@@ -371,6 +371,7 @@ namespace dxvk::backend {
       return;
 
     ensureCommandBuffer();
+    ensureVisBuffer();
 
     if (deferredPassesEnabled()) {
       m_pass.encoder = 0;
@@ -381,6 +382,7 @@ namespace dxvk::backend {
       m_argTablesBound = false;
       m_lastEncodedPso = 0u;
       m_dynValid       = false;
+      armVisibility();
       return;
     }
 
@@ -426,6 +428,7 @@ namespace dxvk::backend {
     m_argTablesBound = false;
     m_lastEncodedPso = 0u;
     m_dynValid       = false;
+    armVisibility();
   }
 
   MtlContextImpl::ArgTablePair MtlContextImpl::createArgumentTablePair() const {
@@ -826,6 +829,8 @@ namespace dxvk::backend {
 
   bool MtlContextImpl::prepareDraw() {
     if (!m_pass.pending && !m_pass.active)
+      return false;
+    if (unlikely(m_viewport.scissorEmpty))
       return false;
     prof::Scope profScope(prof::PrepareDraw);
     if (unlikely(!m_pass.active))

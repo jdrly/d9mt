@@ -60,10 +60,13 @@ namespace dxvk::backend {
       return MtlGpuQueryStatus::Pending;
 
     out = MtlQueryData{};
-    if (type == MtlQueryType::Occlusion && visCpu)
+    if (type == MtlQueryType::Occlusion && visCpu) {
       out.occlusion.samplesPassed =
         *reinterpret_cast<const uint64_t*>(reinterpret_cast<const char*>(visCpu) + slotOffset);
-    else
+      if (d9mtTrace())
+        Logger::info(str::format("OCC result q=", (void*)this, " slot=", slotOffset,
+          " samples=", out.occlusion.samplesPassed));
+    } else
       out.timestamp.time = serial;
     return MtlGpuQueryStatus::Available;
   }
@@ -1435,15 +1438,37 @@ namespace dxvk::backend {
     q->slotOffset = (m_visSlot % 8192u) * 8u;
     q->tracker    = &m_device->submissions();
     m_visSlot++;
+    // Render passes use MTLVisibilityResultTypeAccumulate, so the slot must
+    // start at zero; the GPU only adds to it.
     if (m_visCpu)
       *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(m_visCpu) + q->slotOffset) = 0u;
 
-    if (m_pass.active) {
-      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
-        uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
-      cmd->mode   = uint64_t(WMTVisibilityResultModeCounting);
-      cmd->offset = q->slotOffset;
+    removeActiveOcclusion(q);
+    m_activeOcclusion.push_back(query);
+    if (m_pass.active)
+      armVisibility();
+    if (d9mtTrace())
+      Logger::info(str::format("OCC begin q=", (void*)q, " slot=", q->slotOffset,
+        " passActive=", m_pass.active ? 1 : 0, " nested=", m_activeOcclusion.size() - 1u));
+  }
+
+  void MtlContextImpl::removeActiveOcclusion(const MtlQuery* query) {
+    for (auto it = m_activeOcclusion.begin(); it != m_activeOcclusion.end(); ++it) {
+      if (it->ptr() == query) {
+        m_activeOcclusion.erase(it);
+        return;
+      }
     }
+  }
+
+  void MtlContextImpl::armVisibility() {
+    if (m_activeOcclusion.empty())
+      return;
+    auto* q = static_cast<MtlBackendQuery*>(m_activeOcclusion.back().ptr());
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
+      uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
+    cmd->mode   = uint64_t(WMTVisibilityResultModeCounting);
+    cmd->offset = q->slotOffset;
   }
 
   void MtlContextImpl::endQuery(const Rc<MtlQuery>& query) {
@@ -1454,12 +1479,23 @@ namespace dxvk::backend {
     q->serial  = m_currentSerial;
     q->tracker = &m_device->submissions();
 
-    if (m_pass.active) {
-      auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
-        uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
-      cmd->mode   = uint64_t(WMTVisibilityResultModeDisabled);
-      cmd->offset = 0u;
+    if (q->type != MtlQueryType::Occlusion || m_activeOcclusion.empty())
+      return;
+
+    // Overlapping queries: only the innermost one counts. Ending it resumes
+    // the enclosing one; ending an enclosing one leaves the counter alone.
+    const bool wasCounting = m_activeOcclusion.back().ptr() == q;
+    removeActiveOcclusion(q);
+    if (!wasCounting || !m_pass.active)
+      return;
+    if (!m_activeOcclusion.empty()) {
+      armVisibility();
+      return;
     }
+    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
+      uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
+    cmd->mode   = uint64_t(WMTVisibilityResultModeDisabled);
+    cmd->offset = 0u;
   }
 
   void MtlContextImpl::writeTimestamp(const Rc<MtlQuery>& query) {

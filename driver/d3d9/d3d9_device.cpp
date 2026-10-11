@@ -1634,6 +1634,19 @@ namespace dxvk {
     ConsiderFlush(GpuFlushType::ImplicitWeakHint);
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
+    // Metal's depthBias is in units of r like Vulkan's (measured on Apple GPUs:
+    // float depth r = 2^(exp(z)-23), i.e. 2^-24 for z in [0.5,1)). D3D9 bias is
+    // absolute, so scale by 1/r of the actual Metal format; for float formats
+    // (D24S8 is backed by Depth32Float_Stencil8) use the [0.5,1) value, which
+    // is the force-unorm path.
+    if (ds != nullptr) {
+      const float rValue = GetDepthBufferRValue(
+        ds->GetCommonTexture()->GetFormatMapping().FormatColor, 0, true, true);
+      if (m_depthBiasScale != rValue) {
+        m_depthBiasScale = rValue;
+        m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
+      }
+    }
 
     m_state.depthStencil = ds;
 
@@ -1733,11 +1746,14 @@ namespace dxvk {
     MtlExtent3D extent = {         vp.Width,         vp.Height,  1u };
 
     if (scissor) {
+      const int32_t x1 = std::min<int32_t>(offset.x + int32_t(extent.width),  sc.right);
+      const int32_t y1 = std::min<int32_t>(offset.y + int32_t(extent.height), sc.bottom);
       offset.x = std::max<int32_t> (offset.x, sc.left);
       offset.y = std::max<int32_t> (offset.y, sc.top);
 
-      extent.width  = std::min<uint32_t>(extent.width,  sc.right  - offset.x);
-      extent.height = std::min<uint32_t>(extent.height, sc.bottom - offset.y);
+      // Signed: a scissor outside the viewport must clear nothing, not wrap.
+      extent.width  = uint32_t(std::max<int32_t>(0, x1 - offset.x));
+      extent.height = uint32_t(std::max<int32_t>(0, y1 - offset.y));
     }
 
     if (Count) {
@@ -6261,10 +6277,13 @@ namespace dxvk {
       srPosB.y = std::min<int32_t>(vp.Y + vp.Height, srPosB.y);
 
       MtlExtent2D srSize;
-      srSize.width  = uint32_t(srPosB.x - srPosA.x);
-      srSize.height = uint32_t(srPosB.y - srPosA.y);
+      srSize.width  = uint32_t(std::max<int32_t>(0, srPosB.x - srPosA.x));
+      srSize.height = uint32_t(std::max<int32_t>(0, srPosB.y - srPosA.y));
 
       state.scissor = MtlRect{ uint32_t(srPosA.x), uint32_t(srPosA.y), srSize.width, srSize.height };
+      // The backend widens a 0-sized Metal scissor to the full target, so an
+      // empty D3D9 scissor has to drop the draw instead.
+      state.scissorEmpty = (srSize.width == 0u || srSize.height == 0u) ? 1u : 0u;
     }
     else {
       state.scissor = MtlRect{ uint32_t(vp.X), uint32_t(vp.Y), vp.Width, vp.Height };

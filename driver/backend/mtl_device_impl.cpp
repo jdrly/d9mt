@@ -397,9 +397,19 @@ namespace dxvk::backend {
         return entry->second.handle();
     }
 
+    if (d9mtTrace())
+      Logger::info(str::format("DSS new ztest=", ds.depthTest ? 1 : 0,
+        " zfunc=", uint32_t(ds.depthCompareOp), " zwrite=", ds.depthWrite ? 1 : 0,
+        " stencil=", ds.stencilEnable ? 1 : 0,
+        " F(func=", uint32_t(ds.front.compareOp), " pass=", uint32_t(ds.front.passOp),
+        " zfail=", uint32_t(ds.front.depthFailOp), ")",
+        " B(func=", uint32_t(ds.back.compareOp), " pass=", uint32_t(ds.back.passOp),
+        " zfail=", uint32_t(ds.back.depthFailOp), ")"));
+
     WMTDepthStencilInfo info = {};
-    info.depth_compare_function = WMTCompareFunction(ds.depthCompareOp);
-    info.depth_write_enabled    = ds.depthWrite;
+    info.depth_compare_function = WMTCompareFunction(ds.depthTest
+      ? ds.depthCompareOp : MtlCompareFunction::Always);
+    info.depth_write_enabled    = ds.depthTest && ds.depthWrite;
 
     auto fillStencil = [&](WMTStencilInfo& s, const MtlStencilState& m) {
       s.enabled                  = ds.stencilEnable;

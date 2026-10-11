@@ -298,6 +298,9 @@ namespace dxvk::backend {
     WmtBuffer m_visBuffer;
     void*     m_visCpu   = nullptr;
     uint64_t  m_visSlot  = 0u;
+    // Metal counts into one offset at a time and the mode is per-encoder:
+    // back() is re-armed on every new render encoder.
+    std::vector<Rc<MtlQuery>> m_activeOcclusion;
 
     Rc<MtlShaderFunction>      m_blitVs, m_blitFs;
     Rc<MtlShaderFunction>      m_fillFs;
@@ -361,6 +364,8 @@ namespace dxvk::backend {
     void submit(bool waitCompleted);
 
     void         ensureVisBuffer();
+    void         armVisibility();
+    void         removeActiveOcclusion(const MtlQuery* query);
 
     bool         ensureBlitPipeline();
     obj_handle_t selectBlitArgTable();

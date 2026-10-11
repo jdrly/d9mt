@@ -276,6 +276,7 @@ namespace dxvk {
     float width   = 0.0f, height  = 0.0f;
     float znear   = 0.0f, zfar    = 1.0f;
     MtlRect scissor = { };
+    uint32_t scissorEmpty = 0u;
   };
 
   struct MtlRasterizerState {
@@ -335,7 +336,17 @@ namespace dxvk {
     void setDepthCompareOp(MtlCompareFunction o) { depthCompareOp = o; }
     void setStencilOpFront(const MtlStencilState& s) { front = s; }
     void setStencilOpBack(const MtlStencilState& s)  { back = s; }
-    void normalize() { }
+    // Metal has no depth-test enable: a disabled test must become Always + no writes.
+    void normalize() {
+      if (!depthTest) {
+        depthWrite     = false;
+        depthCompareOp = MtlCompareFunction::Always;
+      }
+      if (!stencilEnable) {
+        front = MtlStencilState();
+        back  = MtlStencilState();
+      }
+    }
   };
 
   struct MtlBlendMode {

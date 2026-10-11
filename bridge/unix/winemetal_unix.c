@@ -5884,6 +5884,11 @@ _wm_mtl4_render_pass_descriptor(const struct WMTRenderPassInfo *info) {
   descriptor.renderTargetHeight = info->render_target_height;
   descriptor.renderTargetWidth = info->render_target_width;
   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+  /* d9mt attaches the buffer to every pass and a D3D9 occlusion query can span
+   * several encoders; Reset would let each encoder overwrite the slot. The
+   * driver zeroes a slot when the query begins. */
+  if (info->visibility_buffer)
+    descriptor.visibilityResultType = MTLVisibilityResultTypeAccumulate;
   if (info->tile_height && info->tile_width) {
     descriptor.tileWidth = info->tile_width;
     descriptor.tileHeight = info->tile_height;
