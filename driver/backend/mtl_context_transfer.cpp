@@ -44,6 +44,11 @@ namespace dxvk::backend {
         case MtlFormat::RG16Snorm:    return WMTAttributeFormatShort2Normalized;
         case MtlFormat::RG16Unorm:    return WMTAttributeFormatUShort2Normalized;
         case MtlFormat::RGB10A2Unorm: return WMTAttributeFormatUInt1010102Normalized;
+        case MtlFormat::RGBA8Uint:    return WMTAttributeFormatUChar4;
+        case MtlFormat::RG16Sint:     return WMTAttributeFormatShort2;
+        case MtlFormat::RGBA16Sint:   return WMTAttributeFormatShort4;
+        case MtlFormat::RGB10A2Uint:  return WMTAttributeFormatUInt1010102Normalized;
+        case MtlFormat::RGB10A2Snorm_Vtx: return WMTAttributeFormatInt1010102Normalized;
         default:                      return WMTAttributeFormatFloat4;
       }
     }

@@ -8,6 +8,7 @@ namespace dxvk {
     static const MtlFormatInfo b2  = { 2u, 1u, 1u, MtlFormatFlagNone, MtlAspectColor };
     static const MtlFormatInfo b4  = { 4u, 1u, 1u, MtlFormatFlagNone, MtlAspectColor };
     static const MtlFormatInfo b8  = { 8u, 1u, 1u, MtlFormatFlagNone, MtlAspectColor };
+    static const MtlFormatInfo b12 = { 12u, 1u, 1u, MtlFormatFlagNone, MtlAspectColor };
     static const MtlFormatInfo b16 = { 16u, 1u, 1u, MtlFormatFlagNone, MtlAspectColor };
     static const MtlFormatInfo bc1 = { 8u, 4u, 4u, MtlFormatFlagCompressed, MtlAspectColor };
     static const MtlFormatInfo bc23 = { 16u, 4u, 4u, MtlFormatFlagCompressed, MtlAspectColor };
@@ -24,6 +25,7 @@ namespace dxvk {
       case 20u: case 22u: case 23u: case 24u: case 25u: case 30u: case 31u:
       case 32u: case 33u: case 40u: case 41u: case 42u: case 43u:
         return &b2;
+      case 60u: case 62u: case 63u: case 64u: case 65u:
       case 70u: case 71u: case 72u: case 73u: case 74u: case 75u:
       case 80u: case 81u: case 85u: case 90u: case 91u: case 92u: case 93u:
         return &b4;
@@ -36,6 +38,10 @@ namespace dxvk {
         return &bc1;
       case 132u: case 133u: case 134u: case 135u:
         return &bc23;
+      // Vertex-attribute-only markers (MtlFormat::RGB32Float / RGB10A2Snorm_Vtx);
+      // their size feeds the stride fallback in the vertex layout.
+      case 900u: return &b12;
+      case 901u: return &b4;
       case 250u: return &d16;
       case 252u: return &d32;
       case 260u: case 261u: return &d32s8;

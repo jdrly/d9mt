@@ -263,18 +263,23 @@ namespace dxvk {
       case D3DDECLTYPE_FLOAT3:    return MtlFormat::RGB32Float;
       case D3DDECLTYPE_FLOAT4:    return MtlFormat::RGBA32Float;
       case D3DDECLTYPE_D3DCOLOR:  return MtlFormat::BGRA8Unorm;
-      case D3DDECLTYPE_UBYTE4:    return MtlFormat::Invalid;
-      case D3DDECLTYPE_SHORT2:    return MtlFormat::Invalid;
-      case D3DDECLTYPE_SHORT4:    return MtlFormat::Invalid;
+      // Metal's plain integer vertex formats convert to float shader inputs like
+      // Vulkan's *SCALED formats (UChar4 3,7,200,255 -> (3,7,200,255)). These used
+      // to map to Invalid -> Float4, so UBYTE4 blend indices fetched as NaN.
+      case D3DDECLTYPE_UBYTE4:    return MtlFormat::RGBA8Uint;
+      case D3DDECLTYPE_SHORT2:    return MtlFormat::RG16Sint;
+      case D3DDECLTYPE_SHORT4:    return MtlFormat::RGBA16Sint;
       case D3DDECLTYPE_UBYTE4N:   return MtlFormat::RGBA8Unorm;
       case D3DDECLTYPE_SHORT2N:   return MtlFormat::RG16Snorm;
       case D3DDECLTYPE_SHORT4N:   return MtlFormat::RGBA16Snorm;
       case D3DDECLTYPE_USHORT2N:  return MtlFormat::RG16Unorm;
       case D3DDECLTYPE_USHORT4N:  return MtlFormat::RGBA16Unorm;
-      case D3DDECLTYPE_UDEC3:     return MtlFormat::Invalid;
+      // Metal has no unscaled 10:10:10:2 vertex format: this yields x/1023 rather
+      // than x, but at least fetches the right 4 bytes.
+      case D3DDECLTYPE_UDEC3:     return MtlFormat::RGB10A2Uint;
       case D3DDECLTYPE_FLOAT16_2: return MtlFormat::RG16Float;
       case D3DDECLTYPE_FLOAT16_4: return MtlFormat::RGBA16Float;
-      case D3DDECLTYPE_DEC3N:     return MtlFormat::Invalid;
+      case D3DDECLTYPE_DEC3N:     return MtlFormat::RGB10A2Snorm_Vtx;
       case D3DDECLTYPE_UNUSED:
       default:                    return MtlFormat::Invalid;
     }

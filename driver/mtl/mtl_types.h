@@ -157,13 +157,16 @@ namespace dxvk {
     R32Float           = 55,
     RG16Unorm          = 60,
     RG16Snorm          = 62,
+    RG16Sint           = 64,
     RG16Float          = 65,
     RGBA8Unorm         = 70,
     RGBA8Unorm_sRGB    = 71,
     RGBA8Snorm         = 72,
+    RGBA8Uint          = 73,
     BGRA8Unorm         = 80,
     BGRA8Unorm_sRGB    = 81,
     RGB10A2Unorm       = 90,
+    RGB10A2Uint        = 91,
     RG11B10Float       = 92,
     RGB9E5Float        = 93,
     BGR10A2Unorm       = 94,
@@ -171,12 +174,15 @@ namespace dxvk {
     RG32Float          = 105,
     RGBA16Unorm        = 110,
     RGBA16Snorm        = 112,
+    RGBA16Sint         = 114,
     RGBA16Float        = 115,
     RGBA32Float        = 125,
     // Vertex-attribute-only marker (not a real pixel format): a D3D9 FLOAT3
     // attribute must stay 3-wide rather than being promoted to Float4, or the
     // shader's w reads stale bytes instead of defaulting to 1.0 per D3D9 rules.
     RGB32Float         = 900,
+    // Vertex-attribute-only marker for D3DDECLTYPE_DEC3N (snorm 10:10:10:2).
+    RGB10A2Snorm_Vtx   = 901,
     Depth16Unorm       = 250,
     Depth32Float       = 252,
     Stencil8           = 253,
