@@ -1973,8 +1973,12 @@ struct AirBuilderImpl {
   }
   MDNode* mdTuple(ArrayRef<Metadata*> ops) { return MDTuple::get(ctx, ops); }
 
+  // Vertex-output / fragment-input link name. Must be a form Apple's compiler can
+  // parse: macOS 27's AGX compiler (attribute_name -> std::stoi) aborts the whole
+  // MTLCompilerService on "generated(loc0_user)". "user(locnN)" is what MSL
+  // [[user(locnN)]] (and SPIRV-Cross) produce.
   static std::string varyingName(uint32_t location) {
-    return "generated(loc" + std::to_string(location) + "_user)";
+    return "user(locn" + std::to_string(location) + ")";
   }
 
   MDNode* buildAbMetadata() {

@@ -18,7 +18,13 @@ set -euo pipefail
 
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 DRV="$V2/driver"
-BUILD="$V2/build/driver"
+# ARCH=x64 -> 64-bit driver for 64-bit games (SWTOR); own build dir, x86_64 mingw.
+ARCH="${ARCH:-x86}"
+if [ "$ARCH" = x64 ]; then
+  BUILD="$V2/build/driver-x64"; MINGW_PREFIX=x86_64-w64-mingw32
+else
+  BUILD="$V2/build/driver"; MINGW_PREFIX=i686-w64-mingw32
+fi
 OBJ="$BUILD/obj"
 mkdir -p "$OBJ"
 
@@ -50,7 +56,7 @@ for src in "$FFVSRC" "$FFFSRC" \
   [ -f "$src" ] && [ "$src" -nt "$FFHDR" ] && ff_stale=1
 done
 if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
-  if command -v glslangValidator >/dev/null && command -v spirv-cross >/dev/null && command -v xcrun >/dev/null; then
+  if command -v glslangValidator >/dev/null && command -v spirv-cross >/dev/null && xcrun -sdk macosx --find metal >/dev/null 2>&1; then
     echo "=== [driver] convert DXVK FF GLSL -> SPIR-V -> MSL -> metallib ==="
     FFTMP="$OBJ/ff"; mkdir -p "$FFTMP"
 
@@ -122,7 +128,7 @@ for src in "$BLITSRC" "$0"; do
   [ -f "$src" ] && [ "$src" -nt "$BLITHDR" ] && blit_stale=1
 done
 if [ -f "$BLITSRC" ] && [ "$blit_stale" = 1 ]; then
-  if command -v xcrun >/dev/null; then
+  if xcrun -sdk macosx --find metal >/dev/null 2>&1; then
     echo "=== [driver] compile meta-blit MSL -> metallib ==="
     BLITTMP="$OBJ/blit"; mkdir -p "$BLITTMP"
     xcrun -sdk macosx metal -O2 -c "$BLITSRC" -o "$BLITTMP/blit.air"
@@ -144,7 +150,7 @@ if [ -f "$BLITSRC" ] && [ "$blit_stale" = 1 ]; then
   fi
 fi
 
-MINGW="${MINGW:-i686-w64-mingw32-g++}"
+MINGW="${MINGW:-$MINGW_PREFIX-g++}"
 command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 
 # -O2: the release optimization level (upstream DXVK ships mingw PE builds at
@@ -316,7 +322,7 @@ OBJS+=("$SHA1C_OBJ")
 
 echo "=== [driver] archive libdriver_core.a ==="
 rm -f "$BUILD/libdriver_core.a"
-i686-w64-mingw32-ar rcs "$BUILD/libdriver_core.a" "${OBJS[@]}"
+"$MINGW_PREFIX-ar" rcs "$BUILD/libdriver_core.a" "${OBJS[@]}"
 echo "  -> $BUILD/libdriver_core.a ($(wc -c < "$BUILD/libdriver_core.a") bytes)"
 
 # --- D3D9-LEAF attempt (non-fatal; reports Phase-C readiness) --------------
@@ -398,7 +404,7 @@ done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
 [ "${#SM3_PIDS[@]}" -gt 0 ] && { wait "${SM3_PIDS[@]}" || SM3_RC=1; }
 [ "$SM3_RC" -eq 0 ] || { echo "FATAL: libdxbcsm3 compile failed" >&2; exit 1; }
 rm -f "$DXBCSM3_LIB"
-i686-w64-mingw32-ar rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
+"$MINGW_PREFIX-ar" rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
 
 # winemetal import lib: prefer the bridge-generated def (build-bridge.sh emits the
@@ -408,8 +414,8 @@ echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS
 WMDEF="$V2/build/bridge/winemetal.def"
 [ -f "$WMDEF" ] || WMDEF="$V2/third_party/winemetal/winemetal32.def"
 WMIMP="$BUILD/libwinemetal32.a"
-D3D9DEF="$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def"
-if command -v i686-w64-mingw32-dlltool >/dev/null && [ -f "$WMDEF" ]; then
+D3D9DEF="${D3D9DEF:-$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def}"
+if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
   # The real shader module (d3d9_shader_compiler.cpp) imports the d9mtair AIR
   # compile thunks (D9MTAirCompile/Free/Version). The bridge-generated def
   # already carries them; when we fall back to the older third_party def it does
@@ -422,19 +428,19 @@ if command -v i686-w64-mingw32-dlltool >/dev/null && [ -f "$WMDEF" ]; then
     /usr/bin/grep -hoE '[A-Za-z_][A-Za-z0-9_]*\(' "$V2/bridge/d9mtair_thunks.h" \
       | sed -E 's/\($//; s/^/  /' >> "$COMBDEF"
   fi
-  i686-w64-mingw32-dlltool -d "$COMBDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+  "$MINGW_PREFIX-dlltool" -d "$COMBDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
     && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/} + d9mtair thunks)"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
 # Phase C-10: the link is now FATAL. The full CORE graph (device/swapchain/
 # interface/main + seam resolvers) links d3d9.dll with all 20 d3d9.def exports;
 # the winemetal MTLDevice_* imports resolve via the bridge import lib above.
-if i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$BUILD/d3d9.dll" \
+if "$MINGW" -shared -static -static-libgcc -static-libstdc++ -o "$BUILD/d3d9.dll" \
       -Wl,--enable-stdcall-fixup \
       "$D3D9DEF" "${OBJS[@]}" "$DXBCSM3_LIB" "$WMIMP" \
       -lgdi32 -luser32 -lole32 -lsetupapi 2>"$LINK_LOG"; then
   echo "  d3d9.dll LINKED: $BUILD/d3d9.dll ($(wc -c < "$BUILD/d3d9.dll") bytes)"
-  nexp="$(i686-w64-mingw32-objdump -p "$BUILD/d3d9.dll" | grep -cE 'Export RVA' || true)"
+  nexp="$("$MINGW_PREFIX-objdump" -p "$BUILD/d3d9.dll" | grep -cE 'Export RVA' || true)"
   echo "  d3d9.dll exports (Export Address Table RVA entries): $nexp"
 else
   undef="$( { grep -oE 'undefined reference to [`'"'"'"][^'"'"'\"\`]+' "$LINK_LOG" || true; } | sed 's/.*to .//' | sort -u)"
