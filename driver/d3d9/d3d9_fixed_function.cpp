@@ -26,7 +26,9 @@ namespace dxvk {
       m_vs->cbvSlotMap[CbvIndex::SpecData]          = 0;
       m_vs->cbvSlotMap[CbvIndex::VSFixedFunction]   = 1;
       m_vs->cbvSlotMap[CbvIndex::VSClipPlanes]      = 2;
-      m_vs->cbvSlotMap[CbvIndex::VSVertexBlendData] = 5;
+      // 3..19 are vertex streams (kVertexBufferBaseIndex + stream, 19 = null stream),
+      // 20 push data, 21 argument buffer. 5 aliased vertex stream 2.
+      m_vs->cbvSlotMap[CbvIndex::VSVertexBlendData] = 22;
     }
 
     m_fs = device->createShaderFunction(

@@ -28,6 +28,13 @@ fi
 OBJ="$BUILD/obj"
 mkdir -p "$OBJ"
 
+# xcode-select may point at CommandLineTools, which has no Metal toolchain; the
+# metallib steps below would then keep stale headers. Fall back to Xcode.app.
+if [ -z "${DEVELOPER_DIR:-}" ] && ! xcrun -sdk macosx --find metal >/dev/null 2>&1 \
+   && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+
 # --- Fixed-function MSL ubershaders -> metallib -> embedded byte-array header --
 # The full FF pipeline is AUTO-CONVERTED from DXVK 3.0's GLSL ubershaders (kept,
 # lightly v2-adapted, under driver/d3d9/shaders/) rather than hand-written:
@@ -37,7 +44,7 @@ mkdir -p "$OBJ"
 #   post-process      pin each CBV/push/texture/sampler [[buffer/texture/sampler(n)]]
 #                     index to the v2 argument-table slots (matched in
 #                     d3d9_fixed_function.cpp cbvSlotMap + flushResources):
-#                       VS: SpecConsts=0 ShaderData=1 ClipPlanes=2 VertexBlend=5
+#                       VS: SpecConsts=0 ShaderData=1 ClipPlanes=2 VertexBlend=22
 #                           RenderStates=20 (kPushConstantIndex)
 #                       FS: SpecConsts=0 SharedData=1 RenderStates=20
 #                           t2d=texture(0) tcube=8 t3d=16 (+shadow arrays 24/32)
@@ -75,9 +82,11 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
       s/(SpecConsts& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(0)]]/;
       s/(ShaderData& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(1)]]/;
       s/(ClipPlanes& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(2)]]/;
-      s/(VertexBlendData& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(5)]]/;
+      s/(VertexBlendData& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(22)]]/;
       s/(RenderStates& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(20)]]/;
     ' "$FFTMP/vs.metal"
+    grep -q 'VertexBlendData& [A-Za-z0-9_]* \[\[buffer(22)\]\]' "$FFTMP/vs.metal" \
+      || { echo "FATAL: FF VS VertexBlendData slot pin (buffer 22) did not apply" >&2; exit 1; }
     perl -0pi -e '
       s/(SpecConsts& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(0)]]/;
       s/(SharedData& \w+ )\[\[buffer\(\d+\)\]\]/${1}[[buffer(1)]]/;
