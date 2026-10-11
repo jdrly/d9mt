@@ -47,6 +47,7 @@ namespace dxvk {
     this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3u);
     this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
     this->lenientClear                  = config.getOption<bool>        ("d3d9.lenientClear",                  false);
+    this->allowOutOfRangeVsDefs         = config.getOption<bool>        ("d3d9.allowOutOfRangeVsDefs",         false);
     this->deferSurfaceCreation          = config.getOption<bool>        ("d3d9.deferSurfaceCreation",          false);
     this->samplerAnisotropy             = config.getOption<int32_t>     ("d3d9.samplerAnisotropy",             -1);
     this->maxAvailableMemory            = config.getOption<int32_t>     ("d3d9.maxAvailableMemory",            4096);

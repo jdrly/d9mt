@@ -38,6 +38,7 @@ namespace dxvk {
       { "no_ztest_blended", d9mtdbg::NoZTestBlended },
       { "no_sameview_skip", d9mtdbg::NoSameViewSkip },
       { "no_clipplanes",    d9mtdbg::NoClipPlanes   },
+      { "bools_off",        d9mtdbg::BoolsOff       },
     };
 
     constexpr uint32_t kLogLinesPerSecond = 400u;
@@ -116,7 +117,8 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugInitPath() {
-    m_dbg.pathInit = true;
+    if (!m_dbg.flagsPath.empty())
+      return;
 
     std::string path = env::getEnvVar("D9MT_DEBUG_FILE");
     if (path.empty()) {
@@ -191,8 +193,8 @@ namespace dxvk {
 
   void D3D9DeviceEx::DebugPoll() {
     const bool startup = !m_dbg.pathInit;
-    if (startup)
-      DebugInitPath();
+    m_dbg.pathInit = true;
+    DebugInitPath();
 
     if (m_dbg.logSuppressed) {
       DebugLogRaw(str::format("D9MT-DEBUG log rate limit: ", m_dbg.logSuppressed, " lines suppressed"));
@@ -446,6 +448,14 @@ namespace dxvk {
       std::fprintf(f, "%08x%s", dw[i], (i % 8u == 7u) ? "\n" : " ");
     std::fputc('\n', f);
     std::fclose(f);
+  }
+
+
+  void D3D9DeviceEx::DebugWriteShaderAlways(const std::string& name, const void* code, size_t size) {
+    DebugInitPath();
+    CreateDirectoryA((m_dbg.dir + "\\d9mt-shaders").c_str(), nullptr);
+    DebugWriteShader(name, code, size);
+    Logger::warn(str::format("D9MT-DEBUG shader text: ", m_dbg.dir, "\\d9mt-shaders\\", name, ".txt"));
   }
 
 

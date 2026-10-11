@@ -34,9 +34,9 @@ namespace dxvk {
         return &b8;
       case 123u: case 124u: case 125u: case 126u:
         return &b16;
-      case 130u: case 131u:
+      case 130u: case 131u: case 140u:
         return &bc1;
-      case 132u: case 133u: case 134u: case 135u:
+      case 132u: case 133u: case 134u: case 135u: case 142u:
         return &bc23;
       // Vertex-attribute-only markers (MtlFormat::RGB32Float / RGB10A2Snorm_Vtx);
       // their size feeds the stride fallback in the vertex layout.

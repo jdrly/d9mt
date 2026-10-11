@@ -38,6 +38,7 @@ int compileImpl(d9mt_air_compile_params* p) {
     : "main";
   options.foldSpecConstants = (p->flags & D9MT_AIR_FLAG_FOLD_SPEC) != 0u;
   options.useArgumentBuffer = (p->flags & D9MT_AIR_FLAG_ARG_BUFFER) != 0u;
+  options.fastMath = (p->flags & D9MT_AIR_FLAG_FAST_MATH) != 0u;
 
   const uint32_t* spec =
     reinterpret_cast<const uint32_t*>(uintptr_t(p->spec_data));

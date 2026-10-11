@@ -42,6 +42,8 @@ namespace dxvk {
 
     bool lenientClear;
 
+    bool allowOutOfRangeVsDefs;
+
     bool deferSurfaceCreation;
 
     int32_t samplerAnisotropy;

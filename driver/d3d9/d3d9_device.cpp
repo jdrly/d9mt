@@ -6873,6 +6873,9 @@ namespace dxvk {
         uint32_t boolConstants = m_state.vsConsts->bConsts[0]
           & m_consts[uint32_t(D3D9ShaderType::VertexShader)].shaderConstantsInfo.boolMask;
 
+        if (unlikely(m_dbg.flags & d9mtdbg::BoolsOff))
+          boolConstants = 0u;
+
         if (m_specData.setVsBoolConstants(boolConstants))
           m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
       }
@@ -6888,6 +6891,9 @@ namespace dxvk {
 
       uint32_t boolConstants = m_state.psConsts->bConsts[0]
         & m_consts[uint32_t(D3D9ShaderType::PixelShader)].shaderConstantsInfo.boolMask;
+
+      if (unlikely(m_dbg.flags & d9mtdbg::BoolsOff))
+        boolConstants = 0u;
 
       if (m_specData.setPsBoolConstants(boolConstants))
         m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
@@ -7325,8 +7331,22 @@ namespace dxvk {
     if (!CanSWVP() && ShaderType == D3D9ShaderType::VertexShader) {
 
       if (unlikely(floatConstantCount > caps::MaxFloatConstantsVS)) {
-        Logger::err(str::format("CreateShaderModule: Invalid VS float constant index ", floatConstantCount));
-        return D3DERR_INVALIDCALL;
+        std::array<Sha1Data, 2> chunks = {{
+          { pShaderBytecode,  bytecodeLength },
+          { &m_shaderOptions, sizeof(m_shaderOptions) },
+        }};
+        const std::string name = str::format("vs_",
+          D3D9ShaderModuleKey(MtlShaderStage::Vertex, Sha1Hash::compute(chunks.size(), chunks.data())).hash());
+        DebugWriteShaderAlways(name, pShaderBytecode, bytecodeLength);
+
+        if (!m_d3d9Options.allowOutOfRangeVsDefs || analysis.ReadsApiFloatConstantBeyondHw()) {
+          Logger::err(str::format("CreateShaderModule: Invalid VS float constant index ", floatConstantCount,
+            " (", name, m_d3d9Options.allowOutOfRangeVsDefs ? ", reads API constants >= 256 or indexes relatively" : "", ")"));
+          return D3DERR_INVALIDCALL;
+        }
+
+        Logger::warn(str::format("CreateShaderModule: accepting ", name, " with def c", floatConstantCount - 1u,
+          " beyond MaxVertexShaderConst (d3d9.allowOutOfRangeVsDefs)"));
       }
 
       if (unlikely(intConstantCount > caps::MaxOtherConstants)) {

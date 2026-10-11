@@ -164,9 +164,24 @@ struct AirBuilderImpl {
     mod->setTargetTriple(kTriple);
     b = std::make_unique<IRBuilder<>>(ctx);
 
+    b->setFastMathFlags(mathFlags());
+  }
+
+  /* Metal "relaxed" math unless fastMath: D3D9 float emulation clamps
+   * rcp/rsq/log results to +-FLT_MAX, and ninf lets the compiler fold those
+   * minnum/maxnum clamps away, so 0 * rcp(0) turns into NaN. */
+  FastMathFlags mathFlags() const {
     FastMathFlags fmf;
-    fmf.setFast();
-    b->setFastMathFlags(fmf);
+    if (options.fastMath) {
+      fmf.setFast();
+    } else {
+      fmf.setAllowReassoc();
+      fmf.setNoSignedZeros();
+      fmf.setAllowReciprocal();
+      fmf.setAllowContract();
+      fmf.setApproxFunc();
+    }
+    return fmf;
   }
 
   Type* mapScalarType(ir::ScalarType t, bool inMemory) {
@@ -751,8 +766,10 @@ struct AirBuilderImpl {
     fn->addFnAttr(Attribute::WillReturn);
     fn->addFnAttr(Attribute::MustProgress);
     fn->addFnAttr("approx-func-fp-math", "true");
-    fn->addFnAttr("no-infs-fp-math", "true");
-    fn->addFnAttr("no-nans-fp-math", "true");
+    if (options.fastMath) {
+      fn->addFnAttr("no-infs-fp-math", "true");
+      fn->addFnAttr("no-nans-fp-math", "true");
+    }
     fn->addFnAttr("no-signed-zeros-fp-math", "true");
     fn->addFnAttr("no-trapping-math", "true");
     fn->addFnAttr("unsafe-fp-math", "true");
@@ -1542,7 +1559,7 @@ struct AirBuilderImpl {
       getAirMathFn(base + ".f32", calcTy,
         std::vector<Type*>(callArgs.size(), calcTy)),
       callArgs);
-    call->setFastMathFlags(FastMathFlags::getFast());
+    call->setFastMathFlags(mathFlags());
     return isHalf ? b->CreateFPTrunc(call, scalarTy) : static_cast<Value*>(call);
   }
 
@@ -1963,7 +1980,7 @@ struct AirBuilderImpl {
 
     Function* fn = getAirIntrinsic(name, type, { type });
     CallInst* call = b->CreateCall(fn, { getValue(operandDef(op, 0u)) });
-    call->setFastMathFlags(FastMathFlags::getFast());
+    call->setFastMathFlags(mathFlags());
     setValue(op, call);
   }
 
@@ -2198,7 +2215,8 @@ struct AirBuilderImpl {
 
     auto* opts = mod->getOrInsertNamedMetadata("air.compile_options");
     opts->addOperand(mdTuple({ mdString("air.compile.denorms_disable") }));
-    opts->addOperand(mdTuple({ mdString("air.compile.fast_math_enable") }));
+    opts->addOperand(mdTuple({ mdString(options.fastMath
+      ? "air.compile.fast_math_enable" : "air.compile.fast_math_disable") }));
     opts->addOperand(mdTuple({ mdString("air.compile.framebuffer_fetch_enable") }));
 
     mod->getOrInsertNamedMetadata("air.version")->addOperand(

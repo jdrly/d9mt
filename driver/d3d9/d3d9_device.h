@@ -1145,6 +1145,7 @@ namespace dxvk {
     uint32_t    DebugObjId(const void* p);
     std::string DebugSurfaceDesc(D3D9CommonTexture* tex);
     void        DebugWriteShader(const std::string& name, const void* code, size_t size);
+    void        DebugWriteShaderAlways(const std::string& name, const void* code, size_t size);
     template <typename Shader>
     std::string DebugShaderName(Shader* shader);
     void        DebugEvent(const std::string& text);

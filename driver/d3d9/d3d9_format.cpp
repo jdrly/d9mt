@@ -42,7 +42,9 @@ namespace dxvk {
       case D3D9Format::A4R4G4B4: return {
         MtlFormat::ABGR4Unorm,
         MtlFormat::Invalid,
-        MtlAspectColor };
+        MtlAspectColor,
+        { MtlSwizzle::Green, MtlSwizzle::Blue,
+          MtlSwizzle::Alpha, MtlSwizzle::Red }};
 
       case D3D9Format::R3G3B2: return {};
 
@@ -58,7 +60,9 @@ namespace dxvk {
       case D3D9Format::X4R4G4B4: return {
         MtlFormat::ABGR4Unorm,
         MtlFormat::Invalid,
-        MtlAspectColor };
+        MtlAspectColor,
+        { MtlSwizzle::Green, MtlSwizzle::Blue,
+          MtlSwizzle::Alpha, MtlSwizzle::One }};
 
       case D3D9Format::A2B10G10R10: return {
         MtlFormat::RGB10A2Unorm,
@@ -348,14 +352,14 @@ namespace dxvk {
         0 };
 
       case D3D9Format::ATI1: return {
-        MtlFormat::Invalid,
+        MtlFormat::BC4_RUnorm,
         MtlFormat::Invalid,
         MtlAspectColor,
         { MtlSwizzle::Red,  MtlSwizzle::Zero,
           MtlSwizzle::Zero, MtlSwizzle::One }};
 
       case D3D9Format::ATI2: return {
-        MtlFormat::Invalid,
+        MtlFormat::BC5_RGUnorm,
         MtlFormat::Invalid,
         MtlAspectColor,
         { MtlSwizzle::Green, MtlSwizzle::Red,

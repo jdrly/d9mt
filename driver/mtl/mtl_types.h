@@ -194,6 +194,8 @@ namespace dxvk {
     BC2_RGBA_sRGB      = 133,
     BC3_RGBA           = 134,
     BC3_RGBA_sRGB      = 135,
+    BC4_RUnorm         = 140,
+    BC5_RGUnorm        = 142,
   };
 
   using MtlAspectMask = uint32_t;

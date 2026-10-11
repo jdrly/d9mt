@@ -137,7 +137,7 @@ namespace dxvk {
     dxbc_spv::ir::SsaDef      m_sharedPushData = {};
     dxbc_spv::ir::SsaDef      m_vsPushData = {};
 
-    std::array<dxbc_spv::ir::SsaDef, MaxNumSpecConstants> m_specConstants = { };
+    dxbc_spv::ir::SsaDef      m_specCbv = {};
     small_vector<SpecFunction, 32u>                       m_specFunctions;
 
     std::pair<dxbc_spv::ir::SsaDef, dxbc_spv::ir::ShaderStage> findEntryPoint() {
@@ -616,44 +616,28 @@ namespace dxvk {
       return std::nullopt;
     }
 
-    // alpha compare must fold to Always (not the zero-init Never), or the PS
-    // alpha-test epilogue would discard every fragment by default
-    static uint32_t defaultSpecDword(uint32_t specId) {
-      D3D9SpecData def = { };
-      def.setAlphaCompareOp(MtlCompareFunction::Always);
-      static_assert(sizeof(D3D9SpecData) % sizeof(uint32_t) == 0u,
-                    "D3D9SpecData must be dword-packed for spec folding");
-      if (specId >= sizeof(D3D9SpecData) / sizeof(uint32_t))
-        return 0u;
-      uint32_t dword = 0u;
-      std::memcpy(&dword,
-        reinterpret_cast<const uint8_t*>(&def) + specId * sizeof(uint32_t),
-        sizeof(uint32_t));
-      return dword;
-    }
-
+    // Spec state is read from the SpecData CBV the device re-uploads on every
+    // change: the AIR backend has no function-constant PSO variants, and folding
+    // to defaults froze bool constants, alpha test, sampler modes and fog.
     dxbc_spv::ir::SsaDef emitSpecConstant(uint32_t specId) {
       using namespace dxbc_spv;
 
-      static const std::array<const char*, 7u> s_specNames = {{
-        "commonState",
-        "fogState",
-        "samplerProjMask",
-        "vsSamplerStateAndBoolConstants",
-        "psSamplerTypes",
-        "psSamplerModes",
-        "psBoolConstants",
-      }};
+      static_assert(sizeof(D3D9SpecData) % 16u == 0u);
+      auto specCbvType = ir::Type(ir::ScalarType::eU32, 4u)
+        .addArrayDimension(sizeof(D3D9SpecData) / 16u);
 
-      auto& specDef = m_specConstants.at(specId);
-
-      if (!specDef) {
-        specDef = m_builder.add(ir::Op::DclSpecConstant(
-          ir::ScalarType::eU32, m_entryPoint, specId, defaultSpecDword(specId)));
-        m_builder.add(ir::Op::DebugName(specDef, s_specNames.at(specId)));
+      if (!m_specCbv) {
+        m_specCbv = m_builder.add(ir::Op::DclCbv(specCbvType, m_entryPoint, 0u,
+          D3D9ShaderResourceMapping::CbvIndex::SpecData, 1u).setFlags(ir::OpFlag::eInBounds));
+        m_builder.add(ir::Op::DebugName(m_specCbv, "spec"));
       }
 
-      return specDef;
+      auto descriptor = m_builder.add(ir::Op::DescriptorLoad(
+        ir::ScalarType::eCbv, m_specCbv, m_builder.makeConstant(0u)));
+      auto vector = m_builder.add(ir::Op::BufferLoad(specCbvType.getSubType(0u),
+        descriptor, m_builder.makeConstant(specId / 4u), 16u).setFlags(ir::OpFlag::eInBounds));
+      return m_builder.add(ir::Op::CompositeExtract(ir::ScalarType::eU32,
+        vector, m_builder.makeConstant(specId % 4u)));
     }
 
     dxbc_spv::ir::SsaDef buildSpecConstantFunction(SpecFunction fn, const char* name) {
@@ -1185,10 +1169,6 @@ namespace dxvk {
         return { };
       }
 
-      static std::atomic<bool> s_loggedFold = { false };
-      if (!s_loggedFold.exchange(true))
-        Logger::info("D3D9 AIR: folding spec constants to defaults (function-constant PSO plumbing pending)");
-
       std::string entry = "main";
 
       // this 32-bit PE process can't dereference a unix-allocated out_metallib
@@ -1197,13 +1177,15 @@ namespace dxvk {
       std::vector<uint8_t> reflection(64u * 1024u);
 
       static const bool noAb = env::getEnvVar("D9MT_NO_AB") == "1";
+      static const bool fastMath = env::getEnvVar("D9MT_AIR_FASTMATH") == "1";
 
       d9mt_air_compile_params params = { };
       params.ir_data     = uint64_t(uintptr_t(irBuf.data()));
       params.ir_size     = irBuf.size();
       params.entry_name  = uint64_t(uintptr_t(entry.c_str()));
       params.flags       = D9MT_AIR_FLAG_FOLD_SPEC
-                         | (noAb ? 0u : D9MT_AIR_FLAG_ARG_BUFFER);
+                         | (noAb ? 0u : D9MT_AIR_FLAG_ARG_BUFFER)
+                         | (fastMath ? D9MT_AIR_FLAG_FAST_MATH : 0u);
       params.spec_count  = 0u;
       params.spec_data   = 0u;
       params.pe_metallib_buffer     = uint64_t(uintptr_t(metallib.data()));

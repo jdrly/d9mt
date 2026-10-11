@@ -60,6 +60,20 @@ namespace dxvk {
     for (size_t i = 0u; i < shaderDefs.ints.size(); i++)
       clrBit(constMaskI, shaderDefs.ints[i]);
 
+    // HWVP VS: defs above the API range are inlined by the converter; any other
+    // read up there (or a0-relative access that could reach a def there) is not
+    if (!m_isSWVP && m_shaderInfo.getType() == ShaderType::eVertex) {
+      for (uint32_t i = MaxFloatConstantsVS / 32u; i < constMaskF.size(); i++)
+        m_readsApiFloatBeyondHw |= constMaskF[i] != 0u;
+
+      if (m_constants.floatsAccessedDynamically) {
+        for (const auto& d : shaderDefs.floats)
+          m_readsApiFloatBeyondHw |= d.index >= MaxFloatConstantsVS;
+      }
+
+      m_constants.floatCount = std::min(m_constants.floatCount, MaxFloatConstantsVS);
+    }
+
     D3D9ConstantBufferLayout constLayoutF = m_constants.floatsAccessedDynamically
       ? D3D9ConstantBufferLayout(m_constants.floatCount, constMaskF.size(), constMaskF.data(),
           shaderDefs.floats.size(), shaderDefs.floats.data())

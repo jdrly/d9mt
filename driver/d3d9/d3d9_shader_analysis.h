@@ -157,6 +157,10 @@ public:
     return m_usedRTs;
   }
 
+  bool ReadsApiFloatConstantBeyondHw() const {
+    return m_readsApiFloatBeyondHw;
+  }
+
   const D3D9ConstantBufferCopy* GetConstantLayout() const {
     return m_constLayout;
   }
@@ -214,6 +218,8 @@ private:
   D3D9ShaderConstantsInfo m_constants;
   D3D9ImmediateConstantsInfo m_immediateConstants;
   const D3D9ConstantBufferCopy* m_constLayout;
+
+  bool m_readsApiFloatBeyondHw = false;
 
   D3D9RenderTargetMask m_usedRTs = 0u;
 

@@ -19,6 +19,7 @@ namespace dxvk::d9mtdbg {
     NoZTestBlended  = 1u << 7,  // no_ztest_blended
     NoSameViewSkip  = 1u << 8,  // no_sameview_skip
     NoClipPlanes    = 1u << 9,  // no_clipplanes
+    BoolsOff        = 1u << 10, // bools_off
   };
 
   inline std::atomic<uint32_t> g_flags = { 0u };
