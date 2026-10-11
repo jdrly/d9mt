@@ -543,6 +543,19 @@ namespace dxvk {
       return;
 
     m_ramp = *pRamp;
+
+    static bool s_rampLogged = false;
+    if (unlikely(!s_rampLogged)) {
+      for (uint32_t i = 0; i < NumControlPoints; i++) {
+        const WORD identity = MapGammaControlPoint(float(i) / float(NumControlPoints - 1));
+        if (pRamp->red[i] != identity || pRamp->green[i] != identity || pRamp->blue[i] != identity) {
+          s_rampLogged = true;
+          Logger::warn(str::format("D3D9SwapChainEx::SetGammaRamp: non-identity ramp ignored (not applied at present), i=", i,
+            " r/g/b=", pRamp->red[i], "/", pRamp->green[i], "/", pRamp->blue[i], " identity=", identity));
+          break;
+        }
+      }
+    }
   }
 
 

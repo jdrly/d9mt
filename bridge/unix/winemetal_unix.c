@@ -2206,6 +2206,25 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
 static uint32_t g_dxmt_pass_rt_w = 0;
 static uint32_t g_dxmt_pass_rt_h = 0;
 
+static void
+_wm_apply_ds_resolve(MTLRenderPassDepthAttachmentDescriptor *depth,
+                     MTLRenderPassStencilAttachmentDescriptor *stencil,
+                     const struct WMTRenderPassInfo *info) {
+  const struct WMTDepthStencilResolveInfo *r = &info->ds_resolve;
+  if (r->depth_texture && info->depth.texture) {
+    depth.resolveTexture = (id<MTLTexture>)r->depth_texture;
+    depth.resolveLevel = r->level;
+    depth.resolveSlice = r->slice;
+    depth.depthResolveFilter = (MTLMultisampleDepthResolveFilter)r->depth_filter;
+  }
+  if (r->stencil_texture && info->stencil.texture) {
+    stencil.resolveTexture = (id<MTLTexture>)r->stencil_texture;
+    stencil.resolveLevel = r->level;
+    stencil.resolveSlice = r->slice;
+    stencil.stencilResolveFilter = (MTLMultisampleStencilResolveFilter)r->stencil_filter;
+  }
+}
+
 static NTSTATUS
 _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
@@ -2251,6 +2270,7 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
     descriptor.stencilAttachment.storeAction = (MTLStoreAction)info->stencil.store_action;
   }
 
+  _wm_apply_ds_resolve(descriptor.depthAttachment, descriptor.stencilAttachment, info);
   descriptor.defaultRasterSampleCount = info->default_raster_sample_count;
   descriptor.renderTargetArrayLength = info->render_target_array_length;
   descriptor.renderTargetHeight = info->render_target_height;
@@ -5858,6 +5878,7 @@ _wm_mtl4_render_pass_descriptor(const struct WMTRenderPassInfo *info) {
     descriptor.stencilAttachment.loadAction = (MTLLoadAction)info->stencil.load_action;
     descriptor.stencilAttachment.storeAction = (MTLStoreAction)info->stencil.store_action;
   }
+  _wm_apply_ds_resolve(descriptor.depthAttachment, descriptor.stencilAttachment, info);
   descriptor.defaultRasterSampleCount = info->default_raster_sample_count;
   descriptor.renderTargetArrayLength = info->render_target_array_length;
   descriptor.renderTargetHeight = info->render_target_height;

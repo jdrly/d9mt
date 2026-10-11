@@ -1248,6 +1248,12 @@ namespace dxvk {
 
     if (fastPath) {
       if (needsResolve) {
+        static bool s_dsResolveLogged = false;
+        if (unlikely(srcIsDS && !s_dsResolveLogged)) {
+          s_dsResolveLogged = true;
+          Logger::warn(str::format("D3D9DeviceEx::StretchRect: depth-stencil MSAA resolve src=", srcFormat,
+            " samples=", srcImage->info().sampleCount, " dst=", dstFormat));
+        }
         MtlResolveRegion region;
         region.srcSubresource = blitInfo.srcSubresource;
         region.srcOffset      = MtlOrigin{ blitInfo.srcOffsets[0].x, blitInfo.srcOffsets[0].y, blitInfo.srcOffsets[0].z };
@@ -7800,6 +7806,13 @@ namespace dxvk {
 
     uint32_t srcSampleCount;
     DecodeMultiSampleType(srcDesc->MultiSample, srcDesc->MultisampleQuality, &srcSampleCount);
+
+    static bool s_reszLogged = false;
+    if (unlikely(!s_reszLogged)) {
+      s_reszLogged = true;
+      Logger::warn(str::format("D3D9DeviceEx::ResolveZ: RESZ src=", srcDesc->Format, " samples=", srcSampleCount,
+        " dst=", dstDesc->Format, (srcSampleCount == 1u ? " (copy)" : " (resolve)")));
+    }
 
     if (srcSampleCount == 1u) {
       EmitCs([

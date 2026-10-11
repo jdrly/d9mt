@@ -723,6 +723,26 @@ struct WMTStencilAttachmentInfo {
   uint8_t clear_stencil;
 };
 
+enum WMTMultisampleDepthResolveFilter {
+  WMTMultisampleDepthResolveFilterSample0 = 0,
+  WMTMultisampleDepthResolveFilterMin = 1,
+  WMTMultisampleDepthResolveFilterMax = 2,
+};
+
+enum WMTMultisampleStencilResolveFilter {
+  WMTMultisampleStencilResolveFilterSample0 = 0,
+  WMTMultisampleStencilResolveFilterDepthResolvedSample = 1,
+};
+
+struct WMTDepthStencilResolveInfo {
+  obj_handle_t depth_texture;
+  obj_handle_t stencil_texture;
+  uint16_t level;
+  uint16_t slice;
+  uint8_t depth_filter;
+  uint8_t stencil_filter;
+};
+
 struct WMTRenderPassInfo {
   struct WMTColorAttachmentInfo colors[8];
   struct WMTDepthAttachmentInfo depth;
@@ -734,6 +754,7 @@ struct WMTRenderPassInfo {
   uint32_t render_target_height;
   uint32_t render_target_width;
   obj_handle_t visibility_buffer;
+  struct WMTDepthStencilResolveInfo ds_resolve;
 };
 
 WINEMETAL_API obj_handle_t MTLCommandBuffer_renderCommandEncoder(obj_handle_t cmdbuf, struct WMTRenderPassInfo *info);

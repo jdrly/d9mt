@@ -75,6 +75,25 @@ namespace dxvk::backend {
       return false;
 
     static const bool mruOff = std::getenv("D9MT_NO_PSOMRU") != nullptr;
+    uint32_t passSamples = 0u;
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets && !passSamples; i++) {
+      const Rc<MtlTextureView>& v = m_pass.targets.color[i];
+      if (v != nullptr && v->image != nullptr)
+        passSamples = v->image->info().sampleCount;
+    }
+    if (!passSamples && m_pass.targets.depthStencil != nullptr
+     && m_pass.targets.depthStencil->image != nullptr)
+      passSamples = m_pass.targets.depthStencil->image->info().sampleCount;
+    if (!passSamples)
+      passSamples = m_msaa.sampleCount ? m_msaa.sampleCount : 1u;
+    if (unlikely(passSamples > 1u)) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn(str::format("MtlContextImpl::resolvePso: MSAA pass, PSO raster sample count ", passSamples));
+      }
+    }
+
     PsoSnapshot snap = {};
     snap.vs = m_vs.ptr();
     snap.fs = m_fs.ptr();
@@ -85,7 +104,7 @@ namespace dxvk::backend {
     snap.layoutGen  = m_layoutGen;
     snap.strideGen  = m_strideGen;
     snap.blendGen   = m_blendGen;
-    snap.msaaPacked = (uint32_t(m_msaa.sampleCount) << 1)
+    snap.msaaPacked = (passSamples << 1)
                     | (m_msaa.alphaToCoverage ? 1u : 0u);
     snap.topoClass  = uint32_t(topologyClass(m_topology));
 
@@ -161,7 +180,7 @@ namespace dxvk::backend {
     }
     key.colorCount = colorCount;
 
-    key.sampleCount     = uint8_t(m_msaa.sampleCount ? m_msaa.sampleCount : 1u);
+    key.sampleCount     = uint8_t(passSamples);
     key.topologyClass   = uint8_t(topologyClass(m_topology));
     key.alphaToCoverage = m_msaa.alphaToCoverage ? 1u : 0u;
 
@@ -702,7 +721,7 @@ namespace dxvk::backend {
   void MtlContextImpl::resolveTexture(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
                                       MtlResolveRegion region, MtlFormat format,
                                       MtlResolveMode color, MtlResolveMode stencil) {
-    (void)color; (void)stencil;
+    (void)stencil;
     auto* d = static_cast<MtlTextureImpl*>(dst.ptr());
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
@@ -710,8 +729,26 @@ namespace dxvk::backend {
 
     const MtlFormatInfo* fi = lookupFormatInfo(
       format != MtlFormat::Invalid ? format : s->format);
-    if (unlikely(fi->flags & (MtlFormatFlagDepth | MtlFormatFlagStencil))) {
-      Logger::err("MtlContextImpl::resolveTexture: depth-stencil resolve unsupported");
+    const bool isDs = (fi->flags & (MtlFormatFlagDepth | MtlFormatFlagStencil)) != 0u;
+
+    if (src->info().sampleCount <= 1u) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn(str::format("MtlContextImpl::resolveTexture: single-sampled source, plain copy (",
+          isDs ? "depth-stencil" : "color", ", fmt=", uint32_t(s->format), ")"));
+      }
+      if (unlikely(s->format != d->format))
+        return;
+      MtlSize extent = region.extent;
+      extent.depth = std::max(extent.depth, 1u);
+      copyTexture(dst, region.dstSubresource, region.dstOffset,
+                  src, region.srcSubresource, region.srcOffset, extent);
+      return;
+    }
+
+    if (isDs) {
+      resolveDepthStencil(dst, src, region, fi, color);
       return;
     }
 
@@ -742,6 +779,75 @@ namespace dxvk::backend {
     info.colors[0].resolve_texture = d->texture.tex;
     info.colors[0].resolve_level   = region.dstSubresource.mipLevel;
     info.colors[0].resolve_slice   = region.dstSubresource.baseLayer;
+    info.render_target_width       = srcExtent.width;
+    info.render_target_height      = srcExtent.height;
+    encodeDirect([this, keepD = dst, keepS = src, info](obj_handle_t cmdbuf) mutable {
+      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+      MTLCommandEncoder_endEncoding(enc);
+      NSObject_release(enc);
+    });
+  }
+
+  void MtlContextImpl::resolveDepthStencil(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
+                                           const MtlResolveRegion& region, const MtlFormatInfo* fi,
+                                           MtlResolveMode depthMode) {
+    auto* d = static_cast<MtlTextureImpl*>(dst.ptr());
+    auto* s = static_cast<MtlTextureImpl*>(src.ptr());
+    const bool hasDepth   = (fi->flags & MtlFormatFlagDepth) != 0u;
+    const bool hasStencil = (fi->flags & MtlFormatFlagStencil) != 0u;
+
+    if (unlikely(s->format != d->format || dst->info().sampleCount > 1u
+              || !(dst->info().usage & MtlTextureUsageRenderTarget))) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn(str::format("MtlContextImpl::resolveDepthStencil: incompatible dst (srcFmt=",
+          uint32_t(s->format), " dstFmt=", uint32_t(d->format), " dstSamples=",
+          dst->info().sampleCount, " dstUsage=", uint32_t(dst->info().usage), "), skipped"));
+      }
+      return;
+    }
+
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      Logger::warn(str::format("MtlContextImpl::resolveDepthStencil: MSAA depth resolve via render pass (samples=",
+        src->info().sampleCount, " fmt=", uint32_t(s->format), " stencil=", hasStencil ? 1 : 0, ")"));
+    }
+
+    const MtlExtent3D srcExtent = src->mipLevelExtent(region.srcSubresource.mipLevel);
+
+    prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
+
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
+    noteTransferRead(s);
+
+    WMTRenderPassInfo info = {};
+    if (hasDepth) {
+      info.depth.texture          = s->texture.tex;
+      info.depth.load_action      = WMTLoadActionLoad;
+      info.depth.store_action     = WMTStoreActionMultisampleResolve;
+      info.depth.level            = region.srcSubresource.mipLevel;
+      info.depth.slice            = region.srcSubresource.baseLayer;
+      info.ds_resolve.depth_texture = d->texture.tex;
+    }
+    if (hasStencil) {
+      info.stencil.texture        = s->texture.tex;
+      info.stencil.load_action    = WMTLoadActionLoad;
+      info.stencil.store_action   = WMTStoreActionMultisampleResolve;
+      info.stencil.level          = region.srcSubresource.mipLevel;
+      info.stencil.slice          = region.srcSubresource.baseLayer;
+      info.ds_resolve.stencil_texture = d->texture.tex;
+    }
+    info.ds_resolve.level          = region.dstSubresource.mipLevel;
+    info.ds_resolve.slice          = region.dstSubresource.baseLayer;
+    info.ds_resolve.depth_filter   = uint8_t(
+        depthMode == MtlResolveMode::Min ? WMTMultisampleDepthResolveFilterMin
+      : depthMode == MtlResolveMode::Max ? WMTMultisampleDepthResolveFilterMax
+      : WMTMultisampleDepthResolveFilterSample0);
+    info.ds_resolve.stencil_filter = uint8_t(WMTMultisampleStencilResolveFilterSample0);
     info.render_target_width       = srcExtent.width;
     info.render_target_height      = srcExtent.height;
     encodeDirect([this, keepD = dst, keepS = src, info](obj_handle_t cmdbuf) mutable {

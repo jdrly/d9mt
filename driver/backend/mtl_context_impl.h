@@ -318,6 +318,9 @@ namespace dxvk::backend {
     bool m_fxChecked = false, m_fxUnsupported = false;
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
+    void resolveDepthStencil(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
+                             const MtlResolveRegion& region, const MtlFormatInfo* fi,
+                             MtlResolveMode depthMode);
 
     void ensureCommandBuffer();
     void materializePass();
