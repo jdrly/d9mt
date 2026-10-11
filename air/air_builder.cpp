@@ -2284,8 +2284,10 @@ struct AirBuilderImpl {
     if (verifyModule(*mod, &verifyStream))
       throw std::runtime_error("AirBuilder: verification failed:\n" + verifyLog);
 
-    raw_string_ostream irStream(irTextOut);
-    mod->print(irStream, nullptr);
+    if (options.emitIrText) {
+      raw_string_ostream irStream(irTextOut);
+      mod->print(irStream, nullptr);
+    }
 
     SmallVector<char, 0> bitcode;
     raw_svector_ostream bcStream(bitcode);

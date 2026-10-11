@@ -45,9 +45,10 @@ namespace dxvk::backend {
     pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
     m_argTables.push_back(std::move(pair));
 
-    m_allocators[0] = WmtAllocator::adopt(MTLDevice_newCommandAllocator(dev));
+    m_allocators.push_back(WmtAllocator::adopt(MTLDevice_newCommandAllocator(dev)));
+    m_initAllocators.emplace_back();
+    m_allocatorSerial.push_back(0u);
     m_allocator     = m_allocators[0].handle();
-    m_frameIndex    = 1u;
   }
 
   MtlContextImpl::~MtlContextImpl() {
@@ -66,19 +67,44 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::BeginRecording);
     m_dirty = DirtyEverything;
 
-    uint32_t slot = m_frameIndex % uint32_t(m_allocators.size());
-    m_frameIndex++;
-    if (!m_allocators[slot]) {
-      m_allocators[slot] = WmtAllocator::adopt(
-        MTLDevice_newCommandAllocator(m_device->wmtDevice()));
-    } else {
-      /* Reset requires the slot's prior command buffers to have COMPLETED
-       * (MTL4CommandAllocator contract) — an ungated reset recycles command
-       * memory the GPU may still be reading. */
-      if (m_device->submissions().completedSerial() < m_allocatorSerial[slot])
-        m_device->submissions().waitFor(m_allocatorSerial[slot]);
-      MTL4CommandAllocator_reset(m_allocators[slot].handle());
+    /* A command buffer opened before this call (lazily, by ensureCommandBuffer)
+     * is already encoding from m_allocator: switching slots now would stamp
+     * the wrong slot's serial at submit and let its allocator be reset early. */
+    if (m_cmdbuf)
+      return;
+
+    /* Reset requires the slot's prior command buffers to have COMPLETED
+     * (MTL4CommandAllocator contract). Prefer any retired slot, grow the
+     * pool when none is free, and only block once the pool is capped. */
+    const uint64_t completed = m_device->submissions().completedSerial();
+    const uint32_t n = uint32_t(m_allocators.size());
+    uint32_t slot = ~0u;
+    for (uint32_t i = 0u; i < n && slot == ~0u; i++) {
+      uint32_t s = (m_allocatorCursor + i) % n;
+      if (s != m_allocatorSlot && m_allocatorSerial[s] <= completed)
+        slot = s;
     }
+    bool fresh = false;
+    if (slot == ~0u && n < kMaxAllocators) {
+      m_allocators.push_back(WmtAllocator::adopt(
+        MTLDevice_newCommandAllocator(m_device->wmtDevice())));
+      m_initAllocators.emplace_back();
+      m_allocatorSerial.push_back(0u);
+      slot = n;
+      fresh = true;
+    }
+    if (slot == ~0u) {
+      slot = m_allocatorCursor % n;
+      if (slot == m_allocatorSlot)
+        slot = (slot + 1u) % n;
+      m_device->submissions().waitFor(m_allocatorSerial[slot]);
+    }
+    if (!fresh) {
+      MTL4CommandAllocator_reset(m_allocators[slot].handle());
+      if (m_initAllocators[slot])
+        MTL4CommandAllocator_reset(m_initAllocators[slot].handle());
+    }
+    m_allocatorCursor = slot + 1u;
     m_allocator = m_allocators[slot].handle();
     m_allocatorSlot = slot;
 
@@ -162,15 +188,35 @@ namespace dxvk::backend {
 
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
+    obj_handle_t cbs[2] = { };
+    uint32_t     cbCount = 0u;
+    if (m_initCmdbuf) {
+      /* Hoisted uploads run first; the producer barrier orders them ahead of
+       * every later queue stage, including the main buffer's vertex fetch. */
+      emitProducerBarrier(m_initEncoder, uint64_t(WMTStageBlit | WMTStageDispatch));
+      MTLCommandEncoder_endEncoding(m_initEncoder);
+      NSObject_release(m_initEncoder);
+      m_initEncoder = 0u;
+      MTL4CommandBuffer_endCommandBuffer(m_initCmdbuf.handle());
+      cbs[cbCount++] = m_initCmdbuf.handle();
+    }
+    cbs[cbCount++] = m_cmdbuf.handle();
+
     m_device->residency().beforeSubmit();
 
-    obj_handle_t cb = m_cmdbuf.handle();
     gpuCaptureBeforeCommit(m_device->wmtDevice());
-    MTL4CommandQueue_commit(m_device->wmtQueue(), &cb, 1u);
+    MTL4CommandQueue_commit(m_device->wmtQueue(), cbs, cbCount);
     gpuCaptureAfterCommit();
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
+
+    if (m_initCmdbuf) {
+      auto doneInit = std::make_shared<WmtCommandBuffer>(std::move(m_initCmdbuf));
+      m_initCmdbuf.reset();
+      m_device->submissions().retireAfter(serial,
+        [doneInit]() mutable { doneInit->reset(); });
+    }
 
     m_device->uploadRing().onSubmit(serial);
 
@@ -271,6 +317,35 @@ namespace dxvk::backend {
 
   void MtlContextImpl::bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) {
     static const bool rtSkipOn = std::getenv("D9MT_RTSKIP") != nullptr;
+    static const bool noSameViewSkip = std::getenv("D9MT_NO_SAMEVIEW_SKIP") != nullptr;
+
+    /* DXVK semantics (DxvkContext::bindRenderTargets): re-binding the exact
+     * same view objects is not a framebuffer change and must not end the
+     * pass. The D3D9 frontend re-emits identical targets on every
+     * Framebuffer-dirty event (Clear(), COLORWRITEENABLE / ZWRITEENABLE /
+     * shader changes, redundant SetRenderTarget, ...). Everything that needs
+     * a split still gets one:
+     *  - read-only vs writable depth (GetDepthStencilView(bool)) and sRGB vs
+     *    linear color are distinct view objects -> not "same";
+     *  - the feedback-loop mask is compared;
+     *  - clears, copies, blits, MSAA resolves (resolveTexture /
+     *    resolveDepthStencil) and partial clears end the pass themselves
+     *    (clearRenderTarget / prepareDirectEncode);
+     *  - occlusion queries need no split: the visibility buffer is attached
+     *    to every encoder and Begin/End re-arm the mode inside the pass.
+     * Pending (not yet materialized) clears stay pending and fold into the
+     * load action; every consumer of those targets flushes them first. */
+    if (!noSameViewSkip && (m_pass.active || m_pass.pending)
+     && uint32_t(feedbackLoop) == m_passFeedbackLoop
+     && m_pass.targets.depthStencil == targets.depthStencil) {
+      bool same = true;
+      for (uint32_t i = 0u; same && i < MtlRenderTargets::MaxColorTargets; i++)
+        same = m_pass.targets.color[i] == targets.color[i];
+      if (same)
+        return;
+    }
+    m_passFeedbackLoop = uint32_t(feedbackLoop);
+
     if (m_pass.active) {
       if (rtSkipOn) {
         auto sameRt = [](const Rc<MtlTextureView>& a, const Rc<MtlTextureView>& b) {
@@ -312,11 +387,20 @@ namespace dxvk::backend {
       Logger::info(str::format("CLR color img=",
         (void*)(view ? view->image.ptr() : nullptr),
         " rgba=", value.color.r, ",", value.color.g, ",", value.color.b));
-    if (std::getenv("D9MT_NOCOLORCLEAR") && (clear & MtlAspectColor)) {
+    static const bool noColorClear = std::getenv("D9MT_NOCOLORCLEAR") != nullptr;
+    if (noColorClear && (clear & MtlAspectColor)) {
       clear = MtlAspectMask(clear & ~MtlAspectColor);
       if (!clear) return;
     }
-    if (!m_pass.active && m_pass.pending) {
+    /* A same-view rebind (e.g. the one D3D9 Clear() emits) no longer ends
+     * the pass, so an active pass must end here: the clear has to land after
+     * the draws already recorded, either folded into the next load action or
+     * as its own pass (never a second encoder while this one is open). */
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseClear);
+      closePass();
+    }
+    if (m_pass.pending) {
       for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
           m_pass.clearColor[i] = true;
@@ -331,10 +415,6 @@ namespace dxvk::backend {
       }
     }
 
-    if (deferredPassesEnabled() && m_pass.active) {
-      prof::bump(prof::CntPassCloseClear);
-      closePass();
-    }
     PendingPass saved = std::move(m_pass);
     m_pass = PendingPass();
     if (clear & MtlAspectColor) {

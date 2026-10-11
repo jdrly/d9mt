@@ -537,6 +537,8 @@ namespace dxvk::backend {
     auto* s = static_cast<MtlBufferImpl*>(src.ptr());
     if (!d || !s)
       return;
+    if (tryHoistBufferCopy(d, s, dst, src, dstOff, srcOff, bytes))
+      return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
@@ -551,6 +553,58 @@ namespace dxvk::backend {
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);
     });
+  }
+
+  bool MtlContextImpl::tryHoistBufferCopy(MtlBufferImpl* d, MtlBufferImpl* s,
+                                          const Rc<MtlBuffer>& dst, const Rc<MtlBuffer>& src,
+                                          MtlDeviceSize dstOff, MtlDeviceSize srcOff, MtlDeviceSize bytes) {
+    /* DXVK's prepareOutOfOrderTransfer equivalent: a staging->VB/IB upload
+     * whose destination this command buffer has not touched yet can run
+     * before the whole command buffer, so it doesn't end the render pass.
+     *  - dst: VB/IB only. Their GPU use is stamped per command buffer
+     *    (flushVertexBuffers / prepareDraw / drawIndexed / copies); uniform
+     *    buffers and textures are not stamped on use and stay in order.
+     *  - src: CPU-write-only staging (the D3D9 staging pool). Such a buffer
+     *    is never a GPU write target, so reading it early can't miss a GPU
+     *    product; its own serial can't tell reads from writes.
+     *  - one hoisted copy per dst per command buffer (the stamp below makes
+     *    later ones go in order), so copies in the init encoder never alias.
+     * Off by default (D9MT_XFER_HOIST=1 enables): the two-command-buffer
+     * commit path has not been validated in-game yet. */
+    static const bool on = [] {
+      const char* v = std::getenv("D9MT_XFER_HOIST");
+      return v != nullptr && v[0] == '1';
+    }();
+    if (!on)
+      return false;
+    const uint32_t vbib = uint32_t(MtlUsage::VertexBuffer) | uint32_t(MtlUsage::IndexBuffer);
+    if (!(uint32_t(d->info.usage) & vbib)
+     || (uint32_t(d->info.usage) & uint32_t(MtlUsage::UniformBuffer)))
+      return false;
+    if (s->info.usage != MtlUsage::Staging || s->info.cpuAccess != MtlCpuAccess::Write)
+      return false;
+    ensureCommandBuffer();
+    if (d->trackingSerial() == m_currentSerial)
+      return false;
+
+    if (!m_initCmdbuf) {
+      if (!m_initAllocators[m_allocatorSlot])
+        m_initAllocators[m_allocatorSlot] = WmtAllocator::adopt(
+          MTLDevice_newCommandAllocator(m_device->wmtDevice()));
+      m_initCmdbuf = WmtCommandBuffer::adopt(
+        MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
+      MTL4CommandBuffer_beginCommandBuffer(m_initCmdbuf.handle(),
+        m_initAllocators[m_allocatorSlot].handle());
+      m_initEncoder = MTL4CommandBuffer_computeCommandEncoder(m_initCmdbuf.handle());
+    }
+
+    d->setTrackingSerial(m_currentSerial);
+    s->setTrackingSerial(m_currentSerial);
+    MTL4ComputeCommandEncoder_copyFromBufferToBuffer(
+      m_initEncoder, s->handle.buf, srcOff, d->handle.buf, dstOff, bytes);
+    m_keepAlive.push_back(dst);
+    m_keepAlive.push_back(src);
+    return true;
   }
 
   void MtlContextImpl::uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
@@ -927,10 +981,14 @@ namespace dxvk::backend {
                        && extent.height >= mipExtent.height;
 
     if (fullRect) {
-      if (deferredPassesEnabled() && m_pass.active) {
+      /* End an active pass in either mode (a second encoder can't be opened
+       * while it is live) and execute pending clears first, so an older
+       * folded clear on this image can't land after this one. */
+      if (m_pass.active) {
         prof::bump(prof::CntPassCloseClear);
         closePass();
       }
+      flushPendingClears();
       PendingPass saved = std::move(m_pass);
       m_pass = PendingPass();
       m_pass.targets.color[0] = view;

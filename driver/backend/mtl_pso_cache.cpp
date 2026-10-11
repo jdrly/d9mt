@@ -3,6 +3,7 @@
 #include "mtl_pso_cache.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
@@ -46,7 +47,19 @@ namespace dxvk::backend {
     }
 
     prof::bump(prof::CntPsoMiss);
+    const auto t0 = std::chrono::steady_clock::now();
     obj_handle_t pso = build(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
+    if (prof::g_profEnabled) {
+      static uint64_t s_total = 0u;
+      static double   s_totalMs = 0.0;
+      const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+      s_total++;
+      s_totalMs += ms;
+      if (ms >= 1.0)
+        Logger::info(str::format("PSOBUILD ms=", ms, " n=", s_total,
+          " cacheSize=", m_cache.size(), " totalMs=", s_totalMs));
+    }
     if (!pso)
       return 0u;
 

@@ -40,6 +40,10 @@ typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
 
+/* d9mt PSO archives: compiles through the serializer-attached MTL4Compiler
+ * hold this shared, serializer flushes hold it exclusively (see below). */
+static pthread_rwlock_t g_pso_lock = PTHREAD_RWLOCK_INITIALIZER;
+
 #if DXMT_APITRACE_METAL
 typedef NS_ENUM(uint32_t, DXMTApitraceEncoderKind) {
   DXMTApitraceEncoderKindRender = 1,
@@ -3608,8 +3612,11 @@ _MTLDevice_newMTL4SpatialScaler(void *obj) {
   desc.inputHeight = info->input_height;
   desc.outputWidth = info->output_width;
   desc.outputHeight = info->output_height;
+  /* MetalFX builds its pipelines through the (serializer-attached) compiler. */
+  pthread_rwlock_rdlock(&g_pso_lock);
   params->ret = (obj_handle_t)[desc newMTL4SpatialScalerWithDevice:(id<MTLDevice>)params->device
                                                           compiler:(id<MTL4Compiler>)params->compiler];
+  pthread_rwlock_unlock(&g_pso_lock);
   [desc release];
   return STATUS_SUCCESS;
 }
@@ -5635,6 +5642,15 @@ NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
+#ifndef __cdecl
+#define __cdecl
+#endif
+#include "../../airlib/d9mtair.h"
+#include <CommonCrypto/CommonDigest.h>
+#include <mach-o/loader.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+
 struct d9mt_air_version_params;
 struct d9mt_air_compile_params;
 struct d9mt_air_free_params;
@@ -5647,9 +5663,206 @@ thunk_D9MTAirVersion(void *args) {
   return d9mtair_version(args) == 0 ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
+/* Persistent AIR metallib cache. The SM3->AIR codegen (LLVM, Rosetta-
+ * translated) otherwise reruns for every shader and every VS/PS linkage on
+ * every launch. Key = SHA-256(build identity, ABI, flags, spec data, entry,
+ * IR bytes); store = the DXMT-derived sqlite cache (cache.c), one table per
+ * build of this .so (tables of other builds are dropped on open, so a rebuild
+ * never reads stale metallibs and the file does not grow without bound).
+ * Every failure degrades to a plain compile.
+ *   D9MT_AIR_CACHE=0            disable
+ *   D9MT_AIR_CACHE=<unix path>  database file (relative = under the macOS
+ *                               user cache dir, default d9mt/air-cache.sqlite3) */
+@interface CacheReader : NSObject
+- (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
+- (dispatch_data_t)get:(NSData *)key;
+@end
+@interface CacheWriter : NSObject
+- (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
+- (void)set:(NSData *)key value:(dispatch_data_t)value;
+@end
+void d9mt_cache_drop_other_versions(NSString *path, uint64_t version);
+
+#define D9MT_AIR_CACHE_MAGIC   0x414d3944u
+#define D9MT_AIR_CACHE_HDR     12u
+
+static pthread_mutex_t g_air_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int             g_air_cache_state;
+static CacheReader    *g_air_cache_reader;
+static CacheWriter    *g_air_cache_writer;
+static uint8_t         g_air_build_id[16];
+
+/* LC_UUID of the image holding the AIR codegen (this .so): ld64 derives it
+ * from the linked contents, so every rebuild changes it. Falls back to the
+ * file's inode/size/mtime. */
+static bool
+air_build_identity(uint8_t out[16]) {
+  Dl_info dl;
+  if (!dladdr((const void *)d9mtair_compile, &dl) || !dl.dli_fbase)
+    return false;
+  const struct mach_header_64 *mh = (const struct mach_header_64 *)dl.dli_fbase;
+  if (mh->magic == MH_MAGIC_64) {
+    const uint8_t *cmd = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0u; i < mh->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)cmd;
+      if (lc->cmd == LC_UUID) {
+        memcpy(out, ((const struct uuid_command *)lc)->uuid, 16u);
+        return true;
+      }
+      cmd += lc->cmdsize;
+    }
+  }
+  struct stat st;
+  if (!dl.dli_fname || stat(dl.dli_fname, &st))
+    return false;
+  const uint64_t id[2] = { (uint64_t)st.st_ino ^ ((uint64_t)st.st_size << 32),
+                           (uint64_t)st.st_mtimespec.tv_sec * 1000000000ull + (uint64_t)st.st_mtimespec.tv_nsec };
+  memcpy(out, id, 16u);
+  return true;
+}
+
+static void
+air_cache_init(void) {
+  const char *env = getenv("D9MT_AIR_CACHE");
+  g_air_cache_state = -1;
+  if (env && (!*env || !strcmp(env, "0")))
+    return;
+  if (!air_build_identity(g_air_build_id)) {
+    fprintf(stderr, "d9mt: AIR cache disabled (no build identity)\n");
+    return; /* never risk stale metallibs */
+  }
+
+  uint64_t version;
+  memcpy(&version, g_air_build_id, sizeof(version));
+  version = (version ^ ((uint64_t)D9MT_AIR_ABI_VERSION << 56)) & 0x7fffffffffffffffull;
+
+  NSString *path = env ? [NSString stringWithUTF8String:env] : @"d9mt/air-cache.sqlite3";
+  if (!path)
+    return;
+  d9mt_cache_drop_other_versions(path, version);
+  g_air_cache_writer = [[CacheWriter alloc] initWithPath:path version:version];
+  if (g_air_cache_writer)
+    g_air_cache_reader = [[CacheReader alloc] initWithPath:path version:version];
+  if (g_air_cache_writer && g_air_cache_reader) {
+    g_air_cache_state = 1;
+    fprintf(stderr, "d9mt: AIR cache %s (table cache_%llu)\n", path.UTF8String, (unsigned long long)version);
+  } else {
+    [g_air_cache_writer release];
+    [g_air_cache_reader release];
+    g_air_cache_writer = nil;
+    g_air_cache_reader = nil;
+    fprintf(stderr, "d9mt: AIR cache disabled (could not open %s)\n", path.UTF8String);
+  }
+}
+
+static void
+air_cache_key(const struct d9mt_air_compile_params *p, unsigned char out[CC_SHA256_DIGEST_LENGTH]) {
+  CC_SHA256_CTX c;
+  CC_SHA256_Init(&c);
+  CC_SHA256_Update(&c, g_air_build_id, sizeof(g_air_build_id));
+  const uint64_t hdr[2] = { D9MT_AIR_ABI_VERSION, ((uint64_t)p->flags << 32) | p->spec_count };
+  CC_SHA256_Update(&c, hdr, sizeof(hdr));
+  if (p->spec_count && p->spec_data)
+    CC_SHA256_Update(&c, (const void *)(uintptr_t)p->spec_data, (CC_LONG)(p->spec_count * 2u * sizeof(uint32_t)));
+  const char *entry = p->entry_name ? (const char *)(uintptr_t)p->entry_name : "main";
+  CC_SHA256_Update(&c, entry, (CC_LONG)strlen(entry) + 1u);
+  CC_SHA256_Update(&c, (const void *)(uintptr_t)p->ir_data, (CC_LONG)p->ir_size);
+  CC_SHA256_Final(out, &c);
+}
+
+static bool
+air_cache_unpack(struct d9mt_air_compile_params *p, const uint8_t *b, size_t len) {
+  uint32_t hdr[3];
+  if (!b || len < D9MT_AIR_CACHE_HDR)
+    return false;
+  memcpy(hdr, b, sizeof(hdr));
+  if (hdr[0] != D9MT_AIR_CACHE_MAGIC || D9MT_AIR_CACHE_HDR + (size_t)hdr[1] + hdr[2] != len || !hdr[1])
+    return false;
+  const uint8_t *ml = b + D9MT_AIR_CACHE_HDR, *rf = ml + hdr[1];
+  if (p->pe_metallib_buffer || p->pe_reflection_buffer) {
+    if (hdr[1] > p->pe_metallib_capacity || hdr[2] > p->pe_reflection_capacity)
+      return false; /* let the real compile report BUFFER_TOO_SMALL */
+    memcpy((void *)(uintptr_t)p->pe_metallib_buffer, ml, hdr[1]);
+    if (hdr[2])
+      memcpy((void *)(uintptr_t)p->pe_reflection_buffer, rf, hdr[2]);
+    p->out_metallib = 0u;
+    p->out_reflection = 0u;
+  } else {
+    /* d9mtair_free() is plain free(), so malloc'd outputs are compatible. */
+    void *m = malloc(hdr[1]), *r = malloc(hdr[2] ? hdr[2] : 1u);
+    if (!m || !r) {
+      free(m);
+      free(r);
+      return false;
+    }
+    memcpy(m, ml, hdr[1]);
+    memcpy(r, rf, hdr[2]);
+    p->out_metallib = (uint64_t)(uintptr_t)m;
+    p->out_reflection = (uint64_t)(uintptr_t)r;
+  }
+  p->out_size = hdr[1];
+  p->out_reflection_size = hdr[2];
+  p->ret_status = D9MT_AIR_OK;
+  return true;
+}
+
 static NTSTATUS
 thunk_D9MTAirCompile(void *args) {
+  struct d9mt_air_compile_params *p = args;
+  unsigned char key[CC_SHA256_DIGEST_LENGTH];
+  NSData *k = nil;
+
+  pthread_mutex_lock(&g_air_cache_mutex);
+  if (!g_air_cache_state)
+    air_cache_init();
+  const bool cache = g_air_cache_state > 0;
+  pthread_mutex_unlock(&g_air_cache_mutex);
+
+  if (cache && p->ir_data && p->ir_size) {
+    air_cache_key(p, key);
+    k = [[NSData alloc] initWithBytesNoCopy:key length:sizeof(key) freeWhenDone:NO];
+    pthread_mutex_lock(&g_air_cache_mutex);
+    dispatch_data_t hit = [g_air_cache_reader get:k];
+    pthread_mutex_unlock(&g_air_cache_mutex);
+    if (hit) {
+      const void *bytes = NULL;
+      size_t len = 0u;
+      dispatch_data_t flat = dispatch_data_create_map(hit, &bytes, &len);
+      const bool ok = air_cache_unpack(p, bytes, len);
+      dispatch_release(flat);
+      dispatch_release(hit);
+      if (ok) {
+        [k release];
+        return STATUS_SUCCESS;
+      }
+    }
+  }
+
   d9mtair_compile(args);
+
+  if (k && p->ret_status == D9MT_AIR_OK && p->out_size
+   && p->out_size <= 0xffffffffu && p->out_reflection_size <= 0xffffffffu) {
+    const bool pe = p->pe_metallib_buffer || p->pe_reflection_buffer;
+    const void *ml = (const void *)(uintptr_t)(pe ? p->pe_metallib_buffer : p->out_metallib);
+    const void *rf = (const void *)(uintptr_t)(pe ? p->pe_reflection_buffer : p->out_reflection);
+    const size_t total = D9MT_AIR_CACHE_HDR + p->out_size + p->out_reflection_size;
+    uint8_t *blob = malloc(total);
+    if (blob && ml && (rf || !p->out_reflection_size)) {
+      const uint32_t hdr[3] = { D9MT_AIR_CACHE_MAGIC, (uint32_t)p->out_size, (uint32_t)p->out_reflection_size };
+      memcpy(blob, hdr, sizeof(hdr));
+      memcpy(blob + D9MT_AIR_CACHE_HDR, ml, p->out_size);
+      if (p->out_reflection_size)
+        memcpy(blob + D9MT_AIR_CACHE_HDR + p->out_size, rf, p->out_reflection_size);
+      dispatch_data_t v = dispatch_data_create(blob, total, NULL, DISPATCH_DATA_DESTRUCTOR_FREE);
+      pthread_mutex_lock(&g_air_cache_mutex);
+      [g_air_cache_writer set:k value:v];
+      pthread_mutex_unlock(&g_air_cache_mutex);
+      dispatch_release(v);
+    } else {
+      free(blob);
+    }
+  }
+  [k release];
   return STATUS_SUCCESS;
 }
 
@@ -5700,10 +5913,259 @@ _MTLDevice_newArgumentTable(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* Persistent Metal 4 pipeline archives. Every PSO the d9mt compiler builds
+ * (archive hits included) is captured by a pipeline data set serializer and
+ * written out as an archive; archives of earlier sessions are passed to every
+ * compile as lookupArchives, so PSOs seen in a previous run skip the backend
+ * compile. Measured on macOS 27 / Metal 4:
+ *  - serializeAsArchiveAndFlushToURL drains the serializer, so each flush
+ *    goes to its own file (<unix-time>-<pid>-<seq>.mtl4archive);
+ *  - flushing while another thread compiles through the same compiler
+ *    crashes, so compiles hold g_pso_lock shared and flushes hold it
+ *    exclusively; flushes run on the compiling (render) thread every
+ *    D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if uncontended);
+ *  - newArchiveWithURL segfaults on a non-archive file and accepts a
+ *    truncated one, so every archive carries a .sum (size + SHA-256) written
+ *    after it and is only loaded when that matches; anything else is deleted.
+ * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>/; other
+ * os-* directories (OS or GPU change) are removed. The newest
+ * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
+ * it used, hits included).
+ *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
+ *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
+ *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256) */
+#define D9MT_PSO_KEEP_SESSIONS 8u
+#define D9MT_PSO_MAX_ARCHIVES  256u
+#define D9MT_PSO_FLUSH_DEFAULT 256u
+
+static id<MTL4PipelineDataSetSerializer> g_pso_serializer;
+static MTL4CompilerTaskOptions          *g_pso_task_options;
+static NSString                         *g_pso_dir;
+static NSString                         *g_pso_session;
+static unsigned                          g_pso_seq;
+static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
+static _Atomic unsigned                  g_pso_pending;
+
+static NSString *
+pso_sum_text(NSString *path) {
+  NSData *d = [[NSData alloc] initWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+  if (!d)
+    return nil;
+  unsigned char h[CC_SHA256_DIGEST_LENGTH];
+  CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+  NSMutableString *s = [NSMutableString stringWithFormat:@"%llu ", (unsigned long long)d.length];
+  for (unsigned i = 0u; i < sizeof(h); i++)
+    [s appendFormat:@"%02x", h[i]];
+  [d release];
+  return s;
+}
+
+static bool
+pso_archive_valid(NSString *path) {
+  NSString *want = [NSString stringWithContentsOfFile:[path stringByAppendingString:@".sum"]
+                                             encoding:NSUTF8StringEncoding error:nil];
+  if (!want)
+    return false;
+  NSString *have = pso_sum_text(path);
+  return have && [have isEqualToString:want];
+}
+
+static void
+pso_remove_archive(NSString *path) {
+  unlink(path.fileSystemRepresentation);
+  unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
+}
+
+/* Caller holds g_pso_lock exclusively. */
+static void
+pso_flush_locked(void) {
+  if (!g_pso_serializer || !atomic_load(&g_pso_pending))
+    return;
+  atomic_store(&g_pso_pending, 0u);
+  NSString *path = [g_pso_dir stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
+  NSString *tmp = [path stringByAppendingString:@".tmp"];
+  NSString *sumTmp = [path stringByAppendingString:@".sum.tmp"];
+  NSError *err = nil;
+  if (![g_pso_serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&err]) {
+    fprintf(stderr, "d9mt: PSO archive flush failed: %s\n",
+            err ? err.localizedDescription.UTF8String : "(no error)");
+    unlink(tmp.fileSystemRepresentation);
+    return;
+  }
+  NSString *sum = pso_sum_text(tmp);
+  if (!sum || ![sum writeToFile:sumTmp atomically:NO encoding:NSUTF8StringEncoding error:nil]
+   || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
+   || rename(sumTmp.fileSystemRepresentation, [path stringByAppendingString:@".sum"].fileSystemRepresentation)) {
+    unlink(tmp.fileSystemRepresentation);
+    unlink(sumTmp.fileSystemRepresentation);
+    pso_remove_archive(path);
+    fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+  }
+}
+
+static void
+pso_flush_atexit(void) {
+  /* Another thread may still be compiling (or died holding the lock while
+   * the process tears down): never block exit on it. */
+  if (pthread_rwlock_trywrlock(&g_pso_lock))
+    return;
+  @autoreleasepool {
+    pso_flush_locked();
+  }
+  pthread_rwlock_unlock(&g_pso_lock);
+}
+
+static NSString *
+pso_sanitize(NSString *s) {
+  char out[49];
+  NSUInteger n = 0u;
+  for (; n < s.length && n < 48u; n++) {
+    const unichar c = [s characterAtIndex:n];
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.';
+    out[n] = ok ? (char)c : '_';
+  }
+  out[n] = '\0';
+  return [NSString stringWithUTF8String:out];
+}
+
+static void
+pso_archive_init(id<MTLDevice> device) {
+  const char *off = getenv("D9MT_PSO_ARCHIVE");
+  if (off && (!*off || !strcmp(off, "0")))
+    return;
+  const char *env = getenv("D9MT_PSO_ARCHIVE_DIR");
+  if (env && (!*env || !strcmp(env, "0")))
+    return;
+  const char *every = getenv("D9MT_PSO_FLUSH_EVERY");
+  if (every && atoi(every) > 0)
+    g_pso_flush_every = (unsigned)atoi(every);
+
+  NSString *base;
+  if (env) {
+    base = [NSString stringWithUTF8String:env];
+  } else {
+    char buf[PATH_MAX];
+    if (!confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf)))
+      return;
+    base = [[NSString stringWithUTF8String:buf] stringByAppendingPathComponent:@"d9mt/pso"];
+  }
+  if (!base)
+    return;
+
+  char osbuild[64] = "unknown";
+  size_t oslen = sizeof(osbuild);
+  if (sysctlbyname("kern.osversion", osbuild, &oslen, NULL, 0))
+    strcpy(osbuild, "unknown");
+  NSString *leaf = [NSString stringWithFormat:@"os-%@-%@",
+    pso_sanitize([NSString stringWithUTF8String:osbuild] ?: @"unknown"),
+    pso_sanitize(device.name ?: @"gpu")];
+  NSString *dir = [base stringByAppendingPathComponent:leaf];
+
+  NSFileManager *fm = [NSFileManager defaultManager];
+  if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) {
+    fprintf(stderr, "d9mt: PSO archives disabled (cannot create %s)\n", dir.UTF8String);
+    return;
+  }
+  for (NSString *name in [fm contentsOfDirectoryAtPath:base error:nil]) {
+    if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
+      [fm removeItemAtPath:[base stringByAppendingPathComponent:name] error:nil];
+  }
+
+  /* Collect archives, drop leftovers of interrupted writes and orphans. */
+  NSMutableArray<NSString *> *names = [NSMutableArray array];
+  const time_t now = time(NULL);
+  for (NSString *name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+    NSString *path = [dir stringByAppendingPathComponent:name];
+    if ([name hasSuffix:@".mtl4archive"]) {
+      [names addObject:name];
+    } else if ([name hasSuffix:@".tmp"]) {
+      struct stat st;
+      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > 600)
+        unlink(path.fileSystemRepresentation);
+    } else if ([name hasSuffix:@".mtl4archive.sum"]) {
+      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]])
+        unlink(path.fileSystemRepresentation);
+    }
+  }
+  /* "<unix-time>-<pid>-<seq>": lexical order == age; newest first. */
+  [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [b compare:a]; }];
+
+  NSMutableArray *archives = [NSMutableArray array];
+  NSMutableSet<NSString *> *sessions = [NSMutableSet set];
+  for (NSString *name in names) {
+    NSString *path = [dir stringByAppendingPathComponent:name];
+    NSArray<NSString *> *parts = [name componentsSeparatedByString:@"-"];
+    NSString *session = parts.count >= 3u ? [NSString stringWithFormat:@"%@-%@", parts[0], parts[1]] : nil;
+    if (session && ![sessions containsObject:session] && sessions.count < D9MT_PSO_KEEP_SESSIONS)
+      [sessions addObject:session];
+    if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES
+     || !pso_archive_valid(path)) {
+      pso_remove_archive(path);
+      continue;
+    }
+    NSError *err = nil;
+    id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+    if (a) {
+      [archives addObject:a];
+      [a release];
+    } else {
+      fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+              err ? err.localizedDescription.UTF8String : "(no error)");
+      pso_remove_archive(path);
+    }
+  }
+  if (archives.count) {
+    g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
+    g_pso_task_options.lookupArchives = archives;
+  }
+
+  MTL4PipelineDataSetSerializerDescriptor *sd = [[MTL4PipelineDataSetSerializerDescriptor alloc] init];
+  sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+  g_pso_serializer = [device newPipelineDataSetSerializerWithDescriptor:sd];
+  [sd release];
+  if (g_pso_serializer) {
+    g_pso_dir = [dir retain];
+    g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
+    atexit(pso_flush_atexit);
+  }
+  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
+          (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
+          g_pso_flush_every);
+}
+
+static void
+pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
+  static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+  static bool initialized;
+  pthread_mutex_lock(&init_mutex);
+  if (!initialized) {
+    initialized = true;
+    @autoreleasepool {
+      pso_archive_init(device);
+    }
+  }
+  pthread_mutex_unlock(&init_mutex);
+  if (g_pso_serializer)
+    desc.pipelineDataSetSerializer = g_pso_serializer;
+}
+
+static void
+pso_note_compiled(void) {
+  if (!g_pso_serializer)
+    return;
+  if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
+    return;
+  pthread_rwlock_wrlock(&g_pso_lock);
+  pso_flush_locked();
+  pthread_rwlock_unlock(&g_pso_lock);
+}
+
 static NTSTATUS
 _MTLDevice_newMTL4Compiler(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor alloc] init];
+  pso_archive_setup((id<MTLDevice>)params->handle, desc);
   NSError *err = NULL;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCompilerWithDescriptor:desc error:&err];
   if (!params->ret)
@@ -6174,10 +6636,14 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
 
   NSError *err = NULL;
+  pthread_rwlock_rdlock(&g_pso_lock);
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
-                                                                                     compilerTaskOptions:nil
+                                                                                     compilerTaskOptions:g_pso_task_options
                                                                                                    error:&err];
+  pthread_rwlock_unlock(&g_pso_lock);
   params->ret_error = (obj_handle_t)[err retain];
+  if (params->ret_pso)
+    pso_note_compiled();
   [descriptor release];
   return STATUS_SUCCESS;
 }

@@ -23,6 +23,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -1209,7 +1211,16 @@ namespace dxvk {
       params.pe_reflection_buffer   = uint64_t(uintptr_t(reflection.data()));
       params.pe_reflection_capacity = reflection.size();
 
+      static const bool s_timeAir = std::getenv("D9MT_PROFILE") != nullptr;
+      const auto airT0 = std::chrono::steady_clock::now();
       uint32_t status = D9MTAirCompile(&params);
+      if (s_timeAir) {
+        static std::atomic<uint64_t> s_n = { 0u };
+        const double ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - airT0).count();
+        Logger::info(str::format("AIRCOMPILE ms=", ms, " n=", ++s_n, " ", m_name,
+          paired.prevStageIr ? " (paired)" : ""));
+      }
 
       if (status != D9MT_AIR_OK || !params.out_size) {
         Logger::err(str::format("D3D9 AIR: compile thunk failed (status ", status, ") for ", m_name));

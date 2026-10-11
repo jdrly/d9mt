@@ -20,6 +20,8 @@ public:
     const char* entryName = "main";
     bool foldSpecConstants = false;
     bool useArgumentBuffer = false;
+    // Textual LLVM IR dump for getIrText(); off in the driver hot path.
+    bool emitIrText = false;
     std::unordered_map<uint32_t, uint32_t> specValues;
   };
 

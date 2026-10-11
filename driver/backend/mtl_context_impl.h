@@ -236,6 +236,7 @@ namespace dxvk::backend {
 
     WmtCommandBuffer   m_cmdbuf;
     PendingPass        m_pass;
+    uint32_t           m_passFeedbackLoop = 0u;
 
     CmdChunk           m_cmdChunk;
 
@@ -245,11 +246,23 @@ namespace dxvk::backend {
     std::unordered_set<const void*> m_everTransferRead;
     bool m_frameBoundaryFlush = false;
 
-    std::array<WmtAllocator, 3> m_allocators;
-    std::array<uint64_t, 3>     m_allocatorSerial = { };
-    uint32_t     m_frameIndex   = 0u;
+    // Pool grows on demand: a fixed ring of 3 forced CPU/GPU lockstep at
+    // ~12 command buffers per frame (recording buffer N waited for N-3).
+    static constexpr uint32_t kMaxAllocators = 32u;
+    std::vector<WmtAllocator> m_allocators;
+    std::vector<WmtAllocator> m_initAllocators;
+    std::vector<uint64_t>     m_allocatorSerial;
+    uint32_t     m_allocatorCursor = 0u;
     uint32_t     m_allocatorSlot = 0u;
     obj_handle_t m_allocator    = 0u;
+
+    // Out-of-order upload command buffer, committed ahead of m_cmdbuf so
+    // staging->VB/IB copies don't split the active render pass.
+    WmtCommandBuffer m_initCmdbuf;
+    obj_handle_t     m_initEncoder = 0u;
+    bool tryHoistBufferCopy(MtlBufferImpl* d, MtlBufferImpl* s,
+                            const Rc<MtlBuffer>& dst, const Rc<MtlBuffer>& src,
+                            MtlDeviceSize dstOff, MtlDeviceSize srcOff, MtlDeviceSize bytes);
 
     std::vector<ArgTablePair> m_argTables;
     uint32_t                 m_argTableCursor = 0u;

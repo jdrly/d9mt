@@ -181,6 +181,42 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
 
 @end
 
+/* d9mt: drop every cache_<n> table except cache_<version> so per-build
+ * tables don't accumulate. Best effort; any failure just leaves them. */
+void
+d9mt_cache_drop_other_versions(NSString *path, uint64_t version) {
+  NSString *dbPath = resolve_cache_dir(path, true);
+  if (!dbPath || ![[NSFileManager defaultManager] fileExistsAtPath:dbPath])
+    return;
+  sqlite3 *db = NULL;
+  if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) !=
+      SQLITE_OK) {
+    sqlite3_close(db);
+    return;
+  }
+  sqlite3_busy_timeout(db, 2000);
+  NSString *keep = [NSString stringWithFormat:@"cache_%llu", version];
+  NSMutableArray<NSString *> *drop = [NSMutableArray array];
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cache\\_%' ESCAPE '\\';",
+                         -1, &stmt, NULL) == SQLITE_OK) {
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      const unsigned char *name = sqlite3_column_text(stmt, 0);
+      NSString *n = name ? [NSString stringWithUTF8String:(const char *)name] : nil;
+      if (n && ![n isEqualToString:keep])
+        [drop addObject:n];
+    }
+  }
+  sqlite3_finalize(stmt);
+  for (NSString *n in drop) {
+    NSString *sql = [NSString stringWithFormat:@"DROP TABLE IF EXISTS \"%@\";", n];
+    sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL);
+  }
+  if (drop.count)
+    sqlite3_exec(db, "VACUUM;", NULL, NULL, NULL);
+  sqlite3_close(db);
+}
+
 int
 _CacheReader_alloc_init(void *obj) {
   struct unixcall_cache_alloc_init *params = obj;

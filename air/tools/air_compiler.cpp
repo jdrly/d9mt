@@ -352,6 +352,7 @@ int main(int argc, char** argv) {
     dxbc_spv::air::AirBuilder::Options airOptions = {};
     airOptions.entryName = args.name.c_str();
     airOptions.useArgumentBuffer = args.argBuffer;
+    airOptions.emitIrText = args.dumpAir;
 
     dxbc_spv::air::AirBuilder airBuilder(builder, airOptions);
     std::vector<uint8_t> metallib = airBuilder.buildMetallib();
