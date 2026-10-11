@@ -122,6 +122,11 @@ namespace dxvk {
 
 
   D3D9DeviceEx::~D3D9DeviceEx() {
+    if (m_dbg.dumpFile)
+      std::fclose(m_dbg.dumpFile);
+    if (m_dbg.logFile)
+      std::fclose(m_dbg.logFile);
+
     if (this_thread::isInModuleDetachment())
       return;
 
@@ -1116,6 +1121,15 @@ namespace dxvk {
     if (unlikely(Filter != D3DTEXF_NONE && Filter != D3DTEXF_LINEAR && Filter != D3DTEXF_POINT))
       return D3DERR_INVALIDCALL;
 
+    if (unlikely(m_dbg.dumping)) {
+      auto rectStr = [] (const RECT* r) {
+        return r ? str::format("[", r->left, ",", r->top, ",", r->right, ",", r->bottom, "]")
+                 : std::string("[full]");
+      };
+      DebugEvent(str::format("STRETCH ", DebugSurfaceDesc(srcTextureInfo), rectStr(pSourceRect),
+        " -> ", DebugSurfaceDesc(dstTextureInfo), rectStr(pDestRect), " filter=", uint32_t(Filter)));
+    }
+
     MtlExtent3D srcExtent = srcImage->mipLevelExtent(srcSubresource.mipLevel);
     MtlExtent3D dstExtent = dstImage->mipLevelExtent(dstSubresource.mipLevel);
 
@@ -1350,6 +1364,10 @@ namespace dxvk {
 
     if (unlikely(dstTextureInfo->Desc()->Pool != D3DPOOL_DEFAULT))
       return D3DERR_INVALIDCALL;
+
+    if (unlikely(m_dbg.dumping))
+      DebugEvent(str::format("COLORFILL ", DebugSurfaceDesc(dstTextureInfo),
+        pRect ? " rect" : " full", " color=0x", std::hex, Color, std::dec));
 
     MtlExtent3D mipExtent = dstTextureInfo->GetExtentMip(dst->GetSubresource());
 
@@ -1731,6 +1749,16 @@ namespace dxvk {
 
     D3D9DeviceLock lock = LockDevice();
     BindFramebuffer();
+
+    if (unlikely(m_dbg.dumping)) {
+      DebugEvent(str::format("CLEAR ",
+        (Flags & D3DCLEAR_TARGET) ? "T" : "", (Flags & D3DCLEAR_ZBUFFER) ? "Z" : "",
+        (Flags & D3DCLEAR_STENCIL) ? "S" : "",
+        " color=0x", std::hex, Color, std::dec, " z=", Z, " s=", Stencil, " rects=", Count,
+        " sc=", m_state.renderStates[D3DRS_SCISSORTESTENABLE] ? 1 : 0,
+        " rt0=", DebugSurfaceDesc(GetCommonTexture(m_state.renderTargets[0].ptr())),
+        " ds=", DebugSurfaceDesc(GetCommonTexture(m_state.depthStencil.ptr()))));
+    }
 
     if (unlikely(m_state.depthStencil == nullptr
             && (Flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL))))
@@ -2819,6 +2847,9 @@ namespace dxvk {
 
     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, false);
 
+    if (unlikely(m_dbg.hooks))
+      DebugOnDraw(PrimitiveType, PrimitiveCount, "DP", 1u);
+
     MtlDrawArgs draw = {};
     draw.vertexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
     draw.instanceCount = 1u;
@@ -2868,6 +2899,9 @@ namespace dxvk {
 
     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO);
 
+    if (unlikely(m_dbg.hooks))
+      DebugOnDraw(PrimitiveType, PrimitiveCount, "DIP", GetInstanceCount());
+
     MtlDrawIndexedArgs draw = {};
     draw.indexCount = indexCount;
     draw.instanceCount = GetInstanceCount();
@@ -2915,6 +2949,9 @@ namespace dxvk {
       return D3D_OK;
 
     PrepareDraw(PrimitiveType, false, false);
+
+    if (unlikely(m_dbg.hooks))
+      DebugOnDraw(PrimitiveType, PrimitiveCount, "DPUP", 1u);
 
     uint32_t vertexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
 
@@ -2968,6 +3005,9 @@ namespace dxvk {
       return D3D_OK;
 
     PrepareDraw(PrimitiveType, false, false);
+
+    if (unlikely(m_dbg.hooks))
+      DebugOnDraw(PrimitiveType, PrimitiveCount, "DIPUP", GetInstanceCount());
 
     uint32_t vertexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
 
@@ -5614,6 +5654,7 @@ namespace dxvk {
     uint32_t clipPlaneCount = 0u;
     for (uint32_t i = 0; i < caps::MaxClipPlanes; i++) {
       D3D9ClipPlane clipPlane = (m_state.renderStates[D3DRS_CLIPPLANEENABLE] & (1 << i))
+                             && !(m_dbg.flags & d9mtdbg::NoClipPlanes)
         ? m_state.clipPlanes[i]
         : D3D9ClipPlane();
 
@@ -6259,7 +6300,8 @@ namespace dxvk {
     state.znear   = std::clamp(vp.MinZ,                            0.0f, 1.0f);
     state.zfar    = std::clamp(std::max(vp.MaxZ, vp.MinZ + zBias), 0.0f, 1.0f);
 
-    bool enableScissorTest = m_state.renderStates[D3DRS_SCISSORTESTENABLE];
+    bool enableScissorTest = m_state.renderStates[D3DRS_SCISSORTESTENABLE]
+      && !(m_dbg.flags & d9mtdbg::NoScissor);
 
     if (enableScissorTest) {
       RECT sr = m_state.scissorRect;
@@ -6442,6 +6484,12 @@ namespace dxvk {
     state.setStencilTest(stencil);
     state.setDepthCompareOp(DecodeCompareOp(D3DCMPFUNC(rs[D3DRS_ZFUNC])));
 
+    // Debug: blended draws pass the depth test (and don't write depth).
+    if (unlikely(m_dbg.flags & d9mtdbg::NoZTestBlended) && rs[D3DRS_ALPHABLENDENABLE]) {
+      state.setDepthCompareOp(MtlCompareFunction::Always);
+      state.setDepthWrite(false);
+    }
+
     MtlStencilState frontOp = { };
 
     if (stencil) {
@@ -6483,8 +6531,9 @@ namespace dxvk {
     auto& rs = m_state.renderStates;
 
     MtlRasterizerState state = { };
-    state.setCullMode(DecodeCullMode(D3DCULL(rs[D3DRS_CULLMODE])));
-    state.setDepthClip(true);
+    state.setCullMode(DecodeCullMode(D3DCULL(
+      (m_dbg.flags & d9mtdbg::CullNone) ? DWORD(D3DCULL_NONE) : rs[D3DRS_CULLMODE])));
+    state.setDepthClip(!(m_dbg.flags & d9mtdbg::DepthClamp));
     state.setFrontFace(MtlWinding::Clockwise);
     state.setPolygonMode(DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE])));
     state.setFlatShading(m_state.renderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT);
@@ -6507,6 +6556,9 @@ namespace dxvk {
 
     float depthBias            = bit::cast<float>(rs[D3DRS_DEPTHBIAS]) * m_depthBiasScale;
     float slopeScaledDepthBias = bit::cast<float>(rs[D3DRS_SLOPESCALEDEPTHBIAS]);
+
+    if (unlikely(m_dbg.flags & d9mtdbg::NoDepthBias))
+      depthBias = slopeScaledDepthBias = 0.0f;
 
     MtlDepthBias biases;
     biases.constantFactor = depthBias;
@@ -6785,6 +6837,11 @@ namespace dxvk {
     const uint32_t usedDirtyTextures = m_textureSlotTracking.textureDirty & usedSamplerMask;
     if (likely(usedDirtyTextures))
       UndirtyTextures(usedDirtyTextures);
+
+    // no_ztest_blended keys the depth state on ALPHABLENDENABLE.
+    if (unlikely(m_dbg.flags & d9mtdbg::NoZTestBlended)
+     && m_dirty.test(D3D9DeviceDirtyFlag::BlendState))
+      m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
 
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::BlendState)))
       BindBlendState();
@@ -7779,6 +7836,9 @@ namespace dxvk {
 
     D3D9CommonTexture* srcTextureInfo = GetCommonTexture(src);
     D3D9CommonTexture* dstTextureInfo = GetCommonTexture(dst);
+
+    if (unlikely(m_dbg.dumping))
+      DebugEvent(str::format("RESZ ", DebugSurfaceDesc(srcTextureInfo), " -> ", DebugSurfaceDesc(dstTextureInfo)));
 
     const D3D9_COMMON_TEXTURE_DESC* srcDesc = srcTextureInfo->Desc();
     const D3D9_COMMON_TEXTURE_DESC* dstDesc = dstTextureInfo->Desc();

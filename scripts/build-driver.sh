@@ -273,7 +273,7 @@ CORE+=("$DRV"/d3d9/d3d9_adapter.cpp "$DRV"/d3d9/d3d9_multithread.cpp \
        "$DRV"/d3d9/d3d9_monitor.cpp)
 # Phase C-9 STAGE-2: the device linchpin (semantic port onto the Mtl seam) + the
 # swapchain (MtlPresenter) + interface/main (the 20 d3d9.def COM exports).
-CORE+=("$DRV"/d3d9/d3d9_device.cpp)
+CORE+=("$DRV"/d3d9/d3d9_device.cpp "$DRV"/d3d9/d3d9_debug.cpp)
 # Phase C-10 link-frontier resolvers (promoted to fatal CORE):
 #   d3d9_state       : D3D9State<dynamic_item>/<static_item> ctor/dtor instantiation.
 #   d3d9_options     : D3D9Options ctor ported off DxvkDevice->MtlDevice (VK_DRIVER_ID

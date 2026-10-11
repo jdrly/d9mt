@@ -60,15 +60,25 @@ namespace dxvk::backend {
       return MtlGpuQueryStatus::Pending;
 
     out = MtlQueryData{};
-    if (type == MtlQueryType::Occlusion && visCpu) {
-      out.occlusion.samplesPassed =
-        *reinterpret_cast<const uint64_t*>(reinterpret_cast<const char*>(visCpu) + slotOffset);
+    if (type == MtlQueryType::Occlusion) {
+      uint64_t samples = 0u;
+      if (visCpu) {
+        for (uint64_t off : slots)
+          samples += *reinterpret_cast<const volatile uint64_t*>(
+            reinterpret_cast<const char*>(visCpu) + off);
+      }
+      out.occlusion.samplesPassed = samples;
       if (d9mtTrace())
-        Logger::info(str::format("OCC result q=", (void*)this, " slot=", slotOffset,
-          " samples=", out.occlusion.samplesPassed));
+        Logger::info(str::format("OCC result q=", (void*)this, " segments=", slots.size(),
+          " samples=", samples));
     } else
       out.timestamp.time = serial;
     return MtlGpuQueryStatus::Available;
+  }
+
+  void MtlBackendQuery::waitData() {
+    if (tracker && serial)
+      tracker->waitFor(serial);
   }
 
   MtlGpuEventStatus MtlBackendEvent::test() {
@@ -505,6 +515,17 @@ namespace dxvk::backend {
       bias->bias        = m_depthBias.constantFactor;
       bias->slope_scale = m_depthBias.slopeFactor;
       bias->clamp       = m_depthBias.clamp;
+
+      // Encoders start in Clip mode; only a change (or a clamp on a fresh
+      // encoder) needs a command. Deferred passes may merge encoders, so
+      // they always state it on the first flush.
+      const bool clamp = !m_rasterizer.depthClip;
+      if (first ? (clamp || deferredPassesEnabled()) : clamp != m_lastDepthClamp) {
+        auto* dc = m_cmdChunk.append<wmtcmd_mtl4_setdepthclipmode>(
+          uint16_t(WMTMtl4RenderCommandSetDepthClipMode));
+        dc->mode = uint64_t(clamp ? WMTDepthClipModeClamp : WMTDepthClipModeClip);
+      }
+      m_lastDepthClamp = clamp;
     }
   }
 
@@ -1477,7 +1498,7 @@ namespace dxvk::backend {
     if (m_visBuffer)
       return;
     WMTBufferInfo info = {};
-    info.length  = 8192u * 8u;
+    info.length  = uint64_t(kVisSlots) * 8u;
     info.options = WMTResourceOptions(WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked);
     info.memory.set(nullptr);
     obj_handle_t h = MTLDevice_newBuffer(m_device->wmtDevice(), &info);
@@ -1491,42 +1512,62 @@ namespace dxvk::backend {
     if (!q || q->type != MtlQueryType::Occlusion)
       return;
     ensureVisBuffer();
-    q->visBuffer  = m_visBuffer.handle();
-    q->visCpu     = m_visCpu;
-    q->slotOffset = (m_visSlot % 8192u) * 8u;
-    q->tracker    = &m_device->submissions();
-    m_visSlot++;
-    // Render passes use MTLVisibilityResultTypeAccumulate, so the slot must
-    // start at zero; the GPU only adds to it.
-    if (m_visCpu)
-      *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(m_visCpu) + q->slotOffset) = 0u;
+    q->visCpu  = m_visCpu;
+    q->tracker = &m_device->submissions();
+    q->slots.clear();
 
     removeActiveOcclusion(q);
     m_activeOcclusion.push_back(query);
-    if (m_pass.active)
-      armVisibility();
+    newVisSegment();
     if (d9mtTrace())
-      Logger::info(str::format("OCC begin q=", (void*)q, " slot=", q->slotOffset,
+      Logger::info(str::format("OCC begin q=", (void*)q, " slot=", m_visSegment,
         " passActive=", m_pass.active ? 1 : 0, " nested=", m_activeOcclusion.size() - 1u));
   }
 
-  void MtlContextImpl::removeActiveOcclusion(const MtlQuery* query) {
+  bool MtlContextImpl::removeActiveOcclusion(const MtlQuery* query) {
     for (auto it = m_activeOcclusion.begin(); it != m_activeOcclusion.end(); ++it) {
       if (it->ptr() == query) {
         m_activeOcclusion.erase(it);
-        return;
+        return true;
       }
     }
+    return false;
+  }
+
+  void MtlContextImpl::newVisSegment() {
+    /* Called whenever the active query set changes. Metal counts into a
+     * single offset, so the set gets a fresh zeroed slot that every active
+     * query adds to its own slot list (the GPU only accumulates into it;
+     * passes use MTLVisibilityResultTypeAccumulate). */
+    const bool emit = m_pass.active || deferredPassesEnabled();
+    if (m_activeOcclusion.empty()) {
+      if (emit) {
+        auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
+          uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
+        cmd->mode   = uint64_t(WMTVisibilityResultModeDisabled);
+        cmd->offset = 0u;
+      }
+      return;
+    }
+
+    m_visSegment = (m_visSlot % kVisSlots) * 8u;
+    m_visSlot++;
+    if (m_visCpu)
+      *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(m_visCpu) + m_visSegment) = 0u;
+    for (const auto& a : m_activeOcclusion)
+      static_cast<MtlBackendQuery*>(a.ptr())->slots.push_back(m_visSegment);
+
+    if (emit)
+      armVisibility();
   }
 
   void MtlContextImpl::armVisibility() {
     if (m_activeOcclusion.empty())
       return;
-    auto* q = static_cast<MtlBackendQuery*>(m_activeOcclusion.back().ptr());
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
       uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
     cmd->mode   = uint64_t(WMTVisibilityResultModeCounting);
-    cmd->offset = q->slotOffset;
+    cmd->offset = m_visSegment;
   }
 
   void MtlContextImpl::endQuery(const Rc<MtlQuery>& query) {
@@ -1537,23 +1578,11 @@ namespace dxvk::backend {
     q->serial  = m_currentSerial;
     q->tracker = &m_device->submissions();
 
-    if (q->type != MtlQueryType::Occlusion || m_activeOcclusion.empty())
+    if (q->type != MtlQueryType::Occlusion)
       return;
 
-    // Overlapping queries: only the innermost one counts. Ending it resumes
-    // the enclosing one; ending an enclosing one leaves the counter alone.
-    const bool wasCounting = m_activeOcclusion.back().ptr() == q;
-    removeActiveOcclusion(q);
-    if (!wasCounting || !m_pass.active)
-      return;
-    if (!m_activeOcclusion.empty()) {
-      armVisibility();
-      return;
-    }
-    auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setvisibilitymode>(
-      uint16_t(WMTMtl4RenderCommandSetVisibilityResultMode));
-    cmd->mode   = uint64_t(WMTVisibilityResultModeDisabled);
-    cmd->offset = 0u;
+    if (removeActiveOcclusion(q))
+      newVisSegment();
   }
 
   void MtlContextImpl::writeTimestamp(const Rc<MtlQuery>& query) {

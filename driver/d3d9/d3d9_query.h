@@ -84,6 +84,12 @@ namespace dxvk {
 
     D3D9_QUERY_DATA m_dataCache;
 
+    // Debug facility (occ_trace / dump / occ_visible / occ_sync).
+    uint32_t m_dbgId       = 0u;
+    uint32_t m_dbgPolls    = 0u;
+    uint64_t m_dbgEndFrame = 0u;
+    bool     m_dbgReported = false;
+
     UINT64 GetTimestampQueryFrequency() const;
 
   };

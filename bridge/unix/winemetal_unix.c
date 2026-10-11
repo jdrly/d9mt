@@ -6848,6 +6848,11 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
                         baseInstance:(NSUInteger)body->base_instance];
       break;
     }
+    case WMTMtl4RenderCommandSetDepthClipMode: {
+      struct wmtcmd_mtl4_setdepthclipmode *body = (struct wmtcmd_mtl4_setdepthclipmode *)next;
+      [encoder setDepthClipMode:(MTLDepthClipMode)body->mode];
+      break;
+    }
     case WMTMtl4RenderCommandBarrier: {
       struct wmtcmd_mtl4_barrier *body = (struct wmtcmd_mtl4_barrier *)next;
       [encoder barrierAfterStages:(MTLStages)body->after_stages

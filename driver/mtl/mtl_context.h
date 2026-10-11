@@ -48,6 +48,8 @@ namespace dxvk {
   public:
     MtlQueryType type = MtlQueryType::Occlusion;
     virtual MtlGpuQueryStatus getData(MtlQueryData& out);
+    // Blocks until the submission holding the query's end has completed.
+    virtual void waitData() { }
   };
 
   class MtlEvent : public RcObject {

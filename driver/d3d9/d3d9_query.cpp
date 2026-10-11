@@ -4,6 +4,9 @@
 
 namespace dxvk {
 
+  // occ_visible: what GetData reports for every occlusion query.
+  constexpr DWORD kDebugVisibleSamples = 1u << 20;
+
   D3D9Query::D3D9Query(
         D3D9DeviceEx*      pDevice,
         D3DQUERYTYPE       QueryType)
@@ -11,6 +14,8 @@ namespace dxvk {
     , m_queryType                          (QueryType)
     , m_state                              (D3D9_VK_QUERY_INITIAL) {
     Rc<MtlDevice> dxvkDevice = m_parent->GetDXVKDevice();
+
+    m_dbgId = D3D9DeviceEx::DebugNewQueryId();
 
     switch (m_queryType) {
       case D3DQUERYTYPE_VCACHE:
@@ -91,8 +96,17 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9Query::Issue(DWORD dwIssueFlags) {
+    const bool occlusion = m_queryType == D3DQUERYTYPE_OCCLUSION;
+
     if (dwIssueFlags == D3DISSUE_BEGIN) {
       if (QueryBeginnable(m_queryType)) {
+        if (unlikely(occlusion && m_parent->DebugHooks())) {
+          D3D9DeviceLock lock = m_parent->LockDevice();
+          m_parent->DebugOnQueryIssue(m_dbgId, true, m_state == D3D9_VK_QUERY_ENDED, m_dbgPolls);
+        }
+        m_dbgPolls    = 0u;
+        m_dbgReported = false;
+
         if (m_state == D3D9_VK_QUERY_BEGUN && QueryEndable(m_queryType)) {
           m_resetCtr.fetch_add(1);
           m_parent->End(this);
@@ -112,6 +126,15 @@ namespace dxvk {
 
         m_parent->End(this);
 
+        if (occlusion) {
+          m_dbgPolls    = 0u;
+          m_dbgReported = false;
+          m_dbgEndFrame = m_parent->DebugFrame();
+          if (unlikely(m_parent->DebugHooks())) {
+            D3D9DeviceLock lock = m_parent->LockDevice();
+            m_parent->DebugOnQueryIssue(m_dbgId, false, false, 0u);
+          }
+        }
       }
       m_state = D3D9_VK_QUERY_ENDED;
     }
@@ -129,6 +152,22 @@ namespace dxvk {
       return flush ? D3DERR_DEVICELOST : S_FALSE;
     }
 
+    const bool     occlusion = m_queryType == D3DQUERYTYPE_OCCLUSION;
+    const uint32_t dbgFlags  = occlusion ? m_parent->DebugFlags() : 0u;
+
+    if (unlikely(dbgFlags & d9mtdbg::OccVisible) && m_state != D3D9_VK_QUERY_BEGUN) {
+      if (pData && dwSize) {
+        const DWORD visible = kDebugVisibleSamples;
+        std::memcpy(pData, &visible, std::min<DWORD>(dwSize, sizeof(visible)));
+      }
+      if (unlikely(m_parent->DebugHooks()) && !m_dbgReported) {
+        m_dbgReported = true;
+        m_parent->DebugOnQueryData(m_dbgId, D3D_OK, kDebugVisibleSamples, m_dbgPolls,
+          m_dbgEndFrame, flush, "forced(occ_visible)");
+      }
+      return D3D_OK;
+    }
+
     if (m_state == D3D9_VK_QUERY_CACHED) {
       if (likely(pData && dwSize)) {
         if (m_queryType != D3DQUERYTYPE_EVENT) {
@@ -142,9 +181,28 @@ namespace dxvk {
 
     HRESULT hr = this->GetQueryData(pData, dwSize);
 
+    // occ_sync: wait for the result instead of returning S_FALSE.
+    bool synced = false;
+    if (unlikely(dbgFlags & d9mtdbg::OccSync) && hr == S_FALSE && m_state == D3D9_VK_QUERY_ENDED) {
+      m_parent->DebugSyncQuery();
+      m_query[0]->waitData();
+      hr = this->GetQueryData(pData, dwSize);
+      synced = true;
+    }
+
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();
       m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+    }
+
+    if (occlusion) {
+      if (hr == S_FALSE) {
+        m_dbgPolls++;
+      } else if (unlikely(m_parent->DebugHooks()) && m_state == D3D9_VK_QUERY_CACHED && !m_dbgReported) {
+        m_dbgReported = true;
+        m_parent->DebugOnQueryData(m_dbgId, hr, m_dataCache.Occlusion, m_dbgPolls,
+          m_dbgEndFrame, flush, synced ? "synced(occ_sync)" : nullptr);
+      }
     }
 
     return hr;

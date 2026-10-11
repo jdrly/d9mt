@@ -11,6 +11,7 @@
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
+#include "../util/util_d9mt_debug.h"
 
 #include "mtl_profiler.h"
 
@@ -317,7 +318,9 @@ namespace dxvk::backend {
 
   void MtlContextImpl::bindRenderTargets(MtlRenderTargets&& targets, MtlFeedbackLoopMask feedbackLoop) {
     static const bool rtSkipOn = std::getenv("D9MT_RTSKIP") != nullptr;
-    static const bool noSameViewSkip = std::getenv("D9MT_NO_SAMEVIEW_SKIP") != nullptr;
+    static const bool noSameViewSkipEnv = std::getenv("D9MT_NO_SAMEVIEW_SKIP") != nullptr;
+    const bool noSameViewSkip = noSameViewSkipEnv
+      || (d9mtdbg::flags() & d9mtdbg::NoSameViewSkip);
 
     /* DXVK semantics (DxvkContext::bindRenderTargets): re-binding the exact
      * same view objects is not a framebuffer change and must not end the

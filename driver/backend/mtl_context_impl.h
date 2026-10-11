@@ -24,13 +24,15 @@ namespace dxvk::backend {
 
   class MtlBackendQuery : public MtlQuery {
   public:
-    obj_handle_t visBuffer   = 0u;
     void*        visCpu      = nullptr;
-    uint64_t     slotOffset  = 0u;
+    // Visibility-buffer offsets of every segment this query was active in;
+    // the result is their sum (see MtlContextImpl::newVisSegment).
+    std::vector<uint64_t> slots;
     uint64_t     serial      = 0u;
     SubmissionTracker* tracker = nullptr;
 
     MtlGpuQueryStatus getData(MtlQueryData& out) override;
+    void waitData() override;
   };
 
   class MtlBackendEvent : public MtlEvent {
@@ -308,12 +310,18 @@ namespace dxvk::backend {
 
     uint64_t m_currentSerial = 0;
 
+    static constexpr uint32_t kVisSlots = 65536u;
     WmtBuffer m_visBuffer;
     void*     m_visCpu   = nullptr;
     uint64_t  m_visSlot  = 0u;
-    // Metal counts into one offset at a time and the mode is per-encoder:
-    // back() is re-armed on every new render encoder.
+    // Metal counts into one offset at a time and the mode is per-encoder.
+    // Every change of the active query set starts a new segment slot that
+    // all active queries own, so overlapping queries each see every sample
+    // drawn while they were active. The segment is re-armed on each new
+    // render encoder.
     std::vector<Rc<MtlQuery>> m_activeOcclusion;
+    uint64_t  m_visSegment = 0u;
+    bool      m_lastDepthClamp = false;
 
     Rc<MtlShaderFunction>      m_blitVs, m_blitFs;
     Rc<MtlShaderFunction>      m_fillFs;
@@ -378,7 +386,8 @@ namespace dxvk::backend {
 
     void         ensureVisBuffer();
     void         armVisibility();
-    void         removeActiveOcclusion(const MtlQuery* query);
+    void         newVisSegment();
+    bool         removeActiveOcclusion(const MtlQuery* query);
 
     bool         ensureBlitPipeline();
     obj_handle_t selectBlitArgTable();

@@ -18,6 +18,7 @@
 
 #include "d3d9_fixed_function.h"
 #include "d3d9_swvp_emu.h"
+#include "d3d9_debug.h"
 
 
 #include <cstdint>
@@ -815,6 +816,17 @@ namespace dxvk {
     void Flush();
     void FlushAndSync9On12();
 
+    // Live debug facility (d3d9_debug.cpp), API thread under the device lock.
+    void     DebugOnPresent();
+    uint32_t DebugFlags() const { return m_dbg.flags; }
+    bool     DebugHooks() const { return m_dbg.hooks; }
+    uint64_t DebugFrame() const { return m_dbg.frame; }
+    static uint32_t DebugNewQueryId();
+    void     DebugOnQueryIssue(uint32_t id, bool begin, bool unread, uint32_t polls);
+    void     DebugOnQueryData(uint32_t id, HRESULT hr, DWORD samples, uint32_t polls,
+                              uint64_t endFrame, bool flush, const char* note);
+    void     DebugSyncQuery();
+
     void BeginFrame(Rc<MtlLatencyTracker> LatencyTracker, uint64_t FrameId);
     void EndFrame(Rc<MtlLatencyTracker> LatencyTracker);
 
@@ -1121,6 +1133,23 @@ namespace dxvk {
     }
 
     void ExecuteFlush(bool Synchronize9On12);
+
+    void        DebugInitPath();
+    void        DebugPoll();
+    void        DebugSetFlags(uint32_t flags);
+    void        DebugUpdateHooks();
+    void        DebugLog(const std::string& line);
+    void        DebugLogRaw(const std::string& line);
+    void        DebugBeginDump();
+    void        DebugEndDump();
+    uint32_t    DebugObjId(const void* p);
+    std::string DebugSurfaceDesc(D3D9CommonTexture* tex);
+    void        DebugWriteShader(const std::string& name, const void* code, size_t size);
+    template <typename Shader>
+    std::string DebugShaderName(Shader* shader);
+    void        DebugEvent(const std::string& text);
+    void        DebugQueryLine(const std::string& text);
+    void        DebugOnDraw(D3DPRIMITIVETYPE type, UINT count, const char* api, UINT instances);
 
     void DetermineConstantLayouts(bool canSWVP);
 
@@ -1500,6 +1529,8 @@ namespace dxvk {
     std::atomic<uint64_t>           m_lastSamplerStats = { 0u };
 
     bool m_unlockAdditionalFormats = false;
+
+    D3D9DebugState                  m_dbg;
   };
 
 }
