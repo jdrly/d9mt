@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# install-bridge-builtins.sh — one-time install of OUR winemetal (the bridge
-# fork with the vertex-descriptor PSO + sampler/VTF + AIR-thunk additions)
-# into CrossOver's wine tree. Originals backed up as *.cx-orig.
+# install-bridge-builtins.sh: install OUR winemetal (the bridge fork with the
+# vertex-descriptor PSO, sampler/VTF, Metal 4 and AIR-thunk additions) into a
+# Wine engine's tree. Originals are backed up once as *.cx-orig.
 #
-# Needs write access to /Applications/CrossOver.app (macOS "App Management"):
-#   EITHER grant your terminal App Management in System Settings > Privacy,
-#   OR run:  sudo bash v2/scripts/install-bridge-builtins.sh
+#   CX=<engine root> scripts/install-bridge-builtins.sh
+#   CX=<engine root> scripts/install-bridge-builtins.sh --restore
 #
-# Restore stock CrossOver winemetal:  bash ... --restore
+# Use a dedicated engine copy, not /Applications/CrossOver.app itself: this
+# replaces the engine's builtin winemetal, which DXMT (D3D10/11) also uses,
+# so DXMT games stop working on that engine (see README, Known issues).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-CX="${CX:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}"
+CX="${CX:?set CX to the Wine engine root (a dedicated copy, see README)}"
 
 pairs=(
   "$V2/build/bridge/winemetal32.dll|$CX/lib/wine/i386-windows/winemetal.dll"
@@ -33,4 +34,4 @@ for p in "${pairs[@]}"; do
   cp "$src" "$dst"
   echo "installed $dst"
 done
-echo "done — GTA + tests now see the bridge ABI (restore: --restore)"
+echo "done (restore: --restore)"

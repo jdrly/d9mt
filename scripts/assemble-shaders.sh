@@ -5,9 +5,9 @@
 # this after editing a .asm; commit the regenerated .inc.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-CX="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver"
+CX="${CX:?set CX to a CrossOver/Wine engine root, e.g. a copy of CrossOver.app/Contents/SharedSupport/CrossOver}"
 WINE="$CX/bin/wine"
-BOTTLE="Rockstar Games Launcher"
+BOTTLE="${BOTTLE:?set BOTTLE to a CrossOver bottle name}"
 TESTDIR="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE/drive_c/d9mt-test"
 
 mkdir -p "$TESTDIR"

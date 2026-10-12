@@ -202,7 +202,7 @@ FLAGS+=(-I"$V2/airlib")
 # --- CORE source list (must compile) --------------------------------------
 # util: everything except TUs pulling not-yet-ported deps.
 #   util_unmap.cpp        -> ../dxvk/dxvk_allocator.h (Phase C)
-#   com/com_guid.cpp      -> ../../d3d11 + ../../dxgi (see build-dxvk.sh note)
+#   com/com_guid.cpp      -> ../../d3d11 + ../../dxgi (not ported)
 #   com/com_destruction_notifier.cpp -> broken ../util/thread.h path in this layout
 CORE=()
 for f in "$DRV"/util/*.cpp "$DRV"/util/sync/*.cpp "$DRV"/util/log/*.cpp \

@@ -2,8 +2,8 @@
 # Build the host-side AIR compiler CLI (SM3 bytecode -> IR -> AIR/metallib).
 #
 # Links the vendored dxbc-spirv front-end (sm3 + ir + util) with the v2 AIR
-# backend (v2/air). Host arm64 tool — the PE integration reuses the same
-# sources via build-dxvk.sh later.
+# backend (v2/air). Host arm64 dev tool (reference metallibs for the bridge
+# smoke test and scripts/run-air-diff.sh).
 #
 # Objects cached per-TU in build/air-compiler/obj; stale check is mtime-based.
 set -euo pipefail

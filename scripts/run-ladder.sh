@@ -7,8 +7,8 @@
 # read rt_dump.bin, assert >2% non-clear-color coverage (a rendered scene).
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-CX="${CX:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}"
-BOTTLE="Rockstar Games Launcher"
+CX="${CX:?set CX to a CrossOver/Wine engine root, e.g. a copy of CrossOver.app/Contents/SharedSupport/CrossOver}"
+BOTTLE="${BOTTLE:?set BOTTLE to a CrossOver bottle name}"
 DEPLOY="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE/drive_c/d9mt-test"
 OUT="$V2/build/test"
 mkdir -p "$OUT" "$DEPLOY"

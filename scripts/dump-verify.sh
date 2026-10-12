@@ -13,8 +13,8 @@
 # Env: EXPECT=nonblack|r,g,b  WAIT=<launch settle secs>  POLL=<dump wait secs>
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-CX="${CX:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}"
-BOTTLE="${BOTTLE:-Rockstar Games Launcher}"
+CX="${CX:?set CX to a CrossOver/Wine engine root, e.g. a copy of CrossOver.app/Contents/SharedSupport/CrossOver}"
+BOTTLE="${BOTTLE:?set BOTTLE to a CrossOver bottle name}"
 BOTTLE_DIR="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE"
 DEPLOY="$BOTTLE_DIR/drive_c/d9mt-test"
 OUT="$V2/build/test"
