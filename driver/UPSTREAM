@@ -1,0 +1,33 @@
+Upstream: DXVK (https://github.com/doitsujin/dxvk), zlib/libpng license
+Version:  DXVK 3.0 tree (extracted by neo773 in July 2026; the exact commit
+          was not recorded). d3d9/d3d9.def is identical to DXVK
+          v3.0.2-21-g3a4c6fa3.
+
+This directory is an ALTERED version of DXVK and is not the original
+software. DXVK's license notice is in ../LICENSES/DXVK-LICENSE.txt (verbatim)
+and ../LICENSE.
+
+Taken from DXVK and modified (Vulkan removed, retargeted to the Metal seam):
+  d3d9/        D3D9 frontend (state tracker, resources, shaders, swapchain),
+               including the fixed-function GLSL ubershaders in d3d9/shaders/
+               (compiled into the generated d3d9/d3d9_ff_metallib.h) and
+               d3d9.def
+  util/        DXVK's support library (config, log, sync, com, sha1, ...)
+  wsi/         win32 window/monitor handling
+  cs/          command-stream thread (dxvk_cs), retargeted to MtlContext
+  dxvk/        dxvk_allocator (page/pool allocator), dxvk_annotation.h
+
+d9mt's own code (not from DXVK):
+  mtl/         the Metal context/device/presenter seam and memory profiles
+  backend/     the Metal 4 backend on the winemetal bridge
+  d3d9/ files with no DXVK counterpart: d3d9_shader_compiler.*,
+               d3d9_debug.*, d3d9_buffer_tracking.h, d3d9_hitch.h,
+               d3d9_com_guid.cpp, phasec_probe.cpp; plus the Metal-specific
+               parts of the DXVK-derived d3d9 files (see EXTRACTION-LOG.md
+               and the git history)
+
+util/sha1/sha1.c is Steve Reid's public-domain SHA-1 (via OpenBSD), as in
+DXVK.
+
+EXTRACTION-LOG.md documents the extraction and every deliberate deviation;
+later changes are in the git history.
