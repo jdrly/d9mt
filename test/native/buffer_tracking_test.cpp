@@ -3,7 +3,7 @@
 //
 // Part 1 checks the policy itself. Part 2 is a model of the frontend (CS chunk
 // numbering, draws stamping the bound buffer, DISCARD renames, in-place locks)
-// that replays SWTOR-like lock patterns and counts how many locks would have
+// that replays lock patterns seen in a 64-bit game and counts how many locks would have
 // to synchronize with the CS thread, compared with upstream DXVK's
 // SynchronizeAll for DIRECT buffers.
 #include "d3d9_buffer_tracking.h"
@@ -182,7 +182,7 @@ int main() {
   }
 
   { // Buffer rewritten in place once per frame right after being drawn (the
-    // SWTOR pattern behind 18,698 bufLockSync in 6 min). Upstream-style
+    // pattern behind 18,698 bufLockSync in 6 min of play). Upstream-style
     // SynchronizeAll syncs every frame; tracked: at most demoteAfter syncs,
     // then BUFFER mode forever.
     Model up; up.tracked = false;

@@ -18,7 +18,7 @@ set -euo pipefail
 
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 DRV="$V2/driver"
-# ARCH=x64 -> 64-bit driver for 64-bit games (SWTOR); own build dir, x86_64 mingw.
+# ARCH=x64 -> 64-bit driver for 64-bit games; own build dir, x86_64 mingw.
 ARCH="${ARCH:-x86}"
 if [ "$ARCH" = x64 ]; then
   BUILD="$V2/build/driver-x64"; MINGW_PREFIX=x86_64-w64-mingw32
