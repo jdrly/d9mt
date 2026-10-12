@@ -1,37 +1,38 @@
 #!/usr/bin/env bash
-# Fetch + vendor the v2 frontend dependencies from upstream DXVK.
+# Fetch the external source dependency: dxbc-spirv (SM1-3 bytecode parser +
+# shader IR, MIT), pinned to the commit the build is tested with. It lands in
+# third_party/dxbc-spirv (gitignored) and is compiled into d3d9.dll,
+# winemetal.so and d9mtair.so by the build scripts.
 #
-# v2 keeps DXVK's D3D9 frontend (v2/d3d9) and its kept C++ deps (util/spirv/wsi)
-# plus the headers needed for types (vulkan/dxvk) and the new shader IR
-# (dxbc-spirv + sm3). The dxvk/ + vulkan/ runtime is what v2 REPLACES with
-# Metal; we keep their headers only for the types the frontend's seam uses.
+#   scripts/fetch-deps.sh
 #
-# These trees are large and external, so they are gitignored and reproduced
-# here rather than committed (see v2/.gitignore).
+# Env: DXBC_SPIRV_URL  clone source (default: upstream on GitHub; a local
+#                      clone or mirror works too)
+#      DXBC_SPIRV_REV  commit to check out (default: the pin below)
+#
+# The pin matches DXVK's subprojects/dxbc-spirv submodule at the time the
+# driver was last synced. Bump it deliberately: the driver and the AIR
+# compiler consume dxbc-spirv's IR directly, so IR changes can break them.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="${1:-/tmp/dxvk-upstream}"
+URL="${DXBC_SPIRV_URL:-https://github.com/doitsujin/dxbc-spirv.git}"
+REV="${DXBC_SPIRV_REV:-c5c1a5b9b61773d59592f628faa39be9add26282}"
+DST="$V2/third_party/dxbc-spirv"
 
-if [ ! -d "$SRC/.git" ]; then
-  echo "[deps] cloning dxvk -> $SRC"
-  git clone --depth 1 https://github.com/doitsujin/dxvk/ "$SRC"
+if [ -L "$DST" ]; then
+  echo "[deps] $DST is a symlink; leaving it alone"
+  exit 0
 fi
-echo "[deps] fetching submodules (dxbc-spirv, vulkan/spirv headers)"
-( cd "$SRC" && git submodule update --init --depth 1 \
-    subprojects/dxbc-spirv include/vulkan include/spirv )
 
-echo "[deps] vendoring kept C++ deps + dxvk/vulkan headers"
-for d in util spirv wsi vulkan; do
-  rm -rf "$V2/$d"; cp -R "$SRC/src/$d" "$V2/$d"
-done
-rm -rf "$V2/dxvk-ref"; cp -R "$SRC/src/dxvk" "$V2/dxvk-ref"  # reference only; v2/dxvk is our shim
+if [ ! -d "$DST/.git" ]; then
+  echo "[deps] cloning dxbc-spirv -> $DST"
+  rm -rf "$DST"
+  git clone --no-checkout "$URL" "$DST"
+fi
 
-echo "[deps] vendoring dxbc-spirv (sm3 + IR) + Khronos headers"
-rm -rf "$V2/third_party/dxbc-spirv"
-cp -R "$SRC/subprojects/dxbc-spirv" "$V2/third_party/dxbc-spirv"
-rm -rf "$V2/third_party/dxbc-spirv/.git"
-mkdir -p "$V2/third_party/khronos"
-cp -R "$SRC/include/vulkan" "$V2/third_party/khronos/vulkan"
-cp -R "$SRC/include/spirv"  "$V2/third_party/khronos/spirv"
-
-echo "[deps] done. Frontend: v2/d3d9 (full upstream)."
+if ! git -C "$DST" cat-file -e "$REV^{commit}" 2>/dev/null; then
+  echo "[deps] fetching $REV"
+  git -C "$DST" fetch origin
+fi
+git -C "$DST" -c advice.detachedHead=false checkout --detach "$REV"
+echo "[deps] dxbc-spirv at $(git -C "$DST" rev-parse --short HEAD)"
