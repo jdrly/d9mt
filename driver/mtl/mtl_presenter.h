@@ -59,6 +59,15 @@ namespace dxvk {
     // per frame, a backlog that persists after the window returns. Win32
     // focus doesn't substitute for this — it doesn't track Spaces.
     virtual bool isVisible() = 0;
+
+    // Display refresh rate (Hz, 0 = unknown); bounds how long the CS thread
+    // waits for a drawable before skipping the present.
+    virtual void setRefreshRate(double hz) { (void)hz; }
+
+    // True while presents are being skipped because no drawable arrived in
+    // time (WindowServer not latching). The app thread paces Present to the
+    // display rate meanwhile, since nothing else does.
+    virtual bool isDrawableStalled() const { return false; }
   };
 
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc);

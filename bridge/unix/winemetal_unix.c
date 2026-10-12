@@ -1490,33 +1490,122 @@ dxmt_apitrace_end_encoder_locked(apitrace_metal_session_t *session, obj_handle_t
 }
 #endif
 
+/* Writes only what differs: even a same-value set of a window/layer property
+ * dirties the layer tree and can make the WindowServer re-composite. */
+static void
+dxmt_set_layer_black_opaque(CALayer *layer, CGColorRef black) {
+  if (!layer)
+    return;
+  if (!layer.backgroundColor || !CGColorEqualToColor(layer.backgroundColor, black))
+    layer.backgroundColor = black;
+  if (!layer.opaque)
+    layer.opaque = YES;
+}
+
 static void
 dxmt_set_layer_background_black(CAMetalLayer *layer) {
   CGColorRef black = CGColorGetConstantColor(kCGColorBlack);
-  layer.backgroundColor = black;
-  layer.opaque = YES;
+  dxmt_set_layer_black_opaque(layer, black);
 
   NSView *view = [layer.delegate isKindOfClass:NSView.class] ? (NSView *)layer.delegate : nil;
-  for (NSView *ancestor = view; ancestor; ancestor = ancestor.superview) {
-    CALayer *ancestor_layer = ancestor.layer;
-    if (ancestor_layer) {
-      ancestor_layer.backgroundColor = black;
-      ancestor_layer.opaque = YES;
-    }
-  }
+  for (NSView *ancestor = view; ancestor; ancestor = ancestor.superview)
+    dxmt_set_layer_black_opaque(ancestor.layer, black);
 
   NSWindow *window = view.window;
   if (window) {
-    window.backgroundColor = NSColor.blackColor;
-    window.opaque = YES;
+    if (![window.backgroundColor isEqual:NSColor.blackColor])
+      window.backgroundColor = NSColor.blackColor;
+    if (!window.opaque)
+      window.opaque = YES;
 
-    NSView *content_view = window.contentView;
-    CALayer *content_layer = content_view.layer;
-    if (content_layer) {
-      content_layer.backgroundColor = black;
-      content_layer.opaque = YES;
-    }
+    dxmt_set_layer_black_opaque(window.contentView.layer, black);
   }
+}
+
+/* ---- present-path diagnostics (always on, rate-limited, stderr = wine log) ---- */
+
+static uint64_t
+d9mt_now_ns(void) {
+  return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+/* local wall clock "HH:MM:SS.mmm" to match the PE side's log stamps */
+static void
+d9mt_wallstamp(char buf[16]) {
+  struct timespec ts;
+  struct tm tm;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  localtime_r(&ts.tv_sec, &tm);
+  snprintf(buf, 16, "%02d:%02d:%02d.%03ld", tm.tm_hour, tm.tm_min, tm.tm_sec,
+           (long)(ts.tv_nsec / 1000000));
+}
+
+struct d9mt_log_limit {
+  _Atomic uint64_t window_start;
+  _Atomic unsigned count;
+  _Atomic unsigned dropped;
+};
+
+/* at most 30 lines per 10 s per category; returns lines dropped before this one, or -1 to drop */
+static int
+d9mt_log_allow(struct d9mt_log_limit *l) {
+  const uint64_t window = 10ull * 1000000000ull;
+  uint64_t now = d9mt_now_ns();
+  uint64_t start = atomic_load(&l->window_start);
+  if (now - start >= window && atomic_compare_exchange_strong(&l->window_start, &start, now))
+    atomic_store(&l->count, 0);
+  if (atomic_fetch_add(&l->count, 1) >= 30) {
+    atomic_fetch_add(&l->dropped, 1);
+    return -1;
+  }
+  return (int)atomic_exchange(&l->dropped, 0);
+}
+
+#define D9MT_DIAG(limit, fmt, ...) do { \
+    int d9mt_dropped_ = d9mt_log_allow(limit); \
+    if (d9mt_dropped_ >= 0) { \
+      char d9mt_ts_[16]; \
+      d9mt_wallstamp(d9mt_ts_); \
+      fprintf(stderr, "D9MT-WSI %s " fmt "%s\n", d9mt_ts_, ##__VA_ARGS__, \
+              d9mt_dropped_ ? " [earlier lines suppressed]" : ""); \
+    } \
+  } while (0)
+
+/* Main-thread responsiveness probe. Core Animation commits and the AppKit
+ * notifications that feed MetalView_visibility only run when wine's main
+ * thread spins its run loop in a common mode; winemac blocks it in a private
+ * mode while it waits on a Win32 thread (queries) and during synchronous
+ * OnMainThread work. Piggybacks on the per-frame visibility call: at most one
+ * block in flight, posted at most every 100 ms; no thread of its own. */
+static _Atomic uint64_t g_probe_posted_ns;
+static _Atomic uint64_t g_probe_last_post_ns;
+static struct d9mt_log_limit g_main_log;
+
+static void
+d9mt_main_probe(void) {
+  uint64_t now = d9mt_now_ns();
+  if (atomic_load(&g_probe_posted_ns))
+    return;
+  if (now - atomic_load(&g_probe_last_post_ns) < 100ull * 1000000ull)
+    return;
+  uint64_t expected = 0;
+  if (!atomic_compare_exchange_strong(&g_probe_posted_ns, &expected, now))
+    return;
+  atomic_store(&g_probe_last_post_ns, now);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    uint64_t posted = atomic_exchange(&g_probe_posted_ns, 0);
+    uint64_t ms = posted ? (d9mt_now_ns() - posted) / 1000000ull : 0;
+    if (ms >= 100)
+      D9MT_DIAG(&g_main_log, "main thread did not service its run loop for %llu ms",
+                (unsigned long long)ms);
+  });
+}
+
+/* ms the outstanding probe has been waiting for the main thread (0 = none) */
+static uint64_t
+d9mt_main_probe_age_ms(void) {
+  uint64_t posted = atomic_load(&g_probe_posted_ns);
+  return posted ? (d9mt_now_ns() - posted) / 1000000ull : 0;
 }
 
 void
@@ -3727,10 +3816,20 @@ static int d9mt_wsilog_enabled(void) {
       fprintf(stderr, "D9MT-WSI[unix] " fmt "\n", ##__VA_ARGS__); \
   } while (0)
 
+static uint64_t d9mt_vis_flags_now(void);
+
 static NTSTATUS
 _MetalLayer_nextDrawable(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
+  static struct d9mt_log_limit slow_log;
+  uint64_t t0 = d9mt_now_ns();
   params->ret = (obj_handle_t)[[(CAMetalLayer *)params->handle nextDrawable] retain];
+  uint64_t ms = (d9mt_now_ns() - t0) / 1000000ull;
+  if (ms >= 50)
+    D9MT_DIAG(&slow_log, "nextDrawable blocked %llu ms (got=%d) main-thread probe pending %llu ms, visibility 0x%llx",
+              (unsigned long long)ms, params->ret != 0,
+              (unsigned long long)d9mt_main_probe_age_ms(),
+              (unsigned long long)d9mt_vis_flags_now());
   static _Atomic unsigned n_next;
   unsigned k = n_next++;
   if (k < 16 || (k % 100) == 0)
@@ -3760,19 +3859,52 @@ _MetalLayer_setProps(void *obj) {
   /* by-value copy: the block outlives this call, after the caller's params struct is gone. */
   const struct WMTLayerProps props = *(const struct WMTLayerProps *)params->arg.ptr;
   [layer retain];
+  /* Only properties that differ are written (see dxmt_set_layer_black_opaque),
+   * and every real change is logged: layer property churn re-composites. */
   void (^apply)(void) = ^{
-    layer.device = (id<MTLDevice>)props.device;
-    layer.opaque = props.opaque;
+    static struct d9mt_log_limit props_log;
+    char changed[160] = "";
+    if (layer.device != (id<MTLDevice>)props.device) {
+      layer.device = (id<MTLDevice>)props.device;
+      strlcat(changed, " device", sizeof(changed));
+    }
+    if (layer.opaque != (BOOL)props.opaque) {
+      layer.opaque = props.opaque;
+      strlcat(changed, " opaque", sizeof(changed));
+    }
     dxmt_set_layer_background_black(layer);
-    layer.framebufferOnly = props.framebuffer_only;
-    if (props.contents_scale > 0.0)
+    if (layer.framebufferOnly != (BOOL)props.framebuffer_only) {
+      layer.framebufferOnly = props.framebuffer_only;
+      strlcat(changed, " framebufferOnly", sizeof(changed));
+    }
+    if (props.contents_scale > 0.0 && layer.contentsScale != props.contents_scale) {
       layer.contentsScale = props.contents_scale;
-    layer.displaySyncEnabled = props.display_sync_enabled;
-    if (props.drawable_width > 0.0 && props.drawable_height > 0.0)
+      strlcat(changed, " contentsScale", sizeof(changed));
+    }
+    if (layer.displaySyncEnabled != (BOOL)props.display_sync_enabled) {
+      layer.displaySyncEnabled = props.display_sync_enabled;
+      strlcat(changed, props.display_sync_enabled ? " displaySync=1" : " displaySync=0", sizeof(changed));
+    }
+    CGSize old_size = layer.drawableSize;
+    if (props.drawable_width > 0.0 && props.drawable_height > 0.0 &&
+        (old_size.width != props.drawable_width || old_size.height != props.drawable_height)) {
       layer.drawableSize = CGSizeMake(props.drawable_width, props.drawable_height);
-    layer.pixelFormat = to_metal_pixel_format(props.pixel_format);
-    if (props.maximum_drawable_count != 0)
+      strlcat(changed, " drawableSize", sizeof(changed));
+    }
+    MTLPixelFormat pf = to_metal_pixel_format(props.pixel_format);
+    if (layer.pixelFormat != pf) {
+      layer.pixelFormat = pf;
+      strlcat(changed, " pixelFormat", sizeof(changed));
+    }
+    if (props.maximum_drawable_count != 0 &&
+        layer.maximumDrawableCount != props.maximum_drawable_count) {
       layer.maximumDrawableCount = props.maximum_drawable_count;
+      strlcat(changed, " maximumDrawableCount", sizeof(changed));
+    }
+    if (changed[0])
+      D9MT_DIAG(&props_log, "layer %p props changed:%s (drawable %.0fx%.0f -> %.0fx%.0f, contentsScale %.1f)",
+                (void *)layer, changed, old_size.width, old_size.height,
+                layer.drawableSize.width, layer.drawableSize.height, layer.contentsScale);
     [layer release];
   };
   if ([NSThread isMainThread])
@@ -3873,8 +4005,14 @@ static _Atomic(void *) g_vis_view;
 static _Atomic uint64_t g_vis_flags;
 static _Atomic int g_vis_observing;
 
+static uint64_t
+d9mt_vis_flags_now(void) {
+  return atomic_load(&g_vis_flags);
+}
+
 static void
-dxmt_vis_refresh(NSView *view) {
+dxmt_vis_refresh(NSView *view, NSString *why) {
+  static struct d9mt_log_limit vis_log;
   uint64_t flags = 0;
   NSWindow *win = view.window;
   if (win) {
@@ -3887,7 +4025,15 @@ dxmt_vis_refresh(NSView *view) {
   } else {
     flags = WMT_VISIBILITY_VISIBLE | WMT_VISIBILITY_ON_ACTIVE_SPACE;
   }
-  atomic_store(&g_vis_flags, flags);
+  uint64_t old = atomic_exchange(&g_vis_flags, flags);
+  if (old != flags)
+    D9MT_DIAG(&vis_log, "visibility 0x%llx -> 0x%llx on %s (window %p visible=%d key=%d main=%d "
+              "occlusionState=0x%lx level=%ld screen=%d)",
+              (unsigned long long)old, (unsigned long long)flags,
+              why ? why.UTF8String : "initial", (void *)win, win ? (int)win.isVisible : -1,
+              win ? (int)win.isKeyWindow : -1, win ? (int)win.isMainWindow : -1,
+              win ? (unsigned long)win.occlusionState : 0ul, win ? (long)win.level : 0l,
+              win.screen != nil);
 }
 
 static NTSTATUS
@@ -3900,6 +4046,8 @@ _MetalView_visibility(void *obj) {
     return STATUS_SUCCESS;
   }
 
+  d9mt_main_probe();
+
   if (atomic_exchange(&g_vis_view, (void *)view) != (void *)view)
     atomic_store(&g_vis_observing, 0);
 
@@ -3910,8 +4058,7 @@ _MetalView_visibility(void *obj) {
     dispatch_async(dispatch_get_main_queue(), ^{
       NSWindow *win = view.window;
       void (^update)(NSNotification *) = ^(NSNotification *n) {
-        (void)n;
-        dxmt_vis_refresh(view);
+        dxmt_vis_refresh(view, n.name);
       };
       NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
       if (win) {
@@ -3926,7 +4073,7 @@ _MetalView_visibility(void *obj) {
         addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
                     object:nil queue:[NSOperationQueue mainQueue] usingBlock:update];
 
-      dxmt_vis_refresh(view);
+      dxmt_vis_refresh(view, nil);
     });
   }
 

@@ -8,6 +8,7 @@
 
 #include "../util/sync/sync_signal.h"
 #include "../util/util_fps_limiter.h"
+#include "../util/util_log_limit.h"
 
 #include "../wsi/wsi_window.h"
 #include "../wsi/wsi_monitor.h"
@@ -159,17 +160,26 @@ namespace dxvk {
 
     // Hidden/minimized windows skip the present, so vsync no longer paces the
     // game; Present() then sleeps (outside the device lock) to this cadence.
+    // Also used at the display rate while presents are skipped transiently.
+    struct PresentThrottle {
+      uint32_t    fps    = 0u;       // 0 = no throttle
+      const char* reason = nullptr;  // static string, for the log
+    };
+
     uint32_t                  m_bgFps = 0u;
+    const char*               m_bgReason = nullptr;
     high_resolution_clock::time_point m_bgDeadline = { };
+    high_resolution_clock::time_point m_hiddenSince = { };
+    LogLimiter                m_bgLog = { 20u, std::chrono::seconds(10) };
 
     HRESULT PresentLocked(
       const RECT*    pSourceRect,
       const RECT*    pDestRect,
             HWND     hDestWindowOverride,
             DWORD    dwFlags,
-            uint32_t& BgFps);
+            PresentThrottle& Throttle);
 
-    high_resolution_clock::time_point UpdateBackgroundThrottle(uint32_t Fps);
+    high_resolution_clock::time_point UpdateBackgroundThrottle(const PresentThrottle& Throttle);
 
     void PresentImage(UINT PresentInterval);
 

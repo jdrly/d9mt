@@ -6,6 +6,7 @@
 
 #include "../util/util_sleep.h"
 #include "../util/util_time.h"
+#include "../util/util_log_limit.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -164,13 +165,13 @@ namespace dxvk {
     const RGNDATA* pDirtyRegion,
           DWORD    dwFlags) {
     (void)pDirtyRegion;
-    uint32_t bgFps = 0u;
+    PresentThrottle throttle = { };
     HRESULT hr;
     high_resolution_clock::time_point until = { };
 
     { D3D9DeviceLock lock = m_parent->LockDevice();
-      hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, bgFps);
-      until = UpdateBackgroundThrottle(bgFps);
+      hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);
+      until = UpdateBackgroundThrottle(throttle);
     }
 
     // Sleep without the device lock; the CS thread never needs it.
@@ -180,14 +181,26 @@ namespace dxvk {
   }
 
 
-  high_resolution_clock::time_point D3D9SwapChainEx::UpdateBackgroundThrottle(uint32_t Fps) {
-    if (Fps != m_bgFps) {
-      if (Fps)
-        Logger::warn(str::format("D9MT: window hidden, throttling to ", Fps, " fps"));
-      else
-        Logger::warn("D9MT: window visible again");
-      m_bgFps = Fps;
-      m_bgDeadline = high_resolution_clock::now();
+  high_resolution_clock::time_point D3D9SwapChainEx::UpdateBackgroundThrottle(const PresentThrottle& Throttle) {
+    const uint32_t Fps = Throttle.fps;
+
+    if (Fps != m_bgFps || Throttle.reason != m_bgReason) {
+      uint32_t dropped = 0u;
+      if (m_bgLog.allow(&dropped)) {
+        std::string suppressed = dropped
+          ? str::format(" [", dropped, " earlier lines suppressed]") : std::string();
+        if (Fps) {
+          Logger::warn(str::format("D9MT: ", wallClockStamp(), " ", Throttle.reason,
+            ", throttling Present to ", Fps, " fps", suppressed));
+        } else {
+          Logger::warn(str::format("D9MT: ", wallClockStamp(), " presenting normally again (was: ",
+            m_bgReason ? m_bgReason : "-", ")", suppressed));
+        }
+      }
+      if (Fps != m_bgFps)
+        m_bgDeadline = high_resolution_clock::now();
+      m_bgFps    = Fps;
+      m_bgReason = Throttle.reason;
     }
 
     if (!Fps)
@@ -213,10 +226,13 @@ namespace dxvk {
     const RECT*    pDestRect,
           HWND     hDestWindowOverride,
           DWORD    dwFlags,
-          uint32_t& BgFps) {
+          PresentThrottle& Throttle) {
     // D9MT_BG_FPS: cap while the window is occluded / on another space
     // (default 30, 0 = off); D9MT_BG_FPS_MINIMIZED: cap while minimized
-    // (default 10, 0 = use D9MT_BG_FPS).
+    // (default 10, 0 = use D9MT_BG_FPS); D9MT_STALL_PACE=0: don't pace to the
+    // display rate while presents are skipped transiently (no drawable, or
+    // during the first second of being hidden).
+    static const bool s_stallPace = env::getEnvVar("D9MT_STALL_PACE") != "0";
     static const uint32_t s_bgFps = [] {
       std::string v = env::getEnvVar("D9MT_BG_FPS");
       return v.empty() ? 30u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
@@ -277,13 +293,36 @@ namespace dxvk {
     }
 
     if (wsi::isMinimized(m_window)) {
-      BgFps = s_minFps;
+      Throttle = { s_minFps, "window minimized" };
       return D3D_OK;
     }
 
-    // Same signal the CS thread uses to skip the present (cached flags, cheap).
-    if (m_wctx->presenter != nullptr && !m_wctx->presenter->isVisible())
-      BgFps = s_bgFps;
+    // Presents that the CS thread skips don't wait for vsync, so without
+    // this the game renders uncapped. Display-rate pacing covers transient
+    // skips (drawable stall, brief occlusion flips); after a second hidden
+    // the background cap applies.
+    if (m_wctx->presenter != nullptr) {
+      const double hz = (m_displayRefreshRate >= 20.0 && m_displayRefreshRate <= 1000.0)
+        ? m_displayRefreshRate : 60.0;
+      const uint32_t displayFps = uint32_t(hz + 0.5);
+
+      // Same signal the CS thread uses to skip the present (cached flags, cheap).
+      if (!m_wctx->presenter->isVisible()) {
+        auto now = high_resolution_clock::now();
+        if (m_hiddenSince == high_resolution_clock::time_point())
+          m_hiddenSince = now;
+
+        if (s_stallPace && now - m_hiddenSince < std::chrono::seconds(1))
+          Throttle = { displayFps, "window not visible (first second)" };
+        else
+          Throttle = { s_bgFps, s_bgFps ? "window hidden" : nullptr };
+      } else {
+        m_hiddenSince = high_resolution_clock::time_point();
+
+        if (s_stallPace && m_wctx->presenter->isDrawableStalled())
+          Throttle = { displayFps, "no drawable (presents skipped)" };
+      }
+    }
 
     if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
       const auto& backbuffer = m_backBuffers[0];
@@ -301,6 +340,8 @@ namespace dxvk {
 
     try {
       UpdateWindowedRefreshRate();
+      if (m_wctx->presenter != nullptr)
+        m_wctx->presenter->setRefreshRate(m_displayRefreshRate);
       UpdateTargetFrameRate(presentInterval);
       PresentImage(presentInterval);
       m_fpsLimiter.delay();
@@ -724,9 +765,11 @@ namespace dxvk {
 
     m_wctx->frameId += 1;
 
-    // The entire present (acquire/blit/signal/present/release) runs on the CS
-    // thread: acquiring on the producer thread instead let drawables exceed
-    // maximumDrawableCount(3), deadlocking both threads.
+    // The present (blit/signal/present/release) runs on the CS thread, which
+    // takes the drawable from the presenter's acquirer thread with a bounded
+    // wait (one drawable in flight at most: acquiring ahead on the producer
+    // thread let drawables exceed maximumDrawableCount(3), deadlocking both
+    // threads).
     m_parent->EmitCs([
       cPresenter    = m_wctx->presenter,
       cSrcView      = swapImageView,
