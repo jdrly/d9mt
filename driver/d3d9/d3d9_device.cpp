@@ -2865,6 +2865,7 @@ namespace dxvk {
 
       if (likely(drawArgs)) {
         new (drawArgs) MtlDrawArgs(draw);
+        TrackDirectBufferUses(false);
         return D3D_OK;
       }
     }
@@ -2875,6 +2876,7 @@ namespace dxvk {
       });
 
     new (m_csData->first()) MtlDrawArgs(draw);
+    TrackDirectBufferUses(false);
     return D3D_OK;
   }
 
@@ -2918,6 +2920,7 @@ namespace dxvk {
 
       if (likely(drawArgs)) {
         new (drawArgs) MtlDrawIndexedArgs(draw);
+        TrackDirectBufferUses(true);
         return D3D_OK;
       }
     }
@@ -2933,6 +2936,7 @@ namespace dxvk {
     });
 
     new (m_csData->first()) MtlDrawIndexedArgs(draw);
+    TrackDirectBufferUses(true);
     return D3D_OK;
   }
 
@@ -2980,6 +2984,9 @@ namespace dxvk {
       ctx->draw(1u, &draw);
       ctx->bindVertexBuffer(0, MtlBufferSlice(), 0);
     });
+
+    // Streams other than 0 stay bound and are read by this draw.
+    TrackDirectBufferUses(false);
 
     m_state.vertexBuffers[0].vertexBuffer = nullptr;
     m_state.vertexBuffers[0].offset       = 0;
@@ -3051,6 +3058,8 @@ namespace dxvk {
       ctx->bindVertexBuffer(0, MtlBufferSlice(), 0);
       ctx->bindIndexBuffer(MtlBufferSlice(), MtlIndexType::Uint32);
     });
+
+    TrackDirectBufferUses(false);
 
     m_state.vertexBuffers[0].vertexBuffer = nullptr;
     m_state.vertexBuffers[0].offset       = 0;
@@ -3166,6 +3175,7 @@ namespace dxvk {
 
     dst->SetNeedsReadback(true);
     TrackBufferMappingBufferSequenceNumber(dst);
+    TrackDirectBufferUses(false);
 
     return D3D_OK;
   }
@@ -3481,10 +3491,14 @@ namespace dxvk {
       const uint32_t bit = 1u << StreamNumber;
       m_vbSlotTracking.uploadPerDraw &= ~bit;
       m_vbSlotTracking.needsUpload &= ~bit;
+      m_vbSlotTracking.directTracked &= ~bit;
 
       if (likely(buffer)) {
         const D3D9CommonBuffer* commonBuffer = GetCommonBuffer(buffer);
         m_vbSlotTracking.bound |= bit;
+
+        if (commonBuffer->TracksUses())
+          m_vbSlotTracking.directTracked |= bit;
 
         if (commonBuffer->DoPerDrawUpload() || CanOnlySWVP())
           m_vbSlotTracking.uploadPerDraw |= bit;
@@ -5139,6 +5153,28 @@ namespace dxvk {
     if ((Flags & D3DLOCK_READONLY) && !IsPoolManaged(desc.Pool))
       Flags &= ~D3DLOCK_READONLY;
 
+    // In-place lock of a DIRECT buffer whose uses are tracked
+    // (d3d9_buffer_tracking.h): free if its backing was never used, and a
+    // WRITEONLY buffer that keeps getting rewritten in place goes back to
+    // BUFFER mode. Decided before the dirty range update: demotion resets it.
+    bool inPlaceFree = false;
+    if (pResource->TracksUses() && !(Flags & (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE))) {
+      const bool canDemote = pResource->GetLockCount() == 0u && !pResource->NeedsReadback();
+      switch (pResource->Tracker().onInPlaceLock(pResource->IsDemotable(),
+                m_d3d9Options.writeOnlyDemoteLocks, canDemote)) {
+        case D3D9DirectBufferTracker::LockAction::NoWait:
+          inPlaceFree = !pResource->NeedsReadback();
+          break;
+        case D3D9DirectBufferTracker::LockAction::Demote:
+          pResource->DemoteToBufferMode();
+          if (pResource->GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_BUFFER)
+            m_dxvkDevice->frontendStats().writeOnlyDemoted.fetch_add(1u, std::memory_order_relaxed);
+          break;
+        case D3D9DirectBufferTracker::LockAction::Wait:
+          break;
+      }
+    }
+
     const bool respectUserBounds = !(Flags & D3DLOCK_DISCARD) &&
                                     SizeToLock != 0 &&
                                     !m_d3d9Options.ignoreDefaultBufferLockRange;
@@ -5192,22 +5228,37 @@ namespace dxvk {
       const bool noOverwrite = Flags & D3DLOCK_NOOVERWRITE;
       const bool directMapping = pResource->GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT;
 
-      const bool skipWait = (!needsReadback && (readOnly || !directMapping)) || noOverwrite;
+      const bool skipWait = (!needsReadback && (readOnly || !directMapping)) || noOverwrite || inPlaceFree;
 
       if (!skipWait) {
         const Rc<MtlBuffer> mappingBuffer = pResource->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>();
-        const auto t0 = unlikely(m_memStats) ? high_resolution_clock::now() : high_resolution_clock::time_point();
-        if (!WaitForResource(*mappingBuffer, pResource->GetMappingBufferSequenceNumber(), Flags))
-          return D3DERR_WASSTILLDRAWING;
+        const uint64_t seq = pResource->GetMappingBufferSequenceNumber();
 
-        if (unlikely(m_memStats)) {
+        if (likely(!m_memStats)) {
+          if (!WaitForResource(*mappingBuffer, seq, Flags))
+            return D3DERR_WASSTILLDRAWING;
+        } else {
+          // Count only locks that really waited: the CS thread had not run the
+          // last use yet, or the GPU still had the backing.
           auto& stats = m_dxvkDevice->frontendStats();
-          stats.bufferLockWaits.fetch_add(1u, std::memory_order_relaxed);
-          stats.bufferLockWaitUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-            high_resolution_clock::now() - t0).count()), std::memory_order_relaxed);
+          const bool csBehind = D3D9DirectBufferTracker::needsCsSync(seq, m_csThread.lastSequenceNumber());
+          const uint64_t gpuWaits = stats.resourceGpuWaits.load(std::memory_order_relaxed);
+          const auto t0 = high_resolution_clock::now();
+          if (!WaitForResource(*mappingBuffer, seq, Flags))
+            return D3DERR_WASSTILLDRAWING;
+
+          if (csBehind || stats.resourceGpuWaits.load(std::memory_order_relaxed) != gpuWaits) {
+            stats.bufferLockWaits.fetch_add(1u, std::memory_order_relaxed);
+            stats.bufferLockWaitUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+              high_resolution_clock::now() - t0).count()), std::memory_order_relaxed);
+          } else {
+            stats.bufferLockFree.fetch_add(1u, std::memory_order_relaxed);
+          }
         }
 
         pResource->SetNeedsReadback(false);
+      } else if (unlikely(m_memStats) && inPlaceFree) {
+        m_dxvkDevice->frontendStats().bufferLockFree.fetch_add(1u, std::memory_order_relaxed);
       }
     }
 
@@ -8351,6 +8402,27 @@ namespace dxvk {
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
     return D3D_OK;
+  }
+
+
+  void D3D9DeviceEx::TrackDirectBufferUses(bool Indexed) {
+    const uint32_t vbMask = m_vbSlotTracking.directTracked;
+    D3D9CommonBuffer* ibo = Indexed ? GetCommonBuffer(m_state.indices) : nullptr;
+    const bool ibTracked = ibo != nullptr && ibo->TracksUses();
+
+    if (likely(!vbMask && !ibTracked))
+      return;
+
+    // After the draw's emit: the current chunk holds it, so this is its number.
+    const uint64_t seq = GetCurrentSequenceNumber();
+    for (uint32_t i : bit::BitMask(vbMask)) {
+      D3D9CommonBuffer* vbo = GetCommonBuffer(m_state.vertexBuffers[i].vertexBuffer);
+      if (vbo != nullptr && vbo->TracksUses())
+        vbo->Tracker().onUse(seq);
+    }
+
+    if (ibTracked)
+      ibo->Tracker().onUse(seq);
   }
 
 

@@ -140,6 +140,9 @@ namespace dxvk::backend {
       ", ring keep ", profile.ringKeep ? str::format(profile.ringKeep) : std::string("all"),
       ", allocators ", profile.allocatorCap,
       ", writeOnlyDirect ", profile.writeOnlyDirect ? "on" : "off",
+      profile.writeOnlyDirect ? (profile.writeOnlyDemoteLocks
+        ? str::format(" (demote after ", profile.writeOnlyDemoteLocks, " in-place locks)")
+        : std::string(" (never demote)")) : std::string(),
       profile.legacy ? ", legacy pools" : "",
       profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
       profile.labels ? ", labels" : ""));
@@ -176,7 +179,9 @@ namespace dxvk::backend {
       " recycledMiB=", uint64_t(double(m_recycledBytes.load()) * MiB),
       " bufLockSync=", m_frontendStats.bufferLockWaits.load(), "/",
         m_frontendStats.bufferLockWaitUs.load() / 1000u, "ms",
+      " bufLockFree=", m_frontendStats.bufferLockFree.load(),
       " gpuWaits=", m_frontendStats.resourceGpuWaits.load(),
+      " woDemoted=", m_frontendStats.writeOnlyDemoted.load(),
       " stagingNew=", m_frontendStats.stagingNew.load(),
       " stagingReused=", m_frontendStats.stagingReused.load());
     for (uint32_t i = 0u; i < uint32_t(MtlMemCategory::Count); i++) {

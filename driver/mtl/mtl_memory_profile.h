@@ -25,6 +25,10 @@ namespace dxvk {
     // tracking not reset on DISCARD renames.
     bool          legacy         = false;
     bool          writeOnlyDirect = true; // DEFAULT+WRITEONLY buffers mapped directly (d9mt.writeOnlyDirect)
+    // Such a buffer locked in place (no DISCARD/NOOVERWRITE) more than this
+    // many times after its backing was used goes back to BUFFER mode for good
+    // (d9mt.writeOnlyDemoteLocks / D9MT_WRITEONLY_DEMOTE); 0 = never.
+    uint32_t      writeOnlyDemoteLocks = 2u;
     // Later phases (not consumed yet): managed/BUFFER-mode CPU copy eviction, LRU residency.
     bool          evictManagedTex    = false;
     bool          evictBufferStaging = false;
@@ -59,6 +63,24 @@ namespace dxvk {
     if (s == "1" || s == "true" || s == "yes" || s == "on")   return 1;
     if (s == "0" || s == "false" || s == "no" || s == "off")  return 0;
     return -1;
+  }
+
+  // D9MT_WRITEONLY_DEMOTE: a count, or never/off/no/false (= 0, never demote).
+  // Anything else keeps the profile value.
+  inline uint32_t parseDemoteLocks(std::string s, uint32_t fallback) {
+    for (char& c : s)
+      c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+    if (s == "never" || parseSwitch(s) == 0)
+      return 0u;
+    if (s.empty() || s.size() > 9u)
+      return fallback;
+    uint32_t n = 0u;
+    for (char c : s) {
+      if (c < '0' || c > '9')
+        return fallback;
+      n = n * 10u + uint32_t(c - '0');
+    }
+    return n;
   }
 
   // "auto" (or empty) -> isAuto. Returns false for unknown names.
@@ -125,6 +147,7 @@ namespace dxvk {
       case MtlMemoryTier::Unlimited:
         p.legacy = true;
         p.writeOnlyDirect = false;
+        p.writeOnlyDemoteLocks = 0u;
         p.stagingBlocks = 0u;
         break;
     }

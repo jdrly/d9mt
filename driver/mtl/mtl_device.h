@@ -145,8 +145,10 @@ namespace dxvk {
     // Frontend counters for the DIAG MEM line. Lock counters are only
     // touched when memoryProfile().statsInterval != 0.
     struct FrontendStats {
-      std::atomic<uint64_t> bufferLockWaits  = { 0u };  // buffer locks that synchronized (CS thread and/or GPU)
+      std::atomic<uint64_t> bufferLockWaits  = { 0u };  // buffer locks that had to wait for the CS thread and/or GPU
       std::atomic<uint64_t> bufferLockWaitUs = { 0u };
+      std::atomic<uint64_t> bufferLockFree   = { 0u };  // in-place DIRECT locks that needed no wait
+      std::atomic<uint64_t> writeOnlyDemoted = { 0u };  // WRITEONLY DIRECT buffers demoted to BUFFER mode
       std::atomic<uint64_t> resourceGpuWaits = { 0u };  // lock waits that blocked on the GPU (buffers + readbacks)
       std::atomic<uint64_t> stagingNew       = { 0u };  // 4 MiB staging blocks created / reused from the pool
       std::atomic<uint64_t> stagingReused    = { 0u };

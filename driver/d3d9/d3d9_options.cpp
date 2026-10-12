@@ -105,6 +105,9 @@ namespace dxvk {
 
     // Memory profile (d9mt.writeOnlyDirect / D9MT_WRITEONLY_DIRECT override it).
     this->writeOnlyDirectMapping = device == nullptr || device->memoryProfile().writeOnlyDirect;
+    this->trackDirectBufferUses  = device == nullptr || !device->memoryProfile().legacy
+                                || this->writeOnlyDirectMapping;
+    this->writeOnlyDemoteLocks   = device != nullptr ? device->memoryProfile().writeOnlyDemoteLocks : 0u;
 
     this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
   }

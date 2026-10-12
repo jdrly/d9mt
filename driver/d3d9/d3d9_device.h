@@ -161,6 +161,8 @@ namespace dxvk {
     uint16_t uploadPerDraw = 0;
 
     uint16_t instanced = 0;
+
+    uint16_t directTracked = 0;  // bound buffer is DIRECT with use tracking
   };
 
   class D3D9DeviceEx final : public ComObjectClamp<IDirect3DDevice9Ex> {
@@ -1296,6 +1298,10 @@ namespace dxvk {
     void BindAlphaTestState();
 
     void BindSpecConstants();
+
+    // Stamps the DIRECT (use-tracked) buffers the draw just emitted reads:
+    // the bound vertex streams and, for indexed draws, the index buffer.
+    void TrackDirectBufferUses(bool Indexed);
 
     void TrackBufferMappingBufferSequenceNumber(
       D3D9CommonBuffer* pResource);

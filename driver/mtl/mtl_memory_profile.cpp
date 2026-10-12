@@ -46,6 +46,11 @@ namespace dxvk {
     if (int v = parseSwitch(env::getEnvVar("D9MT_WRITEONLY_DIRECT")); v >= 0)
       p.writeOnlyDirect = v != 0;
 
+    if (int32_t n = config.getOption<int32_t>("d9mt.writeOnlyDemoteLocks", -1); n >= 0)
+      p.writeOnlyDemoteLocks = uint32_t(n);
+    if (std::string v = env::getEnvVar("D9MT_WRITEONLY_DEMOTE"); !v.empty())
+      p.writeOnlyDemoteLocks = parseDemoteLocks(v, p.writeOnlyDemoteLocks);
+
     // D9MT_MEMSTATS=1/true: every 256 frames; =N (>= 16): every N frames; 0/false: off.
     std::string stats = env::getEnvVar("D9MT_MEMSTATS");
     uint32_t every = uint32_t(std::strtoul(stats.c_str(), nullptr, 10));

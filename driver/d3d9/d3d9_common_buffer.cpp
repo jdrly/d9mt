@@ -1,5 +1,7 @@
 #include "d3d9_common_buffer.h"
 
+#include <cstring>
+
 #include "d3d9_device.h"
 #include "d3d9_util.h"
 
@@ -20,7 +22,38 @@ namespace dxvk {
     if (m_desc.Pool != D3DPOOL_DEFAULT)
       m_dirtyRange = D3D9Range(0, m_desc.Size);
 
-    m_uploadAtDraw = m_parent->GetOptions()->forceDrawTimeBufferUpload;
+    const D3D9Options* options = m_parent->GetOptions();
+    m_uploadAtDraw = options->forceDrawTimeBufferUpload;
+
+    if (m_mapMode == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT) {
+      m_trackUses = options->trackDirectBufferUses;
+      m_demotable = m_trackUses
+        && options->writeOnlyDemoteLocks != 0u
+        && (m_desc.Usage & (D3DUSAGE_WRITEONLY | D3DUSAGE_DYNAMIC)) == D3DUSAGE_WRITEONLY
+        && !m_uploadAtDraw && !m_parent->CanOnlySWVP();
+    }
+  }
+
+
+  void D3D9CommonBuffer::DemoteToBufferMode() {
+    Rc<MtlBuffer> staging = CreateStagingBuffer();
+    if (unlikely(staging == nullptr || staging->mapPtr(0) == nullptr || m_allocation == nullptr
+              || m_allocation->mapPtr == nullptr)) {
+      m_demotable = false;
+      return;
+    }
+
+    // WRITEONLY memory may be write-combined: one slow read, once per buffer.
+    // A later partial lock uploads only its range, so the rest must be current.
+    std::memcpy(staging->mapPtr(0), m_allocation->mapPtr, m_desc.Size);
+
+    m_stagingBuffer  = std::move(staging);
+    m_realAllocation = std::move(m_allocation);
+    m_allocation     = m_stagingBuffer->storage();
+    m_mapMode        = D3D9_COMMON_BUFFER_MAP_MODE_BUFFER;
+    m_demotable      = false;
+    m_seq            = 0u;
+    m_dirtyRange.Clear();
   }
 
   D3D9CommonBuffer::~D3D9CommonBuffer() {

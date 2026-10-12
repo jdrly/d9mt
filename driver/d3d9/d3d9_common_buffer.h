@@ -3,6 +3,7 @@
 #include "../mtl/mtl_device.h"
 #include "../cs/dxvk_cs.h"
 
+#include "d3d9_buffer_tracking.h"
 #include "d3d9_device_child.h"
 #include "d3d9_format.h"
 
@@ -116,6 +117,10 @@ namespace dxvk {
         if (buffer == GetMapBuffer())
           return MtlBufferSlice(buffer, m_allocation, offset, clamped);
 
+        // Demoted DIRECT buffer: same for the renames it had before demotion.
+        if (buffer == m_buffer && m_realAllocation != nullptr)
+          return MtlBufferSlice(buffer, m_realAllocation, offset, clamped);
+
         return MtlBufferSlice(buffer, offset, clamped);
      }
 
@@ -124,6 +129,8 @@ namespace dxvk {
 
     inline Rc<MtlAllocation> DiscardMapSlice() {
       m_allocation = GetMapBuffer()->allocateStorage();
+      if (TracksUses())
+        m_tracker.onRename();
       return m_allocation;
     }
 
@@ -158,18 +165,43 @@ namespace dxvk {
     void PreLoad();
 
     bool HasSequenceNumber() const {
-      return m_mapMode != D3D9_COMMON_BUFFER_MAP_MODE_DIRECT;
+      return m_mapMode != D3D9_COMMON_BUFFER_MAP_MODE_DIRECT || m_trackUses;
+    }
+
+    // DIRECT buffer whose uses are stamped per CS chunk (d3d9_buffer_tracking.h).
+    // Without it (legacy profile), DIRECT locks synchronize with everything.
+    bool TracksUses() const {
+      return m_trackUses && m_mapMode == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT;
     }
 
     void TrackMappingBufferSequenceNumber(uint64_t Seq) {
-      m_seq = Seq;
+      if (TracksUses())
+        m_tracker.onUse(Seq);
+      else
+        m_seq = Seq;
     }
 
 
     uint64_t GetMappingBufferSequenceNumber() const {
+      if (TracksUses())
+        return m_tracker.lastUse();
       return HasSequenceNumber() ? m_seq
         : DxvkCsThread::SynchronizeAll;
     }
+
+    D3D9DirectBufferTracker& Tracker() { return m_tracker; }
+
+    // DEFAULT + WRITEONLY, not DYNAMIC, mapped directly: may go back to BUFFER
+    // mode when the game keeps locking it in place.
+    bool IsDemotable() const {
+      return m_demotable && m_mapMode == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT;
+    }
+
+    // DIRECT -> BUFFER for the rest of the buffer's life: the current backing
+    // (contents copied into a new staging buffer) becomes the GPU buffer and
+    // later locks write the staging copy, uploaded on unlock. Must not be
+    // locked, and must not need a readback.
+    void DemoteToBufferMode();
 
     bool DoPerDrawUpload() const {
       return m_desc.Pool == D3DPOOL_SYSTEMMEM && (m_desc.Usage & D3DUSAGE_DYNAMIC) != 0;
@@ -203,12 +235,17 @@ namespace dxvk {
     Rc<MtlBuffer>              m_stagingBuffer;
 
     Rc<MtlAllocation>         m_allocation;
+    Rc<MtlAllocation>         m_realAllocation;  // m_buffer's backing at demotion
 
     D3D9Range                   m_dirtyRange;
 
     uint32_t                    m_lockCount = 0;
 
     uint64_t                    m_seq = 0ull;
+
+    bool                        m_trackUses = false;
+    bool                        m_demotable = false;
+    D3D9DirectBufferTracker     m_tracker;
 
   };
 

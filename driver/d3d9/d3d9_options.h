@@ -93,6 +93,16 @@ namespace dxvk {
     // them as a GPU buffer plus a full-size CPU staging copy.
     bool writeOnlyDirectMapping;
 
+    // Stamp DIRECT buffers' uses per CS chunk so in-place locks synchronize
+    // only up to their last use (off in the legacy profile unless
+    // writeOnlyDirectMapping is forced on).
+    bool trackDirectBufferUses;
+
+    // A DIRECT DEFAULT+WRITEONLY buffer locked in place (no DISCARD/NOOVERWRITE)
+    // more than this many times after its backing was used goes back to
+    // BUFFER mode; 0 = never.
+    uint32_t writeOnlyDemoteLocks;
+
     // some Source engine games write to D3DPOOL_DEFAULT buffers after unlocking them;
     // uploading on unlock would lose those writes, so upload at draw time instead
     bool forceDrawTimeBufferUpload;
