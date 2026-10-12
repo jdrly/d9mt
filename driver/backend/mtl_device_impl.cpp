@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "mtl_context_impl.h"
@@ -71,6 +72,31 @@ namespace dxvk::backend {
       return result;
     }
 
+    // Estimate only: block-aligned mip chain, no Metal padding.
+    uint64_t textureBytes(const MtlImageCreateInfo& info) {
+      const MtlFormatInfo* f = lookupFormatInfo(info.format);
+      if (!f || !f->elementSize)
+        return 0u;
+      const uint64_t bw = std::max(1u, f->blockWidth), bh = std::max(1u, f->blockHeight);
+      uint64_t total = 0u;
+      for (uint32_t m = 0u; m < std::max(1u, info.mipLevels); m++) {
+        uint64_t w = std::max(1u, info.extent.width  >> m);
+        uint64_t h = std::max(1u, info.extent.height >> m);
+        uint64_t d = info.type == MtlImageType::e3D ? std::max(1u, info.extent.depth >> m) : 1u;
+        total += ((w + bw - 1u) / bw) * ((h + bh - 1u) / bh) * d * f->elementSize;
+      }
+      return total * std::max(1u, info.arrayLayers) * std::max(1u, info.sampleCount);
+    }
+
+    // D9MT_MEMSTATS=1: DIAG MEM line every 256 frames; =N (>= 16): every N frames.
+    uint32_t memStatsIntervalFromEnv() {
+      std::string v = env::getEnvVar("D9MT_MEMSTATS");
+      if (v.empty() || v == "0")
+        return 0u;
+      uint32_t n = uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+      return n >= 16u ? n : 256u;
+    }
+
   }
 
   // D9MT_COMPILE_THREADS=<n> overrides min(4, ncpu/2); 0 = no workers.
@@ -104,6 +130,49 @@ namespace dxvk::backend {
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get());
 
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
+
+    m_memStatsInterval = memStatsIntervalFromEnv();
+    m_labels = env::getEnvVar("D9MT_LABELS") == "1";
+  }
+
+  void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
+                                    const MtlImageCreateInfo* image, uint64_t bytes) {
+    char text[96];
+    if (image) {
+      std::snprintf(text, sizeof(text), "%s %ux%ux%u f%u m%u l%u s%u",
+        memCategoryName(c), image->extent.width, image->extent.height, image->extent.depth,
+        uint32_t(image->format), image->mipLevels, image->arrayLayers, image->sampleCount);
+    } else {
+      std::snprintf(text, sizeof(text), "%s %llu", memCategoryName(c), (unsigned long long)bytes);
+    }
+    obj_handle_t str = NSString_alloc_init(text, WMTUTF8StringEncoding);
+    if (!str)
+      return;
+    /* No MTLResource label thunk in the bridge; this one is a plain
+     * [obj setLabel:str], and MTLResource declares the same selector. */
+    MTLCommandEncoder_setLabel(handle, str);
+    NSObject_release(str);
+  }
+
+  std::string MtlDeviceImpl::memStatsLine(uint64_t frame) {
+    constexpr double MiB = 1.0 / double(1u << 20);
+    std::string line = str::format("DIAG MEM frame=", frame,
+      " allocatedMiB=", uint64_t(double(MTLDevice_currentAllocatedSize(m_device.handle())) * MiB),
+      " residentMiB=", uint64_t(double(m_residency->residentBytes()) * MiB),
+      " resident=", m_residency->netResident(),
+      " pendingFreeMiB=", uint64_t(double(m_residency->pendingBytes()) * MiB),
+      " ringMiB=", uint64_t(double(m_ring->allocatedBytes()) * MiB),
+      " recycledMiB=", uint64_t(double(m_recycledBytes.load()) * MiB));
+    for (uint32_t i = 0u; i < uint32_t(MtlMemCategory::Count); i++) {
+      int64_t n = m_memCount[i].load(std::memory_order_relaxed);
+      if (!n)
+        continue;
+      char part[64];
+      std::snprintf(part, sizeof(part), " %s=%.1f/%lld", memCategoryName(MtlMemCategory(i)),
+        double(m_memBytes[i].load(std::memory_order_relaxed)) * MiB, (long long)n);
+      line += part;
+    }
+    return line;
   }
 
   void MtlDeviceImpl::submitCompile(const Rc<MtlCompileTask>& task, bool urgent) {
@@ -146,9 +215,10 @@ namespace dxvk::backend {
 
   MtlAllocationImpl::~MtlAllocationImpl() {
     if (residencyDevice) {
+      residencyDevice->memSub(category, size);
       residencyDevice->residency().allocDestroyed(
         owned.detach(), mapPtr,
-        residencyDevice->submissions().nextSerial());
+        residencyDevice->submissions().nextSerial(), size);
       mapPtr = nullptr;
       return;
     }
@@ -189,7 +259,11 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = info.size;
     storage->residencyDevice = this;
-    m_residency->allocCreated(handle);
+    storage->category = info.category;
+    memAdd(info.category, info.size);
+    m_residency->allocCreated(handle, info.size);
+    if (unlikely(m_labels))
+      labelResource(handle, info.category, nullptr, info.size);
     buffer->assignStorage(std::move(storage));
     m_diagBuffersCreated++;
     return buffer;
@@ -234,7 +308,11 @@ namespace dxvk::backend {
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     texture->residencyDevice = this;
-    m_residency->allocCreated(handle);
+    texture->bytes = textureBytes(info);
+    memAdd(info.category, texture->bytes);
+    m_residency->allocCreated(handle, texture->bytes);
+    if (unlikely(m_labels))
+      labelResource(handle, info.category, &info, texture->bytes);
     m_diagImagesCreated++;
     return texture;
   }
@@ -359,7 +437,11 @@ namespace dxvk::backend {
     storage->gpuAddress = bufferInfo.gpu_address;
     storage->size = impl->size;
     storage->residencyDevice = this;
-    m_residency->allocCreated(handle);
+    storage->category = impl->info.category;
+    memAdd(impl->info.category, impl->size);
+    m_residency->allocCreated(handle, impl->size);
+    if (unlikely(m_labels))
+      labelResource(handle, impl->info.category, nullptr, impl->size);
     m_diagBuffersRenamed++;
     return storage;
   }

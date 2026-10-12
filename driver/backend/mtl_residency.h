@@ -27,9 +27,9 @@ namespace dxvk::backend {
     MtlResidencyTracker             (const MtlResidencyTracker&) = delete;
     MtlResidencyTracker& operator = (const MtlResidencyTracker&) = delete;
 
-    void allocCreated(obj_handle_t alloc);
+    void allocCreated(obj_handle_t alloc, uint64_t bytes = 0u);
 
-    void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial);
+    void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u);
 
     void beforeSubmit();
 
@@ -42,6 +42,9 @@ namespace dxvk::backend {
     uint64_t totalAdds()       const { return m_adds.load(); }
     uint64_t totalRemoves()    const { return m_removes.load(); }
     uint64_t pendingRemovals() const { return m_pendingCount.load(); }
+    // Bytes added minus bytes removed / still waiting for removal (as passed by callers).
+    uint64_t residentBytes()   const { return m_residentBytes.load(); }
+    uint64_t pendingBytes()    const { return m_pendingBytes.load(); }
 
   private:
 
@@ -49,6 +52,7 @@ namespace dxvk::backend {
       obj_handle_t alloc   = 0u;
       void*        hostMem = nullptr;
       uint64_t     serial  = 0u;
+      uint64_t     bytes   = 0u;
     };
 
     obj_handle_t    m_queue = 0u;
@@ -62,6 +66,8 @@ namespace dxvk::backend {
     std::atomic<uint64_t> m_adds{0u};
     std::atomic<uint64_t> m_removes{0u};
     std::atomic<uint64_t> m_pendingCount{0u};
+    std::atomic<uint64_t> m_residentBytes{0u};
+    std::atomic<uint64_t> m_pendingBytes{0u};
 
   };
 

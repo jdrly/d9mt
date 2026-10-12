@@ -64,7 +64,7 @@ namespace dxvk::backend {
       NSObject_release(kv.second);
     if (m_visBuffer) {
       m_device->residency().allocDestroyed(m_visBuffer.detach(), nullptr,
-        m_device->submissions().nextSerial());
+        m_device->submissions().nextSerial(), uint64_t(kVisSlots) * 8u);
     }
   }
 
@@ -275,6 +275,9 @@ namespace dxvk::backend {
     compile_stats::onFrameEnd(compile_stats::g_enabled ? m_device->pendingCompiles() : 0u);
 
     static uint64_t s_diagFrame = 0u;
+    if (const uint32_t memEvery = m_device->memStatsInterval(); unlikely(memEvery)
+     && (s_diagFrame + 1u) % memEvery == 0u)
+      Logger::warn(m_device->memStatsLine(s_diagFrame + 1u));
     if ((++s_diagFrame & 0xFFu) == 0u) {
       Logger::info(str::format("DIAG frame=", s_diagFrame,
         " residencyNet=", m_device->residency().netResident(),

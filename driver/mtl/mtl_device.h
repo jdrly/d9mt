@@ -18,10 +18,25 @@ namespace dxvk {
   class MtlCompileTask;
   enum class MtlQueryType : uint32_t;
 
+  // What a resource is for, set by the frontend. Only feeds the byte
+  // counters (D9MT_MEMSTATS) and resource labels (D9MT_LABELS).
+  enum class MtlMemCategory : uint8_t {
+    Other,
+    TexManaged, TexDefault, TexSysmem, TexDynamic, TexRT, TexDS,
+    TexMapManaged,  // CPU copy of a MANAGED texture
+    TexMap,         // CPU copy of any other texture (lock/readback buffer)
+    VbIbGpu, VbIbStaging, VbIbDirect,
+    ConstBuf, Staging, UP,
+    Count
+  };
+
+  const char* memCategoryName(MtlMemCategory c);
+
   struct MtlBufferCreateInfo {
     uint64_t     size       = 0u;
     MtlUsage     usage      = MtlUsage::None;
     MtlCpuAccess cpuAccess  = MtlCpuAccess::None;
+    MtlMemCategory category = MtlMemCategory::Other;
   };
 
   struct MtlImageCreateInfo {
@@ -33,6 +48,7 @@ namespace dxvk {
     uint32_t      sampleCount = 1u;
     MtlUsage      usage       = MtlUsage::None;
     bool          cube        = false;
+    MtlMemCategory category   = MtlMemCategory::Other;
   };
 
   struct MtlSamplerKey {
@@ -145,6 +161,7 @@ namespace dxvk {
     info.size      = size;
     info.usage     = MtlUsage::Staging;
     info.cpuAccess = MtlCpuAccess::Write;
+    info.category  = MtlMemCategory::Staging;
     m_buffer = device ? device->createBuffer(info) : nullptr;
     m_size   = size;
     m_offset = 0u;

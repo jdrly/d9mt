@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +25,7 @@ namespace dxvk::backend {
   public:
     WmtBuffer owned;
     class MtlDeviceImpl* residencyDevice = nullptr;
+    MtlMemCategory category = MtlMemCategory::Other;
 
     ~MtlAllocationImpl();
   };
@@ -33,24 +35,13 @@ namespace dxvk::backend {
     WmtBuffer owned;
     MtlBufferCreateInfo info = { };
 
+    ~MtlBufferImpl();
+
     void bindDevice(MtlDevice* device) { m_device = device; }
 
-    void recycleStorage(Rc<MtlAllocation>&& alloc) {
-      if (alloc == nullptr)
-        return;
-      std::lock_guard<std::mutex> lock(m_recycleMutex);
-      if (m_recycled.size() < MaxRecycledBackings)
-        m_recycled.push_back(std::move(alloc));
-    }
+    inline void recycleStorage(Rc<MtlAllocation>&& alloc);
 
-    Rc<MtlAllocation> takeRecycledStorage() {
-      std::lock_guard<std::mutex> lock(m_recycleMutex);
-      if (m_recycled.empty())
-        return nullptr;
-      Rc<MtlAllocation> alloc = std::move(m_recycled.back());
-      m_recycled.pop_back();
-      return alloc;
-    }
+    inline Rc<MtlAllocation> takeRecycledStorage();
 
   private:
     static constexpr size_t MaxRecycledBackings = 4u;
@@ -63,6 +54,7 @@ namespace dxvk::backend {
   public:
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
+    uint64_t   bytes         = 0u;  // estimated, for accounting only
     MtlImageCreateInfo info  = { };
     class MtlDeviceImpl* residencyDevice = nullptr;
     ~MtlTextureImpl();
@@ -146,7 +138,31 @@ namespace dxvk::backend {
     uint64_t diagBuffersRecycled() const { return m_diagBuffersRecycled.load(); }
     uint64_t diagImagesCreated()  const { return m_diagImagesCreated.load(); }
 
+    // Byte accounting by category; relaxed atomics touched only on resource
+    // create/destroy/recycle, never per draw.
+    void memAdd(MtlMemCategory c, uint64_t bytes) {
+      m_memBytes[size_t(c)].fetch_add(int64_t(bytes), std::memory_order_relaxed);
+      m_memCount[size_t(c)].fetch_add(1, std::memory_order_relaxed);
+    }
+    void memSub(MtlMemCategory c, uint64_t bytes) {
+      m_memBytes[size_t(c)].fetch_sub(int64_t(bytes), std::memory_order_relaxed);
+      m_memCount[size_t(c)].fetch_sub(1, std::memory_order_relaxed);
+    }
+    void memRecycled(int64_t delta) { m_recycledBytes.fetch_add(delta, std::memory_order_relaxed); }
+
+    // 0 = off (D9MT_MEMSTATS), else the DIAG interval in frames.
+    uint32_t memStatsInterval() const { return m_memStatsInterval; }
+    std::string memStatsLine(uint64_t frame);
+
   private:
+
+    void labelResource(obj_handle_t handle, MtlMemCategory c, const MtlImageCreateInfo* image, uint64_t bytes);
+
+    std::atomic<int64_t> m_memBytes[size_t(MtlMemCategory::Count)] = { };
+    std::atomic<int64_t> m_memCount[size_t(MtlMemCategory::Count)] = { };
+    std::atomic<int64_t> m_recycledBytes { 0 };
+    uint32_t             m_memStatsInterval = 0u;
+    bool                 m_labels = false;
 
     std::atomic<uint64_t> m_diagBuffersCreated { 0u };
     std::atomic<uint64_t> m_diagBuffersRenamed { 0u };
@@ -181,10 +197,36 @@ namespace dxvk::backend {
   // shares one definition instead of emitting conflicting strong symbols.
   inline MtlTextureImpl::~MtlTextureImpl() {
     if (residencyDevice && owned) {
+      residencyDevice->memSub(info.category, bytes);
       residencyDevice->residency().allocDestroyed(
         owned.detach(), nullptr,
-        residencyDevice->submissions().nextSerial());
+        residencyDevice->submissions().nextSerial(), bytes);
     }
+  }
+
+  inline void MtlBufferImpl::recycleStorage(Rc<MtlAllocation>&& alloc) {
+    if (alloc == nullptr)
+      return;
+    std::lock_guard<std::mutex> lock(m_recycleMutex);
+    if (m_recycled.size() < MaxRecycledBackings) {
+      static_cast<MtlDeviceImpl*>(m_device)->memRecycled(int64_t(alloc->size));
+      m_recycled.push_back(std::move(alloc));
+    }
+  }
+
+  inline Rc<MtlAllocation> MtlBufferImpl::takeRecycledStorage() {
+    std::lock_guard<std::mutex> lock(m_recycleMutex);
+    if (m_recycled.empty())
+      return nullptr;
+    Rc<MtlAllocation> alloc = std::move(m_recycled.back());
+    m_recycled.pop_back();
+    static_cast<MtlDeviceImpl*>(m_device)->memRecycled(-int64_t(alloc->size));
+    return alloc;
+  }
+
+  inline MtlBufferImpl::~MtlBufferImpl() {
+    for (const auto& alloc : m_recycled) if (m_device)
+      static_cast<MtlDeviceImpl*>(m_device)->memRecycled(-int64_t(alloc->size));
   }
 
 }

@@ -1572,7 +1572,7 @@ namespace dxvk::backend {
     obj_handle_t h = MTLDevice_newBuffer(m_device->wmtDevice(), &info);
     m_visBuffer = WmtBuffer::adopt(h);
     m_visCpu    = info.memory.get();
-    m_device->residency().allocCreated(h);
+    m_device->residency().allocCreated(h, info.length);
   }
 
   void MtlContextImpl::beginQuery(const Rc<MtlQuery>& query) {

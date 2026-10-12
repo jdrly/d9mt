@@ -23,6 +23,15 @@ namespace dxvk {
     return !std::memcmp(this, &other, sizeof(*this));
   }
 
+  const char* memCategoryName(MtlMemCategory c) {
+    static const char* const names[] = {
+      "other", "texManaged", "texDefault", "texSysmem", "texDynamic", "texRT", "texDS",
+      "texMapManaged", "texMap", "vbibGpu", "vbibStaging", "vbibDirect",
+      "constBuf", "staging", "up" };
+    static_assert(sizeof(names) / sizeof(names[0]) == size_t(MtlMemCategory::Count));
+    return uint32_t(c) < uint32_t(MtlMemCategory::Count) ? names[uint32_t(c)] : "?";
+  }
+
   MtlDevice::MtlDevice() { }
   MtlDevice::~MtlDevice() { }
 
@@ -103,6 +112,7 @@ namespace dxvk {
     info.size = size;
     info.usage = MtlUsage::Staging;
     info.cpuAccess = MtlCpuAccess::Write;
+    info.category = MtlMemCategory::Staging;
     Rc<MtlBuffer> buffer = createBuffer(info);
     return buffer != nullptr ? new MtlStagingBuffer(std::move(buffer), size) : nullptr;
   }

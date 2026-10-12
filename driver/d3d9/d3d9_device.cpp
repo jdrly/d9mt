@@ -4491,6 +4491,7 @@ namespace dxvk {
       info.size      = std::max(UPBufferSize, size);
       info.usage     = MtlUsage::VertexBuffer | MtlUsage::IndexBuffer;
       info.cpuAccess = MtlCpuAccess::Write;
+      info.category  = MtlMemCategory::UP;
 
       Rc<MtlBuffer> buffer = m_dxvkDevice->createBuffer(info);
       void* mapPtr = buffer->mapPtr(0);

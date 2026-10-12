@@ -33,7 +33,7 @@ namespace dxvk::backend {
     m_attachedLayerSets.clear();
   }
 
-  void MtlResidencyTracker::allocCreated(obj_handle_t alloc) {
+  void MtlResidencyTracker::allocCreated(obj_handle_t alloc, uint64_t bytes) {
     if (!alloc || !m_set)
       return;
 
@@ -41,9 +41,10 @@ namespace dxvk::backend {
     MTLResidencySet_addAllocation(m_set.handle(), alloc);
     m_dirty = true;
     m_adds++;
+    m_residentBytes += bytes;
   }
 
-  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial) {
+  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes) {
     if (!alloc) {
       if (hostMem)
         VirtualFree(hostMem, 0, MEM_RELEASE);
@@ -51,8 +52,9 @@ namespace dxvk::backend {
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_pending.push_back({ alloc, hostMem, lastUseSerial });
+    m_pending.push_back({ alloc, hostMem, lastUseSerial, bytes });
     m_pendingCount = m_pending.size();
+    m_pendingBytes += bytes;
   }
 
   void MtlResidencyTracker::beforeSubmit() {
@@ -92,8 +94,11 @@ namespace dxvk::backend {
       if (due.empty())
         return;
 
-      for (const PendingRemoval& p : due)
+      for (const PendingRemoval& p : due) {
         MTLResidencySet_removeAllocation(m_set.handle(), p.alloc);
+        m_pendingBytes -= p.bytes;
+        m_residentBytes -= p.bytes;
+      }
       MTLResidencySet_commit(m_set.handle());
       m_dirty = false;
       m_removes += due.size();

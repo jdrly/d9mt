@@ -105,6 +105,7 @@ namespace dxvk {
 
     if (m_mapMode == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT) {
       info.cpuAccess = MtlCpuAccess::Write;
+      info.category  = MtlMemCategory::VbIbDirect;
 
       if ((m_desc.Usage & D3DUSAGE_WRITEONLY) == 0
         || DoPerDrawUpload()
@@ -116,6 +117,7 @@ namespace dxvk {
     }
     else {
       info.cpuAccess = MtlCpuAccess::None;
+      info.category  = MtlMemCategory::VbIbGpu;
     }
 
     return m_parent->GetDXVKDevice()->createBuffer(info);
@@ -127,6 +129,7 @@ namespace dxvk {
     info.size      = m_desc.Size;
     info.usage     = MtlUsage::Staging;
     info.cpuAccess = MtlCpuAccess::Write;
+    info.category  = MtlMemCategory::VbIbStaging;
 
     if (!(m_desc.Usage & D3DUSAGE_WRITEONLY))
       info.cpuAccess = MtlCpuAccess::Read;

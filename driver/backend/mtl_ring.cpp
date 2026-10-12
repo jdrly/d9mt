@@ -14,11 +14,11 @@ UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTrac
 UploadRing::~UploadRing() {
   for (auto& chunk : m_live) {
     if (m_residency)
-      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u);
+      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u, chunk.size);
   }
   for (auto& chunk : m_free) {
     if (m_residency)
-      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u);
+      m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u, chunk.size);
   }
 }
 
@@ -101,7 +101,7 @@ UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
   m_totalBytes += minSize;
 
   if (m_residency)
-    m_residency->allocCreated(handle);
+    m_residency->allocCreated(handle, minSize);
   return chunk;
 }
 

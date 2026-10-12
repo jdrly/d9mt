@@ -81,6 +81,7 @@ namespace dxvk {
     bufferInfo.size      = align(m_size, m_align);
     bufferInfo.usage     = m_usage;
     bufferInfo.cpuAccess = m_memType;
+    bufferInfo.category  = MtlMemCategory::ConstBuf;
 
     if (m_useDma) {
       auto cpuInfo = bufferInfo;

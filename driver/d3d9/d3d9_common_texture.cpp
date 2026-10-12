@@ -283,7 +283,7 @@ namespace dxvk {
     info.size      = Size;
     info.usage     = MtlUsage::Staging;
     info.cpuAccess = MtlCpuAccess::Read;
-
+    info.category  = IsManaged() ? MtlMemCategory::TexMapManaged : MtlMemCategory::TexMap;
 
     m_buffer = m_device->GetDXVKDevice()->createBuffer(info);
 
@@ -358,6 +358,13 @@ namespace dxvk {
     if (m_desc.ImageUsage & MtlTextureUsageShaderRead)
       imageInfo.usage = imageInfo.usage | MtlUsage::Sampled;
 
+    imageInfo.category = isRT ? MtlMemCategory::TexRT
+                       : isDS ? MtlMemCategory::TexDS
+                       : IsManaged() ? MtlMemCategory::TexManaged
+                       : IsDynamic() ? MtlMemCategory::TexDynamic
+                       : m_desc.Pool == D3DPOOL_DEFAULT ? MtlMemCategory::TexDefault
+                       : MtlMemCategory::TexSysmem;
+
     if (!CheckImageSupport(&imageInfo))
       return nullptr;
 
@@ -384,6 +391,7 @@ namespace dxvk {
     imageInfo.usage = MtlUsage::Sampled;
     if (isRT) imageInfo.usage = imageInfo.usage | MtlUsage::RenderTarget;
     if (isDS) imageInfo.usage = imageInfo.usage | MtlUsage::DepthStencil;
+    imageInfo.category = isDS ? MtlMemCategory::TexDS : MtlMemCategory::TexRT;
 
     return m_device->GetDXVKDevice()->createImage(imageInfo);
   }
