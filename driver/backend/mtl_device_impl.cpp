@@ -169,7 +169,10 @@ namespace dxvk::backend {
       " resident=", m_residency->netResident(),
       " pendingFreeMiB=", uint64_t(double(m_residency->pendingBytes()) * MiB),
       " ringMiB=", uint64_t(double(m_ring->allocatedBytes()) * MiB),
-      " recycledMiB=", uint64_t(double(m_recycledBytes.load()) * MiB));
+      " recycledMiB=", uint64_t(double(m_recycledBytes.load()) * MiB),
+      " bufLockSync=", m_frontendStats.bufferLockWaits.load(), "/",
+        m_frontendStats.bufferLockWaitUs.load() / 1000u, "ms",
+      " gpuWaits=", m_frontendStats.resourceGpuWaits.load());
     for (uint32_t i = 0u; i < uint32_t(MtlMemCategory::Count); i++) {
       int64_t n = m_memCount[i].load(std::memory_order_relaxed);
       if (!n)

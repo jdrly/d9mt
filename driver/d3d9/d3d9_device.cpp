@@ -90,6 +90,7 @@ namespace dxvk {
     CreateConstantBuffers();
 
     m_availableMemory = DetermineInitialTextureMemory();
+    m_memStats = m_dxvkDevice->memoryProfile().statsInterval != 0u;
 
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer,
@@ -4610,6 +4611,9 @@ namespace dxvk {
       ExecuteFlush(false);
       SynchronizeCsThread(SequenceNumber);
       m_dxvkDevice->waitForResource(Resource);
+
+      if (unlikely(m_memStats))
+        m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
     }
 
     return true;
@@ -5171,8 +5175,16 @@ namespace dxvk {
 
       if (!skipWait) {
         const Rc<MtlBuffer> mappingBuffer = pResource->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>();
+        const auto t0 = unlikely(m_memStats) ? high_resolution_clock::now() : high_resolution_clock::time_point();
         if (!WaitForResource(*mappingBuffer, pResource->GetMappingBufferSequenceNumber(), Flags))
           return D3DERR_WASSTILLDRAWING;
+
+        if (unlikely(m_memStats)) {
+          auto& stats = m_dxvkDevice->frontendStats();
+          stats.bufferLockWaits.fetch_add(1u, std::memory_order_relaxed);
+          stats.bufferLockWaitUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            high_resolution_clock::now() - t0).count()), std::memory_order_relaxed);
+        }
 
         pResource->SetNeedsReadback(false);
       }
@@ -5307,7 +5319,8 @@ namespace dxvk {
       }
 
       if (unlikely(vbo->NeedsReadback())) {
-        WaitForResource(*vbo->GetBuffer<D3D9_COMMON_BUFFER_TYPE_STAGING>(), vbo->GetMappingBufferSequenceNumber(), D3DLOCK_READONLY);
+        // MAPPING, not STAGING: a DIRECT buffer has no staging buffer.
+        WaitForResource(*vbo->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>(), vbo->GetMappingBufferSequenceNumber(), D3DLOCK_READONLY);
       }
 
       const uint32_t vertexSize = m_state.vertexDecl->GetSize(i);

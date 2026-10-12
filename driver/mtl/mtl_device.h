@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 
 #include "mtl_types.h"
@@ -141,7 +142,18 @@ namespace dxvk {
 
     const MtlMemoryProfile& memoryProfile() const { return m_memProfile; }
 
+    // Frontend counters for the DIAG MEM line; only touched when
+    // memoryProfile().statsInterval != 0.
+    struct FrontendStats {
+      std::atomic<uint64_t> bufferLockWaits  = { 0u };  // buffer locks that synchronized (CS thread and/or GPU)
+      std::atomic<uint64_t> bufferLockWaitUs = { 0u };
+      std::atomic<uint64_t> resourceGpuWaits = { 0u };  // lock waits that blocked on the GPU (buffers + readbacks)
+    };
+    FrontendStats& frontendStats() { return m_frontendStats; }
+
   protected:
+
+    FrontendStats    m_frontendStats;
 
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };

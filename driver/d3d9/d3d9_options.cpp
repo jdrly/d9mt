@@ -67,6 +67,7 @@ namespace dxvk {
     this->cachedWriteOnlyBuffers        = config.getOption<bool>        ("d3d9.cachedWriteOnlyBuffers",          false);
     this->deviceLocalConstantBuffers    = config.getOption<Tristate>    ("d3d9.deviceLocalConstantBuffers",    Tristate::Auto);
     this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
+    this->writeOnlyDirectMapping        = config.getOption<bool>        ("d9mt.writeOnlyDirect",               true);
     this->forceDrawTimeBufferUpload     = config.getOption<bool>        ("d3d9.forceDrawTimeBufferUpload",     false);
     this->ignoreDefaultBufferLockRange  = config.getOption<bool>        ("d3d9.ignoreDefaultBufferLockRange",  false);
     this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
@@ -102,6 +103,9 @@ namespace dxvk {
     } else {
       this->useFP16 = useFP16 == Tristate::True;
     }
+
+    if (std::string v = env::getEnvVar("D9MT_WRITEONLY_DIRECT"); !v.empty())
+      this->writeOnlyDirectMapping = v != "0";
 
     this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
   }

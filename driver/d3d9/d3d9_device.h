@@ -1432,6 +1432,8 @@ namespace dxvk {
 
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
 
+    bool                            m_memStats = false;
+
     D3D9Cursor                      m_cursor;
 
     Com<D3D9Surface, false>         m_autoDepthStencil;

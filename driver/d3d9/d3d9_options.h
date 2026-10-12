@@ -89,6 +89,10 @@ namespace dxvk {
 
     bool allowDirectBufferMapping;
 
+    // Map DEFAULT + WRITEONLY buffers directly (upstream DXVK); false keeps
+    // them as a GPU buffer plus a full-size CPU staging copy.
+    bool writeOnlyDirectMapping;
+
     // some Source engine games write to D3DPOOL_DEFAULT buffers after unlocking them;
     // uploading on unlock would lose those writes, so upload at draw time instead
     bool forceDrawTimeBufferUpload;

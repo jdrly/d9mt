@@ -80,7 +80,13 @@ namespace dxvk {
     if (m_desc.Pool != D3DPOOL_DEFAULT)
       return D3D9_COMMON_BUFFER_MAP_MODE_BUFFER;
 
-    if (!(m_desc.Usage & D3DUSAGE_DYNAMIC))
+    // Upstream DXVK: DEFAULT + DYNAMIC behaves like a directly mapped buffer even
+    // while unlocked (CSGO draws from locked VBs). DEFAULT + WRITEONLY only does
+    // while it is locked, which is awkward to model, so it is mapped directly too.
+    // That also saves the full-size CPU staging copy BUFFER mode keeps per buffer.
+    const DWORD directUsage = D3DUSAGE_DYNAMIC
+      | (options->writeOnlyDirectMapping ? DWORD(D3DUSAGE_WRITEONLY) : 0u);
+    if (!(m_desc.Usage & directUsage))
       return D3D9_COMMON_BUFFER_MAP_MODE_BUFFER;
 
     if (!options->allowDirectBufferMapping)
