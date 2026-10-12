@@ -11,19 +11,25 @@
 
 namespace dxvk {
 
-  /* Live debug facility (all on the API thread, under the device lock):
-   *  - flags file polled at most once a second on Present
-   *    (D9MT_DEBUG_FILE, Windows path; default Z:<HOME>\Library\Logs\
-   *    d9mt\d9mt-debug.txt), one flag per line, '#' comments;
+  /* Live debug facility (all on the API thread, under the device lock).
+   * Strictly opt-in: with neither env var set nothing is polled or written.
+   *  - D9MT_DEBUG_FILE=<Windows path>: flags file polled at most once a
+   *    second on Present, one flag per line, '#' comments;
    *  - `dump` dumps the next full frame (once per distinct file mtime) to
    *    d9mt-dump-<n>.txt next to the flags file, shader disassembly to
    *    d9mt-shaders\<name>.txt;
    *  - occ_trace / flag changes go to d9mt-debug.log next to the flags file
-   *    (DXVK_LOG_LEVEL=warn would drop info lines). */
+   *    (DXVK_LOG_LEVEL=warn would drop info lines);
+   *  - D9MT_SHADER_DUMP_PATH=<Windows dir>: disassembly of vertex shaders
+   *    rejected (or accepted via d3d9.allowOutOfRangeVsDefs) for using more
+   *    than 256 float constants; defaults to d9mt-shaders\ next to the flags
+   *    file when only D9MT_DEBUG_FILE is set. */
   struct D3D9DebugState {
     // Flags file
-    std::string flagsPath;
+    std::string flagsPath;     // empty: flags file disabled
     std::string dir;
+    std::string shaderDir;     // empty: shader text dumps disabled
+    bool        pathResolved  = false;
     bool        pathInit      = false;
     uint64_t    lastPollMs    = 0u;
     bool        fileSeen      = false;

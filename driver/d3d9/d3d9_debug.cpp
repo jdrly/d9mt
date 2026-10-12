@@ -117,31 +117,32 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugInitPath() {
-    if (!m_dbg.flagsPath.empty())
+    if (m_dbg.pathResolved)
       return;
+    m_dbg.pathResolved = true;
 
+    // Opt-in only: no default path, nothing is polled or written unless set.
     std::string path = env::getEnvVar("D9MT_DEBUG_FILE");
-    if (path.empty()) {
-      std::string home = env::getEnvVar("HOME");
-      if (!home.empty() && home[0] == '/') {
-        path = "Z:" + home;
-        std::replace(path.begin(), path.end(), '/', '\\');
-        if (path.back() != '\\')
-          path += '\\';
-        path += "Library\\Logs\\d9mt\\d9mt-debug.txt";
-      } else {
-        path = "C:\\d9mt\\d9mt-debug.txt";
-      }
+    if (!path.empty()) {
+      m_dbg.flagsPath = path;
+      size_t sep = path.find_last_of("\\/");
+      m_dbg.dir = sep != std::string::npos ? path.substr(0u, sep) : std::string(".");
+      Logger::warn(str::format("D9MT-DEBUG flags file: ", path));
     }
 
-    m_dbg.flagsPath = path;
-    size_t sep = path.find_last_of("\\/");
-    m_dbg.dir = sep != std::string::npos ? path.substr(0u, sep) : std::string(".");
-    Logger::warn(str::format("D9MT-DEBUG flags file: ", path));
+    std::string shaders = env::getEnvVar("D9MT_SHADER_DUMP_PATH");
+    while (!shaders.empty() && (shaders.back() == '\\' || shaders.back() == '/'))
+      shaders.pop_back();
+    if (!shaders.empty())
+      m_dbg.shaderDir = shaders;
+    else if (!m_dbg.dir.empty())
+      m_dbg.shaderDir = m_dbg.dir + "\\d9mt-shaders";
   }
 
 
   void D3D9DeviceEx::DebugLogRaw(const std::string& line) {
+    if (m_dbg.dir.empty())
+      return;
     if (!m_dbg.logFile) {
       m_dbg.logFile = std::fopen((m_dbg.dir + "\\d9mt-debug.log").c_str(), "a");
       if (!m_dbg.logFile)
@@ -195,6 +196,8 @@ namespace dxvk {
     const bool startup = !m_dbg.pathInit;
     m_dbg.pathInit = true;
     DebugInitPath();
+    if (m_dbg.flagsPath.empty())
+      return;
 
     if (m_dbg.logSuppressed) {
       DebugLogRaw(str::format("D9MT-DEBUG log rate limit: ", m_dbg.logSuppressed, " lines suppressed"));
@@ -301,6 +304,10 @@ namespace dxvk {
     if (unlikely(m_dbg.activeOcc.size() > 256u))
       m_dbg.activeOcc.clear();
 
+    // Without D9MT_DEBUG_FILE, DebugPoll runs once (resolving the env vars)
+    // and Present never stats a file.
+    if (likely(m_dbg.pathInit && m_dbg.flagsPath.empty()))
+      return;
     const uint64_t now = GetTickCount64();
     if (likely(m_dbg.pathInit && now - m_dbg.lastPollMs < 1000u))
       return;
@@ -324,7 +331,8 @@ namespace dxvk {
       return;
     }
 
-    CreateDirectoryA((m_dbg.dir + "\\d9mt-shaders").c_str(), nullptr);
+    if (!m_dbg.shaderDir.empty())
+      CreateDirectoryA(m_dbg.shaderDir.c_str(), nullptr);
 
     m_dbg.dumping     = true;
     m_dbg.dumpCounter = n;
@@ -390,9 +398,11 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugWriteShader(const std::string& name, const void* code, size_t size) {
+    if (m_dbg.shaderDir.empty())
+      return;
     if (!m_dbg.shadersWritten.insert(name).second)
       return;
-    const std::string path = str::format(m_dbg.dir, "\\d9mt-shaders\\", name, ".txt");
+    const std::string path = str::format(m_dbg.shaderDir, "\\", name, ".txt");
     if (fileExists(path))
       return;
     std::FILE* f = std::fopen(path.c_str(), "w");
@@ -452,10 +462,13 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugWriteShaderAlways(const std::string& name, const void* code, size_t size) {
+    // Despite the name: only when D9MT_SHADER_DUMP_PATH or D9MT_DEBUG_FILE is set.
     DebugInitPath();
-    CreateDirectoryA((m_dbg.dir + "\\d9mt-shaders").c_str(), nullptr);
+    if (m_dbg.shaderDir.empty())
+      return;
+    CreateDirectoryA(m_dbg.shaderDir.c_str(), nullptr);
     DebugWriteShader(name, code, size);
-    Logger::warn(str::format("D9MT-DEBUG shader text: ", m_dbg.dir, "\\d9mt-shaders\\", name, ".txt"));
+    Logger::warn(str::format("D9MT-DEBUG shader text: ", m_dbg.shaderDir, "\\", name, ".txt"));
   }
 
 
