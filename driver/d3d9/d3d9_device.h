@@ -961,8 +961,23 @@ namespace dxvk {
     void BindIndices();
 
     D3D9DeviceLock LockDevice() {
-      return m_multithread.AcquireLock();
+      if (likely(!hitch::g_enabled))
+        return m_multithread.AcquireLock();
+      return LockDeviceProfiled();
     }
+
+    D3D9DeviceLock LockDeviceProfiled() {
+      const uint64_t t0 = hitch::ticks();
+      D3D9DeviceLock lock = m_multithread.AcquireLock();
+      lock.AttachHitch(&m_hitch, t0, m_hitch.enter());
+      return lock;
+    }
+
+    hitch::Profiler& Hitch() { return m_hitch; }
+
+    // D9MT_PROFILE: end of a Present (all swapchains); logs a HITCH line for
+    // a long frame.
+    void HitchFrameEnd();
 
     const D3D9Options* GetOptions() const {
       return &m_d3d9Options;
@@ -1444,6 +1459,9 @@ namespace dxvk {
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
 
     bool                            m_memStats = false;
+
+    hitch::Profiler                 m_hitch;
+    double                          m_hitchMs = 50.0;
 
     D3D9Cursor                      m_cursor;
 

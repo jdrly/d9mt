@@ -91,6 +91,7 @@ namespace dxvk {
 
     m_availableMemory = DetermineInitialTextureMemory();
     m_memStats = m_dxvkDevice->memoryProfile().statsInterval != 0u;
+    m_hitchMs  = hitch::thresholdFromEnv();
     m_stagingPool.setCapacity(m_dxvkDevice->memoryProfile().stagingBlocks);
     m_stagingMaxInFlight = MtlDeviceSize(env::is32BitHostPlatform()
       ? std::min(m_dxvkDevice->memoryProfile().stagingInFlightMB, 30u)
@@ -559,10 +560,12 @@ namespace dxvk {
                    !ValidateSharedTexture(*pSharedHandle, D3DRTYPE_TEXTURE, desc)))
         return E_INVALIDARG;
 
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9Texture2D> texture = new D3D9Texture2D(this, &desc, IsExtended(), pSharedHandle);
 
       m_initializer->InitTexture(texture->GetCommonTexture(), initialData);
       *ppTexture = texture.ref();
+      hs.addBytes(texture->GetCommonTexture()->GetTotalSize());
 
       if (desc.Pool == D3DPOOL_DEFAULT)
         m_losableResourceCounter++;
@@ -623,9 +626,11 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9Texture3D> texture = new D3D9Texture3D(this, &desc, IsExtended());
       m_initializer->InitTexture(texture->GetCommonTexture());
       *ppVolumeTexture = texture.ref();
+      hs.addBytes(texture->GetCommonTexture()->GetTotalSize());
 
       if (desc.Pool == D3DPOOL_DEFAULT)
         m_losableResourceCounter++;
@@ -685,9 +690,11 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9TextureCube> texture = new D3D9TextureCube(this, &desc, IsExtended());
       m_initializer->InitTexture(texture->GetCommonTexture());
       *ppCubeTexture = texture.ref();
+      hs.addBytes(texture->GetCommonTexture()->GetTotalSize());
 
       if (desc.Pool == D3DPOOL_DEFAULT)
         m_losableResourceCounter++;
@@ -735,6 +742,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::BufCreate, true);
+      hs.addBytes(desc.Size);
       const Com<D3D9VertexBuffer> buffer = new D3D9VertexBuffer(this, &desc, IsExtended());
       m_initializer->InitBuffer(buffer->GetCommonBuffer());
       *ppVertexBuffer = buffer.ref();
@@ -784,6 +793,8 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::BufCreate, true);
+      hs.addBytes(desc.Size);
       const Com<D3D9IndexBuffer> buffer = new D3D9IndexBuffer(this, &desc, IsExtended());
       m_initializer->InitBuffer(buffer->GetCommonBuffer());
       *ppIndexBuffer = buffer.ref();
@@ -3305,6 +3316,8 @@ namespace dxvk {
     if (unlikely(ppShader == nullptr))
       return D3DERR_INVALIDCALL;
 
+    hitch::Scope hs(m_hitch, hitch::ShaderCreate, true);
+
     D3D9CommonShader module;
     size_t bytecodeLength;
 
@@ -3659,6 +3672,8 @@ namespace dxvk {
 
     if (unlikely(ppShader == nullptr))
       return D3DERR_INVALIDCALL;
+
+    hitch::Scope hs(m_hitch, hitch::ShaderCreate, true);
 
     D3D9CommonShader module;
     size_t bytecodeLength;
@@ -4083,7 +4098,9 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      hs.addBytes(surface->GetCommonTexture()->GetTotalSize());
       m_initializer->InitTexture(surface->GetCommonTexture());
       *ppSurface = surface.ref();
       m_losableResourceCounter++;
@@ -4155,7 +4172,9 @@ namespace dxvk {
                    !ValidateSharedTexture(*pSharedHandle, D3DRTYPE_SURFACE, desc)))
         return E_INVALIDARG;
 
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      hs.addBytes(surface->GetCommonTexture()->GetTotalSize());
       m_initializer->InitTexture(surface->GetCommonTexture(), initialData);
       *ppSurface = surface.ref();
 
@@ -4218,7 +4237,9 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
+      hitch::Scope hs(m_hitch, hitch::TexCreate, true);
       const Com<D3D9Surface> surface = new D3D9Surface(this, &desc, IsExtended(), nullptr, pSharedHandle);
+      hs.addBytes(surface->GetCommonTexture()->GetTotalSize());
       m_initializer->InitTexture(surface->GetCommonTexture());
       *ppSurface = surface.ref();
       m_losableResourceCounter++;
@@ -4605,8 +4626,15 @@ namespace dxvk {
       ConsiderFlush(flushType);
     }
 
-    if (stagingBufferAllocated > MaxMemoryInFlight)
-      m_stagingBufferFence->wait(stagingBufferAllocated - MaxMemoryInFlight);
+    if (stagingBufferAllocated > MaxMemoryInFlight) {
+      const uint64_t target = stagingBufferAllocated - MaxMemoryInFlight;
+      if (unlikely(hitch::g_enabled) && m_stagingBufferFence->value() < target) {
+        hitch::Scope hs(m_hitch, hitch::Throttle);
+        m_stagingBufferFence->wait(target);
+      } else {
+        m_stagingBufferFence->wait(target);
+      }
+    }
   }
 
 
@@ -4645,7 +4673,10 @@ namespace dxvk {
 
       ExecuteFlush(false);
       SynchronizeCsThread(SequenceNumber);
-      m_dxvkDevice->waitForResource(Resource);
+
+      { hitch::Scope hs(m_hitch, hitch::GpuWait);
+        m_dxvkDevice->waitForResource(Resource);
+      }
 
       if (unlikely(m_memStats))
         m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
@@ -4694,6 +4725,7 @@ namespace dxvk {
       const D3DBOX*                 pBox,
             DWORD                   Flags) {
     D3D9DeviceLock lock = LockDevice();
+    hitch::Scope hs(m_hitch, hitch::TexLock);
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
 
@@ -4906,6 +4938,8 @@ namespace dxvk {
         UINT                    Face,
         UINT                    MipLevel) {
     D3D9DeviceLock lock = LockDevice();
+    hitch::Scope hs(m_hitch, hitch::TexLock);
+    hs.noCount();
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
 
@@ -4977,6 +5011,7 @@ namespace dxvk {
     MtlOrigin SrcOffset,
     MtlExtent3D SrcExtent,
     MtlOrigin DestOffset) {
+    hitch::Scope hs(m_hitch, hitch::TexUpload);
     ThrottleAllocation();
 
     const Rc<MtlTexture> image = pDestTexture->GetImage();
@@ -5030,6 +5065,7 @@ namespace dxvk {
 
       const void* mapPtr = MapTexture(pSrcTexture, SrcSubresource);
       MtlDeviceSize dirtySize = extentBlockCount.width * extentBlockCount.height * extentBlockCount.depth * formatInfo->elementSize;
+      hs.addBytes(dirtySize);
       D3D9BufferSlice slice = AllocStagingBuffer(dirtySize);
       const void* srcData = reinterpret_cast<const uint8_t*>(mapPtr) + copySrcOffset;
       util::packImageData(
@@ -5078,6 +5114,7 @@ namespace dxvk {
       MtlExtent3D srcBlockCount = util::computeBlockCount(srcTexLevelExtent, srcBlockSize);
       srcBlockCount.height *= std::min(pSrcTexture->GetPlaneCount(), 2u);
 
+      hs.addBytes(pSrcTexture->GetMipSize(SrcSubresource));
       D3D9BufferSlice slice = AllocStagingBuffer(pSrcTexture->GetMipSize(SrcSubresource));
       MtlDeviceSize pitch = align(srcBlockCount.width * formatElementSize, 4);
 
@@ -5126,6 +5163,7 @@ namespace dxvk {
           void**                  ppbData,
           DWORD                   Flags) {
     D3D9DeviceLock lock = LockDevice();
+    hitch::Scope hs(m_hitch, hitch::BufLock);
 
     if (unlikely(ppbData == nullptr))
       return D3DERR_INVALIDCALL;
@@ -5233,6 +5271,7 @@ namespace dxvk {
       if (!skipWait) {
         const Rc<MtlBuffer> mappingBuffer = pResource->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>();
         const uint64_t seq = pResource->GetMappingBufferSequenceNumber();
+        hs.addAux();
 
         if (likely(!m_memStats)) {
           if (!WaitForResource(*mappingBuffer, seq, Flags))
@@ -5322,6 +5361,8 @@ namespace dxvk {
   HRESULT D3D9DeviceEx::UnlockBuffer(
         D3D9CommonBuffer*       pResource) {
     D3D9DeviceLock lock = LockDevice();
+    hitch::Scope hs(m_hitch, hitch::BufLock);
+    hs.noCount();
 
     if (pResource->DecrementLockCount() != 0)
       return D3D_OK;
@@ -5576,7 +5617,34 @@ namespace dxvk {
     if (SequenceNumber > m_csSeqNum)
       FlushCsChunk();
 
+    // D9MT_PROFILE: only syncs that wait count.
+    if (unlikely(hitch::g_enabled) && SequenceNumber > m_csThread.lastSequenceNumber()) {
+      hitch::Scope hs(m_hitch, hitch::CsSync);
+      m_csThread.synchronize(SequenceNumber);
+      return;
+    }
+
     m_csThread.synchronize(SequenceNumber);
+  }
+
+
+  void D3D9DeviceEx::HitchFrameEnd() {
+    hitch::Profiler::CompileTotals compile;
+    compile.shaders   = compile_stats::g_shaders.totalN.load(std::memory_order_relaxed);
+    compile.shadersNs = compile_stats::g_shaders.totalNs.load(std::memory_order_relaxed);
+    compile.psos      = compile_stats::g_psos.totalN.load(std::memory_order_relaxed);
+    compile.psosNs    = compile_stats::g_psos.totalNs.load(std::memory_order_relaxed);
+    compile.waits     = compile_stats::g_wait.totalN.load(std::memory_order_relaxed);
+    compile.waitsNs   = compile_stats::g_wait.totalNs.load(std::memory_order_relaxed);
+
+    const uint64_t dispatched = m_csSeqNum;
+    const uint64_t executed   = m_csThread.lastSequenceNumber();
+
+    uint64_t frame = 0u;
+    hitch::FrameStats stats;
+    if (m_hitch.endFrame(hitch::ticks(), hitch::nowNs(), compile,
+          dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats))
+      Logger::warn(hitch::formatHitch(frame, stats));
   }
 
 

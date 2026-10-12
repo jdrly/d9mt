@@ -145,6 +145,7 @@ namespace dxvk {
 
   HRESULT STDMETHODCALLTYPE D3D9Query::GetData(void* pData, DWORD dwSize, DWORD dwGetDataFlags) {
     D3D9DeviceLock lock = m_parent->LockDevice();
+    hitch::Scope hs(m_parent->Hitch(), hitch::Query);
 
     bool flush = dwGetDataFlags & D3DGETDATA_FLUSH;
 

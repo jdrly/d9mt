@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d9_include.h"
+#include "d3d9_hitch.h"
 
 namespace dxvk {
 
@@ -16,15 +17,21 @@ namespace dxvk {
     : m_mutex(&mutex) { }
 
     D3D9DeviceLock(D3D9DeviceLock&& other)
-    : m_mutex(other.m_mutex) {
+    : m_mutex(other.m_mutex), m_hitch(other.m_hitch),
+      m_hitchT0(other.m_hitchT0), m_hitchOuter(other.m_hitchOuter) {
       other.m_mutex = nullptr;
+      other.m_hitch = nullptr;
     }
 
     D3D9DeviceLock& operator = (D3D9DeviceLock&& other) {
       Unlock();
 
-      m_mutex = other.m_mutex;
+      m_mutex      = other.m_mutex;
+      m_hitch      = other.m_hitch;
+      m_hitchT0    = other.m_hitchT0;
+      m_hitchOuter = other.m_hitchOuter;
       other.m_mutex = nullptr;
+      other.m_hitch = nullptr;
       return *this;
     }
 
@@ -32,9 +39,19 @@ namespace dxvk {
       Unlock();
     }
 
+    // D9MT_PROFILE: the lock's lifetime is time spent inside d9mt.
+    void AttachHitch(hitch::Profiler* pProfiler, uint64_t T0, bool Outer) {
+      m_hitch      = pProfiler;
+      m_hitchT0    = T0;
+      m_hitchOuter = Outer;
+    }
+
   private:
 
     D3D9Multithread* m_mutex = nullptr;
+    hitch::Profiler* m_hitch = nullptr;
+    uint64_t         m_hitchT0 = 0u;
+    bool             m_hitchOuter = false;
 
     void Unlock();
 
@@ -81,6 +98,11 @@ namespace dxvk {
   };
 
   inline void D3D9DeviceLock::Unlock() {
+    if (unlikely(m_hitch != nullptr)) {
+      m_hitch->leave(m_hitchOuter, m_hitchT0, hitch::ticks());
+      m_hitch = nullptr;
+    }
+
     if (m_mutex)
       m_mutex->Unlock();
   }

@@ -206,12 +206,27 @@ namespace dxvk {
     struct Counter {
       std::atomic<uint64_t> n  = { 0u };
       std::atomic<uint64_t> ns = { 0u };
+      // Never reset: the app-thread HITCH line takes per-frame deltas.
+      std::atomic<uint64_t> totalN  = { 0u };
+      std::atomic<uint64_t> totalNs = { 0u };
 
       void add(uint64_t dns) {
         n.fetch_add(1u, std::memory_order_relaxed);
         ns.fetch_add(dns, std::memory_order_relaxed);
+        totalN.fetch_add(1u, std::memory_order_relaxed);
+        totalNs.fetch_add(dns, std::memory_order_relaxed);
       }
     };
+
+    /// D9MT_HITCH_MS (default 50): frames at least this long log at warn level.
+    inline double hitchMs() {
+      static const double s_ms = [] {
+        const char* v = std::getenv("D9MT_HITCH_MS");
+        double ms = v ? std::strtod(v, nullptr) : 0.0;
+        return ms > 0.0 ? ms : 50.0;
+      } ();
+      return s_ms;
+    }
 
     inline Counter g_shaders;   // AIR codegen + MTLLibrary (worker or inline)
     inline Counter g_shared;    // linkages that reused an identical library
@@ -266,10 +281,16 @@ namespace dxvk {
       if (!(nSh | nShared | nPso | nWait | nSkip) && dtMs < 33.4)
         return;
 
-      Logger::info(str::format("COMPILE frame=", s_frame, " dtMs=", dtMs,
+      // Render-thread frames: a long one is part of a hitch, so make it
+      // visible at DXVK_LOG_LEVEL=warn next to the app-thread HITCH line.
+      std::string line = str::format("COMPILE frame=", s_frame, " dtMs=", dtMs,
         " shaders=", nSh, "/", msSh, "ms shared=", nShared,
         " psos=", nPso, "/", msPso, "ms renderWait=", nWait, "/", msWait,
-        "ms skipped=", nSkip, " queued=", queued));
+        "ms skipped=", nSkip, " queued=", queued);
+      if (dtMs >= hitchMs())
+        Logger::warn(line);
+      else
+        Logger::info(line);
     }
 
   }

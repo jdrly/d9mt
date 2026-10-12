@@ -169,14 +169,20 @@ namespace dxvk {
     HRESULT hr;
     high_resolution_clock::time_point until = { };
 
-    { D3D9DeviceLock lock = m_parent->LockDevice();
-      hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);
-      until = UpdateBackgroundThrottle(throttle);
+    { hitch::Scope hs(m_parent->Hitch(), hitch::Present, true);
+
+      { D3D9DeviceLock lock = m_parent->LockDevice();
+        hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);
+        until = UpdateBackgroundThrottle(throttle);
+      }
+
+      // Sleep without the device lock; the CS thread never needs it.
+      if (until != high_resolution_clock::time_point())
+        Sleep::sleepUntil(high_resolution_clock::now(), until);
     }
 
-    // Sleep without the device lock; the CS thread never needs it.
-    if (until != high_resolution_clock::time_point())
-      Sleep::sleepUntil(high_resolution_clock::now(), until);
+    if (unlikely(hitch::g_enabled))
+      m_parent->HitchFrameEnd();
     return hr;
   }
 
@@ -854,7 +860,9 @@ namespace dxvk {
 
     m_parent->FlushCsChunk();
 
-    SyncFrameLatency();
+    { hitch::Scope hs(m_parent->Hitch(), hitch::Latency);
+      SyncFrameLatency();
+    }
 
     (void)0;
 

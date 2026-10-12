@@ -88,9 +88,10 @@ namespace dxvk {
 
   void D3D9Initializer::InitHostVisibleBuffer(
           MtlBufferSlice     Slice) {
-    std::memset(
-      Slice.buffer()->mapPtr(Slice.offset()), 0,
-      Slice.length());
+    // Nothing to do: CPU-visible Metal buffers are created over fresh
+    // VirtualAlloc pages (MtlDeviceImpl::hostAlloc), which are zero. Writing
+    // zeros again only touched every page on the creating (app) thread.
+    (void) Slice;
   }
 
 
@@ -99,6 +100,11 @@ namespace dxvk {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     Rc<MtlTexture> image = pTexture->GetImage();
+
+    // The backend only clears attachment-capable images (initImage skips the
+    // rest); don't queue a no-op command for every streamed texture.
+    if (!(image->info().usage & MtlTextureUsageRenderTarget))
+      return;
 
     EmitCs([
       cImage = std::move(image)
@@ -142,8 +148,10 @@ namespace dxvk {
           dst += dstSlice;
         }
       }
-    } else {
+    } else if (pTexture->GetBuffer() == nullptr) {
       // All subresources live in one chunk, so subresource 0's pointer covers them all.
+      // A Metal backing buffer is fresh, zeroed VirtualAlloc memory (hostAlloc)
+      // and needs no clear; only other storage (MemoryFileRegion) does.
       std::memset(
         mapPtr, 0,
         pTexture->GetTotalSize());

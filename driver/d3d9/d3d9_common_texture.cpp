@@ -287,12 +287,10 @@ namespace dxvk {
 
     m_buffer = m_device->GetDXVKDevice()->createBuffer(info);
 
-    if (Initialize) {
-      if (m_data)
-        std::memcpy(m_buffer->mapPtr(0), m_data.map(), m_totalSize);
-      else
-        std::memset(m_buffer->mapPtr(0), 0, m_totalSize);
-    }
+    // A new buffer is fresh, zeroed VirtualAlloc memory (hostAlloc), so only
+    // existing data needs copying.
+    if (Initialize && m_data)
+      std::memcpy(m_buffer->mapPtr(0), m_data.map(), m_totalSize);
     m_data = {};
   }
 
