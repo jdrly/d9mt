@@ -20,7 +20,8 @@ namespace dxvk::backend {
 
   public:
 
-    MtlResidencyTracker(obj_handle_t device, obj_handle_t queue);
+    // batchCommits = false (legacy): serialRetired() commits its removals itself.
+    MtlResidencyTracker(obj_handle_t device, obj_handle_t queue, bool batchCommits = true);
 
     ~MtlResidencyTracker();
 
@@ -31,13 +32,16 @@ namespace dxvk::backend {
 
     void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u);
 
-    // Commits pending adds/removes (once per submit, and only if the set
-    // changed), then frees what serialRetired() removed.
+    // Commits pending adds/removes: once per submit, and only if the set changed.
     void beforeSubmit();
 
-    // Removes allocations whose last use has retired; they are released
-    // after the next commit, so one commit covers adds and removes alike.
+    // Removes allocations whose last use has retired from the set. They are
+    // released (object, then host memory) by the first serialRetired() or
+    // releaseCommitted() after the next commit, so one commit covers adds
+    // and removes alike and releasing stays off the pre-commit path.
     void serialRetired(uint64_t completedSerial);
+
+    void releaseCommitted();
 
     bool attachLayer(obj_handle_t layer);
     void detachLayer(obj_handle_t layer);
@@ -60,13 +64,18 @@ namespace dxvk::backend {
       uint64_t     bytes   = 0u;
     };
 
+    bool retireLocked(uint64_t completedSerial);
+    void commitLocked();
+
     obj_handle_t    m_queue = 0u;
+    bool            m_batchCommits = true;
     WmtResidencySet m_set;
 
     std::mutex                  m_mutex;
     bool                        m_dirty = false;
     std::vector<PendingRemoval> m_pending;
-    std::vector<PendingRemoval> m_removed;  // out of the set, awaiting commit
+    std::vector<PendingRemoval> m_removed;    // out of the set, awaiting commit
+    std::vector<PendingRemoval> m_committed;  // removal committed, awaiting release
     std::vector<obj_handle_t>   m_attachedLayerSets;
 
     std::atomic<uint64_t> m_adds{0u};

@@ -6,8 +6,8 @@
 
 namespace dxvk::backend {
 
-  MtlResidencyTracker::MtlResidencyTracker(obj_handle_t device, obj_handle_t queue)
-  : m_queue(queue) {
+  MtlResidencyTracker::MtlResidencyTracker(obj_handle_t device, obj_handle_t queue, bool batchCommits)
+  : m_queue(queue), m_batchCommits(batchCommits) {
     WMTResidencySetInfo info = {};
     m_set = WmtResidencySet::adopt(MTLDevice_newResidencySet(device, &info));
 
@@ -25,6 +25,7 @@ namespace dxvk::backend {
   MtlResidencyTracker::~MtlResidencyTracker() {
     serialRetired(~0ull);
     beforeSubmit();
+    releaseCommitted();
 
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_set)
@@ -62,20 +63,23 @@ namespace dxvk::backend {
     if (!m_set)
       return;
 
-    std::vector<PendingRemoval> removed;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_dirty)
+      commitLocked();
+  }
+
+  void MtlResidencyTracker::releaseCommitted() {
+    std::vector<PendingRemoval> released;
 
     { std::lock_guard<std::mutex> lock(m_mutex);
-      if (!m_dirty)
+      if (m_committed.empty())
         return;
-      MTLResidencySet_commit(m_set.handle());
-      m_dirty = false;
-      m_commits++;
-      removed.swap(m_removed);
+      released.swap(m_committed);
     }
 
-    // Order matters: set removal + commit (above) -> object release -> host free,
-    // so the Metal buffer dies before its bytesNoCopy memory.
-    for (const PendingRemoval& p : removed) {
+    // Order matters: set removal + commit (beforeSubmit) -> object release ->
+    // host free, so the Metal buffer dies before its bytesNoCopy memory.
+    for (const PendingRemoval& p : released) {
       NSObject_release(p.alloc);
       if (p.hostMem)
         VirtualFree(p.hostMem, 0, MEM_RELEASE);
@@ -86,9 +90,22 @@ namespace dxvk::backend {
     if (!m_set)
       return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // Removed by an earlier call and committed since (normally by the
+    // submit that just ran): release them now, off the pre-commit path.
+    releaseCommitted();
+
+    { std::lock_guard<std::mutex> lock(m_mutex);
+      if (!retireLocked(completedSerial) || m_batchCommits)
+        return;
+      // Legacy: commit the removals right away, as before batching.
+      commitLocked();
+    }
+    releaseCommitted();
+  }
+
+  bool MtlResidencyTracker::retireLocked(uint64_t completedSerial) {
     if (m_pending.empty())
-      return;
+      return false;
 
     size_t write = 0u, due = 0u;
     for (size_t i = 0u; i < m_pending.size(); i++) {
@@ -112,6 +129,15 @@ namespace dxvk::backend {
       m_dirty = true;
       m_removes += due;
     }
+    return due != 0u;
+  }
+
+  void MtlResidencyTracker::commitLocked() {
+    MTLResidencySet_commit(m_set.handle());
+    m_dirty = false;
+    m_commits++;
+    m_committed.insert(m_committed.end(), m_removed.begin(), m_removed.end());
+    m_removed.clear();
   }
 
   bool MtlResidencyTracker::attachLayer(obj_handle_t layer) {

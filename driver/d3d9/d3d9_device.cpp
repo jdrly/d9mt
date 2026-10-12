@@ -4551,8 +4551,10 @@ namespace dxvk {
       const MtlDeviceSize retireAt = GetStagingMemoryStatistics().allocated;
       m_stagingAllocatedBase += m_stagingBuffer.stats().allocated;
 
-      if (m_stagingBuffer.size() == StagingBufferSize)
-        m_stagingPool.retire(m_stagingBuffer.takeBuffer(), retireAt);
+      if (m_stagingBuffer.size() == StagingBufferSize) {
+        if (Rc<MtlBuffer> full = m_stagingBuffer.takeBuffer(); full != nullptr)
+          m_stagingPool.retire(std::move(full), retireAt);
+      }
 
       Rc<MtlBuffer> block;
       if (size <= StagingBufferSize && m_stagingPool.take(m_stagingBufferFence->value(), block)) {

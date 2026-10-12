@@ -23,7 +23,9 @@ class UploadRing {
 public:
 
   // keepIdle: idle chunks kept on the free list for good (0 = all of them).
-  UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency, uint32_t keepIdle = 0u);
+  // legacy: FIFO reuse and oversized chunks kept forever (pre-profile policy).
+  UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency,
+             uint32_t keepIdle = 0u, bool legacy = false);
 
   ~UploadRing();
 
@@ -56,6 +58,7 @@ private:
   uint64_t m_chunkSize;
   MtlResidencyTracker* m_residency = nullptr;
   uint32_t m_keepIdle = 0u;
+  bool     m_legacy = false;
   uint64_t m_totalBytes = 0u;
   uint64_t m_frame = 0u;
 

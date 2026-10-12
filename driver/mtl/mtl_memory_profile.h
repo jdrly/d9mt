@@ -19,13 +19,19 @@ namespace dxvk {
     uint64_t      physRam        = 0u;   // bytes, 0 = unknown
     uint64_t      budget         = 0u;   // soft Metal budget in bytes, 0 = none (warning/LRU: later phases)
     uint32_t      reportedVramMB = 4096u; // d3d9 GetAvailableTextureMem cap unless d3d9.maxAvailableMemory is set
+    // `unlimited` = the pre-profile driver in every respect, for A/B runs:
+    // no staging-block pool, one residency commit per change, FIFO ring that
+    // keeps oversized chunks, no MetalFX scaler eviction, buffer in-use
+    // tracking not reset on DISCARD renames.
+    bool          legacy         = false;
+    bool          writeOnlyDirect = true; // DEFAULT+WRITEONLY buffers mapped directly (d9mt.writeOnlyDirect)
     // Later phases (not consumed yet): managed/BUFFER-mode CPU copy eviction, LRU residency.
     bool          evictManagedTex    = false;
     bool          evictBufferStaging = false;
     bool          residencyLru       = false;
     uint32_t      coldFrames         = 0u;
     // Pools.
-    uint32_t      stagingBlocks      = 8u;   // idle 4 MiB D3D9 staging blocks kept for reuse
+    uint32_t      stagingBlocks      = 8u;   // idle 4 MiB D3D9 staging blocks kept for reuse (0 = no pool)
     uint32_t      stagingInFlightMB  = 90u;  // D3D9 staging bytes in flight before the CPU waits
     uint32_t      recycledPerBuffer  = 4u;   // spare DISCARD backings kept per buffer
     uint64_t      recycledCapBytes   = 0u;   // device-wide cap on spare backings, 0 = none
@@ -44,6 +50,15 @@ namespace dxvk {
       case MtlMemoryTier::Ultra:     return "ultra";
       default:                       return "unlimited";
     }
+  }
+
+  // Env/config switch: 1 = on, 0 = off, -1 = unset or unrecognised.
+  inline int parseSwitch(std::string s) {
+    for (char& c : s)
+      c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+    if (s == "1" || s == "true" || s == "yes" || s == "on")   return 1;
+    if (s == "0" || s == "false" || s == "no" || s == "off")  return 0;
+    return -1;
   }
 
   // "auto" (or empty) -> isAuto. Returns false for unknown names.
@@ -74,8 +89,9 @@ namespace dxvk {
   }
 
   // The tier table. `unlimited` is exactly the pre-profile behaviour. Until
-  // MEMSTATS data says otherwise, `ultra` keeps unlimited's pool policy too
-  // (it only differs in the budget and, later, in managed-texture eviction).
+  // MEMSTATS data says otherwise, `ultra` keeps unlimited's pool sizes and
+  // caps; it differs in the budget, the `legacy` switches and, later, in
+  // managed-texture eviction.
   inline MtlMemoryProfile memoryProfileForTier(MtlMemoryTier tier) {
     constexpr uint64_t MiB = 1ull << 20;
     MtlMemoryProfile p;
@@ -107,6 +123,9 @@ namespace dxvk {
         p.evictManagedTex = true;
         break;
       case MtlMemoryTier::Unlimited:
+        p.legacy = true;
+        p.writeOnlyDirect = false;
+        p.stagingBlocks = 0u;
         break;
     }
     return p;

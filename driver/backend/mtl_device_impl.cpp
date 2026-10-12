@@ -119,8 +119,9 @@ namespace dxvk::backend {
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
-    m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle());
-    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get(), profile.ringKeep);
+    m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle(), !profile.legacy);
+    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get(),
+                                         profile.ringKeep, profile.legacy);
 
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
 
@@ -138,6 +139,8 @@ namespace dxvk::backend {
         profile.recycledCapBytes ? str::format(profile.recycledCapBytes / MiB, " MiB") : std::string("none"),
       ", ring keep ", profile.ringKeep ? str::format(profile.ringKeep) : std::string("all"),
       ", allocators ", profile.allocatorCap,
+      ", writeOnlyDirect ", profile.writeOnlyDirect ? "on" : "off",
+      profile.legacy ? ", legacy pools" : "",
       profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
       profile.labels ? ", labels" : ""));
   }
@@ -217,6 +220,7 @@ namespace dxvk::backend {
       if (m_tracker && m_residency) {
         m_residency->serialRetired(m_tracker->completedSerial());
         m_residency->beforeSubmit();  // commit the removals and free them now
+        m_residency->releaseCommitted();
       }
       p = VirtualAlloc(nullptr, SIZE_T(size),
           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);

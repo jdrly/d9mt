@@ -4,8 +4,9 @@
 
 namespace dxvk::backend {
 
-UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency, uint32_t keepIdle)
-: m_device(device), m_chunkSize(chunkSize), m_residency(residency), m_keepIdle(keepIdle) {
+UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency,
+                       uint32_t keepIdle, bool legacy)
+: m_device(device), m_chunkSize(chunkSize), m_residency(residency), m_keepIdle(keepIdle), m_legacy(legacy) {
   m_live.push_back(createChunk(m_chunkSize));
 }
 
@@ -26,13 +27,22 @@ RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
   uint64_t offset = (cur->used + align - 1u) & ~(align - 1u);
 
   if (offset + size > cur->size) {
+    // The outgoing chunk may be referenced by the command buffer being
+    // recorded, which onSubmit() hasn't stamped yet: its old stamp (or 0
+    // for a fresh chunk) must not let onComplete() retire it, e.g. from
+    // endFrame(), which runs before the frame is submitted.
+    cur->retireSerial = ~0ull;
+
     Chunk next;
 
     // Most recently freed first (warm), so the front of m_free goes idle.
-    for (size_t i = m_free.size(); i > 0u; i--) {
-      if (m_free[i - 1u].size >= size) {
-        next = std::move(m_free[i - 1u]);
-        m_free.erase(m_free.begin() + (i - 1u));
+    // Legacy: oldest freed first.
+    const size_t n = m_free.size();
+    for (size_t k = 0u; k < n; k++) {
+      const size_t i = m_legacy ? k : n - 1u - k;
+      if (m_free[i].size >= size) {
+        next = std::move(m_free[i]);
+        m_free.erase(m_free.begin() + i);
         break;
       }
     }
@@ -68,7 +78,7 @@ void UploadRing::onComplete(uint64_t completedSerial) {
 
     if (chunk.retireSerial <= completedSerial) {
       // An oversized chunk served one big allocation; don't keep it forever.
-      if (chunk.size > m_chunkSize) {
+      if (chunk.size > m_chunkSize && !m_legacy) {
         destroyChunk(chunk);
       } else {
         chunk.freeSince = m_frame;

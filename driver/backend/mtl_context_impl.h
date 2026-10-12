@@ -343,7 +343,8 @@ namespace dxvk::backend {
     bool ensureFanIndices();
 
     bool presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) override;
-    std::map<std::array<uint32_t, 6>, obj_handle_t> m_fxScalers;
+    struct FxScaler { obj_handle_t scaler; uint64_t lastUse; };
+    std::map<std::array<uint32_t, 6>, FxScaler> m_fxScalers;
     bool m_fxChecked = false, m_fxUnsupported = false;
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);

@@ -757,7 +757,8 @@ namespace dxvk::backend {
     obj_handle_t scaler = 0u;
     auto it = m_fxScalers.find(key);
     if (it != m_fxScalers.end()) {
-      scaler = it->second;
+      scaler = it->second.scaler;
+      it->second.lastUse = m_currentSerial;
     } else {
       WMTFXSpatialScalerInfo info = {};
       info.color_format  = WMTPixelFormat(uint32_t(src->format));
@@ -774,13 +775,17 @@ namespace dxvk::backend {
         return false;
       }
       /* A new size (window resize) makes the old scalers dead weight: keep
-       * one previous size, release the rest once the GPU is past them. */
-      while (m_fxScalers.size() >= 2u) {
-        obj_handle_t old = m_fxScalers.begin()->second;
-        m_fxScalers.erase(m_fxScalers.begin());
+       * the most recently used one, release the rest once the GPU is past them. */
+      while (!m_device->memoryProfile().legacy && m_fxScalers.size() >= 2u) {
+        auto lru = m_fxScalers.begin();
+        for (auto i = m_fxScalers.begin(); i != m_fxScalers.end(); i++)
+          if (i->second.lastUse < lru->second.lastUse)
+            lru = i;
+        obj_handle_t old = lru->second.scaler;
+        m_fxScalers.erase(lru);
         m_device->submissions().retireAfter(m_currentSerial, [old]() { NSObject_release(old); });
       }
-      m_fxScalers.emplace(key, scaler);
+      m_fxScalers.emplace(key, FxScaler { scaler, m_currentSerial });
     }
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
@@ -1533,6 +1538,15 @@ namespace dxvk::backend {
     if (slice == nullptr)
       return;
     ensureCommandBuffer();
+
+    /* The tracking serial answers "is the GPU still using what the CPU maps":
+     * after a rename that is the new backing, which nothing recorded so far
+     * uses (the old one is kept alive by retireAfter below). Every later use
+     * re-stamps it: refreshed vertex streams are flagged dirty, the index
+     * buffer is stamped per draw. So a non-DISCARD lock after a DISCARD no
+     * longer waits for the old backing. */
+    if (!m_device->memoryProfile().legacy)
+      buffer->setTrackingSerial(0u);
 
     for (uint32_t i = 0u; i < m_vertexStreams.size(); i++) {
       auto& stream = m_vertexStreams[i];

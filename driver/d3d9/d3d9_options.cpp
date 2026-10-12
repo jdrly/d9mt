@@ -2,6 +2,8 @@
 
 #include "d3d9_options.h"
 
+#include "../mtl/mtl_device.h"
+
 #include "d3d9_caps.h"
 
 namespace dxvk {
@@ -30,8 +32,6 @@ namespace dxvk {
 
 
   D3D9Options::D3D9Options(const Rc<MtlDevice>& device, const Config& config) {
-    (void)device;
-
     this->customVendorId                = parsePciId(config.getOption<std::string>("d3d9.customVendorId"));
     this->customDeviceId                = parsePciId(config.getOption<std::string>("d3d9.customDeviceId"));
     this->customDeviceDesc              = config.getOption<std::string> ("d3d9.customDeviceDesc");
@@ -67,7 +67,6 @@ namespace dxvk {
     this->cachedWriteOnlyBuffers        = config.getOption<bool>        ("d3d9.cachedWriteOnlyBuffers",          false);
     this->deviceLocalConstantBuffers    = config.getOption<Tristate>    ("d3d9.deviceLocalConstantBuffers",    Tristate::Auto);
     this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
-    this->writeOnlyDirectMapping        = config.getOption<bool>        ("d9mt.writeOnlyDirect",               true);
     this->forceDrawTimeBufferUpload     = config.getOption<bool>        ("d3d9.forceDrawTimeBufferUpload",     false);
     this->ignoreDefaultBufferLockRange  = config.getOption<bool>        ("d3d9.ignoreDefaultBufferLockRange",  false);
     this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
@@ -104,8 +103,8 @@ namespace dxvk {
       this->useFP16 = useFP16 == Tristate::True;
     }
 
-    if (std::string v = env::getEnvVar("D9MT_WRITEONLY_DIRECT"); !v.empty())
-      this->writeOnlyDirectMapping = v != "0";
+    // Memory profile (d9mt.writeOnlyDirect / D9MT_WRITEONLY_DIRECT override it).
+    this->writeOnlyDirectMapping = device == nullptr || device->memoryProfile().writeOnlyDirect;
 
     this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
   }

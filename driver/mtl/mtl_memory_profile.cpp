@@ -42,19 +42,20 @@ namespace dxvk {
     if (int32_t mb = config.getOption<int32_t>("d9mt.memoryBudgetMB", 0); mb > 0)
       p.budget = uint64_t(mb) << 20;
 
-    // D9MT_MEMSTATS=1: every 256 frames; =N (>= 16): every N frames.
-    std::string stats = env::getEnvVar("D9MT_MEMSTATS");
-    if (stats.empty())
-      stats = config.getOption<bool>("d9mt.memoryStats", false) ? "1" : "0";
-    if (stats != "0") {
-      uint32_t n = uint32_t(std::strtoul(stats.c_str(), nullptr, 10));
-      p.statsInterval = n >= 16u ? n : 256u;
-    }
+    p.writeOnlyDirect = config.getOption<bool>("d9mt.writeOnlyDirect", p.writeOnlyDirect);
+    if (int v = parseSwitch(env::getEnvVar("D9MT_WRITEONLY_DIRECT")); v >= 0)
+      p.writeOnlyDirect = v != 0;
 
-    std::string labels = env::getEnvVar("D9MT_LABELS");
-    p.labels = labels.empty()
-      ? config.getOption<bool>("d9mt.resourceLabels", false)
-      : labels == "1";
+    // D9MT_MEMSTATS=1/true: every 256 frames; =N (>= 16): every N frames; 0/false: off.
+    std::string stats = env::getEnvVar("D9MT_MEMSTATS");
+    uint32_t every = uint32_t(std::strtoul(stats.c_str(), nullptr, 10));
+    if (every)
+      p.statsInterval = every >= 16u ? every : 256u;
+    else if (int v = parseSwitch(stats); v >= 0 ? v : config.getOption<bool>("d9mt.memoryStats", false))
+      p.statsInterval = 256u;
+
+    int labels = parseSwitch(env::getEnvVar("D9MT_LABELS"));
+    p.labels = labels >= 0 ? labels != 0 : config.getOption<bool>("d9mt.resourceLabels", false);
     return p;
   }
 
