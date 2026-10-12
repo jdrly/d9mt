@@ -417,29 +417,16 @@ rm -f "$DXBCSM3_LIB"
 "$MINGW_PREFIX-ar" rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
 
-# winemetal import lib: prefer the bridge-generated def (build-bridge.sh emits the
-# full winemetal.def incl. MTLDevice_newRenderPipelineStateWithVertexDescriptor,
-# the vertex-descriptor pipeline entry the pso-cache imports). Fall back to the
-# older third_party def only if the bridge hasn't been built.
-WMDEF="$V2/build/bridge/winemetal.def"
-[ -f "$WMDEF" ] || WMDEF="$V2/third_party/winemetal/winemetal32.def"
-WMIMP="$BUILD/libwinemetal32.a"
+# winemetal import lib: the export list is generated from the bridge headers
+# (scripts/gen-bridge-def.sh, the same step build-bridge.sh runs), so the
+# driver links without building the bridge first.
+WMDEF="$BUILD/winemetal.def"
+bash "$V2/scripts/gen-bridge-def.sh" > "$WMDEF"
+WMIMP="$BUILD/libwinemetal.a"
 D3D9DEF="${D3D9DEF:-$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def}"
 if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
-  # The real shader module (d3d9_shader_compiler.cpp) imports the d9mtair AIR
-  # compile thunks (D9MTAirCompile/Free/Version). The bridge-generated def
-  # already carries them; when we fall back to the older third_party def it does
-  # not, so union in the thunk names from bridge/d9mtair_thunks.h (same grep the
-  # bridge uses) before generating the import lib. Keeps the driver link FATAL
-  # green whether or not build-bridge.sh has been run.
-  COMBDEF="$BUILD/winemetal-driver.def"
-  cp "$WMDEF" "$COMBDEF"
-  if ! grep -q 'D9MTAirCompile' "$COMBDEF"; then
-    /usr/bin/grep -hoE '[A-Za-z_][A-Za-z0-9_]*\(' "$V2/bridge/d9mtair_thunks.h" \
-      | sed -E 's/\($//; s/^/  /' >> "$COMBDEF"
-  fi
-  "$MINGW_PREFIX-dlltool" -d "$COMBDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
-    && echo "  winemetal32 import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/} + d9mtair thunks)"
+  "$MINGW_PREFIX-dlltool" -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+    && echo "  winemetal import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
 # Phase C-10: the link is now FATAL. The full CORE graph (device/swapchain/

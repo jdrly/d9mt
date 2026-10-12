@@ -123,14 +123,8 @@ if [ -f "$ROOT/tools/make-builtin.py" ]; then
 fi
 
 echo "[bridge] import lib for the driver"
-"$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def" 2>/dev/null || {
-  # derive exports from the header's WINEMETAL_API decls
-  { echo "LIBRARY winemetal.dll"; echo "EXPORTS";
-    /usr/bin/grep -hoE '^(WINEMETAL_API[^;]*?)([A-Za-z_][A-Za-z0-9_]*)\(' \
-      "$BR/winemetal.h" "$BR/d9mtair_thunks.h" "$BR/airconv_public.h" 2>/dev/null \
-      | sed -E 's/.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)\($/  \1/' | sort -u; } \
-    > "$OUT/winemetal.def"
-}
+bash "$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def"
+echo "  $(grep -c '^  ' "$OUT/winemetal.def") exports -> $OUT/winemetal.def"
 i686-w64-mingw32-dlltool -d "$OUT/winemetal.def" \
   -l "$OUT/libwinemetal32.a" --dllname winemetal.dll
 
