@@ -5534,7 +5534,11 @@ namespace dxvk {
     constexpr MtlDeviceSize Megabytes = 1024 * 1024;
     constexpr MtlDeviceSize ReservedMemory = 8 * Megabytes;
 
-    MtlDeviceSize maxMemory = (MtlDeviceSize(m_d3d9Options.maxAvailableMemory) * Megabytes) - 1;
+    // An explicit d3d9.maxAvailableMemory (app profile or dxvk.conf) wins over the memory profile.
+    const MtlDeviceSize maxMemoryMB = m_d3d9Options.maxAvailableMemory >= 0
+      ? MtlDeviceSize(m_d3d9Options.maxAvailableMemory)
+      : MtlDeviceSize(m_dxvkDevice->memoryProfile().reportedVramMB);
+    MtlDeviceSize maxMemory = (maxMemoryMB * Megabytes) - 1;
     availableTextureMemory = std::min(availableTextureMemory, maxMemory) - ReservedMemory;
 
     return int64_t(availableTextureMemory);

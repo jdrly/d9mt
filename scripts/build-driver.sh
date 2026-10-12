@@ -220,7 +220,8 @@ CORE+=("$DRV"/cs/dxvk_cs.cpp)
 # Vulkan-free (pure bit/page math); copied from upstream to the driver tree.
 CORE+=("$DRV"/dxvk/dxvk_allocator.cpp)
 CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
-       "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp)
+       "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp \
+       "$DRV"/mtl/mtl_memory_profile.cpp)
 # backend/ — the real winemetal-backed Metal 3 backend (MtlContextImpl +
 # device/ring/submission/pso-cache/presenter). These override the seam-base
 # stub methods; the stubs still supply the MtlContext/MtlDevice base vtable

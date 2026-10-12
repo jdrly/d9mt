@@ -1,0 +1,61 @@
+#include "mtl_memory_profile.h"
+
+#include <windows.h>
+
+#include <cstdlib>
+
+#include "../util/config/config.h"
+#include "../util/log/log.h"
+#include "../util/util_env.h"
+
+namespace dxvk {
+
+  uint64_t queryPhysicalRam() {
+    MEMORYSTATUSEX status = { };
+    status.dwLength = sizeof(status);
+    return GlobalMemoryStatusEx(&status) ? uint64_t(status.ullTotalPhys) : 0u;
+  }
+
+
+  MtlMemoryProfile resolveMemoryProfile(const Config& config) {
+    std::string name = env::getEnvVar("D9MT_MEMORY_PROFILE");
+    if (name.empty())
+      name = config.getOption<std::string>("d9mt.memoryProfile", "auto");
+
+    const uint64_t physRam = queryPhysicalRam();
+
+    MtlMemoryTier tier = MtlMemoryTier::Unlimited;
+    bool isAuto = false;
+    if (!parseMemoryTier(name, tier, isAuto)) {
+      Logger::warn(str::format("D9MT: unknown memory profile '", name, "', using auto"));
+      isAuto = true;
+    }
+    if (isAuto)
+      tier = autoMemoryTier(physRam);
+
+    MtlMemoryProfile p = memoryProfileForTier(tier);
+    p.autoTier = isAuto;
+    p.physRam  = physRam;
+
+    if (int32_t mb = config.getOption<int32_t>("d9mt.reportedVramMB", 0); mb > 0)
+      p.reportedVramMB = uint32_t(mb);
+    if (int32_t mb = config.getOption<int32_t>("d9mt.memoryBudgetMB", 0); mb > 0)
+      p.budget = uint64_t(mb) << 20;
+
+    // D9MT_MEMSTATS=1: every 256 frames; =N (>= 16): every N frames.
+    std::string stats = env::getEnvVar("D9MT_MEMSTATS");
+    if (stats.empty())
+      stats = config.getOption<bool>("d9mt.memoryStats", false) ? "1" : "0";
+    if (stats != "0") {
+      uint32_t n = uint32_t(std::strtoul(stats.c_str(), nullptr, 10));
+      p.statsInterval = n >= 16u ? n : 256u;
+    }
+
+    std::string labels = env::getEnvVar("D9MT_LABELS");
+    p.labels = labels.empty()
+      ? config.getOption<bool>("d9mt.resourceLabels", false)
+      : labels == "1";
+    return p;
+  }
+
+}

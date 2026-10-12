@@ -153,8 +153,8 @@ namespace dxvk {
   }
 
   Rc<MtlDevice> MtlAdapter::createDevice() {
-    extern Rc<MtlDevice> backendCreateDevice();
-    Rc<MtlDevice> device = backendCreateDevice();
+    extern Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile);
+    Rc<MtlDevice> device = backendCreateDevice(m_memProfile);
     if (device == nullptr) {
       Logger::err("MtlAdapter::createDevice: backend device unavailable");
       return new MtlDevice();
@@ -168,6 +168,8 @@ namespace dxvk {
     m_config.merge(Config::getUserConfig());
     m_config.merge(Config::getAppConfig(env::getExePath()));
     m_config.logOptions();
+
+    m_memProfile = resolveMemoryProfile(m_config);
   }
 
   MtlInstance::~MtlInstance() {
@@ -179,7 +181,7 @@ namespace dxvk {
   }
 
   Rc<MtlAdapter> MtlInstance::enumAdapters(uint32_t index) {
-    return index == 0u ? new MtlAdapter() : nullptr;
+    return index == 0u ? new MtlAdapter(m_memProfile) : nullptr;
   }
 
 }

@@ -88,15 +88,6 @@ namespace dxvk::backend {
       return total * std::max(1u, info.arrayLayers) * std::max(1u, info.sampleCount);
     }
 
-    // D9MT_MEMSTATS=1: DIAG MEM line every 256 frames; =N (>= 16): every N frames.
-    uint32_t memStatsIntervalFromEnv() {
-      std::string v = env::getEnvVar("D9MT_MEMSTATS");
-      if (v.empty() || v == "0")
-        return 0u;
-      uint32_t n = uint32_t(std::strtoul(v.c_str(), nullptr, 10));
-      return n >= 16u ? n : 256u;
-    }
-
   }
 
   // D9MT_COMPILE_THREADS=<n> overrides min(4, ncpu/2); 0 = no workers.
@@ -110,8 +101,10 @@ namespace dxvk::backend {
     return n;
   }
 
-  MtlDeviceImpl::MtlDeviceImpl()
+  MtlDeviceImpl::MtlDeviceImpl(const MtlMemoryProfile& profile)
   : m_compileWorkers(std::make_unique<MtlCompileWorkers>(compileThreadCount())) {
+    m_memProfile = profile;
+
     obj_handle_t devices = WMTCopyAllDevices();
     obj_handle_t device = NSArray_object(devices, 0u);
     NSObject_release(devices);
@@ -131,8 +124,22 @@ namespace dxvk::backend {
 
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
 
-    m_memStatsInterval = memStatsIntervalFromEnv();
-    m_labels = env::getEnvVar("D9MT_LABELS") == "1";
+    m_memStatsInterval = profile.statsInterval;
+    m_labels = profile.labels;
+
+    constexpr uint64_t MiB = 1ull << 20;
+    Logger::warn(str::format("D9MT: memory profile ", memoryTierName(profile.tier),
+      profile.autoTier ? " (auto)" : "", ": RAM ", profile.physRam / MiB, " MiB",
+      ", working set ", m_info.maxBufferLength / MiB, " MiB",
+      ", reportedVram ", profile.reportedVramMB, " MB",
+      ", budget ", profile.budget ? str::format(profile.budget / MiB, " MiB") : std::string("none"),
+      ", staging ", profile.stagingBlocks, " blocks/", profile.stagingInFlightMB, " MiB in flight",
+      ", recycled ", profile.recycledPerBuffer, "/buffer cap ",
+        profile.recycledCapBytes ? str::format(profile.recycledCapBytes / MiB, " MiB") : std::string("none"),
+      ", ring keep ", profile.ringKeep ? str::format(profile.ringKeep) : std::string("all"),
+      ", allocators ", profile.allocatorCap,
+      profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
+      profile.labels ? ", labels" : ""));
   }
 
   void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
@@ -562,8 +569,8 @@ namespace dxvk::backend {
 
 namespace dxvk {
 
-  Rc<MtlDevice> backendCreateDevice() {
-    Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl();
+  Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile) {
+    Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl(profile);
     return device->valid() ? Rc<MtlDevice>(device) : nullptr;
   }
 

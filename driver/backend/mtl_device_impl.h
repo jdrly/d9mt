@@ -76,7 +76,7 @@ namespace dxvk::backend {
 
   public:
 
-    MtlDeviceImpl();
+    explicit MtlDeviceImpl(const MtlMemoryProfile& profile);
     ~MtlDeviceImpl();
 
     Rc<MtlBuffer> createBuffer(

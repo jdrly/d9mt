@@ -4,6 +4,7 @@
 
 #include "mtl_types.h"
 #include "mtl_resource.h"
+#include "mtl_memory_profile.h"
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
@@ -138,9 +139,12 @@ namespace dxvk {
 
     virtual uint64_t getTimestampFrequency() const;
 
+    const MtlMemoryProfile& memoryProfile() const { return m_memProfile; }
+
   protected:
 
-    MtlDeviceInfo m_info = { };
+    MtlDeviceInfo    m_info = { };
+    MtlMemoryProfile m_memProfile = { };
 
   };
 
@@ -170,6 +174,7 @@ namespace dxvk {
 
   class MtlAdapter : public RcObject {
   public:
+    explicit MtlAdapter(const MtlMemoryProfile& profile = { }) : m_memProfile(profile) { }
     virtual ~MtlAdapter() { }
 
     virtual const MtlDeviceInfo& deviceInfo() const;
@@ -179,7 +184,8 @@ namespace dxvk {
     virtual Rc<MtlDevice> createDevice();
 
   protected:
-    MtlDeviceInfo m_info = { };
+    MtlDeviceInfo    m_info = { };
+    MtlMemoryProfile m_memProfile = { };
   };
 
   class MtlInstance : public RcObject {
@@ -195,7 +201,8 @@ namespace dxvk {
     void setConfig(const Config& config) { m_config = config; }
 
   protected:
-    Config m_config;
+    Config           m_config;
+    MtlMemoryProfile m_memProfile = { };
   };
 
 }

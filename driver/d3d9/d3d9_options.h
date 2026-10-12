@@ -48,7 +48,8 @@ namespace dxvk {
 
     int32_t samplerAnisotropy;
 
-    uint32_t maxAvailableMemory;
+    // MB; -1 (default) = the memory profile's reportedVramMB (d9mt.reportedVramMB)
+    int32_t maxAvailableMemory;
 
     D3D9FloatEmulation d3d9FloatEmulation;
 
