@@ -27,11 +27,13 @@ RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
   uint64_t offset = (cur->used + align - 1u) & ~(align - 1u);
 
   if (offset + size > cur->size) {
-    // The outgoing chunk may be referenced by the command buffer being
-    // recorded, which onSubmit() hasn't stamped yet: its old stamp (or 0
+    // If the command buffer being recorded allocated from the outgoing
+    // chunk, onSubmit() hasn't stamped that use yet: its old stamp (or 0
     // for a fresh chunk) must not let onComplete() retire it, e.g. from
-    // endFrame(), which runs before the frame is submitted.
-    cur->retireSerial = ~0ull;
+    // endFrame(), which runs before the frame is submitted. Otherwise its
+    // stamp already is the last submission that used it.
+    if (cur->pending)
+      cur->retireSerial = ~0ull;
 
     Chunk next;
 
@@ -57,6 +59,7 @@ RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
   }
 
   cur->used = offset + size;
+  cur->pending = true;
 
   RingSlice slice;
   slice.buffer = cur->buffer.handle();
@@ -67,8 +70,18 @@ RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
 }
 
 void UploadRing::onSubmit(uint64_t submitSerial) {
-  for (auto& chunk : m_live)
-    chunk.retireSerial = submitSerial;
+  // Stamp only the chunks this command buffer allocated from: the bump
+  // target and chunks that filled up while it was recorded (held at ~0).
+  // Re-stamping every live chunk pushed the retirement of full chunks out
+  // to the newest submission on every flush (10-13 per frame), so they only
+  // retired when the GPU had caught up completely and the ring grew to GiBs
+  // (DIAG MEM ringMiB=3004 after ~11 min, 2026-10-12 18:14 session).
+  for (auto& chunk : m_live) {
+    if (chunk.pending) {
+      chunk.retireSerial = submitSerial;
+      chunk.pending = false;
+    }
+  }
 }
 
 void UploadRing::onComplete(uint64_t completedSerial) {

@@ -246,6 +246,16 @@ namespace dxvk::backend {
     m_cmdbuf.reset();
     m_dirty = DirtyEverything;
 
+    // Ring slices are only valid in the command buffer that allocated them
+    // (UploadRing retires a chunk once its last allocating submission has
+    // completed). Push constants that didn't change would otherwise keep
+    // binding the old slice in later command buffers: upload them again.
+    for (auto& b : m_bindings) {
+      if (b.pushExtent)
+        b.pushDirtyHi = b.pushExtent;  // the whole extent is uploaded anyway
+      b.abGpuAddress = 0u;
+    }
+
     const uint64_t completed = m_device->submissions().completedSerial();
     m_device->submissions().processRetirements();
     m_device->residency().serialRetired(completed);

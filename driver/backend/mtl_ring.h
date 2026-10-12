@@ -2,6 +2,9 @@
 
 // Chunks retire by GPU-completed submission serial, not immediately after
 // use — a live chunk may still be read by an in-flight command buffer.
+// A slice is only valid for the command buffer it was allocated in: a chunk
+// retires once the last submission that allocated from it has completed, so
+// callers must not keep ring addresses across submits.
 
 #include <cstdint>
 #include <vector>
@@ -40,6 +43,9 @@ public:
 
   uint64_t allocatedBytes() const { return m_totalBytes; }
 
+  size_t liveChunks() const { return m_live.size(); }
+  size_t freeChunks() const { return m_free.size(); }
+
 private:
 
   struct Chunk {
@@ -48,7 +54,8 @@ private:
     uint64_t  gpuAddress = 0u;
     uint64_t  size = 0u;
     uint64_t  used = 0u;
-    uint64_t  retireSerial = 0u;
+    uint64_t  retireSerial = 0u;  // last submission that used it; ~0 while 'pending' and rotated out
+    bool      pending = false;     // allocated from by the command buffer being recorded
     uint64_t  freeSince = 0u;  // frame it went onto the free list
   };
 
