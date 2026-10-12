@@ -22,7 +22,8 @@ class UploadRing {
 
 public:
 
-  UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency);
+  // keepIdle: idle chunks kept on the free list for good (0 = all of them).
+  UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency, uint32_t keepIdle = 0u);
 
   ~UploadRing();
 
@@ -31,6 +32,9 @@ public:
   void onSubmit(uint64_t submitSerial);
 
   void onComplete(uint64_t completedSerial);
+
+  // Once per frame: frees free-list chunks beyond keepIdle that sat unused for IdleFrames.
+  void onFrame();
 
   uint64_t allocatedBytes() const { return m_totalBytes; }
 
@@ -43,17 +47,24 @@ private:
     uint64_t  size = 0u;
     uint64_t  used = 0u;
     uint64_t  retireSerial = 0u;
+    uint64_t  freeSince = 0u;  // frame it went onto the free list
   };
+
+  static constexpr uint64_t IdleFrames = 120u;
 
   obj_handle_t m_device;
   uint64_t m_chunkSize;
   MtlResidencyTracker* m_residency = nullptr;
+  uint32_t m_keepIdle = 0u;
   uint64_t m_totalBytes = 0u;
+  uint64_t m_frame = 0u;
 
   std::vector<Chunk> m_live;
   std::vector<Chunk> m_free;
 
   Chunk createChunk(uint64_t minSize);
+
+  void destroyChunk(Chunk& chunk);
 
 };
 

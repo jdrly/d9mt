@@ -30,6 +30,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../util/util_fenced_pool.h"
 #include "../util/util_flush.h"
 #include "../util/util_lru.h"
 #include "../util/util_unmap.h"
@@ -1429,6 +1430,10 @@ namespace dxvk {
     Rc<sync::Fence>                 m_stagingBufferFence;
     MtlDeviceSize                   m_stagingMemorySignaled = 0ull;
     MtlDeviceSize                   m_stagingAllocatedBase = 0ull;
+    // Full 4 MiB staging blocks, reused once m_stagingBufferFence passes the
+    // staging total at which they filled up.
+    FencedPool<Rc<MtlBuffer>>       m_stagingPool;
+    MtlDeviceSize                   m_stagingMaxInFlight = 90ull << 20;
 
     MtlDeviceSize                   m_discardMemoryCounter = 0u;
 

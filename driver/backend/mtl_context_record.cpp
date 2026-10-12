@@ -91,7 +91,7 @@ namespace dxvk::backend {
         slot = s;
     }
     bool fresh = false;
-    if (slot == ~0u && n < kMaxAllocators) {
+    if (slot == ~0u && n < std::clamp(m_device->memoryProfile().allocatorCap, 2u, kMaxAllocators)) {
       m_allocators.push_back(WmtAllocator::adopt(
         MTLDevice_newCommandAllocator(m_device->wmtDevice())));
       m_initAllocators.emplace_back();
@@ -270,6 +270,7 @@ namespace dxvk::backend {
       m_device->submissions().processRetirements();
       m_device->residency().serialRetired(completed);
       m_device->uploadRing().onComplete(completed);
+      m_device->uploadRing().onFrame();
     }
     prof::onFrameEnd();
     compile_stats::onFrameEnd(compile_stats::g_enabled ? m_device->pendingCompiles() : 0u);

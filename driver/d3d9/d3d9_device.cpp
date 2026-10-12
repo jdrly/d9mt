@@ -91,6 +91,10 @@ namespace dxvk {
 
     m_availableMemory = DetermineInitialTextureMemory();
     m_memStats = m_dxvkDevice->memoryProfile().statsInterval != 0u;
+    m_stagingPool.setCapacity(m_dxvkDevice->memoryProfile().stagingBlocks);
+    m_stagingMaxInFlight = MtlDeviceSize(env::is32BitHostPlatform()
+      ? std::min(m_dxvkDevice->memoryProfile().stagingInFlightMB, 30u)
+      : m_dxvkDevice->memoryProfile().stagingInFlightMB) << 20u;
 
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer,
@@ -4541,10 +4545,24 @@ namespace dxvk {
     D3D9BufferSlice result;
     result.slice = m_stagingBuffer.alloc(size);
     if (unlikely(!result.slice.defined())) {
+      // Every slice of the full block was allocated, and its copy emitted to
+      // the CS thread, before the staging total reached this value; the fence
+      // reaching it means a flush after all of them has completed on the GPU.
+      const MtlDeviceSize retireAt = GetStagingMemoryStatistics().allocated;
       m_stagingAllocatedBase += m_stagingBuffer.stats().allocated;
 
-      MtlDeviceSize newSize = std::max<MtlDeviceSize>(size, StagingBufferSize);
-      m_stagingBuffer.reinit(GetDXVKDevice(), newSize);
+      if (m_stagingBuffer.size() == StagingBufferSize)
+        m_stagingPool.retire(m_stagingBuffer.takeBuffer(), retireAt);
+
+      Rc<MtlBuffer> block;
+      if (size <= StagingBufferSize && m_stagingPool.take(m_stagingBufferFence->value(), block)) {
+        m_stagingBuffer.reuse(std::move(block), StagingBufferSize);
+        m_dxvkDevice->frontendStats().stagingReused.fetch_add(1u, std::memory_order_relaxed);
+      } else {
+        MtlDeviceSize newSize = std::max<MtlDeviceSize>(size, StagingBufferSize);
+        m_stagingBuffer.reinit(GetDXVKDevice(), newSize);
+        m_dxvkDevice->frontendStats().stagingNew.fetch_add(1u, std::memory_order_relaxed);
+      }
       result.slice = m_stagingBuffer.alloc(size);
     }
 
@@ -4554,9 +4572,10 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::ThrottleAllocation() {
-    constexpr MtlDeviceSize MaxMemoryPerSubmission = (env::is32BitHostPlatform() ? 10u : 30u) << 20u;
+    // Memory profile: 90 MiB (30 per submission) on ultra/unlimited, as before.
+    const MtlDeviceSize MaxMemoryInFlight = m_stagingMaxInFlight;
 
-    constexpr MtlDeviceSize MaxMemoryInFlight = MaxMemoryPerSubmission * 3u;
+    const MtlDeviceSize MaxMemoryPerSubmission = MaxMemoryInFlight / 3u;
 
     MtlStagingBufferStats stats = GetStagingMemoryStatistics();
 

@@ -120,7 +120,7 @@ namespace dxvk::backend {
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
     m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle());
-    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get());
+    m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get(), profile.ringKeep);
 
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
 
@@ -167,12 +167,15 @@ namespace dxvk::backend {
       " allocatedMiB=", uint64_t(double(MTLDevice_currentAllocatedSize(m_device.handle())) * MiB),
       " residentMiB=", uint64_t(double(m_residency->residentBytes()) * MiB),
       " resident=", m_residency->netResident(),
+      " commits=", m_residency->totalCommits(),
       " pendingFreeMiB=", uint64_t(double(m_residency->pendingBytes()) * MiB),
       " ringMiB=", uint64_t(double(m_ring->allocatedBytes()) * MiB),
       " recycledMiB=", uint64_t(double(m_recycledBytes.load()) * MiB),
       " bufLockSync=", m_frontendStats.bufferLockWaits.load(), "/",
         m_frontendStats.bufferLockWaitUs.load() / 1000u, "ms",
-      " gpuWaits=", m_frontendStats.resourceGpuWaits.load());
+      " gpuWaits=", m_frontendStats.resourceGpuWaits.load(),
+      " stagingNew=", m_frontendStats.stagingNew.load(),
+      " stagingReused=", m_frontendStats.stagingReused.load());
     for (uint32_t i = 0u; i < uint32_t(MtlMemCategory::Count); i++) {
       int64_t n = m_memCount[i].load(std::memory_order_relaxed);
       if (!n)
@@ -211,15 +214,17 @@ namespace dxvk::backend {
       waitForIdle();
       if (m_tracker)
         m_tracker->processRetirements();
-      if (m_tracker && m_residency)
+      if (m_tracker && m_residency) {
         m_residency->serialRetired(m_tracker->completedSerial());
+        m_residency->beforeSubmit();  // commit the removals and free them now
+      }
       p = VirtualAlloc(nullptr, SIZE_T(size),
           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
       if (!p)
         Logger::err("MtlDeviceImpl: host allocation failed after drain");
     }
-    if (p)
-      std::memset(p, 0, SIZE_T(size));
+    // No memset: fresh VirtualAlloc pages are zero, and nothing recycles
+    // host memory through here.
     return p;
   }
 

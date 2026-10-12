@@ -44,8 +44,6 @@ namespace dxvk::backend {
     inline Rc<MtlAllocation> takeRecycledStorage();
 
   private:
-    static constexpr size_t MaxRecycledBackings = 4u;
-
     std::mutex m_recycleMutex;
     std::vector<Rc<MtlAllocation>> m_recycled;
   };
@@ -150,6 +148,16 @@ namespace dxvk::backend {
     }
     void memRecycled(int64_t delta) { m_recycledBytes.fetch_add(delta, std::memory_order_relaxed); }
 
+    // Accounts a spare backing unless that would exceed the device-wide cap (0 = none).
+    bool tryRecycle(uint64_t bytes, uint64_t cap) {
+      int64_t cur = m_recycledBytes.load(std::memory_order_relaxed);
+      do {
+        if (cap && uint64_t(cur) + bytes > cap)
+          return false;
+      } while (!m_recycledBytes.compare_exchange_weak(cur, cur + int64_t(bytes), std::memory_order_relaxed));
+      return true;
+    }
+
     // 0 = off (D9MT_MEMSTATS), else the DIAG interval in frames.
     uint32_t memStatsInterval() const { return m_memStatsInterval; }
     std::string memStatsLine(uint64_t frame);
@@ -207,11 +215,12 @@ namespace dxvk::backend {
   inline void MtlBufferImpl::recycleStorage(Rc<MtlAllocation>&& alloc) {
     if (alloc == nullptr)
       return;
+    auto* device = static_cast<MtlDeviceImpl*>(m_device);
+    const MtlMemoryProfile& profile = device->memoryProfile();
     std::lock_guard<std::mutex> lock(m_recycleMutex);
-    if (m_recycled.size() < MaxRecycledBackings) {
-      static_cast<MtlDeviceImpl*>(m_device)->memRecycled(int64_t(alloc->size));
+    if (m_recycled.size() < profile.recycledPerBuffer
+     && device->tryRecycle(alloc->size, profile.recycledCapBytes))
       m_recycled.push_back(std::move(alloc));
-    }
   }
 
   inline Rc<MtlAllocation> MtlBufferImpl::takeRecycledStorage() {

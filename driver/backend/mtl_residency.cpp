@@ -24,6 +24,7 @@ namespace dxvk::backend {
 
   MtlResidencyTracker::~MtlResidencyTracker() {
     serialRetired(~0ull);
+    beforeSubmit();
 
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_set)
@@ -61,54 +62,55 @@ namespace dxvk::backend {
     if (!m_set)
       return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_dirty)
-      return;
-    MTLResidencySet_commit(m_set.handle());
-    m_dirty = false;
+    std::vector<PendingRemoval> removed;
+
+    { std::lock_guard<std::mutex> lock(m_mutex);
+      if (!m_dirty)
+        return;
+      MTLResidencySet_commit(m_set.handle());
+      m_dirty = false;
+      m_commits++;
+      removed.swap(m_removed);
+    }
+
+    // Order matters: set removal + commit (above) -> object release -> host free,
+    // so the Metal buffer dies before its bytesNoCopy memory.
+    for (const PendingRemoval& p : removed) {
+      NSObject_release(p.alloc);
+      if (p.hostMem)
+        VirtualFree(p.hostMem, 0, MEM_RELEASE);
+    }
   }
 
   void MtlResidencyTracker::serialRetired(uint64_t completedSerial) {
     if (!m_set)
       return;
 
-    std::vector<PendingRemoval> due;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_pending.empty())
+      return;
 
-    { std::lock_guard<std::mutex> lock(m_mutex);
-      if (m_pending.empty())
-        return;
-
-      size_t write = 0u;
-      for (size_t i = 0u; i < m_pending.size(); i++) {
-        if (m_pending[i].serial <= completedSerial) {
-          due.push_back(m_pending[i]);
-        } else {
-          if (write != i)
-            m_pending[write] = m_pending[i];
-          write++;
-        }
-      }
-      m_pending.resize(write);
-      m_pendingCount = write;
-
-      if (due.empty())
-        return;
-
-      for (const PendingRemoval& p : due) {
+    size_t write = 0u, due = 0u;
+    for (size_t i = 0u; i < m_pending.size(); i++) {
+      const PendingRemoval& p = m_pending[i];
+      if (p.serial <= completedSerial) {
         MTLResidencySet_removeAllocation(m_set.handle(), p.alloc);
         m_pendingBytes -= p.bytes;
         m_residentBytes -= p.bytes;
+        m_removed.push_back(p);
+        due++;
+      } else {
+        if (write != i)
+          m_pending[write] = p;
+        write++;
       }
-      MTLResidencySet_commit(m_set.handle());
-      m_dirty = false;
-      m_removes += due.size();
     }
+    m_pending.resize(write);
+    m_pendingCount = write;
 
-    // Order matters: set removal (above) -> object release -> host free, so the Metal buffer dies before its bytesNoCopy memory.
-    for (const PendingRemoval& p : due) {
-      NSObject_release(p.alloc);
-      if (p.hostMem)
-        VirtualFree(p.hostMem, 0, MEM_RELEASE);
+    if (due) {
+      m_dirty = true;
+      m_removes += due;
     }
   }
 

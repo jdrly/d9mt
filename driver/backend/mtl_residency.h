@@ -31,8 +31,12 @@ namespace dxvk::backend {
 
     void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u);
 
+    // Commits pending adds/removes (once per submit, and only if the set
+    // changed), then frees what serialRetired() removed.
     void beforeSubmit();
 
+    // Removes allocations whose last use has retired; they are released
+    // after the next commit, so one commit covers adds and removes alike.
     void serialRetired(uint64_t completedSerial);
 
     bool attachLayer(obj_handle_t layer);
@@ -42,6 +46,7 @@ namespace dxvk::backend {
     uint64_t totalAdds()       const { return m_adds.load(); }
     uint64_t totalRemoves()    const { return m_removes.load(); }
     uint64_t pendingRemovals() const { return m_pendingCount.load(); }
+    uint64_t totalCommits()    const { return m_commits.load(); }
     // Bytes added minus bytes removed / still waiting for removal (as passed by callers).
     uint64_t residentBytes()   const { return m_residentBytes.load(); }
     uint64_t pendingBytes()    const { return m_pendingBytes.load(); }
@@ -61,6 +66,7 @@ namespace dxvk::backend {
     std::mutex                  m_mutex;
     bool                        m_dirty = false;
     std::vector<PendingRemoval> m_pending;
+    std::vector<PendingRemoval> m_removed;  // out of the set, awaiting commit
     std::vector<obj_handle_t>   m_attachedLayerSets;
 
     std::atomic<uint64_t> m_adds{0u};
@@ -68,6 +74,7 @@ namespace dxvk::backend {
     std::atomic<uint64_t> m_pendingCount{0u};
     std::atomic<uint64_t> m_residentBytes{0u};
     std::atomic<uint64_t> m_pendingBytes{0u};
+    std::atomic<uint64_t> m_commits{0u};
 
   };
 

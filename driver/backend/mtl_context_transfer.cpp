@@ -773,6 +773,13 @@ namespace dxvk::backend {
         Logger::warn("MtlContextImpl: MTL4 spatial scaler creation failed — falling back to blit");
         return false;
       }
+      /* A new size (window resize) makes the old scalers dead weight: keep
+       * one previous size, release the rest once the GPU is past them. */
+      while (m_fxScalers.size() >= 2u) {
+        obj_handle_t old = m_fxScalers.begin()->second;
+        m_fxScalers.erase(m_fxScalers.begin());
+        m_device->submissions().retireAfter(m_currentSerial, [old]() { NSObject_release(old); });
+      }
       m_fxScalers.emplace(key, scaler);
     }
 

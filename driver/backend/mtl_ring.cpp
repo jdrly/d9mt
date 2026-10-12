@@ -2,12 +2,10 @@
 
 #include <windows.h>
 
-#include <cstring>
-
 namespace dxvk::backend {
 
-UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency)
-: m_device(device), m_chunkSize(chunkSize), m_residency(residency) {
+UploadRing::UploadRing(obj_handle_t device, uint64_t chunkSize, MtlResidencyTracker* residency, uint32_t keepIdle)
+: m_device(device), m_chunkSize(chunkSize), m_residency(residency), m_keepIdle(keepIdle) {
   m_live.push_back(createChunk(m_chunkSize));
 }
 
@@ -30,10 +28,11 @@ RingSlice UploadRing::allocate(uint64_t size, uint64_t align) {
   if (offset + size > cur->size) {
     Chunk next;
 
-    for (size_t i = 0u; i < m_free.size(); i++) {
-      if (m_free[i].size >= size) {
-        next = std::move(m_free[i]);
-        m_free.erase(m_free.begin() + i);
+    // Most recently freed first (warm), so the front of m_free goes idle.
+    for (size_t i = m_free.size(); i > 0u; i--) {
+      if (m_free[i - 1u].size >= size) {
+        next = std::move(m_free[i - 1u]);
+        m_free.erase(m_free.begin() + (i - 1u));
         break;
       }
     }
@@ -68,19 +67,42 @@ void UploadRing::onComplete(uint64_t completedSerial) {
     Chunk& chunk = m_live[i - 1u];
 
     if (chunk.retireSerial <= completedSerial) {
-      m_free.push_back(std::move(chunk));
+      // An oversized chunk served one big allocation; don't keep it forever.
+      if (chunk.size > m_chunkSize) {
+        destroyChunk(chunk);
+      } else {
+        chunk.freeSince = m_frame;
+        m_free.push_back(std::move(chunk));
+      }
       m_live.erase(m_live.begin() + (i - 1u));
     }
   }
 }
 
+void UploadRing::onFrame() {
+  m_frame++;
+  if (!m_keepIdle || m_free.size() <= m_keepIdle)
+    return;
+  // allocate() reuses from the back, so the front holds the longest-idle chunks.
+  while (m_free.size() > m_keepIdle && m_free.front().freeSince + IdleFrames < m_frame) {
+    destroyChunk(m_free.front());
+    m_free.erase(m_free.begin());
+  }
+}
+
+void UploadRing::destroyChunk(Chunk& chunk) {
+  m_totalBytes -= chunk.size;
+  // Already retired by the GPU: removal is due at the next serialRetired().
+  if (m_residency)
+    m_residency->allocDestroyed(chunk.buffer.detach(), chunk.cpuPtr, 0u, chunk.size);
+  chunk.cpuPtr = nullptr;
+}
+
 UploadRing::Chunk UploadRing::createChunk(uint64_t minSize) {
   // CPU-visible memory must live in our address space (32-bit process); unix-side pointers are unreachable here.
+  // Fresh VirtualAlloc pages are zero already; the ring is write-before-read anyway.
   void* host = VirtualAlloc(nullptr, SIZE_T(minSize),
     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-  if (host)
-    std::memset(host, 0, SIZE_T(minSize));
 
   WMTBufferInfo info = {};
   info.length = minSize;

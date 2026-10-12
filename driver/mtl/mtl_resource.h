@@ -301,6 +301,18 @@ namespace dxvk {
 
     void reset() { m_offset = 0u; m_stats.used = 0u; }
 
+    // Rebinds to an idle block from a pool; contents are stale, never zeroed.
+    void reuse(Rc<MtlBuffer>&& buffer, MtlDeviceSize size) {
+      m_buffer = std::move(buffer);
+      m_size   = size;
+      m_offset = 0u;
+      m_stats  = { };
+    }
+
+    Rc<MtlBuffer> takeBuffer() { return std::move(m_buffer); }
+
+    MtlDeviceSize size() const { return m_size; }
+
     const MtlStagingBufferStats& stats() const { return m_stats; }
 
   private:
