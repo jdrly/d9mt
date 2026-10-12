@@ -157,6 +157,20 @@ namespace dxvk {
     bool                      m_latencyTracking = false;
     Rc<MtlLatencyTracker>     m_latencyTracker = nullptr;
 
+    // Hidden/minimized windows skip the present, so vsync no longer paces the
+    // game; Present() then sleeps (outside the device lock) to this cadence.
+    uint32_t                  m_bgFps = 0u;
+    high_resolution_clock::time_point m_bgDeadline = { };
+
+    HRESULT PresentLocked(
+      const RECT*    pSourceRect,
+      const RECT*    pDestRect,
+            HWND     hDestWindowOverride,
+            DWORD    dwFlags,
+            uint32_t& BgFps);
+
+    high_resolution_clock::time_point UpdateBackgroundThrottle(uint32_t Fps);
+
     void PresentImage(UINT PresentInterval);
 
     Rc<MtlPresenter> CreatePresenter(

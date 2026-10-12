@@ -4,6 +4,7 @@
 
 #include "d3d9_window.h"
 
+#include "../util/util_sleep.h"
 #include "../util/util_time.h"
 
 #include <cstdio>
@@ -162,7 +163,69 @@ namespace dxvk {
           HWND     hDestWindowOverride,
     const RGNDATA* pDirtyRegion,
           DWORD    dwFlags) {
-    D3D9DeviceLock lock = m_parent->LockDevice();
+    (void)pDirtyRegion;
+    uint32_t bgFps = 0u;
+    HRESULT hr;
+    high_resolution_clock::time_point until = { };
+
+    { D3D9DeviceLock lock = m_parent->LockDevice();
+      hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, bgFps);
+      until = UpdateBackgroundThrottle(bgFps);
+    }
+
+    // Sleep without the device lock; the CS thread never needs it.
+    if (until != high_resolution_clock::time_point())
+      Sleep::sleepUntil(high_resolution_clock::now(), until);
+    return hr;
+  }
+
+
+  high_resolution_clock::time_point D3D9SwapChainEx::UpdateBackgroundThrottle(uint32_t Fps) {
+    if (Fps != m_bgFps) {
+      if (Fps)
+        Logger::warn(str::format("D9MT: window hidden, throttling to ", Fps, " fps"));
+      else
+        Logger::warn("D9MT: window visible again");
+      m_bgFps = Fps;
+      m_bgDeadline = high_resolution_clock::now();
+    }
+
+    if (!Fps)
+      return { };
+
+    // Fixed cadence from the previous deadline (no drift); if a frame overran
+    // it, restart from now instead of letting frames through to catch up.
+    auto now = high_resolution_clock::now();
+    m_bgDeadline += std::chrono::duration_cast<high_resolution_clock::duration>(
+      std::chrono::nanoseconds(1000000000ull / Fps));
+
+    if (m_bgDeadline <= now) {
+      m_bgDeadline = now;
+      return { };
+    }
+
+    return m_bgDeadline;
+  }
+
+
+  HRESULT D3D9SwapChainEx::PresentLocked(
+    const RECT*    pSourceRect,
+    const RECT*    pDestRect,
+          HWND     hDestWindowOverride,
+          DWORD    dwFlags,
+          uint32_t& BgFps) {
+    // D9MT_BG_FPS: cap while the window is occluded / on another space
+    // (default 30, 0 = off); D9MT_BG_FPS_MINIMIZED: cap while minimized
+    // (default 10, 0 = use D9MT_BG_FPS).
+    static const uint32_t s_bgFps = [] {
+      std::string v = env::getEnvVar("D9MT_BG_FPS");
+      return v.empty() ? 30u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+    } ();
+    static const uint32_t s_minFps = [] {
+      std::string v = env::getEnvVar("D9MT_BG_FPS_MINIMIZED");
+      uint32_t n = v.empty() ? 10u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
+      return s_bgFps ? (n ? std::min(n, s_bgFps) : s_bgFps) : 0u;
+    } ();
 
     m_parent->DebugOnPresent();
 
@@ -213,8 +276,14 @@ namespace dxvk {
       }
     }
 
-    if (wsi::isMinimized(m_window))
+    if (wsi::isMinimized(m_window)) {
+      BgFps = s_minFps;
       return D3D_OK;
+    }
+
+    // Same signal the CS thread uses to skip the present (cached flags, cheap).
+    if (m_wctx->presenter != nullptr && !m_wctx->presenter->isVisible())
+      BgFps = s_bgFps;
 
     if (!SwapWithFrontBuffer() && m_parent->GetOptions()->extraFrontbuffer) {
       const auto& backbuffer = m_backBuffers[0];
