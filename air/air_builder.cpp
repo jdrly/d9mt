@@ -2067,6 +2067,19 @@ struct AirBuilderImpl {
       mdString("air.arg_name"), mdString("ab") });
   }
 
+  /* MSL type name of a user varying, from its actual LLVM type. Declaring a
+   * scalar varying (e.g. the D3D9 fog value) as float4 makes the AGX compiler
+   * crash in InstCombine (macOS 27) once the value is used. */
+  static std::string varyingTypeName(Type* t) {
+    uint32_t width = t->isVectorTy()
+      ? uint32_t(cast<FixedVectorType>(t)->getNumElements()) : 1u;
+    Type* el = t->getScalarType();
+    std::string base = el->isIntegerTy(1u) ? "bool"
+                     : el->isIntegerTy() ? "int"
+                     : el->isHalfTy() ? "half" : "float";
+    return width > 1u ? base + std::to_string(width) : base;
+  }
+
   void buildMetadata() {
     SmallVector<Metadata*, 4> outputMd;
     for (const auto& out : outputs) {
@@ -2098,7 +2111,7 @@ struct AirBuilderImpl {
         outputMd.push_back(mdTuple({
           mdString("air.vertex_output"),
           mdString(varyingName(out.location)),
-          mdString("air.arg_type_name"), mdString("float4"),
+          mdString("air.arg_type_name"), mdString(varyingTypeName(out.type)),
           mdString("air.arg_name"),
           mdString("o" + std::to_string(out.location)) }));
       } else {
@@ -2139,7 +2152,7 @@ struct AirBuilderImpl {
           mdI32(in.argIndex), mdString("air.fragment_input"),
           mdString(varyingName(in.location)),
           mdString("air.center"), mdString("air.perspective"),
-          mdString("air.arg_type_name"), mdString("float4"),
+          mdString("air.arg_type_name"), mdString(varyingTypeName(in.type)),
           mdString("air.arg_name"),
           mdString("v" + std::to_string(in.location)) }));
       }
