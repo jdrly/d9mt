@@ -1,3 +1,12 @@
+# Derived from DXMT src/winemetal/unix/meson.build (https://github.com/3Shain/dxmt)
+# Copyright (c) 2023-2026 Feifan He for CodeWeavers
+# SPDX-License-Identifier: LGPL-2.1-or-later (see bridge/LICENSE, bridge/COPYING.LIB)
+#
+# Changed for d9mt by:
+#   neo773 (d9mt-v2), 2026-07
+#   Jan Drlý and contributors (d9mt), 2026-10
+# The changes are listed in bridge/UPSTREAM; the git history has each one with its date.
+
 winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
