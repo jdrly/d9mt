@@ -282,6 +282,9 @@ namespace dxvk::backend {
     obj_handle_t m_lastDsso        = 0u;
     uint32_t     m_lastStencilRef  = 0u;
     MtlColor4    m_lastBlendColor  = {};
+    uint64_t     m_lastCullMode    = 0u;
+    uint64_t     m_lastWinding     = 0u;
+    MtlDepthBias m_lastDepthBias   = {};
 
     uint64_t s_diagVbStale  = 0u;
     uint64_t s_diagCbvStale = 0u;

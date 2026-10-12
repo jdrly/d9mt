@@ -545,7 +545,13 @@ namespace dxvk::backend {
     }
 
     {
-      obj_handle_t dsso = m_device->getDepthStencilState(m_depthStencil);
+      // The DSS lookup hashes the whole state and takes the device mutex;
+      // m_depthStencil only changes through setDepthStencilState, which sets
+      // DirtyDepthStencil, so a viewport/stencil-ref/bias-only flush keeps
+      // the last state object.
+      obj_handle_t dsso = m_lastDsso;
+      if (first || (m_dirty & DirtyDepthStencil))
+        dsso = m_device->getDepthStencilState(m_depthStencil);
       if (first || dsso != m_lastDsso) {
         m_lastDsso = dsso;
         auto* dss = m_cmdChunk.append<wmtcmd_mtl4_setdsso>(
@@ -572,17 +578,33 @@ namespace dxvk::backend {
     }
 
     {
-      auto* cull = m_cmdChunk.append<wmtcmd_mtl4_setcullmode>(
-        uint16_t(WMTMtl4RenderCommandSetCullMode));
-      cull->mode = uint64_t(WMTCullMode(m_rasterizer.cullMode));
-      auto* wind = m_cmdChunk.append<wmtcmd_mtl4_setwinding>(
-        uint16_t(WMTMtl4RenderCommandSetFrontFacingWinding));
-      wind->winding = uint64_t(WMTWinding(m_rasterizer.frontFace));
-      auto* bias = m_cmdChunk.append<wmtcmd_mtl4_setdepthbias>(
-        uint16_t(WMTMtl4RenderCommandSetDepthBias));
-      bias->bias        = m_depthBias.constantFactor;
-      bias->slope_scale = m_depthBias.slopeFactor;
-      bias->clamp       = m_depthBias.clamp;
+      // Cull mode, winding and depth bias used to be re-sent on every
+      // dynamic-state flush (any viewport, DSS, stencil-ref or blend-color
+      // change): three translated objc_msgSends into AGX each time. Encoder
+      // state doesn't carry over, so 'first' (m_dynValid, reset whenever
+      // materializePass starts an encoder or a deferred pass) sends them all.
+      const uint64_t cullMode = uint64_t(WMTCullMode(m_rasterizer.cullMode));
+      if (first || cullMode != m_lastCullMode) {
+        m_lastCullMode = cullMode;
+        auto* cull = m_cmdChunk.append<wmtcmd_mtl4_setcullmode>(
+          uint16_t(WMTMtl4RenderCommandSetCullMode));
+        cull->mode = cullMode;
+      }
+      const uint64_t winding = uint64_t(WMTWinding(m_rasterizer.frontFace));
+      if (first || winding != m_lastWinding) {
+        m_lastWinding = winding;
+        auto* wind = m_cmdChunk.append<wmtcmd_mtl4_setwinding>(
+          uint16_t(WMTMtl4RenderCommandSetFrontFacingWinding));
+        wind->winding = winding;
+      }
+      if (first || std::memcmp(&m_lastDepthBias, &m_depthBias, sizeof(MtlDepthBias)) != 0) {
+        m_lastDepthBias = m_depthBias;
+        auto* bias = m_cmdChunk.append<wmtcmd_mtl4_setdepthbias>(
+          uint16_t(WMTMtl4RenderCommandSetDepthBias));
+        bias->bias        = m_depthBias.constantFactor;
+        bias->slope_scale = m_depthBias.slopeFactor;
+        bias->clamp       = m_depthBias.clamp;
+      }
 
       // Encoders start in Clip mode; only a change (or a clamp on a fresh
       // encoder) needs a command. Deferred passes may merge encoders, so
