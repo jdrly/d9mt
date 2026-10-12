@@ -167,7 +167,8 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # un-optimized code pays double, so this is a whole-driver speedup.
 # -fno-strict-aliasing: the PE<->unix boundary structs and wmtcmd stream do
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
-FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+# -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
+FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
 
 # --- PROFILE_INSTRUMENT=1 — per-function CPU profiler build mode -------------
 # Compiles ONLY the backend hot-path TUs (the CS-thread draw loop) with GCC
@@ -326,7 +327,7 @@ done
 SHA1C_OBJ="$OBJ/util_sha1_sha1.c.o"
 if [ ! -f "$SHA1C_OBJ" ] || [ "$DRV/util/sha1/sha1.c" -nt "$SHA1C_OBJ" ]; then
   echo "[cc] util/sha1/sha1.c"
-  "${MINGW/g++/gcc}" -std=c11 -O2 -g -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
+  "${MINGW/g++/gcc}" -std=c11 -O2 -g -ffile-prefix-map="$V2"=. -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
 fi
 OBJS+=("$SHA1C_OBJ")
 

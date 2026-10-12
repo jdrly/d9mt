@@ -22,7 +22,7 @@ mkdir -p "$OBJ"
 LLVM="$V2/toolchains/llvm-x86_64"
 [ -f "$LLVM/lib/libLLVMBitWriter.a" ] || { echo "FATAL: run scripts/build-llvm-unixside.sh first" >&2; exit 1; }
 
-CXXFLAGS=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden
+CXXFLAGS=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
           -I"$DX" -I"$V2" -I"$LLVM/include"
           -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
 # Link the full archive set (built with no codegen targets, so it is lean);
@@ -100,10 +100,10 @@ x86_64-w64-mingw32-dlltool -d "$OUT/ntdll-cx64.def" \
 
 echo "[d9mtair] PE dlls (builtin file-alignment, stripped: see d9mtmetal notes)"
 mkdir -p "$OUT/i386" "$OUT/x86_64"
-i686-w64-mingw32-gcc -shared -O2 -s -o "$OUT/i386/d9mtair.dll" \
+i686-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/i386/d9mtair.dll" \
   "$SRC/dll.c" -I "$SRC" "$OUT/libntdll-cx32.a" \
   -Wl,--file-alignment,0x1000
-x86_64-w64-mingw32-gcc -shared -O2 -s -o "$OUT/x86_64/d9mtair.dll" \
+x86_64-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/x86_64/d9mtair.dll" \
   "$SRC/dll.c" -I "$SRC" "$OUT/libntdll-cx64.a" \
   -Wl,--file-alignment,0x1000
 cp "$OUT/i386/d9mtair.dll" "$OUT/d9mtair32.dll"

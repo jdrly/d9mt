@@ -28,6 +28,8 @@ cmake -B "$TC/llvm-build" -S "$TC/llvm-project/llvm" \
   -DLLVM_ENABLE_LIBXML2=Off \
   -DLLVM_ENABLE_TERMINFO=Off \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_FLAGS="-ffile-prefix-map=$TC/llvm-project=llvm-project" \
+  -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$TC/llvm-project=llvm-project" \
   -DLLVM_TARGETS_TO_BUILD="" \
   -DLLVM_BUILD_TOOLS=Off \
   -DLLVM_INCLUDE_TESTS=Off \

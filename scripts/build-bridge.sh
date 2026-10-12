@@ -34,10 +34,10 @@ CORE_OBJS=("$OBJ"/../../airlib/obj/third_party_dxbc-spirv_ir_*.o \
            "$OBJ"/../../airlib/obj/air_air_builder.cpp.o \
            "$OBJ"/../../airlib/obj/air_air_metallib.cpp.o)
 
-CXXFLAGS_UNIX=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden
+CXXFLAGS_UNIX=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
                -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
                -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
-CFLAGS_UNIX=(-ObjC -O2 -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")
+CFLAGS_UNIX=(-ObjC -O2 -arch x86_64 -ffile-prefix-map="$V2"=. -I"$BR" -I"$BR/unix" -I"$V2/airlib")
 LLVM_LIBS=("$LLVM"/lib/libLLVM*.a)
 
 echo "[bridge] airlib compile core for the bridge (table symbols renamed:"
@@ -106,10 +106,10 @@ x86_64-w64-mingw32-dlltool -d "$OUT/ntdll-cx64.def" \
 echo "[bridge] PE winemetal dlls"
 PE_SRC=("$BR/main.c" "$BR/winecrt0_compat.c" "$BR/winemetal_thunks.c" "$BR/airconv_thunks.c" "$BR/d9mtair_thunks.c")
 mkdir -p "$OUT/i386" "$OUT/x86_64"
-i686-w64-mingw32-gcc -shared -O2 -s -o "$OUT/i386/winemetal.dll" \
+i686-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/i386/winemetal.dll" \
   "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
   "$OUT/libntdll-cx32.a" -Wl,--file-alignment,0x1000
-x86_64-w64-mingw32-gcc -shared -O2 -s -o "$OUT/x86_64/winemetal.dll" \
+x86_64-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/x86_64/winemetal.dll" \
   "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
   "$OUT/libntdll-cx64.a" -Wl,--file-alignment,0x1000
 cp "$OUT/i386/winemetal.dll" "$OUT/winemetal32.dll"
