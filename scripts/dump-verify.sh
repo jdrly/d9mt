@@ -7,6 +7,7 @@
 # Instead of screencapture (unreliable across Spaces), this drops the trigger
 # file C:/d9mt-test/DUMP into the bottle, runs the exe, and the DRIVER copies
 # its rendered backbuffer to C:/d9mt-test/rt_dump.bin (u32 w, u32 h, raw BGRA8).
+# The driver only probes for the trigger (at most 1/s) with D9MT_DUMP_TRIGGER=1.
 # We then read that file and check the center pixels are non-black.
 #
 # Env: EXPECT=nonblack|r,g,b  WAIT=<launch settle secs>  POLL=<dump wait secs>
@@ -51,6 +52,7 @@ echo "[dump-verify] armed trigger $DEPLOY/DUMP"
 
 echo "[dump-verify] launching (absolute path)"
 export WINEDLLOVERRIDES="d3d9=n;winemetal=b"
+export D9MT_DUMP_TRIGGER=1
 ( "$CX/bin/wine" --bottle "$BOTTLE" --cx-log "$OUT/$NAME-dump-wine.log" \
     "$DEPLOY/$NAME.exe" >/dev/null 2>&1 & )
 

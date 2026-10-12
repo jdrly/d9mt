@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <thread>
 #include <chrono>
 
@@ -23,6 +24,22 @@ namespace dxvk {
           uint32_t             paramsH) {
     if (ctx == nullptr || device == nullptr || image == nullptr)
       return;
+
+    // The trigger file was probed with fopen (NtCreateFile through Wine's
+    // path lookup) on the CS thread every present. A manual trigger only
+    // needs ~1 s latency: probe once per second, and only when
+    // D9MT_DUMP_TRIGGER=1 is set.
+    static const bool enabled = [] {
+      const char* v = std::getenv("D9MT_DUMP_TRIGGER");
+      return v != nullptr && v[0] == '1';
+    }();
+    if (likely(!enabled))
+      return;
+    static auto s_lastProbe = std::chrono::steady_clock::time_point();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_lastProbe < std::chrono::seconds(1))
+      return;
+    s_lastProbe = now;
 
     FILE* trig = std::fopen("C:/d9mt-test/DUMP", "rb");
     if (trig == nullptr)

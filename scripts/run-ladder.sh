@@ -22,6 +22,7 @@ bash "$V2/scripts/build-driver.sh" >/dev/null 2>&1 || { echo "driver build FAILE
 cp "$V2/build/driver/d3d9.dll" "$DEPLOY/d3d9.dll"
 
 export WINEDLLOVERRIDES="d3d9=n;winemetal=b"
+export D9MT_DUMP_TRIGGER=1  # the driver ignores C:/d9mt-test/DUMP without it
 pass=0; fail=0; results=""
 for name in $EXES; do
   [ -f "$V2/test/$name.c" ] || { results+=$'\n'"$name  SKIP (no source)"; continue; }
