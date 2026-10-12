@@ -109,12 +109,7 @@ x86_64-w64-mingw32-gcc -shared -O2 -s -o "$OUT/x86_64/d9mtair.dll" \
 cp "$OUT/i386/d9mtair.dll" "$OUT/d9mtair32.dll"
 cp "$OUT/x86_64/d9mtair.dll" "$OUT/d9mtair64.dll"
 
-if [ -f "$ROOT/tools/make-builtin.py" ]; then
-  python3 "$ROOT/tools/make-builtin.py" "$OUT/d9mtair32.dll"
-  python3 "$ROOT/tools/make-builtin.py" "$OUT/d9mtair64.dll"
-else
-  echo "  [warn] tools/make-builtin.py not found; PE dlls lack builtin marker"
-fi
+python3 "$V2/scripts/make-builtin.py" "$OUT/d9mtair32.dll" "$OUT/d9mtair64.dll"
 
 echo "[d9mtair] import lib for d3d9.dll"
 cat > "$OUT/d9mtair.def" <<'EOF'

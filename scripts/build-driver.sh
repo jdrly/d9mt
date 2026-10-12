@@ -423,7 +423,8 @@ echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS
 WMDEF="$BUILD/winemetal.def"
 bash "$V2/scripts/gen-bridge-def.sh" > "$WMDEF"
 WMIMP="$BUILD/libwinemetal.a"
-D3D9DEF="${D3D9DEF:-$V2/DXVK-3.0-uptsream/src/d3d9/d3d9.def}"
+# d3d9.def: DXVK's export list (zlib, committed; undecorated, fits x86 and x64).
+D3D9DEF="${D3D9DEF:-$DRV/d3d9/d3d9.def}"
 if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
   "$MINGW_PREFIX-dlltool" -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
     && echo "  winemetal import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"

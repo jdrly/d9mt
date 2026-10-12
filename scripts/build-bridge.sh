@@ -117,10 +117,7 @@ x86_64-w64-mingw32-gcc -shared -O2 -s -o "$OUT/x86_64/winemetal.dll" \
 cp "$OUT/i386/winemetal.dll" "$OUT/winemetal32.dll"
 cp "$OUT/x86_64/winemetal.dll" "$OUT/winemetal64.dll"
 
-if [ -f "$ROOT/tools/make-builtin.py" ]; then
-  python3 "$ROOT/tools/make-builtin.py" "$OUT/winemetal32.dll"
-  python3 "$ROOT/tools/make-builtin.py" "$OUT/winemetal64.dll"
-fi
+python3 "$V2/scripts/make-builtin.py" "$OUT/winemetal32.dll" "$OUT/winemetal64.dll"
 
 echo "[bridge] import lib for the driver"
 bash "$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def"
