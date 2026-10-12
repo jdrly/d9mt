@@ -31,11 +31,17 @@ run_pair() { # <harness> <winemetal.so> <workdir>
   ls "$3/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
 }
 
-echo "[compile-mt] driver compile tasks / worker pool (native arm64, ThreadSanitizer)"
-NATIVE="$V2/../vendor/dxvk/include/native"
-clang++ -std=c++17 -g -O1 -fsanitize=thread -I"$V2/driver" -I"$NATIVE/windows" -I"$NATIVE/directx" \
-  "$V2/driver/mtl/tests/mtl_compile_test.cpp" -o "$OUT/mtl_compile_test"
-"$OUT/mtl_compile_test"
+# Needs DXVK's native Windows headers (include/native/{windows,directx} of a
+# DXVK checkout with its submodules); skipped when DXVK_NATIVE is not found.
+NATIVE="${DXVK_NATIVE:-$V2/DXVK-3.0-uptsream/include/native}"
+if [ -d "$NATIVE/windows" ] && [ -d "$NATIVE/directx" ]; then
+  echo "[compile-mt] driver compile tasks / worker pool (native arm64, ThreadSanitizer)"
+  clang++ -std=c++17 -g -O1 -fsanitize=thread -I"$V2/driver" -I"$NATIVE/windows" -I"$NATIVE/directx" \
+    "$V2/driver/mtl/tests/mtl_compile_test.cpp" -o "$OUT/mtl_compile_test"
+  "$OUT/mtl_compile_test"
+else
+  echo "[compile-mt] worker pool test skipped: no DXVK native headers at $NATIVE (set DXVK_NATIVE)"
+fi
 
 echo "[compile-mt] harness"
 clang++ "${INC[@]}" "$BR/tests/compile_mt_test.cpp" "${DXBC_OBJS[@]}" -lpthread -o "$OUT/compile_mt_test"
