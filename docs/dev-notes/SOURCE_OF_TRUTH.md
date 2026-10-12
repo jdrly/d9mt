@@ -1,3 +1,8 @@
+> **Historical development note.** This was the upstream author's working
+> plan for d9mt-v2 (July/August 2026), written partly to steer coding agents.
+> It is kept for context and is not maintained. Paths, bottle names and
+> scripts it mentions may no longer exist; see the top-level README.
+
 # d9mt v2 — SOURCE OF TRUTH
 
 This is the ONLY authoritative document. All prior docs/memories were deleted
@@ -175,7 +180,8 @@ code_shader must show a non-clear-color triangle (RGB interpolated) at center.
 **Op-coverage debug loop** (when AirBuilder rejects an op at runtime): edit
 `air/air_builder.cpp` → `rm build/airlib/obj/air_air_builder.cpp.o` →
 `build-d9mtair.sh` → `build-bridge.sh` → `install-bridge-builtins.sh` → run.
-AirBuilder rejections log to `/tmp/d9mtair_err.log`. Decode op# via the
+AirBuilder rejections log to the host path in `D9MT_AIR_ERRLOG` (opt-in;
+this was `/tmp/d9mtair_err.log`, always on). Decode op# via the
 `OpCode` enum in `third_party/dxbc-spirv/ir/ir.h` (explicit uint16 values).
 
 ## 6. Environment facts (still valid, folded from old memories)
@@ -201,7 +207,7 @@ AirBuilder rejections log to `/tmp/d9mtair_err.log`. Decode op# via the
   `i686-w64-mingw32-addr2line -e build/driver/d3d9.dll -f <imagebase+RVA>`
   (imagebase from `objdump -p`).
 - screencapture fights Spaces/window-focus — prefer driver logs +
-  `/tmp/d9mtair_err.log` as ground truth over screenshots.
+  the `D9MT_AIR_ERRLOG` file as ground truth over screenshots.
 
 ## 7. Hard-won lessons (do not relearn)
 

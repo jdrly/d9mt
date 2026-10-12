@@ -24,7 +24,7 @@ Local changes:
       #3 d9mtair AIR-compile thunks (unix calls 154..156): D9MTAirVersion/
          Compile/Free, backed by the airlib compile core.
       #4 FULL METAL 4 SURFACE (unix calls 157..200). DXMT's winemetal4 exposes
-         only counter/timestamp heaps; the Metal-4-only backend (docs/
+         only counter/timestamp heaps; the Metal-4-only backend (docs/dev-notes/
          SOURCE_OF_TRUTH.md §2) needs the whole MTL4 command path. Additive,
          appended after 156, never renumbering. All WMT* params are 8-byte/
          arch-invariant, so each 64-bit unix thunk is wow64 byte-compatible and

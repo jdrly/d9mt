@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dump-verify.sh — autonomous backbuffer verifier (SOURCE_OF_TRUTH §4b bug 2).
+# dump-verify.sh — autonomous backbuffer verifier (docs/dev-notes/SOURCE_OF_TRUTH.md §4b bug 2).
 #
 #   scripts/dump-verify.sh code_shader             # build+deploy+run+dump+check
 #   scripts/dump-verify.sh code_shader --no-build  # skip rebuilds
