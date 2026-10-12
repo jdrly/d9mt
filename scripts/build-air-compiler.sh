@@ -17,8 +17,10 @@ LLVM_CONFIG="${LLVM_CONFIG:-/opt/homebrew/opt/llvm@15/bin/llvm-config}"
 [ -x "$LLVM_CONFIG" ] || { echo "FATAL: need brew llvm@15" >&2; exit 1; }
 
 CXX="${CXX:-clang++}"
-ROOT="$(cd "$V2/.." && pwd)"
-SC="$ROOT/vendor/spirv-cross"
+# SPIRV-Cross sources (Apache-2.0), only for this host dev tool's SPIR-V/MSL
+# reference path: git clone https://github.com/KhronosGroup/SPIRV-Cross
+SC="${SPIRV_CROSS_DIR:-$V2/third_party/SPIRV-Cross}"
+[ -f "$SC/spirv_msl.cpp" ] || { echo "FATAL: SPIRV-Cross sources not at $SC (set SPIRV_CROSS_DIR)" >&2; exit 1; }
 COMMON_FLAGS=(-std=c++17 -O1 -g -I"$DX" -I"$DX/ir" -I"$SC" -Wno-unused-parameter)
 LLVM_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags | sed 's/-std=c++14//')"
 

@@ -11,7 +11,6 @@
 # upstream bridge/meson.build + bridge/unix/meson.build.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-ROOT="$(cd "$V2/.." && pwd)"
 BR="$V2/bridge"
 DX="$V2/third_party/dxbc-spirv"
 OUT="$V2/build/bridge"
@@ -19,16 +18,16 @@ AIRLIB_OUT="$V2/build/airlib"
 OBJ="$OUT/obj"
 mkdir -p "$OBJ"
 
-CX="${CX:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}"
-CX_UNIX="$CX/lib/wine/x86_64-unix"
-[ -f "$CX_UNIX/ntdll.so" ] || { echo "FATAL: CrossOver unix libs not at $CX_UNIX" >&2; exit 1; }
+# No Wine engine is needed at build time: the unix side resolves ntdll/winemac
+# symbols at load time (-undefined dynamic_lookup below).
 
 LLVM="$V2/toolchains/llvm-x86_64"
 [ -f "$LLVM/lib/libLLVMBitWriter.a" ] || { echo "FATAL: run scripts/build-llvm-unixside.sh first" >&2; exit 1; }
 
 # The airlib compile-core objects (AirBuilder + metallib writer + ir core).
-# build-d9mtair.sh must have run; reuse its object cache.
-[ -f "$AIRLIB_OUT/d9mtair.so" ] || bash "$V2/scripts/build-d9mtair.sh"
+# Always run build-d9mtair.sh (incremental by mtime) so edits under air/ never
+# link a stale air_builder.o into winemetal.so.
+bash "$V2/scripts/build-d9mtair.sh"
 
 CORE_OBJS=("$OBJ"/../../airlib/obj/third_party_dxbc-spirv_ir_*.o \
            "$OBJ"/../../airlib/obj/third_party_dxbc-spirv_util_*.o \
@@ -54,8 +53,7 @@ for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c
   obj="$OBJ/$(basename "$src").o"
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
     echo "[cc] ${src#$BR/}"
-    clang "${CFLAGS_UNIX[@]}" -I"$ROOT/../dxmt/src/airconv" -c "$src" -o "$obj" \
-      || clang "${CFLAGS_UNIX[@]}" -c "$src" -o "$obj"
+    clang "${CFLAGS_UNIX[@]}" -c "$src" -o "$obj"
   fi
 done
 
@@ -109,10 +107,10 @@ echo "[bridge] PE winemetal dlls"
 PE_SRC=("$BR/main.c" "$BR/winecrt0_compat.c" "$BR/winemetal_thunks.c" "$BR/airconv_thunks.c" "$BR/d9mtair_thunks.c")
 mkdir -p "$OUT/i386" "$OUT/x86_64"
 i686-w64-mingw32-gcc -shared -O2 -s -o "$OUT/i386/winemetal.dll" \
-  "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" -I"$ROOT/../dxmt/src/airconv" \
+  "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
   "$OUT/libntdll-cx32.a" -Wl,--file-alignment,0x1000
 x86_64-w64-mingw32-gcc -shared -O2 -s -o "$OUT/x86_64/winemetal.dll" \
-  "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" -I"$ROOT/../dxmt/src/airconv" \
+  "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
   "$OUT/libntdll-cx64.a" -Wl,--file-alignment,0x1000
 cp "$OUT/i386/winemetal.dll" "$OUT/winemetal32.dll"
 cp "$OUT/x86_64/winemetal.dll" "$OUT/winemetal64.dll"
@@ -125,17 +123,31 @@ echo "  $(grep -c '^  ' "$OUT/winemetal.def") exports -> $OUT/winemetal.def"
 i686-w64-mingw32-dlltool -d "$OUT/winemetal.def" \
   -l "$OUT/libwinemetal32.a" --dllname winemetal.dll
 
-echo "[bridge] smoke test (x86_64 host)"
-[ -f "$V2/build/air-compiler/vs.metallib" ] || bash "$V2/scripts/build-air-compiler.sh" >/dev/null
-clang++ "${CXXFLAGS_UNIX[@]}" \
-  "$BR/tests/bridge_smoke.cpp" \
-  $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_*.o) \
-  "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
-  "${LLVM_LIBS[@]}" -lm -lpthread \
-  -o "$OUT/bridge_smoke"
-(cd "$V2" && "$OUT/bridge_smoke" \
-  "$OUT/winemetal.so" "$AIRLIB_OUT/d9mtair.so" \
-  build/air-compiler/vs.metallib build/air-compiler/ps.metallib \
-  air/tests/bin/vs_mvp.bin)
+# Smoke test (x86_64 host, needs a Metal GPU): vertex-descriptor PSO, MTL4
+# path and AIR parity against reference metallibs from the host AIR compiler
+# (scripts/build-air-compiler.sh, which needs Homebrew llvm@15 + a
+# SPIRV-Cross checkout). Skipped when those references can't be built;
+# SMOKE=0 skips it explicitly, SMOKE=1 makes a missing reference fatal.
+SMOKE="${SMOKE:-auto}"
+if [ "$SMOKE" != 0 ] && [ ! -f "$V2/build/air-compiler/vs.metallib" ]; then
+  bash "$V2/scripts/build-air-compiler.sh" >/dev/null 2>&1 || {
+    [ "$SMOKE" = 1 ] && { echo "FATAL: build-air-compiler.sh failed (smoke test references)" >&2; exit 1; }
+    echo "[bridge] smoke test skipped: no reference metallibs (scripts/build-air-compiler.sh failed)"
+    SMOKE=0
+  }
+fi
+if [ "$SMOKE" != 0 ]; then
+  echo "[bridge] smoke test (x86_64 host)"
+  clang++ "${CXXFLAGS_UNIX[@]}" \
+    "$BR/tests/bridge_smoke.cpp" \
+    $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_*.o) \
+    "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
+    "${LLVM_LIBS[@]}" -lm -lpthread \
+    -o "$OUT/bridge_smoke"
+  (cd "$V2" && "$OUT/bridge_smoke" \
+    "$OUT/winemetal.so" "$AIRLIB_OUT/d9mtair.so" \
+    build/air-compiler/vs.metallib build/air-compiler/ps.metallib \
+    air/tests/bin/vs_mvp.bin)
+fi
 
 echo "[bridge] done"

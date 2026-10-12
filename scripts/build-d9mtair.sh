@@ -6,10 +6,10 @@
 # Also builds the x86_64 host loopback driver (airlib/loopback_main.cpp).
 #
 #   bash scripts/build-d9mtair.sh              # build only
-#   bash scripts/build-d9mtair.sh --install    # + install into CrossOver/bottle
+#   CX=<engine> BOTTLE=<name> bash scripts/build-d9mtair.sh --install
+#        # + install into a (dedicated) CrossOver engine copy and bottle
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-ROOT="$(cd "$V2/.." && pwd)"
 SRC="$V2/airlib"
 DX="$V2/third_party/dxbc-spirv"
 OUT="$V2/build/airlib"
@@ -121,8 +121,8 @@ i686-w64-mingw32-dlltool -d "$OUT/d9mtair.def" \
   -l "$OUT/libd9mtair32.a" --dllname d9mtair.dll
 
 if [ "${1:-}" = "--install" ]; then
-  CX="${CX:-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver}"
-  BOTTLE="${BOTTLE:-Rockstar Games Launcher}"
+  CX="${CX:?set CX to the Wine engine root (a dedicated copy, not CrossOver.app)}"
+  BOTTLE="${BOTTLE:?set BOTTLE to the CrossOver bottle name}"
   echo "[d9mtair] installing (CrossOver dxmt dir + wine tree + bottle)"
   for d in "$CX/lib/dxmt" "$CX/lib/wine"; do :; done
   mkdir -p "$CX/lib/dxmt/i386-windows" "$CX/lib/dxmt/x86_64-windows" "$CX/lib/dxmt/x86_64-unix"

@@ -11,7 +11,7 @@
 #   scripts/audit-port-diff.sh <file.cpp>   # full normalized diff for one file
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
-UP="$V2/DXVK-3.0-uptsream/src/d3d9"
+UP="${DXVK_SRC:-$V2/DXVK-3.0-uptsream}/src/d3d9"   # DXVK checkout (DXVK_SRC)
 PORT="$V2/driver/d3d9"
 
 # Expected mechanical rename map (sed -E), applied to the UPSTREAM side so
