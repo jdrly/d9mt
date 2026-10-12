@@ -3,6 +3,7 @@
 #include "mtl_pso_cache.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 
 #include "../util/log/log.h"
@@ -23,54 +24,67 @@ namespace dxvk::backend {
     }
   }
 
-  RenderPsoCache::RenderPsoCache(obj_handle_t compiler)
-  : m_compiler(compiler) { }
+  RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device)
+  : m_compiler(compiler), m_device(device) { }
 
-  obj_handle_t RenderPsoCache::get(
+  RenderPsoCache::Entry* RenderPsoCache::get(
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
     const char* vsEntry, const char* fsEntry) {
     static const bool s_noPsoCache = std::getenv("D9MT_NOPSOCACHE") != nullptr;
     if (s_noPsoCache) {
-      m_hasLast = false;
+      m_last = nullptr;
       m_cache.erase(key);
     }
 
-    if (m_hasLast && m_lastKey == key)
-      return m_lastPso;
+    if (m_last && m_lastKey == key)
+      return m_last;
 
     auto entry = m_cache.find(key);
-    if (entry != m_cache.end()) {
-      m_hasLast = true;
-      m_lastKey = key;
-      m_lastPso = entry->second.handle();
-      return m_lastPso;
+    if (entry == m_cache.end()) {
+      prof::bump(prof::CntPsoMiss);
+
+      Rc<Entry> e = new Entry();
+      e->m_key       = key;
+      e->m_compiler  = m_compiler;
+      e->m_vsLibrary = vsLibrary;
+      e->m_fsLibrary = fsLibrary;
+      e->m_vsEntry   = vsEntry;
+      e->m_fsEntry   = fsEntry;
+
+      entry = m_cache.emplace(key, e).first;
+      m_device->submitCompile(e, true);
     }
 
-    prof::bump(prof::CntPsoMiss);
-    const auto t0 = std::chrono::steady_clock::now();
-    obj_handle_t pso = build(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
-    if (prof::g_profEnabled) {
-      static uint64_t s_total = 0u;
-      static double   s_totalMs = 0.0;
-      const double ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
-      s_total++;
-      s_totalMs += ms;
-      if (ms >= 1.0)
-        Logger::info(str::format("PSOBUILD ms=", ms, " n=", s_total,
-          " cacheSize=", m_cache.size(), " totalMs=", s_totalMs));
-    }
-    if (!pso)
-      return 0u;
-
-    m_cache.emplace(key, WmtRenderPso::adopt(pso));
-    m_hasLast = true;
     m_lastKey = key;
-    m_lastPso = pso;
-    return pso;
+    m_last = entry->second.ptr();
+    return m_last;
   }
 
-  obj_handle_t RenderPsoCache::build(
+  obj_handle_t RenderPsoCache::getSync(
+    const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
+    const char* vsEntry, const char* fsEntry) {
+    Entry* e = get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
+    compile_stats::waitOnRenderThread(e);
+    return e->handle();
+  }
+
+  void RenderPsoCache::Entry::run() {
+    const uint64_t t0 = compile_stats::nowNs();
+    m_pso = WmtRenderPso::adopt(build(m_compiler, m_key,
+      m_vsLibrary, m_fsLibrary, m_vsEntry, m_fsEntry));
+
+    if (compile_stats::g_enabled) {
+      static std::atomic<uint64_t> s_total = { 0u };
+      const uint64_t dt = compile_stats::nowNs() - t0;
+      const uint64_t n = ++s_total;
+      compile_stats::g_psos.add(dt);
+      const double ms = double(dt) * 1e-6;
+      if (ms >= 1.0)
+        Logger::info(str::format("PSOBUILD ms=", ms, " n=", n));
+    }
+  }
+
+  obj_handle_t RenderPsoCache::build(obj_handle_t compiler,
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
     const char* vsEntry, const char* fsEntry) {
 
@@ -81,8 +95,8 @@ namespace dxvk::backend {
     info.vertex_entry_name.set(vsEntry ? vsEntry : "main");
     info.fragment_entry_name.set(fsLibrary ? (fsEntry ? fsEntry : "main") : nullptr);
     if (vsEntry && vsEntry[0] == 'f' && vsEntry[1] == 'f') {
-      static bool s_ffOnce = false;
-      if (!s_ffOnce) { s_ffOnce = true;
+      static std::atomic<bool> s_ffOnce = { false };
+      if (!s_ffOnce.exchange(true)) {
         Logger::warn(str::format("D9MT-FF: building FF render PSO vsEntry=", vsEntry,
           " fsEntry=", (fsLibrary && fsEntry) ? fsEntry : "(none)",
           " attrs=", uint32_t(key.attrCount), " colors=", uint32_t(key.colorCount))); }
@@ -136,7 +150,7 @@ namespace dxvk::backend {
     info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
 
     obj_handle_t err = 0u;
-    obj_handle_t pso = MTL4Compiler_newRenderPipelineState(m_compiler, &info, &err);
+    obj_handle_t pso = MTL4Compiler_newRenderPipelineState(compiler, &info, &err);
 
     if (!pso) {
       if (err) {

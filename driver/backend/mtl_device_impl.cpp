@@ -2,11 +2,13 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "mtl_context_impl.h"
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
+#include "../util/util_env.h"
 #include "../util/util_string.h"
 
 namespace dxvk::backend {
@@ -71,7 +73,19 @@ namespace dxvk::backend {
 
   }
 
-  MtlDeviceImpl::MtlDeviceImpl() {
+  // D9MT_COMPILE_THREADS=<n> overrides min(4, ncpu/2); 0 = no workers.
+  static uint32_t compileThreadCount() {
+    std::string env = env::getEnvVar("D9MT_COMPILE_THREADS");
+    uint32_t ncpu = dxvk::thread::hardware_concurrency();
+    uint32_t n = env.empty()
+      ? std::clamp(ncpu / 2u, 1u, 4u)
+      : uint32_t(std::strtoul(env.c_str(), nullptr, 10));
+    Logger::info(str::format("D9MT: compile workers: ", n, " (ncpu ", ncpu, ")"));
+    return n;
+  }
+
+  MtlDeviceImpl::MtlDeviceImpl()
+  : m_compileWorkers(std::make_unique<MtlCompileWorkers>(compileThreadCount())) {
     obj_handle_t devices = WMTCopyAllDevices();
     obj_handle_t device = NSArray_object(devices, 0u);
     NSObject_release(devices);
@@ -92,7 +106,17 @@ namespace dxvk::backend {
     m_info.maxBufferLength = MTLDevice_recommendedMaxWorkingSetSize(m_device.handle());
   }
 
+  void MtlDeviceImpl::submitCompile(const Rc<MtlCompileTask>& task, bool urgent) {
+    m_compileWorkers->submit(task, urgent);
+  }
+
+  size_t MtlDeviceImpl::pendingCompiles() {
+    return m_compileWorkers->pending();
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
+    m_compileWorkers = nullptr;
+
     /* Retirement callbacks reach into the residency tracker, which is
      * destroyed after this body runs — the pump must be stopped and
      * drained here, before that member teardown happens. */

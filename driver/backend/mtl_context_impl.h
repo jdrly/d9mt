@@ -270,7 +270,12 @@ namespace dxvk::backend {
     uint32_t                 m_argTableCursor = 0u;
 
     uint64_t     m_lastStampSerial = ~0ull;
-    obj_handle_t m_lastEncodedPso  = 0u;
+    Rc<RenderPsoCache::Entry> m_lastEncodedPso;
+    // D9MT_ASYNC_SKIP=1: drop draws whose shaders/PSO are still compiling
+    // instead of waiting (no stalls, but objects pop in a few frames late).
+    // Needs compile workers, or nothing would ever finish.
+    bool         m_asyncSkip = false;
+    Rc<MtlCompileTask> m_lastBoosted[2];
     bool         m_dynValid        = false;
     MtlViewport  m_lastViewport    = {};
     MtlRect      m_lastScissor     = {};
@@ -364,6 +369,16 @@ namespace dxvk::backend {
     void appendTableSampler(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuResourceId, uint32_t index);
     bool prepareDraw();
     bool resolvePso();
+    bool emitPso(RenderPsoCache::Entry* pso);
+    // Waits for PSOs still compiling and patches their SetPSO commands; must
+    // run before m_cmdChunk is encoded or handed off.
+    void resolvePsoPatches();
+
+    struct PsoPatch {
+      wmtcmd_mtl4_setpso*       cmd;
+      Rc<RenderPsoCache::Entry> pso;
+    };
+    std::vector<PsoPatch> m_psoPatches;
 
     struct PsoSnapshot {
       const void* vs = nullptr;
@@ -373,7 +388,7 @@ namespace dxvk::backend {
       uint32_t msaaPacked = 0u, topoClass = 0u, pad = 0u;
     };
     PsoSnapshot  m_psoMruKey[4] = { };
-    obj_handle_t m_psoMruPso[4] = { };
+    Rc<RenderPsoCache::Entry> m_psoMruPso[4];
     uint32_t     m_psoMruCursor = 0u;
     uint32_t     m_layoutGen = 0u, m_strideGen = 0u, m_blendGen = 0u;
     ArgTablePair createArgumentTablePair() const;

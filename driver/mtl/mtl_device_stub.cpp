@@ -53,6 +53,12 @@ namespace dxvk {
     return nullptr;
   }
 
+  void MtlDevice::submitCompile(const Rc<MtlCompileTask>& task, bool urgent) { }
+
+  size_t MtlDevice::pendingCompiles() {
+    return 0u;
+  }
+
   Rc<MtlContext> MtlDevice::createContext() {
     Logger::warn("MtlDevice::createContext: stub");
     return nullptr;

@@ -32,7 +32,12 @@ namespace dxvk::backend {
 
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
-    m_psoCache(m_device->wmtCompiler()) {
+    m_psoCache(m_device->wmtCompiler(), m_device.ptr()) {
+    if (const char* v = std::getenv("D9MT_ASYNC_SKIP"); v && v[0] == '1') {
+      m_asyncSkip = m_device->m_compileWorkers->maxThreads() != 0u;
+      Logger::warn(str::format("D9MT: async skip ", m_asyncSkip ? "on" : "ignored (no compile workers)"));
+    }
+
     obj_handle_t dev = m_device->wmtDevice();
 
     WMTArgTableInfo ati = {};
@@ -267,6 +272,7 @@ namespace dxvk::backend {
       m_device->uploadRing().onComplete(completed);
     }
     prof::onFrameEnd();
+    compile_stats::onFrameEnd(compile_stats::g_enabled ? m_device->pendingCompiles() : 0u);
 
     static uint64_t s_diagFrame = 0u;
     if ((++s_diagFrame & 0xFFu) == 0u) {
@@ -463,7 +469,7 @@ namespace dxvk::backend {
       m_pass.encodedDraws = 0u;
       m_dirty = DirtyEverything;
       m_argTablesBound = false;
-      m_lastEncodedPso = 0u;
+      m_lastEncodedPso = nullptr;
       m_dynValid       = false;
       armVisibility();
       return;
@@ -509,7 +515,7 @@ namespace dxvk::backend {
     m_pass.pending = false;
     m_dirty = DirtyEverything;
     m_argTablesBound = false;
-    m_lastEncodedPso = 0u;
+    m_lastEncodedPso = nullptr;
     m_dynValid       = false;
     armVisibility();
   }
@@ -574,6 +580,7 @@ namespace dxvk::backend {
       return;
     prof::Scope profScope(prof::FlushCmdChunk);
     prof::bump(prof::CntChunkFlush);
+    resolvePsoPatches();
     MTL4RenderCommandEncoder_encodeCommands(m_pass.encoder, m_cmdChunk.head());
     m_cmdChunk.reset();
   }
@@ -983,6 +990,7 @@ namespace dxvk::backend {
     e.depthClear   = m_pass.depthClear;
     e.stencilClear = m_pass.stencilClear;
     e.draws        = m_pass.encodedDraws;
+    resolvePsoPatches();
     e.chunks.push_back(std::move(m_cmdChunk));
     m_cmdChunk = takeChunk();
     m_frameEntries.push_back(std::move(e));

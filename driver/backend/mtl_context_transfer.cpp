@@ -92,6 +92,29 @@ namespace dxvk::backend {
     if (m_vs == nullptr)
       return false;
 
+    // Shaders compile on the worker pool; the PSO key needs their libraries.
+    if (unlikely(!m_vs->ready() || (m_fs != nullptr && !m_fs->ready()))) {
+      if (m_asyncSkip) {
+        // Move still-queued prefetch compiles ahead (once per function).
+        const MtlShaderFunction* fns[2] = { m_vs.ptr(), m_fs.ptr() };
+
+        for (uint32_t i = 0u; i < 2u; i++) {
+          if (fns[i] != nullptr && !fns[i]->ready() && fns[i]->task != m_lastBoosted[i]) {
+            m_lastBoosted[i] = fns[i]->task;
+            m_device->submitCompile(fns[i]->task, true);
+          }
+        }
+
+        if (compile_stats::g_enabled)
+          compile_stats::g_skips.add(0u);
+        return false;
+      }
+
+      compile_stats::waitOnRenderThread(m_vs->task.ptr());
+      if (m_fs != nullptr)
+        compile_stats::waitOnRenderThread(m_fs->task.ptr());
+    }
+
     static const bool mruOff = std::getenv("D9MT_NO_PSOMRU") != nullptr;
     uint32_t passSamples = 0u;
     for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets && !passSamples; i++) {
@@ -128,17 +151,9 @@ namespace dxvk::backend {
 
     if (!mruOff) {
       for (uint32_t i = 0u; i < 4u; i++) {
-        if (m_psoMruPso[i] != 0u
-         && std::memcmp(&m_psoMruKey[i], &snap, sizeof(snap)) == 0) {
-          obj_handle_t pso = m_psoMruPso[i];
-          if (pso == m_lastEncodedPso)
-            return true;
-          m_lastEncodedPso = pso;
-          auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setpso>(
-            uint16_t(WMTMtl4RenderCommandSetPSO));
-          cmd->pso = pso;
-          return true;
-        }
+        if (m_psoMruPso[i] != nullptr
+         && std::memcmp(&m_psoMruKey[i], &snap, sizeof(snap)) == 0)
+          return emitPso(m_psoMruPso[i].ptr());
       }
     }
     prof::bump(prof::CntPsoKeyBuild);
@@ -204,22 +219,75 @@ namespace dxvk::backend {
 
     const char* vsEntry = m_vs->entryName ? m_vs->entryName : "main";
     const char* fsEntry = (m_fs != nullptr && m_fs->entryName) ? m_fs->entryName : "main";
-    obj_handle_t pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
-    if (!pso)
-      return false;
+    RenderPsoCache::Entry* pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
 
     m_psoMruKey[m_psoMruCursor] = snap;
     m_psoMruPso[m_psoMruCursor] = pso;
     m_psoMruCursor = (m_psoMruCursor + 1u) & 3u;
 
-    if (pso == m_lastEncodedPso)
+    return emitPso(pso);
+  }
+
+  bool MtlContextImpl::emitPso(RenderPsoCache::Entry* pso) {
+    const bool done = pso->isDone();
+
+    if (done && !pso->handle())
+      return false;
+
+    if (!done && m_asyncSkip) {
+      if (compile_stats::g_enabled)
+        compile_stats::g_skips.add(0u);
+      return false;
+    }
+
+    if (pso == m_lastEncodedPso.ptr())
       return true;
     m_lastEncodedPso = pso;
 
     auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_setpso>(
       uint16_t(WMTMtl4RenderCommandSetPSO));
-    cmd->pso = pso;
+
+    // Still compiling: patched (or dropped) before the chunk is encoded.
+    if (done)
+      cmd->pso = pso->handle();
+    else
+      m_psoPatches.push_back({ cmd, pso });
     return true;
+  }
+
+  void MtlContextImpl::resolvePsoPatches() {
+    if (likely(m_psoPatches.empty()))
+      return;
+
+    bool failed = false;
+
+    for (auto& p : m_psoPatches) {
+      compile_stats::waitOnRenderThread(p.pso.ptr());
+      p.cmd->pso = p.pso->handle();
+
+      if (p.cmd->pso)
+        continue;
+
+      // Build failed: drop the bind and the draws that relied on it, as a
+      // synchronous failure would have.
+      failed = true;
+      p.cmd->type = WMTMtl4RenderCommandNop;
+
+      for (auto* c = static_cast<wmtcmd_base*>(p.cmd->next.get()); c != nullptr;
+           c = static_cast<wmtcmd_base*>(c->next.get())) {
+        if (c->type == WMTMtl4RenderCommandSetPSO)
+          break;
+        if (c->type == WMTMtl4RenderCommandDraw || c->type == WMTMtl4RenderCommandDrawIndexed)
+          c->type = WMTMtl4RenderCommandNop;
+      }
+    }
+
+    m_psoPatches.clear();
+
+    if (failed) {
+      m_lastEncodedPso = nullptr;
+      m_dirty |= DirtyPso;
+    }
   }
 
   void MtlContextImpl::appendTableAddress(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuAddress, uint32_t index) {
@@ -1040,7 +1108,7 @@ namespace dxvk::backend {
     key.colorCount            = 1u;
     key.sampleCount           = uint8_t(std::max(view->image->info().sampleCount, 1u));
     key.topologyClass         = uint8_t(WMTPrimitiveTopologyClassTriangle);
-    obj_handle_t pso = m_psoCache.get(
+    obj_handle_t pso = m_psoCache.getSync(
       key, m_blitVs->library, m_fillFs->library,
       m_blitVs->entryName, m_fillFs->entryName);
     if (!pso)
@@ -1127,7 +1195,7 @@ namespace dxvk::backend {
     key.sampleCount   = uint8_t(std::max(view->image->info().sampleCount, 1u));
     key.topologyClass = uint8_t(WMTPrimitiveTopologyClassTriangle);
     key.depthFormat   = uint32_t(view->key.format);
-    obj_handle_t pso = m_psoCache.get(
+    obj_handle_t pso = m_psoCache.getSync(
       key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
     if (!pso)
       return;
@@ -1291,7 +1359,7 @@ namespace dxvk::backend {
     key.colorCount           = 1u;
     key.sampleCount          = uint8_t(std::max(dstView->image->info().sampleCount, 1u));
     key.topologyClass        = uint8_t(WMTPrimitiveTopologyClassTriangle);
-    obj_handle_t pso = m_psoCache.get(
+    obj_handle_t pso = m_psoCache.getSync(
       key, m_blitVs->library, m_blitFs->library,
       m_blitVs->entryName, m_blitFs->entryName);
     if (!pso)

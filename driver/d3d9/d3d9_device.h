@@ -1410,7 +1410,9 @@ namespace dxvk {
     D3D9FFShaderModuleSet           m_ffModules;
     D3D9SWVPEmulator                m_swvpEmulator;
 
-    uint64_t                        m_boundPsLinkageHash = ~0ull;
+    // Programs of the PS bound at draw time and the VS it was linked to.
+    const void*                     m_boundPs     = nullptr;
+    const void*                     m_boundPsPrev = nullptr;
 
     Com<D3D9StateBlock, false>      m_recorder;
 

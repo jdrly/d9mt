@@ -15,6 +15,7 @@ namespace dxvk {
   class MtlQuery;
   class MtlEvent;
   class MtlShaderFunction;
+  class MtlCompileTask;
   enum class MtlQueryType : uint32_t;
 
   struct MtlBufferCreateInfo {
@@ -77,6 +78,14 @@ namespace dxvk {
             MtlShaderStage              stage,
             const void*                 metallib,
             size_t                      size);
+
+    // Queues a compile task on the device's worker pool. Without workers
+    // (D9MT_COMPILE_THREADS=0, stub device) tasks run inline on first wait().
+    // Urgent tasks (needed by a draw) go ahead of prefetch work.
+    virtual void submitCompile(const Rc<MtlCompileTask>& task, bool urgent);
+
+    // Tasks queued but not yet started.
+    virtual size_t pendingCompiles();
 
     virtual Rc<MtlContext> createContext();
 

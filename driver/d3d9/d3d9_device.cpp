@@ -3334,8 +3334,6 @@ namespace dxvk {
 
     m_state.vertexShader = shader;
 
-    m_boundPsLinkageHash = ~0ull;
-
     const bool usesProgrammableVS = UseProgrammableVS();
 
     if (usesProgrammableVS) {
@@ -3687,11 +3685,10 @@ namespace dxvk {
     m_state.pixelShader = shader;
     const D3D9ShaderMasks newShaderMasks = PSShaderMasks();
 
-    m_boundPsLinkageHash = ~0ull;
+    // Bound (linked to the current VS) by the next draw.
+    m_boundPs = nullptr;
 
     if (shader != nullptr) {
-      BindShader<D3D9ShaderType::PixelShader>(newShader);
-
       const auto& programInfo = GetCommonShader(m_state.pixelShader)->GetInfo();
 
       if (m_specData.setPsShaderModel(programInfo.getVersion().first))
@@ -6992,6 +6989,9 @@ namespace dxvk {
   template <D3D9ShaderType ShaderStage>
   void D3D9DeviceEx::BindShader(
   const D3D9CommonShader*                 pShaderModule) {
+    if (ShaderStage == D3D9ShaderType::PixelShader)
+      m_boundPs = nullptr;
+
     auto shader = pShaderModule->GetShader();
 
 
@@ -7011,6 +7011,9 @@ namespace dxvk {
       ? MtlShaderStage::Vertex
       : MtlShaderStage::Fragment;
 
+    if (ShaderStage == D3D9ShaderType::PixelShader)
+      m_boundPs = nullptr;
+
     EmitCs([
       cShader = m_ffModules.GetShader<ShaderStage>()
     ](MtlContext* ctx) mutable {
@@ -7020,28 +7023,28 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindProgrammablePixelShaderLinkage() {
-    if (!UseProgrammablePS() || !UseProgrammableVS())
+    // Programmable pixel shaders are bound here, at draw time, linked against
+    // the programmable VS (or standalone under fixed-function VS). Binding
+    // never blocks: the function is a future the CS thread waits on (or, with
+    // D9MT_ASYNC_SKIP, skips draws for) only if it is still compiling.
+    if (!UseProgrammablePS())
       return;
 
-    const D3D9CommonShader* vs = GetCommonShader(m_state.vertexShader);
     const D3D9CommonShader* ps = GetCommonShader(m_state.pixelShader);
+    const D3D9CommonShader* vs = UseProgrammableVS()
+      ? GetCommonShader(m_state.vertexShader) : nullptr;
 
-    if (vs == nullptr || ps == nullptr)
+    const void* psProgram = ps->GetProgram();
+    const void* vsProgram = vs != nullptr ? vs->GetProgram() : nullptr;
+
+    if (m_boundPs == psProgram && m_boundPsPrev == vsProgram)
       return;
 
-    uint64_t linkageHash = vs->GetOutputIoHash();
-    linkageHash = linkageHash * 1099511628211ull ^ uint64_t(uintptr_t(vs));
-    linkageHash = linkageHash * 1099511628211ull ^ uint64_t(uintptr_t(ps));
-
-    if (linkageHash == m_boundPsLinkageHash)
-      return;
-
-    m_boundPsLinkageHash = linkageHash;
-
-    Rc<MtlShaderFunction> shader = ps->GetShaderForLinkage(vs);
+    m_boundPs     = psProgram;
+    m_boundPsPrev = vsProgram;
 
     EmitCs([
-      cShader = std::move(shader)
+      cShader = ps->GetShaderForLinkage(vs)
     ] (MtlContext* ctx) mutable {
       ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
     });

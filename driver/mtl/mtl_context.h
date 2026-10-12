@@ -7,6 +7,7 @@
 #include "mtl_types.h"
 #include "mtl_resource.h"
 #include "mtl_device.h"
+#include "mtl_compile.h"
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
@@ -31,6 +32,12 @@ namespace dxvk {
     };
     uint8_t             abTableIndex = 21u;
     std::vector<AbWord> abWords;
+
+    // Set at creation for functions compiled asynchronously (never changed
+    // afterwards); every other field is only valid once task->isDone().
+    Rc<MtlCompileTask>  task;
+
+    bool ready() const { return task == nullptr || task->isDone(); }
   };
 
   class MtlCommandBuffer : public RcObject { };

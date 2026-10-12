@@ -105,6 +105,10 @@ namespace dxvk::backend {
             const void*                 metallib,
             size_t                      size) override;
 
+    void submitCompile(const Rc<MtlCompileTask>& task, bool urgent) override;
+
+    size_t pendingCompiles() override;
+
     Rc<MtlContext> createContext() override;
 
     uint64_t getCompletedSerial() override;
@@ -165,6 +169,9 @@ namespace dxvk::backend {
 
     std::mutex m_dssoMutex;
     std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
+
+    // Stopped first in ~MtlDeviceImpl, while the compiler is still alive.
+    std::unique_ptr<MtlCompileWorkers> m_compileWorkers;
 
     friend class MtlContextImpl;
 

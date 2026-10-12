@@ -1094,30 +1094,11 @@ namespace dxvk {
       return m_ir;
     }
 
-    uint64_t outputIoHash() const override {
-      return m_outputIoHash;
-    }
-
-    std::vector<uint8_t> getMetallib(const PairedStageIo& paired, uint64_t specStateHash,
-                                     D3D9CbvSlotMap* outCbvMap = nullptr) override {
+    std::vector<uint8_t> getFinalIr(const PairedStageIo& paired) const override {
       using namespace dxbc_spv;
 
       if (m_ir.empty())
         return { };
-
-      uint64_t cacheKey = util::hash_combine(
-        std::hash<uint64_t>()(paired.prevStageIoHash),
-        std::hash<uint64_t>()(specStateHash));
-
-      {
-        std::lock_guard lock(m_metallibMutex);
-        auto it = m_metallibCache.find(cacheKey);
-        if (it != m_metallibCache.end()) {
-          if (outCbvMap)
-            *outCbvMap = it->second.cbvMap;
-          return it->second.metallib;
-        }
-      }
 
       ir::Builder builder;
       ir::Deserializer deser(m_ir.data(), m_ir.size());
@@ -1158,8 +1139,6 @@ namespace dxvk {
           ioPass.enableFlatInterpolation(flatMask);
       }
 
-      (void)specStateHash;
-
       ir::Serializer ser(builder);
       size_t irSize = ser.computeSerializedSize();
 
@@ -1169,10 +1148,15 @@ namespace dxvk {
         return { };
       }
 
+      return irBuf;
+    }
+
+    std::vector<uint8_t> compileMetallib(const std::vector<uint8_t>& irBuf,
+                                         D3D9CbvSlotMap*             outCbvMap) const override {
       std::string entry = "main";
 
-      // this 32-bit PE process can't dereference a unix-allocated out_metallib
-      // pointer, so provide our own buffers for the unix side to memcpy into
+      // the unix side memcpys into PE-owned buffers (the PE side can't free
+      // unix allocations)
       std::vector<uint8_t> metallib(512u * 1024u);
       std::vector<uint8_t> reflection(64u * 1024u);
 
@@ -1200,8 +1184,7 @@ namespace dxvk {
         static std::atomic<uint64_t> s_n = { 0u };
         const double ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - airT0).count();
-        Logger::info(str::format("AIRCOMPILE ms=", ms, " n=", ++s_n, " ", m_name,
-          paired.prevStageIr ? " (paired)" : ""));
+        Logger::info(str::format("AIRCOMPILE ms=", ms, " n=", ++s_n, " ", m_name));
       }
 
       if (status != D9MT_AIR_OK || !params.out_size) {
@@ -1212,18 +1195,8 @@ namespace dxvk {
       metallib.resize(params.out_size);
       reflection.resize(params.out_reflection_size);
 
-      D3D9CbvSlotMap cbvMap = parseReflectionCbvMap(reflection);
-
-      {
-        std::lock_guard lock(m_metallibMutex);
-        MetallibCacheEntry entry;
-        entry.metallib = metallib;
-        entry.cbvMap   = cbvMap;
-        m_metallibCache.emplace(cacheKey, std::move(entry));
-      }
-
       if (outCbvMap)
-        *outCbvMap = cbvMap;
+        *outCbvMap = parseReflectionCbvMap(reflection);
 
       return metallib;
     }
@@ -1303,35 +1276,6 @@ namespace dxvk {
     D3D9ShaderAnalysis   m_analysis;
     std::string          m_name;
     std::vector<uint8_t> m_ir;
-    uint64_t             m_outputIoHash = 0u;
-
-    struct MetallibCacheEntry {
-      std::vector<uint8_t> metallib;
-      D3D9CbvSlotMap       cbvMap;
-    };
-    std::mutex                                          m_metallibMutex;
-    std::unordered_map<uint64_t, MetallibCacheEntry>    m_metallibCache;
-
-    static uint64_t hashOutputIoMap(const dxbc_spv::ir::Builder& builder) {
-      using namespace dxbc_spv;
-
-      ir::IoMap outputs = ir::IoMap::forOutputs(builder, 0u);
-
-      size_t h = 0u;
-      for (const auto& loc : outputs) {
-        h = util::hash_combine(h, size_t(loc.getType()));
-        h = util::hash_combine(h, size_t(loc.getType() == ir::IoEntryType::eBuiltIn
-          ? uint32_t(loc.getBuiltIn()) : loc.getLocationIndex()));
-        h = util::hash_combine(h, size_t(loc.getComponentMask()));
-
-        auto sem = outputs.getSemanticForEntry(loc);
-        for (char c : sem.name)
-          h = util::hash_combine(h, size_t(uint8_t(c)));
-        h = util::hash_combine(h, size_t(sem.index));
-      }
-
-      return uint64_t(h);
-    }
 
     void runPhaseA(const D3D9ShaderOptions& options, const void* bytecode) {
       using namespace dxbc_spv;
@@ -1360,8 +1304,6 @@ namespace dxvk {
 
       ir::CompileOptions compileOptions = { };
       ir::legalizeIr(builder, compileOptions);
-
-      m_outputIoHash = hashOutputIoMap(builder);
 
       ir::Serializer ser(builder);
       size_t size = ser.computeSerializedSize();

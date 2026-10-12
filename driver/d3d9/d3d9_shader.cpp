@@ -2,11 +2,11 @@
 #include "d3d9_shader_compiler.h"
 #include "d3d9_device.h"
 
+#include "../util/util_env.h"
+
 namespace dxvk {
 
-  static void ApplyCbvSlotMap(const Rc<MtlShaderFunction>& fn, const D3D9CbvSlotMap& map) {
-    if (fn == nullptr)
-      return;
+  static void ApplyCbvSlotMap(MtlShaderFunction* fn, const D3D9CbvSlotMap& map) {
     for (size_t i = 0u; i < fn->cbvSlotMap.size(); i++)
       fn->cbvSlotMap[i] = (i < map.slot.size()) ? map.slot[i] : int8_t(-1);
 
@@ -19,87 +19,226 @@ namespace dxvk {
     }
   }
 
+
+  static void CopyFunction(MtlShaderFunction* dst, const MtlShaderFunction* src) {
+    dst->library      = src->library;
+    dst->entryName    = src->entryName;
+    dst->cbvSlotMap   = src->cbvSlotMap;
+    dst->abTableIndex = src->abTableIndex;
+    dst->abWords      = src->abWords;
+  }
+
+
+  /**
+   * \brief Compiles one function future of a program
+   *
+   * Holds its program, the paired program and the function until it has
+   * run, then drops them (the function keeps the task, not the reverse).
+   */
+  class D3D9ShaderFunctionTask : public MtlCompileTask {
+
+  public:
+
+    D3D9ShaderFunctionTask(
+            D3D9ShaderProgram*    pProgram,
+      const D3D9ShaderProgram*    pPrev,
+            MtlShaderFunction*    pFn)
+    : m_program(pProgram)
+    , m_prev(const_cast<D3D9ShaderProgram*>(pPrev))
+    , m_fn(pFn) { }
+
+  protected:
+
+    void run() override {
+      Compile();
+
+      m_fn      = nullptr;
+      m_prev    = nullptr;
+      m_program = nullptr;
+    }
+
+  private:
+
+    Rc<D3D9ShaderProgram> m_program;
+    Rc<D3D9ShaderProgram> m_prev;
+    Rc<MtlShaderFunction> m_fn;
+
+    void Compile() {
+      // Phase A of both stages; runs them here if no worker has yet.
+      m_program->wait();
+
+      if (m_prev != nullptr)
+        m_prev->wait();
+
+      const auto& backend = m_program->m_backend;
+
+      if (backend == nullptr)
+        return;
+
+      ID3D9MetalShaderBackend::PairedStageIo paired = { };
+
+      if (m_prev != nullptr && m_prev->m_backend != nullptr)
+        paired.prevStageIr = &m_prev->m_backend->serializedIr();
+
+      std::vector<uint8_t> ir = backend->getFinalIr(paired);
+
+      if (ir.empty()) {
+        Fallback(nullptr);
+        return;
+      }
+
+      Sha1Hash hash = Sha1Hash::compute(ir.data(), ir.size());
+      Rc<MtlShaderFunction> owner = m_program->ClaimIr(hash, m_fn);
+
+      if (owner != m_fn) {
+        // Same IR as another function of this shader (typically: the PS
+        // reads nothing the VS doesn't write, so linking changed nothing).
+        // The owner never waits on us, so this cannot deadlock.
+        owner->task->wait();
+        CopyFunction(m_fn.ptr(), owner.ptr());
+
+        if (compile_stats::g_enabled)
+          compile_stats::g_shared.add(0u);
+
+        if (!m_fn->library)
+          Fallback(&hash);
+        return;
+      }
+
+      const uint64_t t0 = compile_stats::g_enabled ? compile_stats::nowNs() : 0u;
+
+      D3D9CbvSlotMap cbvMap;
+      std::vector<uint8_t> metallib = backend->compileMetallib(ir, &cbvMap);
+
+      Rc<MtlShaderFunction> lib;
+
+      if (!metallib.empty()) {
+        lib = m_program->m_device->createShaderFunction(
+          m_program->m_stage, metallib.data(), metallib.size());
+      }
+
+      if (compile_stats::g_enabled)
+        compile_stats::g_shaders.add(compile_stats::nowNs() - t0);
+
+      if (lib == nullptr) {
+        Logger::err(str::format("D3D9 shader: ", metallib.empty() ? "AIR compile" : "newLibrary",
+          " failed for ", m_program->m_name, m_prev != nullptr ? " (paired)" : ""));
+        Fallback(&hash);
+        return;
+      }
+
+      m_fn->library = lib->library;
+      ApplyCbvSlotMap(m_fn.ptr(), cbvMap);
+    }
+
+    // A failed linked PS falls back to the standalone PS, unless that is
+    // the very IR that just failed (whose owner may be waiting on us).
+    void Fallback(const Sha1Hash* pFailedHash) {
+      if (m_prev == nullptr)
+        return;
+
+      if (pFailedHash != nullptr) {
+        std::vector<uint8_t> ir = m_program->m_backend->getFinalIr({ });
+
+        if (ir.empty() || Sha1Hash::compute(ir.data(), ir.size()) == *pFailedHash)
+          return;
+      }
+
+      Rc<MtlShaderFunction> standalone = m_program->GetFunction(nullptr);
+      standalone->task->wait();
+      CopyFunction(m_fn.ptr(), standalone.ptr());
+    }
+
+  };
+
+
+  D3D9ShaderProgram::D3D9ShaderProgram(
+          MtlDevice*                pDevice,
+    const std::string&              Name,
+          MtlShaderStage            Stage,
+    const D3D9ShaderOptions&        Options,
+    const D3D9ShaderAnalysis&       Analysis,
+    const void*                     pBytecode)
+  : m_device(pDevice), m_name(Name), m_stage(Stage), m_options(Options), m_analysis(Analysis)
+  , m_bytecode(reinterpret_cast<const uint8_t*>(pBytecode),
+               reinterpret_cast<const uint8_t*>(pBytecode) + Analysis.GetLength()) {
+    // D9MT_PS_PREFETCH=0: compile pixel shaders only once a draw needs them
+    // (default: right after Phase A, like vertex shaders, since a PS linked
+    // against a compatible VS reuses the standalone library).
+    static const bool s_psPrefetch = env::getEnvVar("D9MT_PS_PREFETCH") != "0";
+
+    if (Stage == MtlShaderStage::Vertex || s_psPrefetch) {
+      Rc<MtlShaderFunction> fn = CreateFunction(nullptr);
+      m_functions.emplace(nullptr, fn);
+      m_prefetch = fn->task;
+    }
+  }
+
+
+  Rc<MtlShaderFunction> D3D9ShaderProgram::GetFunction(const D3D9ShaderProgram* pPrev) {
+    Rc<MtlShaderFunction> fn;
+
+    { std::lock_guard lock(m_mutex);
+      auto& slot = m_functions[pPrev];
+
+      if (slot != nullptr)
+        return slot;
+
+      slot = fn = CreateFunction(pPrev);
+    }
+
+    m_device->submitCompile(fn->task, true);
+    return fn;
+  }
+
+
+  Rc<MtlShaderFunction> D3D9ShaderProgram::CreateFunction(const D3D9ShaderProgram* pPrev) {
+    Rc<MtlShaderFunction> fn = new MtlShaderFunction();
+    fn->stage = m_stage;
+    fn->task  = new D3D9ShaderFunctionTask(this, pPrev, fn.ptr());
+    return fn;
+  }
+
+
+  Rc<MtlShaderFunction> D3D9ShaderProgram::ClaimIr(const Sha1Hash& Hash, const Rc<MtlShaderFunction>& Fn) {
+    std::lock_guard lock(m_mutex);
+    return m_byIr.emplace(Hash, Fn).first->second;
+  }
+
+
+  void D3D9ShaderProgram::run() {
+    Logger::debug(str::format("Compiling shader ", m_name));
+
+    m_backend = createD3D9MetalShader(m_name, m_stage, m_options, m_analysis, m_bytecode.data());
+
+    if (m_backend == nullptr)
+      Logger::err(str::format("D3D9 shader: Phase-A build failed for ", m_name));
+
+    m_bytecode = std::vector<uint8_t>();
+
+    // Queue (not run) the standalone compile: it waits on this task.
+    if (m_prefetch != nullptr)
+      m_device->submitCompile(std::exchange(m_prefetch, nullptr), false);
+  }
+
+
   D3D9CommonShader::D3D9CommonShader(
           D3D9DeviceEx*             pDevice,
     const D3D9ShaderModuleKey&      ShaderKey,
           D3D9ShaderAnalysis&&      Analysis,
     const D3D9ShaderCreateInfo&     ModuleInfo,
     const void*                     pShaderBytecode)
-  : m_analysis(std::move(Analysis))
-  , m_device(pDevice)
-  , m_linkageCache(std::make_shared<D3D9ShaderLinkageCache>()) {
+  : m_analysis(std::move(Analysis)) {
     const MtlShaderStage stage = ShaderKey.stage();
 
     m_name = str::format(stage == MtlShaderStage::Vertex ? "vs_" : "ps_", ShaderKey.hash());
-    Logger::debug(str::format("Compiling shader ", m_name));
 
-    m_backend = createD3D9MetalShader(
+    // The game may free the bytecode once Create*Shader returns; the
+    // program keeps its own copy until Phase A has run.
+    m_program = new D3D9ShaderProgram(pDevice->GetDXVKDevice().ptr(),
       m_name, stage, ModuleInfo.shaderOptions, m_analysis, pShaderBytecode);
 
-    if (m_backend == nullptr) {
-      Logger::err(str::format("D3D9 shader: Phase-A build failed for ", m_name));
-      return;
-    }
-
-    D3D9CbvSlotMap cbvMap;
-    std::vector<uint8_t> metallib = m_backend->getMetallib(
-      ID3D9MetalShaderBackend::PairedStageIo { }, 0u, &cbvMap);
-
-    if (metallib.empty()) {
-      Logger::err(str::format("D3D9 shader: Phase-B metallib empty for ", m_name));
-      return;
-    }
-
-    m_shader = pDevice->GetDXVKDevice()->createShaderFunction(
-      stage, metallib.data(), metallib.size());
-
-    if (m_shader == nullptr)
-      Logger::err(str::format("D3D9 shader: newLibrary failed for ", m_name));
-    else
-      ApplyCbvSlotMap(m_shader, cbvMap);
-  }
-
-
-  Rc<MtlShaderFunction> D3D9CommonShader::GetShaderForLinkage(
-    const D3D9CommonShader* pPrevStage) const {
-    if (m_backend == nullptr
-     || m_backend->stage() != MtlShaderStage::Fragment
-     || pPrevStage == nullptr
-     || pPrevStage->m_backend == nullptr)
-      return m_shader;
-
-    const uint64_t prevIoHash = pPrevStage->m_backend->outputIoHash();
-
-    std::lock_guard lock(m_linkageCache->mutex);
-
-    auto it = m_linkageCache->functions.find(prevIoHash);
-    if (it != m_linkageCache->functions.end())
-      return it->second;
-
-    ID3D9MetalShaderBackend::PairedStageIo paired = { };
-    paired.prevStageIr     = &pPrevStage->m_backend->serializedIr();
-    paired.prevStageIoHash = prevIoHash;
-    paired.matchSemantics  = true;
-
-    D3D9CbvSlotMap cbvMap;
-    std::vector<uint8_t> metallib = m_backend->getMetallib(paired, 0u, &cbvMap);
-
-    Rc<MtlShaderFunction> fn = m_shader;
-
-    if (!metallib.empty()) {
-      auto compiled = m_device->GetDXVKDevice()->createShaderFunction(
-        m_backend->stage(), metallib.data(), metallib.size());
-
-      if (compiled != nullptr) {
-        ApplyCbvSlotMap(compiled, cbvMap);
-        fn = compiled;
-      } else {
-        Logger::err(str::format("D3D9 shader: linkage newLibrary failed for ", m_name));
-      }
-    }
-
-    m_linkageCache->functions.emplace(prevIoHash, fn);
-    return fn;
+    pDevice->GetDXVKDevice()->submitCompile(m_program, false);
   }
 
 

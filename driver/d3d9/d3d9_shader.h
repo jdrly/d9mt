@@ -16,6 +16,7 @@
 
 #include "../mtl/mtl_types.h"
 #include "../mtl/mtl_context.h"
+#include "../mtl/mtl_compile.h"
 
 #include "../util/dxvk_hash.h"
 #include "../util/util_unmap.h"
@@ -55,17 +56,18 @@ namespace dxvk {
 
     virtual const std::vector<uint8_t>& serializedIr() const = 0;
 
-    virtual uint64_t outputIoHash() const = 0;
-
     struct PairedStageIo {
       const std::vector<uint8_t>* prevStageIr    = nullptr;
-      uint64_t                    prevStageIoHash = 0u;
-      bool                        matchSemantics  = true;
+      bool                        matchSemantics = true;
     };
 
-    virtual std::vector<uint8_t> getMetallib(const PairedStageIo& paired,
-                                             uint64_t             specStateHash,
-                                             D3D9CbvSlotMap*      outCbvMap = nullptr) = 0;
+    /// Final IR (I/O lowered, linked against the previous stage if given);
+    /// empty on failure. Identical bytes compile to identical metallibs.
+    /// Thread-safe (the backend is immutable after construction).
+    virtual std::vector<uint8_t> getFinalIr(const PairedStageIo& paired) const = 0;
+
+    virtual std::vector<uint8_t> compileMetallib(const std::vector<uint8_t>& ir,
+                                                 D3D9CbvSlotMap*             outCbvMap) const = 0;
   };
 
   struct D3D9ShaderResourceMapping {
@@ -138,9 +140,61 @@ namespace dxvk {
     Sha1Hash       m_sha   = { };
   };
 
-  struct D3D9ShaderLinkageCache {
-    dxvk::mutex                                      mutex;
-    std::unordered_map<uint64_t, Rc<MtlShaderFunction>> functions;
+  /**
+   * \brief Compiled form of one unique D3D9 shader
+   *
+   * Shared by every D3D9CommonShader copy and kept alive by the module set.
+   * As a task it runs the SM3 -> IR front end (Phase A) on the compile
+   * workers; Metal functions are futures (MtlShaderFunction::task) for the
+   * standalone shader and, for pixel shaders, per paired vertex shader.
+   * Functions whose final IR is byte-identical share one MTLLibrary, so a
+   * PS linked against a compatible VS reuses the standalone compile and its
+   * PSOs. All members are immutable after run() except the maps (m_mutex).
+   */
+  class D3D9ShaderProgram : public MtlCompileTask {
+    friend class D3D9ShaderFunctionTask;
+  public:
+
+    D3D9ShaderProgram(
+            MtlDevice*                pDevice,
+      const std::string&              Name,
+            MtlShaderStage            Stage,
+      const D3D9ShaderOptions&        Options,
+      const D3D9ShaderAnalysis&       Analysis,
+      const void*                     pBytecode);
+
+    /// Function future for this shader linked against pPrev (nullptr =
+    /// standalone). Never blocks; the first request queues the compile.
+    Rc<MtlShaderFunction> GetFunction(const D3D9ShaderProgram* pPrev);
+
+  protected:
+
+    void run() override;
+
+  private:
+
+    MtlDevice*                  m_device;
+    std::string                 m_name;
+    MtlShaderStage              m_stage;
+    D3D9ShaderOptions           m_options;
+    D3D9ShaderAnalysis          m_analysis;
+    std::vector<uint8_t>        m_bytecode;
+
+    Rc<ID3D9MetalShaderBackend> m_backend;
+
+    dxvk::mutex                 m_mutex;
+    std::unordered_map<const D3D9ShaderProgram*, Rc<MtlShaderFunction>> m_functions;
+    struct IrHash {
+      size_t operator () (const Sha1Hash& h) const { return h.dword(0); }
+    };
+
+    std::unordered_map<Sha1Hash, Rc<MtlShaderFunction>, IrHash> m_byIr;
+    Rc<MtlCompileTask>          m_prefetch;
+
+    Rc<MtlShaderFunction> CreateFunction(const D3D9ShaderProgram* pPrev);
+
+    Rc<MtlShaderFunction> ClaimIr(const Sha1Hash& Hash, const Rc<MtlShaderFunction>& Fn);
+
   };
 
   class D3D9CommonShader {
@@ -157,13 +211,17 @@ namespace dxvk {
       const void*                     pShaderBytecode);
 
     Rc<MtlShaderFunction> GetShader() const {
-      return m_shader;
+      return m_program != nullptr ? m_program->GetFunction(nullptr) : nullptr;
     }
 
-    Rc<MtlShaderFunction> GetShaderForLinkage(const D3D9CommonShader* pPrevStage) const;
+    Rc<MtlShaderFunction> GetShaderForLinkage(const D3D9CommonShader* pPrevStage) const {
+      return m_program != nullptr
+        ? m_program->GetFunction(pPrevStage ? pPrevStage->GetProgram() : nullptr)
+        : nullptr;
+    }
 
-    uint64_t GetOutputIoHash() const {
-      return m_backend != nullptr ? m_backend->outputIoHash() : 0u;
+    const D3D9ShaderProgram* GetProgram() const {
+      return m_program.ptr();
     }
 
     std::string GetName() const {
@@ -188,12 +246,8 @@ namespace dxvk {
   private:
 
     D3D9ShaderAnalysis          m_analysis;
-    Rc<MtlShaderFunction>       m_shader;
     std::string                 m_name;
-
-    Rc<ID3D9MetalShaderBackend> m_backend;
-    D3D9DeviceEx*               m_device = nullptr;
-    std::shared_ptr<D3D9ShaderLinkageCache> m_linkageCache;
+    Rc<D3D9ShaderProgram>       m_program;
 
   };
 
