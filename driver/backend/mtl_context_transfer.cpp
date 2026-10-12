@@ -1608,13 +1608,17 @@ namespace dxvk::backend {
   void MtlContextImpl::ensureVisBuffer() {
     if (m_visBuffer)
       return;
+    // CPU-visible memory must live in our address space (32-bit process): Metal's own
+    // contents pointer is unreachable from i386 code. 512 KiB is a whole number of pages.
+    const uint64_t length = uint64_t(kVisSlots) * 8u;
+    void* host = VirtualAlloc(nullptr, SIZE_T(length), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     WMTBufferInfo info = {};
-    info.length  = uint64_t(kVisSlots) * 8u;
+    info.length  = length;
     info.options = WMTResourceOptions(WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked);
-    info.memory.set(nullptr);
+    info.memory.set(host);
     obj_handle_t h = MTLDevice_newBuffer(m_device->wmtDevice(), &info);
     m_visBuffer = WmtBuffer::adopt(h);
-    m_visCpu    = info.memory.get();
+    m_visCpu    = host;
     m_device->residency().allocCreated(h, info.length);
   }
 

@@ -63,7 +63,7 @@ namespace dxvk::backend {
     for (auto& kv : m_fxScalers)
       NSObject_release(kv.second.scaler);
     if (m_visBuffer) {
-      m_device->residency().allocDestroyed(m_visBuffer.detach(), nullptr,
+      m_device->residency().allocDestroyed(m_visBuffer.detach(), m_visCpu,
         m_device->submissions().nextSerial(), uint64_t(kVisSlots) * 8u);
     }
   }
