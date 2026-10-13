@@ -1044,8 +1044,20 @@ namespace dxvk {
       m_targetFrameRate = frameRate;
     }
 
-    if (!m_presentParams.Windowed && m_presentParams.FullScreen_RefreshRateInHz)
-      m_targetFrameRate = double(m_presentParams.FullScreen_RefreshRateInHz);
+    if (!m_presentParams.Windowed && m_presentParams.FullScreen_RefreshRateInHz) {
+      double requested = double(m_presentParams.FullScreen_RefreshRateInHz);
+      m_targetFrameRate = requested;
+
+      // With vsync on a display that refreshes no faster than the requested mode, presentation
+      // already runs at that rate. A hard limit of exactly one refresh interval on top only
+      // beats against vsync: a frame the limiter wakes a hair late misses its refresh, the
+      // following frames are timed from that one, and presentation latches at half rate until
+      // timing noise tips it back (60 Hz displays: long runs of 33 ms frames after a hitch).
+      // Keep the limiter as a fallback that engages only if frames do come faster than the
+      // requested rate, as for the display refresh above.
+      if (SyncInterval && m_displayRefreshRate > 0.0 && m_displayRefreshRate <= requested * 1.01)
+        m_targetFrameRate = -requested / double(SyncInterval);
+    }
 
     if (m_parent->GetOptions()->maxFrameRate > 0)
       m_targetFrameRate = double(m_parent->GetOptions()->maxFrameRate);
