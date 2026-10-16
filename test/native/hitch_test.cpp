@@ -49,6 +49,10 @@ int main(int argc, char** argv) {
     CHECK(a < b && b < c && c < d);
     CHECK(line.find("present=") == std::string::npos);  // zero-count categories omitted
     CHECK(line.find("cs: renderWait=1/5.0ms") != std::string::npos);
+    CHECK(line.find("skipped=") == std::string::npos);    // no skips: not shown
+    s.skipped = 7u; s.budgetHits = 2u;
+    CHECK(hitch::formatHitch(77u, s).find("psos=0/0.0ms skipped=7 budgetHit=2") != std::string::npos);
+    s.skipped = 0u; s.budgetHits = 0u;
 
     std::string top2 = hitch::formatHitch(77u, s, 2u);
     CHECK(top2.find("texCreate=") == std::string::npos && top2.find("texUpload=") != std::string::npos);
@@ -85,6 +89,7 @@ int main(int argc, char** argv) {
     }
     spinMs(40.0);                     // the game's own time
     compile.waits = 2u; compile.waitsNs = 3000000u;
+    compile.skipped = 5u; compile.budgetHits = 1u;
 
     CHECK(p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 4u, 50.0, frame, s));
     std::printf("%s\n", hitch::formatHitch(frame, s).c_str());
@@ -97,6 +102,7 @@ int main(int argc, char** argv) {
     CHECK(s.cat[hitch::BufLock].n == 1u && s.cat[hitch::BufLock].aux == 1u);
     CHECK(s.cat[hitch::BufLock].ms >= 5.5);
     CHECK(s.renderWaits == 2u && s.renderWaitMs > 2.9 && s.renderWaitMs < 3.1);
+    CHECK(s.skipped == 5u && s.budgetHits == 1u);
     CHECK(s.csBehind == 4u);
 
     // Counters were consumed: an idle long frame shows nothing inside d9mt,
@@ -104,6 +110,7 @@ int main(int argc, char** argv) {
     spinMs(55.0);
     CHECK(p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 50.0, frame, s));
     CHECK(s.inMs == 0.0 && s.cat[hitch::Present].n == 0u && s.renderWaits == 0u);
+    CHECK(s.skipped == 0u && s.budgetHits == 0u);
   }
 
   { // Entries from two threads: depth never goes negative or sticks.

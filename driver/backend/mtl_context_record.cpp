@@ -33,9 +33,22 @@ namespace dxvk::backend {
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
     m_psoCache(m_device->wmtCompiler(), m_device.ptr()) {
+    // D9MT_ASYNC_SKIP=1 wins and is the same as a wait budget of 0.
+    const int32_t budgetMs = m_device->memoryProfile().pipelineWaitBudgetMs;
+    const bool workers = m_device->m_compileWorkers->maxThreads() != 0u;
+
     if (const char* v = std::getenv("D9MT_ASYNC_SKIP"); v && v[0] == '1') {
-      m_asyncSkip = m_device->m_compileWorkers->maxThreads() != 0u;
+      m_asyncSkip = workers;
       Logger::warn(str::format("D9MT: async skip ", m_asyncSkip ? "on" : "ignored (no compile workers)"));
+    } else if (budgetMs == 0) {
+      m_asyncSkip = workers;
+      Logger::warn(str::format("D9MT: pipeline wait budget 0 ms = async skip ",
+        m_asyncSkip ? "on" : "ignored (no compile workers)"));
+    } else if (budgetMs > 0) {
+      if (workers)
+        m_waitBudget.setBudgetMs(budgetMs);
+      Logger::warn(str::format("D9MT: pipeline wait budget ", budgetMs, " ms per frame",
+        workers ? "" : " ignored (no compile workers)"));
     }
 
     obj_handle_t dev = m_device->wmtDevice();
@@ -284,6 +297,7 @@ namespace dxvk::backend {
     }
     prof::onFrameEnd();
     compile_stats::onFrameEnd(compile_stats::g_enabled ? m_device->pendingCompiles() : 0u);
+    m_waitBudget.onFrameEnd();
 
     static uint64_t s_diagFrame = 0u;
     if (const uint32_t memEvery = m_device->memStatsInterval(); unlikely(memEvery)

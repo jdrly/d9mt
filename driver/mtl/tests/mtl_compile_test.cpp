@@ -5,7 +5,8 @@
 // programs, claim their "IR" in a per-program map and either compile or wait
 // for the owner of an identical IR; a render thread requests functions in
 // random order and waits on them (stealing queued ones), while pools are
-// torn down with work still queued.
+// torn down with work still queued. Also: timed waits and the per-frame
+// render-thread wait budget.
 
 #include <cstdio>
 #include <random>
@@ -159,7 +160,114 @@ static void iteration(uint32_t seed, uint32_t threads, bool teardownEarly) {
   (void)rng;
 }
 
+// A task that runs until released.
+struct GateTask : public MtlCompileTask {
+  std::atomic<bool> open = { false };
+  std::atomic<bool> ran  = { false };
+
+  void run() override {
+    ran = true;
+    while (!open.load())
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+};
+
+#define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_errors++; } } while (0)
+
+static double msSince(uint64_t t0) {
+  return double(compile_stats::nowNs() - t0) * 1e-6;
+}
+
+// MtlCompileTask::waitFor and the per-frame wait budget (D9MT_PSO_WAIT_MS).
+// Lower bounds are exact; upper bounds leave room for a loaded machine.
+static void budgetTests() {
+  { // waitFor never runs a queued task inline; wait() still does.
+    Rc<GateTask> t = new GateTask();
+    uint64_t t0 = compile_stats::nowNs();
+    CHECK(!t->waitFor(5000000u));
+    CHECK(msSince(t0) >= 5.0);
+    CHECK(!t->ran && !t->isDone());
+    t->open = true;
+    t->wait();
+    CHECK(t->ran && t->isDone() && t->waitFor(0u));
+  }
+
+  { // Off (the default): wait() is the unbounded render-thread wait.
+    MtlCompileWorkers pool(1u);
+    MtlCompileWaitBudget budget;
+    CHECK(!budget.enabled());
+    Rc<GateTask> t = new GateTask();
+    pool.submit(t, true);
+    std::thread opener([&t] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      t->open = true;
+    });
+    uint64_t t0 = compile_stats::nowNs();
+    CHECK(budget.wait(t.ptr()));
+    CHECK(t->isDone() && msSince(t0) >= 25.0);
+    opener.join();
+    // Not on a worker yet / no workers: off runs it inline like before.
+    Rc<GateTask> u = new GateTask();
+    u->open = true;
+    CHECK(budget.wait(u.ptr()) && u->ran);
+  }
+
+  { // On: one frame's waits together stay within the budget.
+    MtlCompileWorkers pool(2u);
+    MtlCompileWaitBudget budget;
+    budget.setBudgetMs(40);
+    CHECK(budget.enabled() && budget.leftNs() == 40000000u);
+
+    Rc<GateTask> a = new GateTask(), b = new GateTask();
+    pool.submit(a, true);
+    pool.submit(b, true);
+
+    uint64_t t0 = compile_stats::nowNs();
+    CHECK(!budget.wait(a.ptr()));           // waits out the whole budget
+    double first = msSince(t0);
+    CHECK(first >= 40.0 && first < 200.0);
+    CHECK(budget.leftNs() == 0u);
+    t0 = compile_stats::nowNs();
+    CHECK(!budget.wait(b.ptr()));           // nothing left: no wait at all
+    CHECK(msSince(t0) < 5.0);
+    CHECK(!a->isDone() && !b->isDone());    // both keep running
+
+    // Next frame: a task that finishes within the budget is waited for and
+    // only its time is charged.
+    budget.onFrameEnd();
+    CHECK(budget.leftNs() == 40000000u);
+    std::thread opener([&a] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      a->open = true;
+    });
+    t0 = compile_stats::nowNs();
+    CHECK(budget.wait(a.ptr()));
+    CHECK(a->isDone());
+    opener.join();
+    const uint64_t charged = 40000000u - budget.leftNs();
+    CHECK(charged >= 5000000u && charged <= uint64_t(msSince(t0) * 1e6) + 1000000u);
+    CHECK(budget.wait(nullptr));            // done / null: free
+    CHECK(budget.wait(a.ptr()) && 40000000u - budget.leftNs() == charged);
+
+    b->open = true;
+    b->wait();
+  }
+
+  { // Budget 0: never waits.
+    MtlCompileWaitBudget budget;
+    budget.setBudgetMs(0);
+    Rc<GateTask> t = new GateTask();
+    CHECK(budget.enabled() && !budget.wait(t.ptr()) && !t->ran);
+    budget.setBudgetMs(-1);
+    CHECK(!budget.enabled());
+    t->open = true;
+    t->wait();
+  }
+}
+
 int main() {
+  budgetTests();
+
   for (uint32_t i = 0u; i < 40u; i++)
     iteration(i * 7919u + 1u, 1u + i % 5u, (i % 4u) == 3u);
 

@@ -95,19 +95,24 @@ namespace dxvk::backend {
     // Shaders compile on the worker pool; the PSO key needs their libraries.
     if (unlikely(!m_vs->ready() || (m_fs != nullptr && !m_fs->ready()))) {
       if (m_asyncSkip) {
-        // Move still-queued prefetch compiles ahead (once per function).
-        const MtlShaderFunction* fns[2] = { m_vs.ptr(), m_fs.ptr() };
-
-        for (uint32_t i = 0u; i < 2u; i++) {
-          if (fns[i] != nullptr && !fns[i]->ready() && fns[i]->task != m_lastBoosted[i]) {
-            m_lastBoosted[i] = fns[i]->task;
-            m_device->submitCompile(fns[i]->task, true);
-          }
-        }
+        boostPendingShaders();
 
         if (compile_stats::g_enabled)
           compile_stats::g_skips.add(0u);
         return false;
+      }
+
+      // Wait budget: the waits below never run a queued task inline, so
+      // queue it ahead first. Out of budget: skip, as with m_asyncSkip.
+      if (unlikely(m_waitBudget.enabled())) {
+        boostPendingShaders();
+
+        if (!m_waitBudget.wait(m_vs->task.ptr())
+         || (m_fs != nullptr && !m_waitBudget.wait(m_fs->task.ptr()))) {
+          if (compile_stats::g_enabled)
+            compile_stats::g_skips.add(0u);
+          return false;
+        }
       }
 
       compile_stats::waitOnRenderThread(m_vs->task.ptr());
@@ -228,6 +233,18 @@ namespace dxvk::backend {
     return emitPso(pso);
   }
 
+  void MtlContextImpl::boostPendingShaders() {
+    // Move still-queued prefetch compiles ahead (once per function).
+    const MtlShaderFunction* fns[2] = { m_vs.ptr(), m_fs.ptr() };
+
+    for (uint32_t i = 0u; i < 2u; i++) {
+      if (fns[i] != nullptr && !fns[i]->ready() && fns[i]->task != m_lastBoosted[i]) {
+        m_lastBoosted[i] = fns[i]->task;
+        m_device->submitCompile(fns[i]->task, true);
+      }
+    }
+  }
+
   bool MtlContextImpl::emitPso(RenderPsoCache::Entry* pso) {
     const bool done = pso->isDone();
 
@@ -262,6 +279,18 @@ namespace dxvk::backend {
     bool failed = false;
 
     for (auto& p : m_psoPatches) {
+      // Still building and this frame's wait budget is spent: drop the bind
+      // and its draws for now, like a failed build but not cached as one.
+      // The PSO keeps building; the next draw binds it again.
+      if (unlikely(m_waitBudget.enabled()) && !m_waitBudget.wait(p.pso.ptr())) {
+        failed = true;
+        uint32_t draws = dropPsoBind(p.cmd);
+
+        if (compile_stats::g_enabled && draws)
+          compile_stats::g_skips.add(0u, draws);
+        continue;
+      }
+
       compile_stats::waitOnRenderThread(p.pso.ptr());
       p.cmd->pso = p.pso->handle();
 
@@ -271,15 +300,7 @@ namespace dxvk::backend {
       // Build failed: drop the bind and the draws that relied on it, as a
       // synchronous failure would have.
       failed = true;
-      p.cmd->type = WMTMtl4RenderCommandNop;
-
-      for (auto* c = static_cast<wmtcmd_base*>(p.cmd->next.get()); c != nullptr;
-           c = static_cast<wmtcmd_base*>(c->next.get())) {
-        if (c->type == WMTMtl4RenderCommandSetPSO)
-          break;
-        if (c->type == WMTMtl4RenderCommandDraw || c->type == WMTMtl4RenderCommandDrawIndexed)
-          c->type = WMTMtl4RenderCommandNop;
-      }
+      dropPsoBind(p.cmd);
     }
 
     m_psoPatches.clear();
@@ -288,6 +309,23 @@ namespace dxvk::backend {
       m_lastEncodedPso = nullptr;
       m_dirty |= DirtyPso;
     }
+  }
+
+  uint32_t MtlContextImpl::dropPsoBind(wmtcmd_mtl4_setpso* cmd) {
+    uint32_t draws = 0u;
+    cmd->type = WMTMtl4RenderCommandNop;
+
+    for (auto* c = static_cast<wmtcmd_base*>(cmd->next.get()); c != nullptr;
+         c = static_cast<wmtcmd_base*>(c->next.get())) {
+      if (c->type == WMTMtl4RenderCommandSetPSO)
+        break;
+      if (c->type == WMTMtl4RenderCommandDraw || c->type == WMTMtl4RenderCommandDrawIndexed) {
+        c->type = WMTMtl4RenderCommandNop;
+        draws++;
+      }
+    }
+
+    return draws;
   }
 
   void MtlContextImpl::appendTableAddress(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuAddress, uint32_t index) {

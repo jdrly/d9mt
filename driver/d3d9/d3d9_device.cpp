@@ -5636,6 +5636,8 @@ namespace dxvk {
     compile.psosNs    = compile_stats::g_psos.totalNs.load(std::memory_order_relaxed);
     compile.waits     = compile_stats::g_wait.totalN.load(std::memory_order_relaxed);
     compile.waitsNs   = compile_stats::g_wait.totalNs.load(std::memory_order_relaxed);
+    compile.skipped   = compile_stats::g_skips.totalN.load(std::memory_order_relaxed);
+    compile.budgetHits = compile_stats::g_budgetHits.totalN.load(std::memory_order_relaxed);
 
     const uint64_t dispatched = m_csSeqNum;
     const uint64_t executed   = m_csThread.lastSequenceNumber();
@@ -7184,7 +7186,8 @@ namespace dxvk {
     // Programmable pixel shaders are bound here, at draw time, linked against
     // the programmable VS (or standalone under fixed-function VS). Binding
     // never blocks: the function is a future the CS thread waits on (or, with
-    // D9MT_ASYNC_SKIP, skips draws for) only if it is still compiling.
+    // D9MT_ASYNC_SKIP or a spent wait budget, skips draws for) only if it is
+    // still compiling.
     if (!UseProgrammablePS())
       return;
 
