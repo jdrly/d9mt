@@ -231,6 +231,7 @@ The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
 | `d9mt.writeOnlyDemoteLocks` | `2` (`0` in `unlimited`) | a directly mapped buffer locked in place more often than this goes back to a staging copy; `0` = never; env `D9MT_WRITEONLY_DEMOTE` |
 | `d9mt.memoryStats` | `False` | log a `DIAG MEM` line every 256 frames; env `D9MT_MEMSTATS` (`1`, or a frame interval ≥ 16) |
 | `d9mt.resourceLabels` | `False` | label Metal resources for Xcode's GPU tools; env `D9MT_LABELS` |
+| `d9mt.pipelineWaitBudgetMs` | `-1` (off: wait as long as it takes) | most the render thread waits per frame for shaders/pipelines still compiling before it skips the draws that need them (see below); `0` = never wait (= `D9MT_ASYNC_SKIP=1`); max `10000`; env `D9MT_PSO_WAIT_MS` |
 
 **Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
 to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
@@ -240,6 +241,26 @@ to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
 upload-ring chunks, command allocators). `unlimited` behaves like the driver
 before profiles existed and is meant for A/B comparisons.
 
+**Pipeline wait budget.** When a draw needs a shader or pipeline that is
+still compiling on the worker threads, the render thread waits for it by
+default: no draw is ever missing, but a slow compile is a hitch.
+`D9MT_ASYNC_SKIP=1` never waits and skips such draws instead: no hitch, but
+objects pop in a few frames late. `d9mt.pipelineWaitBudgetMs = N` sits in
+between: the render thread waits for pending compiles, but at most N ms per
+frame in total (each wait gets what is left of the frame's N ms, so many
+pending pipelines can't stack up their waits). Draws whose compile isn't done
+when the budget runs out are skipped for that frame, as with
+`D9MT_ASYNC_SKIP`; the compile carries on and the draws come back once it is
+done. Most compiles finish within a few ms and are still waited for; only
+the rare slow one is skipped, so a budget of e.g. `30` caps compile hitches
+at about 30 ms in exchange for occasional brief pop-in. While a draw is
+skipped, occlusion queries that cover it count fewer samples. Clears and
+blits are never skipped (their pipelines are built on the spot). `D9MT_ASYNC_SKIP=1` takes
+precedence and acts as a budget of `0`; without compile workers
+(`D9MT_COMPILE_THREADS=0`) the budget is ignored. With `D9MT_PROFILE`, the
+`COMPILE` and `HITCH` lines count skipped draws (`skipped=`) and waits cut
+short by the budget (`budgetHit=`).
+
 ### Environment variables
 
 | Variable | Default | Effect |
@@ -248,7 +269,8 @@ before profiles existed and is meant for A/B comparisons.
 | `D9MT_PSO_ARCHIVE` / `D9MT_PSO_ARCHIVE_DIR` | on | Metal 4 pipeline archives in `<user cache dir>/d9mt/pso/` (last 8 sessions); `0` turns them off, `_DIR` relocates them |
 | `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
-| `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in |
+| `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
+| `D9MT_PSO_WAIT_MS` | off | wait at most this many ms per frame for pending pipelines, then skip (see `d9mt.pipelineWaitBudgetMs`); `off` or `-1` overrides a `dxvk.conf` value |
 | `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | frame cap while the window is hidden / minimized; `0` turns it off |
 | `D9MT_DRAWABLE_TIMEOUT_MS` | max(3 frames, 50 ms) | longest wait for a drawable before a present is skipped |
 | `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
@@ -288,7 +310,9 @@ before profiles existed and is meant for A/B comparisons.
   pending.
 - **First-time stutter** in new areas while shaders and pipelines compile.
   Compiles run on worker threads and are cached on disk, so later visits are
-  smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in.
+  smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in;
+  `d9mt.pipelineWaitBudgetMs` caps the stutter and only skips what takes
+  longer.
 - **The disk caches have no size cap.** The AIR cache is one sqlite file
   shared by all games (entries from other driver builds are dropped); the
   pipeline archives keep the last 8 sessions.

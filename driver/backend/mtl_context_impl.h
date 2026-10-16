@@ -275,7 +275,12 @@ namespace dxvk::backend {
     // instead of waiting (no stalls, but objects pop in a few frames late).
     // Needs compile workers, or nothing would ever finish.
     bool         m_asyncSkip = false;
+    // d9mt.pipelineWaitBudgetMs / D9MT_PSO_WAIT_MS > 0: wait for such
+    // shaders/PSOs at most what is left of the frame's budget, then drop the
+    // draws like m_asyncSkip. Off by default (wait as long as it takes).
+    MtlCompileWaitBudget m_waitBudget;
     Rc<MtlCompileTask> m_lastBoosted[2];
+    void boostPendingShaders();
     bool         m_dynValid        = false;
     MtlViewport  m_lastViewport    = {};
     MtlRect      m_lastScissor     = {};
@@ -377,6 +382,9 @@ namespace dxvk::backend {
     // Waits for PSOs still compiling and patches their SetPSO commands; must
     // run before m_cmdChunk is encoded or handed off.
     void resolvePsoPatches();
+    // Turns a SetPSO and the draws after it (up to the next SetPSO) into
+    // NOPs; returns the number of draws dropped.
+    static uint32_t dropPsoBind(wmtcmd_mtl4_setpso* cmd);
 
     struct PsoPatch {
       wmtcmd_mtl4_setpso*       cmd;

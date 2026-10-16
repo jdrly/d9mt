@@ -94,6 +94,9 @@ namespace dxvk::hitch {
     // CS thread / compile workers, from the COMPILE counters (not app-thread time).
     uint64_t shaders = 0u, psos = 0u, renderWaits = 0u;
     double   shadersMs = 0.0, psosMs = 0.0, renderWaitMs = 0.0;
+    // Draws dropped while their pipeline compiled (D9MT_ASYNC_SKIP or the wait
+    // budget) and waits the budget cut short; only shown when non-zero.
+    uint64_t skipped = 0u, budgetHits = 0u;
   };
 
   inline std::string formatHitch(uint64_t frame, const FrameStats& s, uint32_t maxCats = 8u) {
@@ -139,6 +142,11 @@ namespace dxvk::hitch {
       (unsigned long long)s.shaders, s.shadersMs,
       (unsigned long long)s.psos, s.psosMs);
     line += buf;
+    if (s.skipped || s.budgetHits) {
+      std::snprintf(buf, sizeof(buf), " skipped=%llu budgetHit=%llu",
+        (unsigned long long)s.skipped, (unsigned long long)s.budgetHits);
+      line += buf;
+    }
     return line;
   }
 
@@ -151,6 +159,7 @@ namespace dxvk::hitch {
       uint64_t shaders = 0u, shadersNs = 0u;
       uint64_t psos = 0u, psosNs = 0u;
       uint64_t waits = 0u, waitsNs = 0u;
+      uint64_t skipped = 0u, budgetHits = 0u;
     };
 
     // Outermost d9mt entry on this device (depth 0 -> 1) counts towards inD9mt.
@@ -211,6 +220,8 @@ namespace dxvk::hitch {
       s.psosMs       = double(compile.psosNs - m_compile.psosNs) * 1e-6;
       s.renderWaits  = compile.waits - m_compile.waits;
       s.renderWaitMs = double(compile.waitsNs - m_compile.waitsNs) * 1e-6;
+      s.skipped      = compile.skipped - m_compile.skipped;
+      s.budgetHits   = compile.budgetHits - m_compile.budgetHits;
       m_compile = compile;
 
       // The first frame has no previous Present; before calibration the
