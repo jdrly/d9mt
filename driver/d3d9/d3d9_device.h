@@ -976,7 +976,7 @@ namespace dxvk {
     hitch::Profiler& Hitch() { return m_hitch; }
 
     // D9MT_PROFILE: end of a Present (all swapchains); logs a HITCH line for
-    // a long frame.
+    // a long frame and a STATS line once a second.
     void HitchFrameEnd();
 
     // Present with D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: the auto depth-stencil's
@@ -1467,6 +1467,7 @@ namespace dxvk {
 
     hitch::Profiler                 m_hitch;
     double                          m_hitchMs = 50.0;
+    stats::Window                   m_statsWindow;
     bool                            m_discardLogged = false;
 
     D3D9Cursor                      m_cursor;

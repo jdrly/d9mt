@@ -152,6 +152,7 @@ clang++ -std=c++17 -I driver/d3d9 test/native/hitch_test.cpp -o /tmp/ht && /tmp/
 clang++ -std=c++17 -I driver/mtl test/native/memory_profile_test.cpp -o /tmp/mpt && /tmp/mpt
 clang++ -std=c++17 -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp -o /tmp/urt && /tmp/urt
 clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp/aot && /tmp/aot
+clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 ```
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
@@ -274,7 +275,7 @@ contents are a known clear value:
 - If no draw of the pass writes it and nothing samples it during the pass,
   its store is skipped. Its contents are still the clear value: the next pass
   Clear-loads it, and any other reader (sampling, copies, blits, resolves,
-  readbacks, Present) gets it by a re-clear first.
+  readbacks, Present) gets it by a re-clear first (`restore` in `STATS`).
 - A pass without draws whose clears needn't be stored gets no encoder at all;
   the clear moves into the next pass's load action.
 - An MSAA color resolve (StretchRect) right after the pass that rendered the
@@ -316,7 +317,7 @@ passes have their own load/store rules).
 
 | Variable | Effect |
 |---|---|
-| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters) and `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game |
+| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`). No GPU time: MTL4 command buffers don't report it |
 | `D9MT_TRACE` | verbose trace lines |
 | `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
 | `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions each time it's set), and `dump` to dump the next frame's draws. Off unless set |

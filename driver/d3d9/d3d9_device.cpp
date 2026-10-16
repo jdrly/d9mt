@@ -5648,6 +5648,20 @@ namespace dxvk {
     if (m_hitch.endFrame(hitch::ticks(), nowNs, compile,
           dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats))
       Logger::warn(hitch::formatHitch(frame, stats));
+
+    if (m_statsWindow.addFrame(nowNs)) {
+      static const bool deferred = std::getenv("D9MT_DEFERRED") != nullptr;
+      stats::CompileTotals ct;
+      ct.shaders = compile.shaders;
+      ct.psos    = compile.psos;
+      ct.waits   = compile.waits;
+      ct.waitsNs = compile.waitsNs;
+      stats::Extra extra;
+      extra.allocBytes = m_dxvkDevice->allocatedBytes();
+      extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
+                : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
+      Logger::warn(m_statsWindow.take(nowNs, m_dxvkDevice->renderStats().snapshot(), ct, extra));
+    }
   }
 
 
