@@ -79,9 +79,9 @@ int main() {
     CHECK(a.recycledPerBuffer <= b.recycledPerBuffer && a.allocatorCap <= b.allocatorCap);
     CHECK(a.stagingInFlightMB >= 12u);  // >= 3 x 4 MiB blocks per submission window
   }
-  CHECK(memoryProfileForTier(MtlMemoryTier::Low).reportedVramMB == 1024u);
-  CHECK(memoryProfileForTier(MtlMemoryTier::Medium).reportedVramMB == 2048u);
-  CHECK(memoryProfileForTier(MtlMemoryTier::High).reportedVramMB == 3072u);
+  CHECK(memoryProfileForTier(MtlMemoryTier::Low).reportedVramMB == 2048u);
+  CHECK(memoryProfileForTier(MtlMemoryTier::Medium).reportedVramMB == 3072u);
+  CHECK(memoryProfileForTier(MtlMemoryTier::High).reportedVramMB == 4096u);
 
   std::printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
   return g_fail ? 1 : 0;

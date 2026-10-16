@@ -113,28 +113,29 @@ namespace dxvk {
   // The tier table. `unlimited` is exactly the pre-profile behaviour. Until
   // MEMSTATS data says otherwise, `ultra` keeps unlimited's pool sizes and
   // caps; it differs in the budget, the `legacy` switches and, later, in
-  // managed-texture eviction.
+  // managed-texture eviction. Reported video memory: low 2 GiB, medium 3 GiB,
+  // high and above 4 GiB (DXVK's default and what wined3d reports).
   inline MtlMemoryProfile memoryProfileForTier(MtlMemoryTier tier) {
     constexpr uint64_t MiB = 1ull << 20;
     MtlMemoryProfile p;
     p.tier = tier;
     switch (tier) {
       case MtlMemoryTier::Low:
-        p.budget = 2560u * MiB; p.reportedVramMB = 1024u;
+        p.budget = 2560u * MiB; p.reportedVramMB = 2048u;
         p.evictManagedTex = p.evictBufferStaging = p.residencyLru = true; p.coldFrames = 300u;
         p.stagingBlocks = 2u; p.stagingInFlightMB = 30u;
         p.recycledPerBuffer = 1u; p.recycledCapBytes = 32u * MiB;
         p.ringKeep = 1u; p.allocatorCap = 8u;
         break;
       case MtlMemoryTier::Medium:
-        p.budget = 5120u * MiB; p.reportedVramMB = 2048u;
+        p.budget = 5120u * MiB; p.reportedVramMB = 3072u;
         p.evictManagedTex = p.evictBufferStaging = p.residencyLru = true; p.coldFrames = 600u;
         p.stagingBlocks = 4u; p.stagingInFlightMB = 60u;
         p.recycledPerBuffer = 2u; p.recycledCapBytes = 64u * MiB;
         p.ringKeep = 2u; p.allocatorCap = 12u;
         break;
       case MtlMemoryTier::High:
-        p.budget = 8192u * MiB; p.reportedVramMB = 3072u;
+        p.budget = 8192u * MiB; p.reportedVramMB = 4096u;
         p.evictManagedTex = p.evictBufferStaging = true;
         p.stagingBlocks = 6u; p.stagingInFlightMB = 90u;
         p.recycledPerBuffer = 4u; p.recycledCapBytes = 128u * MiB;

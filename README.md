@@ -234,8 +234,8 @@ The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
 
 **Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
 to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
-`unlimited`. The tiers set the reported video memory (`low` 1 GB, `medium`
-2 GB, `high` 3 GB, otherwise 4 GB) and how much the driver keeps pooled
+`unlimited`. The tiers set the reported video memory (`low` 2 GB, `medium`
+3 GB, otherwise 4 GB) and how much the driver keeps pooled
 (staging blocks, staging bytes in flight, spare buffer backings, idle
 upload-ring chunks, command allocators). `unlimited` behaves like the driver
 before profiles existed and is meant for A/B comparisons.
