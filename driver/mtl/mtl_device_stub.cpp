@@ -57,7 +57,7 @@ namespace dxvk {
   }
 
   Rc<MtlShaderFunction> MtlDevice::createShaderFunction(
-    MtlShaderStage stage, const void* metallib, size_t size) {
+    MtlShaderStage stage, const void* metallib, size_t size, const void* fallback, size_t fallbackSize) {
     Logger::warn("MtlDevice::createShaderFunction: stub");
     return nullptr;
   }

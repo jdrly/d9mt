@@ -19,7 +19,8 @@ namespace dxvk {
     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
 
     m_vs = device->createShaderFunction(
-      MtlShaderStage::Vertex, g_ffVsMetallib, size_t(g_ffVsMetallibSize));
+      MtlShaderStage::Vertex, g_ffVsMetallib, size_t(g_ffVsMetallibSize),
+      g_ffVsMetallibCompat, size_t(g_ffVsMetallibCompatSize));
     if (m_vs != nullptr) {
       m_vs->entryName = "ffVsMain";
       m_vs->cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };
@@ -32,7 +33,8 @@ namespace dxvk {
     }
 
     m_fs = device->createShaderFunction(
-      MtlShaderStage::Fragment, g_ffFsMetallib, size_t(g_ffFsMetallibSize));
+      MtlShaderStage::Fragment, g_ffFsMetallib, size_t(g_ffFsMetallibSize),
+      g_ffFsMetallibCompat, size_t(g_ffFsMetallibCompatSize));
     if (m_fs != nullptr) {
       m_fs->entryName = "ffFsMain";
       m_fs->cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };

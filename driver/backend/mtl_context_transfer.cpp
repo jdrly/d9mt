@@ -1050,19 +1050,23 @@ namespace dxvk::backend {
       return false;
 
     m_blitVs = m_device->createShaderFunction(
-      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize));
+      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize),
+      g_blitMetallibCompat, size_t(g_blitMetallibCompatSize));
     if (m_blitVs != nullptr)
       m_blitVs->entryName = "blitVsMain";
     m_blitFs = m_device->createShaderFunction(
-      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize));
+      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize),
+      g_blitMetallibCompat, size_t(g_blitMetallibCompatSize));
     if (m_blitFs != nullptr)
       m_blitFs->entryName = "blitFsMain";
     m_fillFs = m_device->createShaderFunction(
-      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize));
+      MtlShaderStage::Fragment, g_blitMetallib, size_t(g_blitMetallibSize),
+      g_blitMetallibCompat, size_t(g_blitMetallibCompatSize));
     if (m_fillFs != nullptr)
       m_fillFs->entryName = "fillFsMain";
     m_depthClearVs = m_device->createShaderFunction(
-      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize));
+      MtlShaderStage::Vertex, g_blitMetallib, size_t(g_blitMetallibSize),
+      g_blitMetallibCompat, size_t(g_blitMetallibCompatSize));
     if (m_depthClearVs != nullptr)
       m_depthClearVs->entryName = "depthClearVsMain";
 
