@@ -8,6 +8,9 @@
 # we only need Core/BitWriter/Support.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
+# Oldest macOS the unix side runs on (README: Requirements). Without it clang targets the
+# SDK's version, and dyld refuses the library on older systems.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 TC="$V2/toolchains"
 mkdir -p "$TC"
 grep -q toolchains "$V2/.gitignore" || printf '\n# local LLVM toolchain builds\n/toolchains/\n' >> "$V2/.gitignore"
@@ -21,6 +24,7 @@ fi
 cmake -B "$TC/llvm-build" -S "$TC/llvm-project/llvm" \
   -DCMAKE_INSTALL_PREFIX="$TC/llvm-x86_64" \
   -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
   -DLLVM_HOST_TRIPLE=x86_64-apple-darwin \
   -DLLVM_ENABLE_ASSERTIONS=Off \
   -DLLVM_ENABLE_ZSTD=Off \

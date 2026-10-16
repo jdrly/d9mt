@@ -11,6 +11,9 @@
 # upstream bridge/meson.build + bridge/unix/meson.build.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
+# Oldest macOS the unix side runs on (README: Requirements). Without it clang targets the
+# SDK's version, and dyld refuses the library on older systems.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 BR="$V2/bridge"
 DX="$V2/third_party/dxbc-spirv"
 OUT="$V2/build/bridge"

@@ -83,6 +83,11 @@ the embedded metallibs.
 From the repo root. The scripts need bash ≥ 4.3 (`/bin/bash` 3.2 fails), so
 put Homebrew's first in `PATH`.
 
+Everything macOS-side (LLVM, `winemetal.so`, the embedded metallibs) targets
+macOS 26.0, whatever the SDK; set `MACOSX_DEPLOYMENT_TARGET` to change it.
+An LLVM built before this default (with the SDK's version) gives linker
+warnings and a `winemetal.so` older systems refuse: rebuild it.
+
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 
@@ -285,9 +290,10 @@ before profiles existed and is meant for A/B comparisons.
 - **The disk caches have no size cap.** The AIR cache is one sqlite file
   shared by all games (entries from other driver builds are dropped); the
   pipeline archives keep the last 8 sessions.
-- **macOS 26 is untested.** The embedded fixed-function metallib was built
-  with the macOS 27 (Xcode 27) toolchain; regenerate it with an older
-  toolchain if it fails to load on 26.
+- **macOS 26 is barely tested.** Builds target macOS 26.0 (see Build);
+  before that they inherited the SDK's version, so with Xcode 27
+  `winemetal.so` (minos 27.0) and the embedded metallibs
+  (`air64_v29-apple-macosx27.0.0`) did not load on 26 (black screen).
 - **Gamma ramps** (`SetGammaRamp`, used by some brightness sliders) are
   ignored.
 - **Not implemented or unverified**, from code review: instance divisors
