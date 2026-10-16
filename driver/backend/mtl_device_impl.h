@@ -93,7 +93,9 @@ namespace dxvk::backend {
     Rc<MtlShaderFunction> createShaderFunction(
             MtlShaderStage              stage,
             const void*                 metallib,
-            size_t                      size) override;
+            size_t                      size,
+            const void*                 fallback = nullptr,
+            size_t                      fallbackSize = 0) override;
 
     void submitCompile(const Rc<MtlCompileTask>& task, bool urgent) override;
 

@@ -470,25 +470,37 @@ namespace dxvk::backend {
     return storage;
   }
 
-  Rc<MtlShaderFunction> MtlDeviceImpl::createShaderFunction(
-    MtlShaderStage stage, const void* metallib, size_t size) {
-    if (!metallib || !size)
-      return nullptr;
-
+  // A Metal library from metallib bytes, or 0 if Metal rejects them (for example a newer
+  // Metal language than this macOS supports).
+  static obj_handle_t newLibraryFromBytes(obj_handle_t device, const void* metallib, size_t size) {
     obj_handle_t data = DispatchData_alloc_init(uint64_t(uintptr_t(metallib)), uint64_t(size));
     if (!data) {
       Logger::err("MtlDeviceImpl::createShaderFunction: DispatchData_alloc_init failed");
-      return nullptr;
+      return 0u;
     }
-
     obj_handle_t err = 0u;
-    obj_handle_t library = MTLDevice_newLibrary(m_device.handle(), data, &err);
+    obj_handle_t library = MTLDevice_newLibrary(device, data, &err);
     NSObject_release(data);
+    if (err)
+      NSObject_release(err);
+    return library;
+  }
+
+  Rc<MtlShaderFunction> MtlDeviceImpl::createShaderFunction(
+    MtlShaderStage stage, const void* metallib, size_t size, const void* fallback, size_t fallbackSize) {
+    if (!metallib || !size)
+      return nullptr;
+
+    obj_handle_t library = newLibraryFromBytes(m_device.handle(), metallib, size);
+    if (!library && fallback && fallbackSize) {
+      static std::atomic<bool> logged = { false };
+      if (!logged.exchange(true))
+        Logger::info("MtlDeviceImpl::createShaderFunction: embedded metallib not supported by this macOS, using its Compat build");
+      library = newLibraryFromBytes(m_device.handle(), fallback, fallbackSize);
+    }
 
     if (!library) {
       Logger::err("MtlDeviceImpl::createShaderFunction: newLibraryWithData failed");
-      if (err)
-        NSObject_release(err);
       return nullptr;
     }
 

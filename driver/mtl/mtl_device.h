@@ -92,10 +92,14 @@ namespace dxvk {
     virtual Rc<MtlSamplerState> createSampler(
             const MtlSamplerKey&        key);
 
+    // fallback: a metallib to load if Metal rejects the first one, e.g. the Compat build of
+    // an embedded metallib for macOS versions without the newest Metal language.
     virtual Rc<MtlShaderFunction> createShaderFunction(
             MtlShaderStage              stage,
             const void*                 metallib,
-            size_t                      size);
+            size_t                      size,
+            const void*                 fallback = nullptr,
+            size_t                      fallbackSize = 0);
 
     // Queues a compile task on the device's worker pool. Without workers
     // (D9MT_COMPILE_THREADS=0, stub device) tasks run inline on first wait().
