@@ -20,6 +20,8 @@ namespace dxvk::d9mtdbg {
     NoSameViewSkip  = 1u << 8,  // no_sameview_skip
     NoClipPlanes    = 1u << 9,  // no_clipplanes
     BoolsOff        = 1u << 10, // bools_off
+    NoAttachOpt     = 1u << 11, // no_attach_opt: previous load/store actions (backend)
+    AttTrace        = 1u << 12, // att_trace: log render-pass load/store decisions (backend)
   };
 
   inline std::atomic<uint32_t> g_flags = { 0u };

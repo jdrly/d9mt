@@ -149,6 +149,9 @@ namespace dxvk {
 
     virtual void initBuffer(const Rc<MtlBuffer>& buffer);
     virtual void initImage(const Rc<MtlTexture>& image);
+    // The image's contents are no longer needed (D3D9 discard of the auto
+    // depth-stencil at Present). A hint: a no-op where unsupported.
+    virtual void discardImage(const Rc<MtlTexture>& image);
     // Buffer binds resolve against the storage snapshot captured at record
     // time; a rename only reaches already-bound slices through this call's
     // CS-time refresh, so ordering here is what keeps renames from

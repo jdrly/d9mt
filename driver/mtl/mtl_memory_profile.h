@@ -50,6 +50,10 @@ namespace dxvk {
     // draws (d9mt.pipelineWaitBudgetMs / D9MT_PSO_WAIT_MS). -1 = off (wait
     // as long as it takes), 0 = never wait (= D9MT_ASYNC_SKIP=1).
     int32_t       pipelineWaitBudgetMs = -1;
+    // Also not memory: attachment load/store optimization (Clear/DontCare
+    // loads, skipped stores, folded MSAA resolves; backend/mtl_attachment_opt.h).
+    // d9mt.attachmentOpt (default on); D9MT_NO_ATTACHMENT_OPT=1 turns it off.
+    bool          attachmentOpt = true;
   };
 
   inline const char* memoryTierName(MtlMemoryTier t) {

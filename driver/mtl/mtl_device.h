@@ -6,6 +6,7 @@
 #include "mtl_types.h"
 #include "mtl_resource.h"
 #include "mtl_memory_profile.h"
+#include "mtl_render_stats.h"
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
@@ -144,6 +145,9 @@ namespace dxvk {
 
     virtual uint64_t getTimestampFrequency() const;
 
+    // Metal's currentAllocatedSize in bytes, 0 if unknown (STATS line).
+    virtual uint64_t allocatedBytes();
+
     const MtlMemoryProfile& memoryProfile() const { return m_memProfile; }
 
     // Frontend counters for the DIAG MEM line. Lock counters are only
@@ -159,9 +163,13 @@ namespace dxvk {
     };
     FrontendStats& frontendStats() { return m_frontendStats; }
 
+    // D9MT_PROFILE: render-thread totals for the STATS line (mtl_render_stats.h).
+    rstats::Totals& renderStats() { return m_renderStats; }
+
   protected:
 
     FrontendStats    m_frontendStats;
+    rstats::Totals   m_renderStats;
 
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };

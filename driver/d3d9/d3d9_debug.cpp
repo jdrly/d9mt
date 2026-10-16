@@ -39,6 +39,8 @@ namespace dxvk {
       { "no_sameview_skip", d9mtdbg::NoSameViewSkip },
       { "no_clipplanes",    d9mtdbg::NoClipPlanes   },
       { "bools_off",        d9mtdbg::BoolsOff       },
+      { "no_attach_opt",    d9mtdbg::NoAttachOpt    },
+      { "att_trace",        d9mtdbg::AttTrace       },
     };
 
     constexpr uint32_t kLogLinesPerSecond = 400u;

@@ -5642,11 +5642,34 @@ namespace dxvk {
     const uint64_t dispatched = m_csSeqNum;
     const uint64_t executed   = m_csThread.lastSequenceNumber();
 
+    const uint64_t nowNs = hitch::nowNs();
     uint64_t frame = 0u;
     hitch::FrameStats stats;
-    if (m_hitch.endFrame(hitch::ticks(), hitch::nowNs(), compile,
+    if (m_hitch.endFrame(hitch::ticks(), nowNs, compile,
           dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats))
       Logger::warn(hitch::formatHitch(frame, stats));
+  }
+
+
+  void D3D9DeviceEx::DiscardAutoDepthStencilAtPresent() {
+    if (m_autoDepthStencil == nullptr)
+      return;
+
+    D3D9CommonTexture* tex = m_autoDepthStencil->GetCommonTexture();
+    const bool discard = tex->Desc()->Discard;
+
+    if (!m_discardLogged) {
+      m_discardLogged = true;
+      Logger::warn(str::format("D9MT: auto depth-stencil discard at Present ",
+        discard ? "on (D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL)" : "off (flag not set)"));
+    }
+
+    if (!discard)
+      return;
+
+    EmitCs([cImage = tex->GetImage()] (MtlContext* ctx) {
+      ctx->discardImage(cImage);
+    });
   }
 
 

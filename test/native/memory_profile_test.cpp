@@ -74,6 +74,11 @@ int main() {
   for (MtlMemoryTier x : { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High,
                            MtlMemoryTier::Ultra, MtlMemoryTier::Unlimited })
     CHECK(memoryProfileForTier(x).pipelineWaitBudgetMs == -1);
+  // Attachment load/store optimization: on in every tier (unlimited included;
+  // D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt turn it off).
+  for (MtlMemoryTier x : { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High,
+                           MtlMemoryTier::Ultra, MtlMemoryTier::Unlimited })
+    CHECK(memoryProfileForTier(x).attachmentOpt);
   CHECK(parseWaitBudgetMs("", -1) == -1 && parseWaitBudgetMs("", 25) == 25);
   CHECK(parseWaitBudgetMs("50", -1) == 50 && parseWaitBudgetMs("50", 10) == 50);
   CHECK(parseWaitBudgetMs("0", 25) == 0 && parseWaitBudgetMs("1", -1) == 1);

@@ -64,6 +64,10 @@ namespace dxvk {
 
     p.pipelineWaitBudgetMs = parseWaitBudgetMs(env::getEnvVar("D9MT_PSO_WAIT_MS"),
       clampWaitBudgetMs(config.getOption<int32_t>("d9mt.pipelineWaitBudgetMs", -1)));
+
+    p.attachmentOpt = config.getOption<bool>("d9mt.attachmentOpt", true);
+    if (parseSwitch(env::getEnvVar("D9MT_NO_ATTACHMENT_OPT")) == 1)
+      p.attachmentOpt = false;
     return p;
   }
 

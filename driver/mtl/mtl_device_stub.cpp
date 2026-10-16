@@ -144,6 +144,10 @@ namespace dxvk {
     return 1000000000ull;
   }
 
+  uint64_t MtlDevice::allocatedBytes() {
+    return 0u;
+  }
+
   const MtlDeviceInfo& MtlAdapter::deviceInfo() const {
     return m_info;
   }

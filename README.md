@@ -151,6 +151,7 @@ clang++ -std=c++17 -I driver/util test/native/fenced_pool_test.cpp -o /tmp/fpt &
 clang++ -std=c++17 -I driver/d3d9 test/native/hitch_test.cpp -o /tmp/ht && /tmp/ht
 clang++ -std=c++17 -I driver/mtl test/native/memory_profile_test.cpp -o /tmp/mpt && /tmp/mpt
 clang++ -std=c++17 -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp -o /tmp/urt && /tmp/urt
+clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp/aot && /tmp/aot
 ```
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
@@ -232,6 +233,7 @@ The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
 | `d9mt.memoryStats` | `False` | log a `DIAG MEM` line every 256 frames; env `D9MT_MEMSTATS` (`1`, or a frame interval ≥ 16) |
 | `d9mt.resourceLabels` | `False` | label Metal resources for Xcode's GPU tools; env `D9MT_LABELS` |
 | `d9mt.pipelineWaitBudgetMs` | `-1` (off: wait as long as it takes) | most the render thread waits per frame for shaders/pipelines still compiling before it skips the draws that need them (see below); `0` = never wait (= `D9MT_ASYNC_SKIP=1`); max `10000`; env `D9MT_PSO_WAIT_MS` |
+| `d9mt.attachmentOpt` | `True` | attachment load/store optimization (see below); `D9MT_NO_ATTACHMENT_OPT=1` turns it off |
 
 **Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
 to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
@@ -261,6 +263,37 @@ precedence and acts as a budget of `0`; without compile workers
 `COMPILE` and `HITCH` lines count skipped draws (`skipped=`) and waits cut
 short by the budget (`budgetHit=`).
 
+**Attachment load/store optimization.** A Metal render pass loads each
+attachment from memory when it starts and stores it when it ends. d9mt
+creates a pass's encoder only when the pass ends, so it knows what the pass
+did, and it tracks for each single-subresource attachment image whether its
+contents are a known clear value:
+
+- An attachment that holds a known clear (from creation or a clear) is
+  Clear-loaded instead of read from memory.
+- If no draw of the pass writes it and nothing samples it during the pass,
+  its store is skipped. Its contents are still the clear value: the next pass
+  Clear-loads it, and any other reader (sampling, copies, blits, resolves,
+  readbacks, Present) gets it by a re-clear first.
+- A pass without draws whose clears needn't be stored gets no encoder at all;
+  the clear moves into the next pass's load action.
+- An MSAA color resolve (StretchRect) right after the pass that rendered the
+  source becomes that pass's `StoreAndMultisampleResolve`, instead of a pass
+  of its own that loads every sample again.
+- With `D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL`, the pass still rendering into
+  the auto depth-stencil at Present doesn't store it, and the next pass
+  doesn't load it (wined3d discards it too).
+
+Everything else is loaded and stored as before. Written contents are never
+dropped: when a pass ends, nothing tells whether a later pass needs them
+(only `D9MT_DEFERRED`'s whole-frame rules can). In SWTOR this removes the
+load and store of the 2048² R32F color target that its shadow passes bind with
+color writes off, about 32 MB per shadow pass. Memoryless textures aren't
+used: D3D9 surfaces outlive the pass. `no_attach_opt` in the
+`D9MT_DEBUG_FILE` flags switches back to the previous actions live, for A/B
+tests; `att_trace` logs the decisions. `D9MT_DEFERRED` turns it off (deferred
+passes have their own load/store rules).
+
 ### Environment variables
 
 | Variable | Default | Effect |
@@ -271,6 +304,7 @@ short by the budget (`budgetHit=`).
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
 | `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
 | `D9MT_PSO_WAIT_MS` | off | wait at most this many ms per frame for pending pipelines, then skip (see `d9mt.pipelineWaitBudgetMs`); `off` or `-1` overrides a `dxvk.conf` value |
+| `D9MT_NO_ATTACHMENT_OPT` | off | `1` turns the attachment load/store optimization off (see `d9mt.attachmentOpt`) |
 | `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | frame cap while the window is hidden / minimized; `0` turns it off |
 | `D9MT_DRAWABLE_TIMEOUT_MS` | max(3 frames, 50 ms) | longest wait for a drawable before a present is skipped |
 | `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
@@ -285,7 +319,7 @@ short by the budget (`budgetHit=`).
 | `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters) and `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game |
 | `D9MT_TRACE` | verbose trace lines |
 | `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
-| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, and `dump` to dump the next frame's draws. Off unless set |
+| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions each time it's set), and `dump` to dump the next frame's draws. Off unless set |
 | `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
 | `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |

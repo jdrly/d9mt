@@ -196,6 +196,10 @@ namespace dxvk::backend {
     return line;
   }
 
+  uint64_t MtlDeviceImpl::allocatedBytes() {
+    return m_device ? uint64_t(MTLDevice_currentAllocatedSize(m_device.handle())) : 0u;
+  }
+
   void MtlDeviceImpl::submitCompile(const Rc<MtlCompileTask>& task, bool urgent) {
     m_compileWorkers->submit(task, urgent);
   }

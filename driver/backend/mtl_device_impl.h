@@ -14,6 +14,7 @@
 #include "mtl_residency.h"
 #include "mtl_ring.h"
 #include "mtl_submission.h"
+#include "mtl_attachment_opt.h"
 
 namespace dxvk::backend {
 
@@ -55,6 +56,10 @@ namespace dxvk::backend {
     uint64_t   bytes         = 0u;  // estimated, for accounting only
     MtlImageCreateInfo info  = { };
     class MtlDeviceImpl* residencyDevice = nullptr;
+    // Attachment load/store optimization (mtl_attachment_opt.h), render
+    // thread only. Stays Defined on images it doesn't track.
+    attopt::AspectState attColor, attDepth, attStencil;
+    uint64_t           attSampledEpoch = 0u;  // pass epoch of the last bind for sampling
     ~MtlTextureImpl();
   };
 
@@ -119,6 +124,8 @@ namespace dxvk::backend {
 
     Rc<MtlQuery> createGpuQuery(MtlQueryType type) override;
     Rc<MtlEvent> createGpuEvent() override;
+
+    uint64_t allocatedBytes() override;
 
     obj_handle_t wmtDevice()   const { return m_device.handle(); }
     obj_handle_t wmtQueue()    const { return m_queue.handle(); }

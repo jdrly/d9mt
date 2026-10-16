@@ -979,6 +979,11 @@ namespace dxvk {
     // a long frame.
     void HitchFrameEnd();
 
+    // Present with D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: the auto depth-stencil's
+    // contents are undefined afterwards (as wined3d does), so the pass still
+    // rendering into it needn't store them.
+    void DiscardAutoDepthStencilAtPresent();
+
     const D3D9Options* GetOptions() const {
       return &m_d3d9Options;
     }
@@ -1462,6 +1467,7 @@ namespace dxvk {
 
     hitch::Profiler                 m_hitch;
     double                          m_hitchMs = 50.0;
+    bool                            m_discardLogged = false;
 
     D3D9Cursor                      m_cursor;
 
