@@ -8,7 +8,10 @@
 //   done
 //
 // macOS 27.0.1, M5 Max: 11.0 and 12.0 lose x18 in 0 of 20000 checks,
-// 26.0 in 13333 (every syscall).
+// 26.0 in 13333 (every syscall). What counts is the SDK version in
+// LC_BUILD_VERSION, not the minimum OS: `vtool -set-build-version macos 26.0
+// 12.0` (minos 26, SDK 12) plus an ad-hoc re-sign keeps x18; SDK 13.0 and up
+// lose it.
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
