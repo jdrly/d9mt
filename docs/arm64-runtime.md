@@ -83,4 +83,49 @@ The entitled route (athei, CrossOver) stays the long-term best case
 
 ## Prototype
 
-(in progress)
+### Build
+
+`experiments/arm64/tools/build-wine-fex.sh` (outside the repo for now):
+Wine 11.19 (tarball SHA-256 `4820066e…95f1`, GPG-signed by Alexandre
+Julliard) with neutron 0ac2574d's 17 Wine patches, FEX-2610 (14c92681) with
+its 5 FEX patches, llvm-mingw 20260908 (SHA-256 `d1dc5d1e…a149`) with the
+`NtCurrentTeb` patch and the CRT startup objects rebuilt from mingw-w64
+9f55f4a2. Not built: neutron's Steam bridge (its two `WINE_CONFIG_MAKEFILE`
+lines are dropped from `configure.ac`), SDL, Mono, DXMT. Three things the
+script had to do beyond neutron's recipe:
+- build through a path without spaces (`/tmp/arm64-work` → the work dir):
+  Wine's build breaks on "Application Support";
+- pass the PE cross compilers to configure by absolute path: with
+  llvm-mingw appended to `PATH`, Homebrew's `x86_64-w64-mingw32-gcc` built
+  the x86_64 part of the ARM64EC ntdll (`signal_x86_64.c`) and failed;
+- `--without-sdl`.
+About 3 minutes for Wine and FEX on an M5 Max from a warm source tree. No
+system changes; Homebrew's bison, gnutls, freetype, pkgconf, cmake, ninja,
+autoconf were already there.
+
+### Results
+
+`scripts/run-hash-tests.sh` (20 x64 test programs, fresh `/tmp` prefix,
+FEX registered under `HKLM\Software\Microsoft\Wow64\amd64`):
+
+| Engine | d3d9.dll | winemetal | Result |
+|---|---|---|---|
+| CrossOver 26.3 (x86_64, Rosetta) | x64 | x64 dll + x86_64 .so | 20/20, the reference hashes |
+| arm64 Wine 11.19 + FEX (neutron patches, TSD) | **x64, unmodified, under FEX** | ARM64EC dll + arm64 .so | **20/20, all hashes identical** |
+| ″ | **ARM64EC** | ARM64EC dll + arm64 .so | **20/20, all hashes identical** |
+
+- `+loaddll`: `libarm64ecfex.dll` and our builtin `winemetal.dll` load,
+  `d3d9.dll` from the test directory is the ARM64EC one (machine 0xA641).
+- The x64 `winemetal.dll` can't be used there: it imports CrossOver's
+  `__wine_unix_call`, which upstream Wine doesn't export. The x64 `d3d9.dll`
+  with the ARM64EC `winemetal.dll` is the mixed setup that works.
+- `PE=1`: `arm64_xarch_test` built by mingw GCC for x64 (run under FEX) and
+  by llvm-mingw for ARM64EC: both digests identical to the native macOS run.
+  This closes the "PE compilers" gap of `docs/arm64ec-port.md`. Its
+  single-threaded integer loops: 39 s under FEX, 36.7 s under Rosetta, 27 s
+  as ARM64EC.
+- `wineboot` reports "Wine cannot find the FreeType font library": the
+  engine needs Homebrew's or a bundled FreeType for fonts (neutron bundles
+  it); the tests don't draw text.
+
+Timings: pending, measured on an idle machine.
