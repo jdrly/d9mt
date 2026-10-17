@@ -66,6 +66,8 @@ namespace dxvk {
 
     m_ffModules.Initialize(m_dxvkDevice);
 
+    InitStateCache();
+
     bool canSWVP = CanSWVP();
     DetermineConstantLayouts(canSWVP);
 
@@ -138,6 +140,11 @@ namespace dxvk {
 
     ExecuteFlush(true);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+
+    // Stops the prewarm and writes the file while shaders, the compiler and
+    // the CS thread are all still alive.
+    if (m_stateCache != nullptr)
+      m_stateCache->shutdown();
 
     // D9MT_PROFILE: the session's restores (a game that exits without
     // releasing the device has only its RESTORE lines).
@@ -7505,6 +7512,32 @@ namespace dxvk {
   void D3D9DeviceEx::SetPixelBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits) {
     m_state.psConsts->bConsts[idx] &= ~mask;
     m_state.psConsts->bConsts[idx] |= bits & mask;
+  }
+
+
+  void D3D9DeviceEx::InitStateCache() {
+    MtlStateCacheBackend* backend = m_dxvkDevice->stateCacheBackend();
+
+    if (backend == nullptr)
+      return;
+
+    if (!m_d3d9Options.stateCache) {
+      Logger::info("STATECACHE off (d9mt.stateCache = False)");
+      return;
+    }
+
+    MtlStateCacheConfig config;
+    config.keySignature = m_dxvkDevice->psoKeySignature();
+
+    std::string reason;
+    if (!MtlStateCache::resolveConfig(config, reason)) {
+      Logger::info(str::format("STATECACHE ", reason));
+      return;
+    }
+
+    m_stateCache = new MtlStateCache(backend, config);
+    m_dxvkDevice->setStateCache(m_stateCache);
+    m_ffModules.AnnounceToStateCache(m_stateCache.ptr());
   }
 
 

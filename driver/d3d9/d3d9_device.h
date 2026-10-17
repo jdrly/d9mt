@@ -1427,6 +1427,8 @@ namespace dxvk {
 
     void InitShaderOptions();
 
+    void InitStateCache();
+
     static uint32_t GetTextureStageArgMask(
             D3DTEXTUREOP          Op);
 
@@ -1581,6 +1583,10 @@ namespace dxvk {
 
     D3D9ON12_ARGS                   m_d3d9On12Args = { };
     DxvkD3D8Bridge                  m_d3d8Bridge;
+
+    // Pipeline state cache (nullptr: off). Shut down in the destructor,
+    // before the shader module sets it points into.
+    Rc<MtlStateCache>               m_stateCache;
 
     constexpr static uint32_t       SamplerCountBits = 12u;
     constexpr static uint64_t       SamplerCountMask = (1u << SamplerCountBits) - 1u;

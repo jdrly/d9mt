@@ -80,6 +80,8 @@ namespace dxvk {
 
     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
 
+    this->stateCache = config.getOption<bool>("d9mt.stateCache", true);
+
     this->shaderModel = dxvk::clamp(this->shaderModel, 0u, 3u);
     this->samplerLodBias = dxvk::fclamp(this->samplerLodBias, -2.0f, 1.0f);
 
