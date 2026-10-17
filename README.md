@@ -153,6 +153,7 @@ clang++ -std=c++17 -I driver/mtl test/native/memory_profile_test.cpp -o /tmp/mpt
 clang++ -std=c++17 -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp -o /tmp/urt && /tmp/urt
 clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp/aot && /tmp/aot
 clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
+clang++ -std=c++17 -I driver/d3d9 test/native/pace_test.cpp -o /tmp/pt && /tmp/pt
 ```
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
@@ -339,7 +340,7 @@ passes have their own load/store rules).
 
 | Variable | Effect |
 |---|---|
-| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, the render thread's CPU time in the attachment optimization (`attMs`, ms per second) and clears folded into a pass or given one of their own, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`), plus a `RESTORE` line in seconds with attachment restores and `RESTORE-SUMMARY` at device destruction (`driver/mtl/mtl_restore_stats.h`). No GPU time: MTL4 command buffers don't report it |
+| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, the render thread's CPU time in the attachment optimization (`attMs`, ms per second) and clears folded into a pass or given one of their own, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`), plus a `RESTORE` line in seconds with attachment restores and `RESTORE-SUMMARY` at device destruction (`driver/mtl/mtl_restore_stats.h`), and a `PACE` line every second: the interval between the game's Present calls (min/avg/max, standard deviation) and the Present thread's time per frame inside d9mt (and how much of it is waiting) and outside it, with its CPU time per second split into d9mt's and the game's own (`driver/d3d9/d3d9_pace.h`). No GPU time: MTL4 command buffers don't report it |
 | `D9MT_TRACE` | verbose trace lines |
 | `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
 | `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
