@@ -13,6 +13,8 @@ examples/triangle/*.png
 # symlink is ignored as well.
 /third_party/dxbc-spirv
 /third_party/SPIRV-Cross
+# DXVK's native headers for the native tests (scripts/fetch-dxvk-native.sh)
+/third_party/dxvk-native
 
 # upstream DXVK reference clone (scripts/audit-port-diff.sh only)
 /DXVK-3.0-uptsream

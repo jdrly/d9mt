@@ -348,12 +348,11 @@ class Gen:
                     if u not in used:
                         break
                 used.add(u)
-                # full mask: reading undeclared components trips dxbc-spirv asserts
-                L.append('dcl_%s v%d' % (u, i))
+                L.append('dcl_%s v%d%s' % (u, i, self.ch(['', '', '.xy', '.xyz'])))
                 inputs.append('v%d' % i)
             if r.random() < 0.2:
                 L.append('dcl vPos.xy')
-                inputs.append('vPos.xyyy')  # .xyxy trips a dxbc-spirv assert (both archs)
+                inputs.append('vPos.xyxy')
             if r.random() < 0.2:
                 L.append('dcl vFace')
                 inputs.append('vFace.xxxx')

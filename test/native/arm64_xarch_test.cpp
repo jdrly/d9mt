@@ -247,7 +247,14 @@ void testConstantCopy() {
       }
       fl = D3D9ConstantBufferLayout(MaxF, MaxF / 32u, fMask, 4u, defs);
     }
-    D3D9ConstantBufferCopy copy(fl, D3D9ConstantBufferLayout(1u, iMask), D3D9ConstantBufferLayout(1u, bMask));
+    // Bools: every fourth layout is shaped like the driver's
+    // (d3d9_shader_analysis.cpp: one range of align(dwordCount, 4) dwords),
+    // the others arbitrary.
+    const bool realBools = (iter & 3u) == 0u;
+    D3D9ConstantBufferLayout bl = realBools
+      ? D3D9ConstantBufferLayout(align(1u + uint32_t(r.next() % 8u), 4u))
+      : D3D9ConstantBufferLayout(1u, bMask);
+    D3D9ConstantBufferCopy copy(fl, D3D9ConstantBufferLayout(1u, iMask), bl);
 
     D3D9ConstantBufferSizes sizes = copy.getAllocationSizes(uint32_t(r.next() % (MaxF + 1u)));
     std::memset(fOut.data(), 0xcd, fOut.size() * sizeof(Vector4));
@@ -262,7 +269,8 @@ void testConstantCopy() {
     args.intBuffer = iOut.data();
     args.intBufferSize = sizes.intBufferSize;
     args.boolBuffer = bOut.data();
-    args.boolBufferSize = align(sizes.boolBufferSize, 16u);
+    // the driver's bool block runs to the end of an aligned buffer: padding
+    args.boolBufferSize = align(sizes.boolBufferSize, realBools ? 64u : 16u);
     args.constFloatApi = fApi.data();
     args.constIntApi = iApi.data();
     args.constBoolApi = bApi.data();
@@ -274,17 +282,18 @@ void testConstantCopy() {
         for (uint32_t j = 0; j < 4; j++)
           bad += std::isnan(fOut[i].data[j]);
     }
-    // Digest what shaders can read: the layouts' constants. Past the used
-    // bools the paths differ by design: the SSE copy moves whole 16-byte groups
-    // (up to 3 more source bools) and its pad16 stores whole 16-byte blocks,
-    // where the portable path copies exactly and memsets to the end. Those
-    // bytes sit past every index the shader reads.
+    // Digest what shaders can read: the layouts' constants. With the
+    // arbitrary bool layouts the paths differ past the used bools by design:
+    // the SSE copy moves whole 16-byte groups (up to 3 more source bools) and
+    // its pad16 stores whole 16-byte blocks, where the ARM path copies exactly
+    // and zeroes to the end; those bytes sit past every index a shader reads.
+    // With the driver's layouts (whole groups of 4) the buffers are identical.
     size_t fw = copy.getLayout(D3D9ConstantType::Float).computeConstantCount(args.floatConstantCount) * sizeof(Vector4);
     size_t iw = copy.getLayout(D3D9ConstantType::Int).computeConstantCount(0u) * sizeof(Vector4i);
     size_t bw = copy.getLayout(D3D9ConstantType::Bool).computeConstantCount(0u) * sizeof(uint32_t);
     d.bytes(fOut.data(), args.floatBufferSize);
     d.bytes(iOut.data(), args.intBufferSize);
-    d.bytes(bOut.data(), bw);
+    d.bytes(bOut.data(), realBools ? args.boolBufferSize : bw);
     bad += fw > args.floatBufferSize || iw > args.intBufferSize;
   }
   CHECK(bad == 0);

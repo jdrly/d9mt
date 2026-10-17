@@ -44,6 +44,9 @@ run_pair() { # <harness> <winemetal.so> <workdir>
 # Needs DXVK's native Windows headers (include/native/{windows,directx} of a
 # DXVK checkout with its submodules); skipped when DXVK_NATIVE is not found.
 NATIVE="${DXVK_NATIVE:-$V2/DXVK-3.0-uptsream/include/native}"
+# scripts/fetch-dxvk-native.sh's pinned copy, when there is no DXVK checkout
+[ -d "$NATIVE/windows" ] || [ ! -d "$V2/third_party/dxvk-native/include/native/windows" ] \
+  || NATIVE="$V2/third_party/dxvk-native/include/native"
 if [ -d "$NATIVE/windows" ] && [ -d "$NATIVE/directx" ]; then
   echo "[compile-mt] driver compile tasks / worker pool (native arm64, ThreadSanitizer)"
   clang++ -std=c++17 -g -O1 -fsanitize=thread -I"$V2/driver" -I"$NATIVE/windows" -I"$NATIVE/directx" \
