@@ -976,8 +976,21 @@ namespace dxvk {
     hitch::Profiler& Hitch() { return m_hitch; }
 
     // D9MT_PROFILE: end of a Present (all swapchains); logs a HITCH line for
-    // a long frame and a STATS line once a second.
+    // a long frame, and a STATS line (plus RESTORE when there were restores)
+    // once a second.
     void HitchFrameEnd();
+
+    // D9MT_PROFILE: tags the CS stream with the D3D9 call its next commands
+    // come from (rstore::Api), so the backend can attribute restores. Emitted
+    // only when the call kind changes; nothing without D9MT_PROFILE.
+    void ProfApi(rstore::Api api) {
+      if (likely(!hitch::g_enabled) || api == m_profApi)
+        return;
+      m_profApi = api;
+      EmitCs([cApi = uint32_t(api)] (MtlContext* ctx) {
+        ctx->setApiTag(cApi);
+      });
+    }
 
     // Present with D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: the auto depth-stencil's
     // contents are undefined afterwards (as wined3d does), so the pass still
@@ -1468,6 +1481,8 @@ namespace dxvk {
     hitch::Profiler                 m_hitch;
     double                          m_hitchMs = 50.0;
     stats::Window                   m_statsWindow;
+    rstore::Window                  m_restoreWindow;
+    rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 
     D3D9Cursor                      m_cursor;

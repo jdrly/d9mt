@@ -770,8 +770,8 @@ namespace dxvk::backend {
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     if (m_attOpt) {
-      attRead(s);
-      attWrite(d);
+      attRead(s, rstore::Reason::Copy);
+      attWrite(d, rstore::Reason::CopyDst);
     }
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
@@ -855,8 +855,8 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     if (m_attOpt) {
-      attRead(s);
-      attWrite(d);
+      attRead(s, rstore::Reason::Present);
+      attWrite(d, rstore::Reason::Present);
     }
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
@@ -898,7 +898,7 @@ namespace dxvk::backend {
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     if (m_attOpt)
-      attWrite(d);
+      attWrite(d, rstore::Reason::Upload);
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     WMTSize   size   = { extent.width, extent.height, extent.depth };
@@ -930,7 +930,7 @@ namespace dxvk::backend {
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     if (m_attOpt)
-      attRead(s);
+      attRead(s, rstore::Reason::Readback);
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
@@ -1035,8 +1035,8 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
     if (m_attOpt) {
-      attRead(s);
-      attWrite(d);
+      attRead(s, rstore::Reason::Resolve);
+      attWrite(d, rstore::Reason::Resolve);
     }
 
     d->setTrackingSerial(m_currentSerial);
@@ -1093,8 +1093,8 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
     if (m_attOpt) {
-      attRead(s);
-      attWrite(d);
+      attRead(s, rstore::Reason::Resolve);
+      attWrite(d, rstore::Reason::Resolve);
     }
 
     d->setTrackingSerial(m_currentSerial);
@@ -1246,7 +1246,7 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
     if (m_attOpt)
-      attWrite(view->image.ptr());
+      attWrite(view->image.ptr(), rstore::Reason::PartialClear);
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -1347,7 +1347,7 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
     if (m_attOpt)
-      attWrite(view->image.ptr());
+      attWrite(view->image.ptr(), rstore::Reason::PartialClear);
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -1501,8 +1501,8 @@ namespace dxvk::backend {
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
     if (m_attOpt) {
-      attRead(srcView->image.ptr());
-      attWrite(dstView->image.ptr());
+      attRead(srcView->image.ptr(), rstore::Reason::Blit);
+      attWrite(dstView->image.ptr(), rstore::Reason::Blit);
     }
 
     auto* dstTv = static_cast<MtlTextureViewImpl*>(dstView.ptr());
@@ -1577,7 +1577,7 @@ namespace dxvk::backend {
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
     if (m_attOpt)
-      attWrite(view->image.ptr());
+      attWrite(view->image.ptr(), rstore::Reason::MipGen);
     if (view->image != nullptr) {
       view->image->setTrackingSerial(m_currentSerial);
       noteTransferRead(view->image.ptr());

@@ -267,6 +267,7 @@ namespace dxvk {
     } ();
 
     m_parent->DebugOnPresent();
+    m_parent->ProfApi(rstore::Api::Present);
 
     m_parent->SetMostRecentlyUsedSwapchain(this);
 

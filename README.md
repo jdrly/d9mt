@@ -292,7 +292,12 @@ load and store of the 2048² R32F color target that its shadow passes bind with
 color writes off, about 32 MB per shadow pass. Memoryless textures aren't
 used: D3D9 surfaces outlive the pass. `no_attach_opt` in the
 `D9MT_DEBUG_FILE` flags switches back to the previous actions live, for A/B
-tests; `att_trace` logs the decisions. `D9MT_DEFERRED` turns it off (deferred
+tests; `att_trace` logs the decisions and the restores. With `D9MT_PROFILE`, a
+`RESTORE` line follows each second's `STATS` line when there were restores:
+the most frequent images (Metal format, size, aspects re-cleared), why (`sample`,
+`copy`, `blit`, `resolve`, `readback`, `partial-clear`, ...) and the D3D9 call
+they came from, e.g. `120x 2048x2048 Depth32Float_Stencil8 s sample@Draw`;
+`RESTORE-SUMMARY` has the session's totals when the device is destroyed. `D9MT_DEFERRED` turns it off (deferred
 passes have their own load/store rules).
 
 ### Environment variables
@@ -317,10 +322,10 @@ passes have their own load/store rules).
 
 | Variable | Effect |
 |---|---|
-| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`). No GPU time: MTL4 command buffers don't report it |
+| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`), plus a `RESTORE` line in seconds with attachment restores and `RESTORE-SUMMARY` at device destruction (`driver/mtl/mtl_restore_stats.h`). No GPU time: MTL4 command buffers don't report it |
 | `D9MT_TRACE` | verbose trace lines |
 | `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
-| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions each time it's set), and `dump` to dump the next frame's draws. Off unless set |
+| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
 | `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
 | `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |

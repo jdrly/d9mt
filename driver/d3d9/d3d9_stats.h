@@ -26,6 +26,9 @@
 //   allocMiB    Metal's currentAllocatedSize
 //   att         attachment optimization: on, off (startup) or live-off (no_attach_opt)
 //
+// When the second had restores, a RESTORE line follows with what they were
+// for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
+//
 // GPU time isn't reported: MTL4 command buffers have no GPUStartTime /
 // GPUEndTime (it would take MTL4CommitFeedback handlers in the bridge).
 //
@@ -40,6 +43,7 @@
 #include <vector>
 
 #include "../mtl/mtl_render_stats.h"
+#include "../mtl/mtl_restore_stats.h"
 
 namespace dxvk::stats {
 
@@ -67,6 +71,11 @@ namespace dxvk::stats {
       m_dts.push_back(float(double(nowNs - m_lastNs) * 1e-6));
       m_lastNs = nowNs;
       return nowNs - m_winStartNs >= PeriodNs;
+    }
+
+    // Seconds since the first Present (the STATS line's t).
+    double seconds(uint64_t nowNs) const {
+      return m_startNs ? double(nowNs - m_startNs) * 1e-9 : 0.0;
     }
 
     // The line for the window that ends now; starts the next window.

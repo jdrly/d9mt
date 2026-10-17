@@ -2,6 +2,7 @@
 //   clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 #include "d3d9_stats.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -69,6 +70,63 @@ int main() {
   CHECK(has(line, " restore=1.0 savedMiB=-1.0 "));
   CHECK(has(line, "| sh=0 pso=0 wait=0/0.0ms "));
   CHECK(has(line, " att=live-off"));
+
+  // RESTORE: what the restores were for, per second and for the session.
+  {
+    CHECK(std::abs(w.seconds(t) - 2.02) < 0.01);
+
+    rstore::Log log;
+    rstore::Key shadow;
+    shadow.format = 260u; shadow.width = shadow.height = 2048u;
+    shadow.aspects = rstore::AspectStencil;
+    shadow.reason = rstore::Reason::Sample; shadow.api = rstore::Api::Draw;
+    rstore::Key scene;
+    scene.format = 80u; scene.width = 3840u; scene.height = 2160u;
+    scene.aspects = rstore::AspectColor;
+    scene.reason = rstore::Reason::Copy; scene.api = rstore::Api::StretchRect;
+    rstore::Key part = shadow;
+    part.aspects = rstore::AspectDepth | rstore::AspectStencil;
+    part.reason = rstore::Reason::PartialClear; part.api = rstore::Api::Clear;
+
+    rstore::Window rw;
+    CHECK(rw.take(1.0, 60u, log.snapshot()).empty());           // nothing restored: no line
+
+    for (int i = 0; i < 120; i++) log.add(shadow);
+    for (int i = 0; i < 6; i++)   log.add(scene);
+    log.add(part);
+    std::string r = rw.take(2.0, 120u, log.snapshot());
+    std::printf("%s\n", r.c_str());
+    CHECK(r == "RESTORE t=2 frames=60 n=127 perFrame=2.12"
+               " | 120x 2048x2048 Depth32Float_Stencil8 s sample@Draw"
+               " | 6x 3840x2160 BGRA8Unorm c copy@StretchRect"
+               " | 1x 2048x2048 Depth32Float_Stencil8 ds partial-clear@Clear");
+
+    CHECK(rw.take(3.0, 180u, log.snapshot()).empty());         // a second without any
+    log.add(scene);
+    r = rw.take(4.0, 240u, log.snapshot(), 0u);
+    CHECK(r == "RESTORE t=4 frames=60 n=1 perFrame=0.02 | +1 other");
+
+    r = rstore::summary(240u, log.snapshot(), 1u);
+    std::printf("%s\n", r.c_str());
+    CHECK(r == "RESTORE-SUMMARY frames=240 n=128 perFrame=0.53"
+               " | 120x 2048x2048 Depth32Float_Stencil8 s sample@Draw | +8 other");
+    CHECK(rstore::summary(0u, rstore::Entries()) == "RESTORE-SUMMARY frames=0 n=0 perFrame=0.00");
+
+    // Bounded: keys beyond MaxKeys count as one default key.
+    rstore::Log big;
+    for (uint32_t i = 0u; i < rstore::Log::MaxKeys + 10u; i++) {
+      rstore::Key k;
+      k.width = i + 1u;
+      big.add(k);
+    }
+    rstore::Entries e = big.snapshot();
+    CHECK(e.size() == rstore::Log::MaxKeys);
+    CHECK(e.back().key == rstore::Key() && e.back().count == 11u);
+
+    CHECK(rstore::formatName(123456u) == "fmt123456");
+    CHECK(std::string(rstore::apiName(rstore::Api(200))) == "Unknown");
+    CHECK(std::string(rstore::reasonName(rstore::Reason::RtView)) == "rt-view");
+  }
 
   if (g_fail) {
     std::printf("%d check(s) failed\n", g_fail);

@@ -143,6 +143,7 @@ namespace dxvk::backend {
     void beginDebugLabel(const char* label) override;
     void endDebugLabel() override;
     void insertDebugLabel(const char* label) override;
+    void setApiTag(uint32_t api) override;
 
     void setPresenter(Rc<MtlPresenter> presenter) { m_presenter = std::move(presenter); }
 
@@ -393,14 +394,18 @@ namespace dxvk::backend {
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
     uint32_t     m_attTraceBudget = 0u;
     bool         m_attTraceOn = false;
+    uint32_t     m_apiTag = 0u;         // D9MT_PROFILE: rstore::Api of the commands being recorded
     bool         createPassEncoder(bool early);
     void         attApplyAfter();
     uint8_t      attComputeWriteMask() const;
     bool         attSampled(const MtlTexture* img) const;
-    void         attBindSampled(MtlTexture* img);
-    void         attRestore(MtlTextureImpl* img);
-    void         attRead(const MtlTexture* img);
-    void         attWrite(const MtlTexture* img);
+    // `why`: the operation that needs memory to hold the contents, for the
+    // RESTORE attribution. `aspects`: the aspects it reads.
+    void         attBindSampled(const MtlTextureView* view);
+    void         attRestore(MtlTextureImpl* img, rstore::Reason why, MtlAspectMask aspects);
+    void         attRead(const MtlTexture* img, rstore::Reason why,
+                         MtlAspectMask aspects = MtlAspectColor | MtlAspectDepth | MtlAspectStencil);
+    void         attWrite(const MtlTexture* img, rstore::Reason why);
     bool         chunkHasNoWork() const;
 
     // D9MT_PROFILE: render-thread totals, published at endFrame (mtl_render_stats.h).

@@ -824,7 +824,8 @@ namespace dxvk::backend {
       a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
       a.d = attopt::decide(a.in);
       if (a.d.restoreFirst) {
-        attRestore(img);
+        attRestore(img, rstore::Reason::RtView,
+          s < kAttDepth ? MtlAspectColor : s == kAttDepth ? MtlAspectDepth : MtlAspectStencil);
         a.in.content = st.content;
         a.d = attopt::decide(a.in);
       }
@@ -1022,38 +1023,45 @@ namespace dxvk::backend {
   }
 
 
-  void MtlContextImpl::attBindSampled(MtlTexture* img) {
+  void MtlContextImpl::attBindSampled(const MtlTextureView* view) {
+    auto* t = static_cast<MtlTextureImpl*>(view->image.ptr());
     // A bind while no pass is open counts for the pass that opens next.
-    static_cast<MtlTextureImpl*>(img)->attSampledEpoch =
-      m_pass.active ? m_pass.epoch : m_attEpoch + 1u;
-    attRead(img);
+    t->attSampledEpoch = m_pass.active ? m_pass.epoch : m_attEpoch + 1u;
+    attRead(t, rstore::Reason::Sample);
   }
 
 
-  void MtlContextImpl::attRead(const MtlTexture* img) {
+  void MtlContextImpl::attRead(const MtlTexture* img, rstore::Reason why, MtlAspectMask aspects) {
     auto* t = static_cast<MtlTextureImpl*>(const_cast<MtlTexture*>(img));
-    if (likely(t == nullptr
-     || (t->attColor.content != attopt::Content::Lazy
-      && t->attDepth.content != attopt::Content::Lazy
-      && t->attStencil.content != attopt::Content::Lazy)))
+    if (t == nullptr)
       return;
-    attRestore(t);
+    auto lazy = [] (const attopt::AspectState& st) { return st.content == attopt::Content::Lazy; };
+    if (likely(!lazy(t->attColor) && !lazy(t->attDepth) && !lazy(t->attStencil)))
+      return;
+    MtlAspectMask need = 0u;
+    if ((aspects & MtlAspectColor)   && lazy(t->attColor))   need |= MtlAspectColor;
+    if ((aspects & MtlAspectDepth)   && lazy(t->attDepth))   need |= MtlAspectDepth;
+    if ((aspects & MtlAspectStencil) && lazy(t->attStencil)) need |= MtlAspectStencil;
+    if (need)
+      attRestore(t, why, need);
   }
 
 
-  void MtlContextImpl::attWrite(const MtlTexture* img) {
+  void MtlContextImpl::attWrite(const MtlTexture* img, rstore::Reason why) {
     if (img == nullptr)
       return;
     // Partial writes keep the rest of the contents: make memory hold them first.
-    attRead(img);
+    attRead(img, why);
     auto* t = static_cast<MtlTextureImpl*>(const_cast<MtlTexture*>(img));
     t->attColor.content = t->attDepth.content = t->attStencil.content = attopt::Content::Defined;
   }
 
 
-  void MtlContextImpl::attRestore(MtlTextureImpl* t) {
+  void MtlContextImpl::attRestore(MtlTextureImpl* t, rstore::Reason why, MtlAspectMask aspects) {
     // Something reads an image whose clear was never stored: store it now.
     // Its own pass, before whatever reads; an encoder already open ends first.
+    // Only `aspects` are re-cleared; another Lazy aspect is loaded and stored
+    // unchanged and stays Lazy (memory never holds it).
     if (m_pass.encoder) {
       prof::bump(prof::CntPassCloseBlit);
       closePass();
@@ -1065,6 +1073,9 @@ namespace dxvk::backend {
     const bool hasDepth   = (fi->flags & MtlFormatFlagDepth) != 0u;
     const bool hasStencil = (fi->flags & MtlFormatFlagStencil) != 0u;
     auto lazy = [] (const attopt::AspectState& st) { return st.content == attopt::Content::Lazy; };
+    const bool clearColor   = (aspects & MtlAspectColor)   && lazy(t->attColor);
+    const bool clearDepth   = (aspects & MtlAspectDepth)   && lazy(t->attDepth);
+    const bool clearStencil = (aspects & MtlAspectStencil) && lazy(t->attStencil);
 
     WMTRenderPassInfo info = {};
     info.render_target_width  = t->extent.width;
@@ -1073,14 +1084,14 @@ namespace dxvk::backend {
     if (hasDepth || hasStencil) {
       if (hasDepth) {
         info.depth.texture      = t->owned.handle();
-        info.depth.load_action  = lazy(t->attDepth) ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.depth.load_action  = clearDepth ? WMTLoadActionClear : WMTLoadActionLoad;
         info.depth.store_action = WMTStoreActionStore;
         info.depth.clear_depth  = t->attDepth.value.c[0];
         bytes += attBytes(t, 4u);
       }
       if (hasStencil) {
         info.stencil.texture       = t->owned.handle();
-        info.stencil.load_action   = lazy(t->attStencil) ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.stencil.load_action   = clearStencil ? WMTLoadActionClear : WMTLoadActionLoad;
         info.stencil.store_action  = WMTStoreActionStore;
         info.stencil.clear_stencil = t->attStencil.value.stencil;
         bytes += attBytes(t, 5u);
@@ -1088,7 +1099,7 @@ namespace dxvk::backend {
     } else {
       const float* c = t->attColor.value.c;
       info.colors[0].texture      = t->owned.handle();
-      info.colors[0].load_action  = WMTLoadActionClear;
+      info.colors[0].load_action  = clearColor ? WMTLoadActionClear : WMTLoadActionLoad;
       info.colors[0].store_action = WMTStoreActionStore;
       info.colors[0].clear_color  = { c[0], c[1], c[2], c[3] };
       bytes += attBytes(t, 0u);
@@ -1100,15 +1111,42 @@ namespace dxvk::backend {
     NSObject_release(enc);
     m_keepAlive.push_back(Rc<MtlTexture>(t));
 
-    for (attopt::AspectState* st : { &t->attColor, &t->attDepth, &t->attStencil }) {
-      if (st->content == attopt::Content::Lazy)
-        st->content = attopt::Content::Cleared;
-    }
+    uint8_t restored = 0u;
+    if (clearColor)   { t->attColor.content   = attopt::Content::Cleared; restored |= rstore::AspectColor; }
+    if (clearDepth)   { t->attDepth.content   = attopt::Content::Cleared; restored |= rstore::AspectDepth; }
+    if (clearStencil) { t->attStencil.content = attopt::Content::Cleared; restored |= rstore::AspectStencil; }
 
     if (unlikely(prof::g_profEnabled)) {
       m_rs[rstats::Restores]++;
       m_rs[rstats::BytesSaved] -= bytes;
+      rstore::Key k;
+      k.format  = uint32_t(t->format);
+      k.width   = t->extent.width;
+      k.height  = t->extent.height;
+      k.aspects = restored;
+      k.reason  = why;
+      k.api     = rstore::Api(m_apiTag < uint32_t(rstore::Api::Count) ? m_apiTag : 0u);
+      m_device->restoreLog().add(k);
     }
+
+    // att_trace: the restores share the pass decisions' line budget.
+    if (unlikely(d9mtdbg::flags() & d9mtdbg::AttTrace) && m_attTraceOn && m_attTraceBudget) {
+      m_attTraceBudget--;
+      rstore::Key k;
+      k.format  = uint32_t(t->format);
+      k.width   = t->extent.width;
+      k.height  = t->extent.height;
+      k.aspects = restored;
+      k.reason  = why;
+      k.api     = rstore::Api(m_apiTag < uint32_t(rstore::Api::Count) ? m_apiTag : 0u);
+      Logger::warn(str::format("D9MT-ATT restore after pass=", m_attEpoch, " ", rstore::describe(k),
+        m_apiTag ? "" : " (api tags need D9MT_PROFILE)"));
+    }
+  }
+
+
+  void MtlContextImpl::setApiTag(uint32_t api) {
+    m_apiTag = api;
   }
 
 
@@ -1299,7 +1337,7 @@ namespace dxvk::backend {
       if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
         m_frameSampled.insert(view->image.ptr());
       if (m_attOpt && view != nullptr && view->image != nullptr)
-        attBindSampled(view->image.ptr());
+        attBindSampled(view.ptr());
     }
   }
 

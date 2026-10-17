@@ -7,6 +7,7 @@
 #include "mtl_resource.h"
 #include "mtl_memory_profile.h"
 #include "mtl_render_stats.h"
+#include "mtl_restore_stats.h"
 
 #include "../util/rc/util_rc.h"
 #include "../util/rc/util_rc_ptr.h"
@@ -166,10 +167,15 @@ namespace dxvk {
     // D9MT_PROFILE: render-thread totals for the STATS line (mtl_render_stats.h).
     rstats::Totals& renderStats() { return m_renderStats; }
 
+    // D9MT_PROFILE: what the attachment optimization's restores were for
+    // (mtl_restore_stats.h), for the RESTORE lines.
+    rstore::Log& restoreLog() { return m_restoreLog; }
+
   protected:
 
     FrontendStats    m_frontendStats;
     rstats::Totals   m_renderStats;
+    rstore::Log      m_restoreLog;
 
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };

@@ -174,6 +174,10 @@ namespace dxvk {
     virtual void endDebugLabel();
     virtual void insertDebugLabel(const char* label);
 
+    // D9MT_PROFILE: the D3D9 call the following commands come from
+    // (rstore::Api), for the RESTORE attribution. A no-op where unsupported.
+    virtual void setApiTag(uint32_t api);
+
   private:
 
     Rc<MtlDevice> m_device;
