@@ -16,6 +16,9 @@
 #
 # Nothing outside WORK is read or written (Wine prefix, AIR cache, PSO archives, state cache);
 # the engine is only executed. Prints: label, summary; keeps the log in $WORK/logs/<label>.log.
+#   EXC_GUARD=<exc_guard binary>  run Wine through test/harness/exc_guard.c (arm64ec branch), so
+#                                 a crash is logged to $WORK/logs/<label>.exc instead of a
+#                                 "quit unexpectedly" dialog
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 : "${ENGINE:?set ENGINE to a Wine engine root (bin/wine, bin/wineserver)}"
@@ -62,7 +65,11 @@ LOG="$WORK/logs/$LABEL.log"
   export D9MT_STATE_CACHE="$STATE"
   [ -n "$THREADS" ] && export D9MT_STATE_CACHE_THREADS="$THREADS"
   [ "$FASTMATH" = 1 ] && export D9MT_AIR_FASTMATH=1
-  cd "$D" && exec "$WINE" code_statecache.exe $ARGS
+  cd "$D"
+  if [ -n "${EXC_GUARD:-}" ]; then
+    exec "$EXC_GUARD" "$TIMEOUT" "$WORK/logs/$LABEL.exc" "$WINE" code_statecache.exe $ARGS
+  fi
+  exec "$WINE" code_statecache.exe $ARGS
 ) >"$LOG" 2>&1 &
 pid=$!
 t=0
