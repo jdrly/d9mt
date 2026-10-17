@@ -225,7 +225,11 @@ Entry (fixed size, 384 bytes):
   therefore don't drop each other's entries; whoever writes last wins only
   the counters.
 - **Bounded size**:
-  - Cap 4096 entries ≈ 1.5 MB; SWTOR uses ~350 per session.
+  - Cap 1024 entries by default ≈ 390 KB; SWTOR uses ~350 per session.
+    `D9MT_STATE_CACHE_MAX` sets another cap within 64–16384. The default was
+    lowered from 4096: every session's PSO archive captures every prewarmed
+    pipeline (§12), and until the bridge keeps fewer archive sessions, the
+    cap also bounds the archives.
   - Over the cap, entries with the lowest `lastSession` are dropped first,
     then the lowest `sessionsUsed`.
   - The cache keeps only a pointer to each announced shader, no reference:
@@ -269,20 +273,36 @@ like this:
      can't be derived. On that engine this fallback never triggers. It stays
      in the code because it is harmless and other Wine builds pass `TMPDIR`
      through.
-3. Otherwise the cache is off, with a
-   `STATECACHE off (no cache dir: …; set D9MT_STATE_CACHE)` line.
+3. Otherwise `~/Library/Caches/d9mt/state/`, the user's Library caches.
+   - The home dir comes from Wine's `WINEHOMEDIR` (`\??\Z:\Users\<name>`),
+     converted with `kernel32!wine_get_unix_file_name`, or directly for a
+     `\??\unix\…` form.
+   - It is used only if `<home>/Library/Caches` exists (a Mac). `d9mt/state`
+     is created there.
+4. Otherwise the cache is off, with a
+   `STATECACHE off (no cache dir: no usable TMPDIR or ~/Library/Caches; set D9MT_STATE_CACHE)`
+   line.
 
-So on SWTOR on Mac the launcher line is required. A possible further
-fallback is `~/Library/Caches/d9mt/state`, which can be derived from
-`WINEHOMEDIR`. It is not implemented: it would put d9mt's files in a second
-place, and that is Jan's call.
+So on SWTOR on Mac, without the launcher line, the cache lives in
+`~/Library/Caches/d9mt/state`. With the line it lives next to the AIR cache
+and PSO archives, which keeps every d9mt cache in one place; that is still
+the recommended setup.
 
 The Unix path is converted with `kernel32!wine_get_dos_file_name`, Wine's own
 mapping, which gives a drive path such as `Z:\…`. If that function is missing
-or fails, the path is opened as `\\?\unix\<path>`. On the shipped engine the
-explicit path works: every Wine test in §12 wrote and read its file in
-`/tmp`. The `TMPDIR` fallback was tested with a fake `TMPDIR` under `/tmp`
-and stays off, as described above.
+or fails, the path is opened as `\\?\unix\<path>`. Tested on the shipped engine,
+through `exc_guard`, with a fake `HOME` under `/tmp` in every run:
+- The explicit path: every Wine test in §12 wrote and read its file in
+  `/tmp`, and it wins over the fallback.
+- The `~/Library/Caches` fallback: `WINEHOMEDIR` arrives as
+  `\??\Z:\tmp\…\home`. The file is created there, and the next run loads it
+  and prewarms (39/40 hits).
+- `=0`, and a home without `Library/Caches`: both log `STATECACHE off`.
+- The `TMPDIR` derivation: tested with a fake `TMPDIR`; it stays unused, as
+  described above.
+
+Natively, `state_cache_test` covers every branch of the resolution, with
+`HOME` standing in for `WINEHOMEDIR`.
 
 Rejected: reusing the bridge's sqlite `CacheReader`/`CacheWriter` thunks (they
 resolve relative paths under the cache dir). `CacheReader_get` returns a
@@ -417,7 +437,8 @@ index, ring; plain C++, unit-tested natively).
     PSO. Eviction after 8 sessions no longer loses recorded PSOs.
   - Consequence 2: each session's archive gets bigger (all recorded PSOs
     instead of ~350), and the newest 8 are kept. §12 measures the bytes per
-    PSO. The 4096-entry cap and the 32-session prewarm window bound it.
+    PSO. The 1024-entry default cap and the 32-session prewarm window bound
+    it.
   - Consequence 3: the 256-PSO flush happens during the prewarm at startup.
     That moves the 0.5–0.67 s flush out of the world, but more prewarmed
     PSOs mean more flushes at startup (one per 256). Builds the render thread
@@ -431,6 +452,7 @@ index, ring; plain C++, unit-tested natively).
   point it at `/tmp`).
 - `D9MT_STATE_CACHE_THREADS=<0..4>`: prewarm threads. `0` loads and records
   but never prewarms; this is the A/B switch.
+- `D9MT_STATE_CACHE_MAX=<64..16384>`: the entry cap (default 1024).
 - `dxvk.conf`: `d9mt.stateCache = False` turns it off like the env var.
 
 Log lines (info level, so they show with Debug Logging; a few per session):
@@ -587,8 +609,13 @@ Other Metal layers:
     out), truncation mid-entry and at a boundary, a damaged header, random
     garbage;
   - older/newer format versions, a key signature change;
-  - the cap on the database and on a 4396-entry file (loaded capped,
-    rewritten capped);
+  - the cap on the database, and on a file 300 entries above the default
+    1024 (loaded capped, rewritten capped, the most recently used kept); a
+    configured larger cap keeps them all;
+  - the location and limits from the environment: explicit dir or file,
+    `=0`, an empty value, the cache dir next to the AIR cache, the
+    `~/Library/Caches` fallback, neither (off), and the
+    `D9MT_STATE_CACHE_MAX`/`_THREADS` clamps;
   - `use()`/`merge()` counters; the prewarm index (readiness, order, stale
     entries, FF and linked identities);
   - the SPSC ring (200 000 items, in order, references released);
@@ -705,7 +732,13 @@ Other Metal layers:
   |---|---|---|
   | today's ~350 | ≈ 16 MB | ≈ 130 MB |
   | 1000 | ≈ 45 MB | ≈ 360 MB |
-  | the cap, 4096 | ≈ 185 MB | ≈ 1.5 GB |
+  | the default cap, 1024 | ≈ 46 MB | ≈ 370 MB |
+  | the old cap, 4096 | ≈ 185 MB | ≈ 1.5 GB |
+
+- The default cap is therefore 1024 until the bridge follow-up below
+  lands. Eviction is least recently used, so the pipelines of recent
+  sessions stay. In Wine, `D9MT_STATE_CACHE_MAX=64` on a 400-entry file
+  dropped 336 and wrote 64 (24 640 bytes).
 
 - Proposed bridge follow-up, with #11 and the QoS thunk: with a state
   cache, the newest one or two sessions already hold everything recorded,
@@ -721,7 +754,8 @@ export D9MT_STATE_CACHE="$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"
 ```
 
 `getconf` prints the directory with a trailing `/`, hence no slash before
-`d9mt`. This is required on SWTOR on Mac's engine; see §4.
+`d9mt`. Without it the cache goes to `~/Library/Caches/d9mt/state` (§4).
+With it, it sits next to the AIR cache and PSO archives.
 
 For the A/B, quit SWTOR, then:
 

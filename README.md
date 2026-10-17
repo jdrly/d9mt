@@ -337,7 +337,8 @@ passes have their own load/store rules).
 |---|---|---|
 | `D9MT_AIR_CACHE` | on | persistent compiled-shader cache (`<user cache dir>/d9mt/air-cache.sqlite3`); `0` turns it off, a path relocates it |
 | `D9MT_PSO_ARCHIVE` / `D9MT_PSO_ARCHIVE_DIR` | on | Metal 4 pipeline archives in `<user cache dir>/d9mt/pso/` (last 8 sessions); `0` turns them off, `_DIR` relocates them |
-| `D9MT_STATE_CACHE` | `<user cache dir>/d9mt/state/<exe>.d9mtstate` | pipeline state cache file; `0` turns the cache off, a Unix directory or `.d9mtstate` file path relocates it. The launcher must set it to `"$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"`. Without it, d9mt tries to derive the user cache dir from `TMPDIR` (`/var/folders/…/T/` → `…/C/`), but CrossOver's Wine doesn't pass `TMPDIR` to the game, so there the cache stays off (logged) |
+| `D9MT_STATE_CACHE` | `~/Library/Caches/d9mt/state/<exe>.d9mtstate` | pipeline state cache file; `0` turns the cache off, a Unix directory or `.d9mtstate` file path relocates it. Launchers should set it to `"$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"`, next to the AIR cache and PSO archives. Without it, d9mt uses that dir if Wine passes `TMPDIR` (CrossOver's doesn't), else `~/Library/Caches/d9mt/state` (home from `WINEHOMEDIR`), else the cache stays off (logged) |
+| `D9MT_STATE_CACHE_MAX` | `1024` | most pipelines kept per game (least recently used dropped first), `64`–`16384`; every session's PSO archive holds every prewarmed pipeline, ≈ 45 KB each |
 | `D9MT_STATE_CACHE_THREADS` | `2` | background prewarm threads (lowest priority, the second one only for long queues), `0`–`4`; `0` records and loads but never prewarms |
 | `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
@@ -387,8 +388,8 @@ passes have their own load/store rules).
   smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in;
   `d9mt.pipelineWaitBudgetMs` caps the stutter and only skips what takes
   longer.
-- **The disk caches have no size cap**, except the state cache (4096
-  pipelines per game, ≈ 1.5 MB). The AIR cache is one sqlite file
+- **The disk caches have no size cap**, except the state cache (1024
+  pipelines per game, ≈ 390 KB). The AIR cache is one sqlite file
   shared by all games (entries from other driver builds are dropped); the
   pipeline archives keep the last 8 sessions.
 - **macOS 26 is barely tested.** Before the Compat metallibs (see Build),
