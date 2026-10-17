@@ -307,7 +307,13 @@ namespace dxvk {
     }
 
     if (registerType == RegisterType::eInput && GetShaderInfo().getType() == ShaderType::eVertex) {
-      m_inputSignature.add(Semantic { dcl.getSemanticUsage(), dcl.getSemanticIndex() });
+      // One attribute per semantic, in declaration order, as the converter
+      // assigns input locations: a semantic declared again (on another
+      // register or mask) shares the first declaration's attribute.
+      Semantic semantic = { dcl.getSemanticUsage(), dcl.getSemanticIndex() };
+
+      if (m_inputSignature.find(semantic) >= m_inputSignature.size())
+        m_inputSignature.add(semantic);
       return true;
     }
 
@@ -382,9 +388,9 @@ namespace dxvk {
     switch (op.getOpCode()) {
       case OpCode::eCrs:
       case OpCode::eSetP: {
-        // Converter::handleCrs/handleSetP build one value per written component,
-        // packed, but composite() indexes that list by component: only masks
-        // that start at .x without gaps (and .xyzw for setp) come out right.
+        // Unpatched, Converter::handleCrs/handleSetP built one value per written
+        // component but composite() indexed that list by component: only masks
+        // that start at .x without gaps (and .xyzw for setp) came out right.
         const auto& dst = op.getDst();
         uint8_t mask = uint8_t(dst.getWriteMask(GetShaderInfo()));
         bool isCrs = op.getOpCode() == OpCode::eCrs;
@@ -463,7 +469,7 @@ namespace dxvk {
           D3D9IoDclList&                ioDcls,
           D3D9IoDclEntry                entry,
           bool                          isImplicit) {
-    // The conflict test of IoMap::dclIoVar, which asserts there isn't one.
+    // The conflict test unpatched IoMap::dclIoVar asserted on.
     bool isRegularRegister = entry.registerType == RegisterType::eInput
                           || entry.registerType == RegisterType::eOutput;
 

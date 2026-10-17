@@ -211,8 +211,9 @@ public:
    * - packed-io:<what>        an I/O register or semantic declared twice
    *   (several semantics or masks in one register, a semantic on two
    *   registers or an undeclared input whose implicit semantic is taken)
-   * The converter aborts on some (asserts are live) and builds wrong code
-   * for the rest; see GitHub issue #8.
+   * dxbc-spirv's converter aborted on some (asserts are live) and built
+   * wrong code for the rest, until patches/dxbc-spirv (GitHub issue #8).
+   * Still reported, so logs show which games use them.
    */
   const std::string& GetConverterHazards() const {
     return m_converterHazards;

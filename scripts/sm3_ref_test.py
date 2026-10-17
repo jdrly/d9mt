@@ -438,6 +438,7 @@ def all_cases(legacy):
                 cases.append(setp_case(st, m, cmp))
             cases.append(setp_case(st, m, 'gt', neg=True))
             cases.append(setp_case(st, m, 'lt', sw='wzyx'))
+    cases += ps_io_cases() + vs_out_cases() + vs_in_cases()
     return cases
 
 
@@ -461,7 +462,7 @@ def crs_oracle(text):
     return '\n'.join(out) + '\n'
 
 
-def corpus_cases(d):
+def corpus_cases(d, tag='c0'):
     cases = []
     feed_elems = [(D_POS, 0, T_F4, 0), (D_TEX, 0, T_F4, 16)]
     feed_data = POS + [0.25, -1.5, 2.0, 3.0]
@@ -481,7 +482,7 @@ def corpus_cases(d):
         base = f[:-4]
         if text.startswith('ps_3_0'):
             for variant, t in (('orig', text), ('oracle', crs_oracle(text))):
-                cases.append(Case('corpus_%s_%s' % (base, variant), feed, t, feed_elems, feed_data, None))
+                cases.append(Case('corpus_%s_%s_%s' % (tag, base, variant), feed, t, feed_elems, feed_data, None))
             continue
         # vertex shader: position from v0, no point size (both would only
         # move or hide the point), every input semantic fed, outputs read back
@@ -517,7 +518,7 @@ def corpus_cases(d):
             ps = ('ps_3_0\n' + ''.join('dcl_%s v%d\n' % (s, i) for i, s in enumerate(sems))
                   + ''.join('mov oC%d, v%d\n' % (i, i) for i in range(len(sems))))
             for variant, t in (('orig', text), ('oracle', crs_oracle(text))):
-                cases.append(Case('corpus_%s_%d_%s' % (base, k, variant), t, ps, elems, data, None))
+                cases.append(Case('corpus_%s_%s_%d_%s' % (tag, base, k, variant), t, ps, elems, data, None))
     return cases
 
 
@@ -550,8 +551,8 @@ def main(argv):
     only = argv[argv.index('--only') + 1] if '--only' in argv else ''
     corpora = [argv[i + 1] for i, a in enumerate(argv) if a == '--corpus']
     cases = [c for c in all_cases(legacy) if c.name.startswith(only)]
-    for d in corpora:
-        cases += [c for c in corpus_cases(d) if c.name.startswith(only)]
+    for i, d in enumerate(corpora):
+        cases += [c for c in corpus_cases(d, 'c%d' % i) if c.name.startswith(only)]
     if '--skip' in argv:
         skip = set(open(argv[argv.index('--skip') + 1]).read().split())
         cases = [c for c in cases if c.name not in skip]

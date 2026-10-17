@@ -233,8 +233,9 @@ namespace dxvk {
 
     m_name = str::format(stage == MtlShaderStage::Vertex ? "vs_" : "ps_", ShaderKey.hash());
 
-    // Once per distinct shader: patterns dxbc-spirv's sm3 converter aborts on
-    // or miscompiles (issue #8), so logs show whether a game uses them.
+    // Once per distinct shader: patterns dxbc-spirv's sm3 converter aborted on
+    // or miscompiled before patches/dxbc-spirv (issue #8), so logs show
+    // whether a game uses them.
     if (unlikely(!m_analysis.GetConverterHazards().empty())) {
       Logger::warn(str::format("D3D9 SM3 hazard: ", m_name, " ",
         stage == MtlShaderStage::Vertex ? "VS" : "PS", " ", m_analysis.GetConverterHazards()));

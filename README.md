@@ -162,7 +162,7 @@ patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
 scripts/sm3_hazard_test.py build/driver-x64/d3d9.dll [<dir of .asm/.bin>...]`
 (corpora from `scripts/sm3_corpus.py gen`). `scripts/sm3_ref_test.py` (same
 environment) renders `crs`/`setp` with every write mask, modifier and
-predicate on the GPU and compares the results
+predicate and packed I/O declarations on the GPU and compares the results
 with a scalar model of the D3D9 semantics; `--strict` uses
 `d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
 every corpus `crs` against a `mul`/`mul`/`add` expansion.
