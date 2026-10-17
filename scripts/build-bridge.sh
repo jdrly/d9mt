@@ -7,6 +7,11 @@
 #   PE side   : winemetal.dll (x86_64) + winemetal32.dll (i686), builtin-marked
 #   gate      : tests/bridge_smoke.cpp (vertex-descriptor PSO + AIR parity)
 #
+#   ARCH=arm64ec  arm64 Wine instead: winemetal.so for arm64 and winemetal.dll
+#                 as ARM64EC (llvm-mingw, scripts/llvm-mingw.sh), in
+#                 build/bridge-arm64ec. No i386 dll: 32-bit games run under
+#                 FEX's WoW64 and keep the i386 build.
+#
 # Mirrors scripts/build-d9mtair.sh conventions; meson flags derived from
 # upstream bridge/meson.build + bridge/unix/meson.build.
 set -euo pipefail
@@ -16,31 +21,42 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 BR="$V2/bridge"
 DX="$V2/third_party/dxbc-spirv"
-OUT="$V2/build/bridge"
-AIRLIB_OUT="$V2/build/airlib"
+case "${ARCH:-x86}" in
+  x86|x86_64|x64)
+    PE_ARCH=x86; UNIX_ARCH=x86_64; ARCH_FLAGS=()
+    OUT="$V2/build/bridge"; AIRLIB_OUT="$V2/build/airlib" ;;
+  arm64ec)
+    # -ffp-contract=off: clang fuses a*b+c into fmadd on arm64, never on
+    # x86_64, so float results could differ (docs/arm64ec-port.md).
+    PE_ARCH=arm64ec; UNIX_ARCH=arm64; ARCH_FLAGS=(-ffp-contract=off)
+    OUT="$V2/build/bridge-arm64ec"; AIRLIB_OUT="$V2/build/airlib-arm64" ;;
+  *) echo "FATAL: ARCH must be x86 (default) or arm64ec" >&2; exit 1 ;;
+esac
 OBJ="$OUT/obj"
 mkdir -p "$OBJ"
 
 # No Wine engine is needed at build time: the unix side resolves ntdll/winemac
 # symbols at load time (-undefined dynamic_lookup below).
 
-LLVM="$V2/toolchains/llvm-x86_64"
+LLVM="$V2/toolchains/llvm-$UNIX_ARCH"
 [ -f "$LLVM/lib/libLLVMBitWriter.a" ] || { echo "FATAL: run scripts/build-llvm-unixside.sh first" >&2; exit 1; }
 
 # The airlib compile-core objects (AirBuilder + metallib writer + ir core).
 # Always run build-d9mtair.sh (incremental by mtime) so edits under air/ never
 # link a stale air_builder.o into winemetal.so.
-bash "$V2/scripts/build-d9mtair.sh"
+ARCH="$UNIX_ARCH" bash "$V2/scripts/build-d9mtair.sh"
 
 CORE_OBJS=("$OBJ"/../../airlib/obj/third_party_dxbc-spirv_ir_*.o \
            "$OBJ"/../../airlib/obj/third_party_dxbc-spirv_util_*.o \
            "$OBJ"/../../airlib/obj/air_air_builder.cpp.o \
            "$OBJ"/../../airlib/obj/air_air_metallib.cpp.o)
 
-CXXFLAGS_UNIX=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
+CXXFLAGS_UNIX=(-std=c++17 -O2 -arch "$UNIX_ARCH" -fvisibility=hidden -ffile-prefix-map="$V2"=.
                -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
-               -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
-CFLAGS_UNIX=(-ObjC -O2 -arch x86_64 -ffile-prefix-map="$V2"=. -I"$BR" -I"$BR/unix" -I"$V2/airlib")
+               -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+               ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})
+CFLAGS_UNIX=(-ObjC -O2 -arch "$UNIX_ARCH" -ffile-prefix-map="$V2"=. -I"$BR" -I"$BR/unix" -I"$V2/airlib"
+             ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})
 LLVM_LIBS=("$LLVM"/lib/libLLVM*.a)
 
 echo "[bridge] airlib compile core for the bridge (table symbols renamed:"
@@ -69,7 +85,7 @@ _d9mtair_compile
 _d9mtair_free
 EOF
 
-clang++ -arch x86_64 -dynamiclib \
+clang++ -arch "$UNIX_ARCH" -dynamiclib \
   -o "$OUT/winemetal.so" \
   "$OBJ/winemetal_unix.c.o" "$OBJ/cache.c.o" "$OBJ/dxso_stubs.c.o" \
   "$OBJ/airlib_unix_renamed.o" \
@@ -88,6 +104,36 @@ clang++ -arch x86_64 -dynamiclib \
   -lsqlite3 -lm -lpthread
 echo "  -> $OUT/winemetal.so ($(wc -c < "$OUT/winemetal.so") bytes)"
 
+PE_SRC=("$BR/main.c" "$BR/winecrt0_compat.c" "$BR/winemetal_thunks.c" "$BR/airconv_thunks.c" "$BR/d9mtair_thunks.c")
+if [ "$PE_ARCH" = arm64ec ]; then
+  . "$V2/scripts/llvm-mingw.sh"
+  llvm_mingw_ensure
+  LMB="$LLVM_MINGW/bin"
+  echo "[bridge] ntdll import lib (arm64ec)"
+  # winecrt0_compat.c's ARM64EC path finds ntdll's unix-call dispatcher itself
+  cat > "$OUT/ntdll-arm64ec.def" <<'EOF'
+LIBRARY ntdll.dll
+EXPORTS
+  NtQueryVirtualMemory
+  LdrGetDllHandle
+  RtlFindExportedRoutineByName
+EOF
+  "$LMB/arm64ec-w64-mingw32-dlltool" -d "$OUT/ntdll-arm64ec.def" \
+    -l "$OUT/libntdll-arm64ec.a" --dllname ntdll.dll
+  echo "[bridge] PE winemetal dll (arm64ec)"
+  mkdir -p "$OUT/arm64ec"
+  "$LMB/arm64ec-w64-mingw32-gcc" -shared -O2 -s -ffile-prefix-map="$V2"=. "${ARCH_FLAGS[@]}" \
+    -o "$OUT/arm64ec/winemetal.dll" \
+    "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
+    "$OUT/libntdll-arm64ec.a" -Wl,--file-alignment,0x1000
+  cp "$OUT/arm64ec/winemetal.dll" "$OUT/winemetal-arm64ec.dll"
+  python3 "$V2/scripts/make-builtin.py" "$OUT/winemetal-arm64ec.dll"
+  echo "[bridge] import lib for the driver"
+  bash "$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def"
+  echo "  $(grep -c '^  ' "$OUT/winemetal.def") exports -> $OUT/winemetal.def"
+fi
+
+if [ "$PE_ARCH" = x86 ]; then
 echo "[bridge] ntdll import libs"
 cat > "$OUT/ntdll-cx32.def" <<'EOF'
 LIBRARY ntdll.dll
@@ -107,7 +153,6 @@ x86_64-w64-mingw32-dlltool -d "$OUT/ntdll-cx64.def" \
   -l "$OUT/libntdll-cx64.a" --dllname ntdll.dll
 
 echo "[bridge] PE winemetal dlls"
-PE_SRC=("$BR/main.c" "$BR/winecrt0_compat.c" "$BR/winemetal_thunks.c" "$BR/airconv_thunks.c" "$BR/d9mtair_thunks.c")
 mkdir -p "$OUT/i386" "$OUT/x86_64"
 i686-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/i386/winemetal.dll" \
   "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
@@ -125,8 +170,9 @@ bash "$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def"
 echo "  $(grep -c '^  ' "$OUT/winemetal.def") exports -> $OUT/winemetal.def"
 i686-w64-mingw32-dlltool -d "$OUT/winemetal.def" \
   -l "$OUT/libwinemetal32.a" --dllname winemetal.dll
+fi
 
-# Smoke test (x86_64 host, needs a Metal GPU): vertex-descriptor PSO, MTL4
+# Smoke test (unix-side arch on this host, needs a Metal GPU): vertex-descriptor PSO, MTL4
 # path and AIR parity against reference metallibs from the host AIR compiler
 # (scripts/build-air-compiler.sh, which needs Homebrew llvm@15 + a
 # SPIRV-Cross checkout). Skipped when those references can't be built;
@@ -140,7 +186,7 @@ if [ "$SMOKE" != 0 ] && [ ! -f "$V2/build/air-compiler/vs.metallib" ]; then
   }
 fi
 if [ "$SMOKE" != 0 ]; then
-  echo "[bridge] smoke test (x86_64 host)"
+  echo "[bridge] smoke test ($UNIX_ARCH host)"
   clang++ "${CXXFLAGS_UNIX[@]}" \
     "$BR/tests/bridge_smoke.cpp" \
     $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_*.o) \

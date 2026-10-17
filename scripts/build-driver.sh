@@ -19,9 +19,16 @@ set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 DRV="$V2/driver"
 # ARCH=x64 -> 64-bit driver for 64-bit games; own build dir, x86_64 mingw.
+# ARCH=arm64ec -> the 64-bit driver as ARM64EC for arm64 Wine (llvm-mingw,
+# scripts/llvm-mingw.sh); own build dir. 32-bit games keep the x86 build.
 ARCH="${ARCH:-x86}"
 if [ "$ARCH" = x64 ]; then
   BUILD="$V2/build/driver-x64"; MINGW_PREFIX=x86_64-w64-mingw32
+elif [ "$ARCH" = arm64ec ]; then
+  BUILD="$V2/build/driver-arm64ec"; MINGW_PREFIX=arm64ec-w64-mingw32
+  . "$V2/scripts/llvm-mingw.sh"
+  llvm_mingw_ensure
+  export PATH="$LLVM_MINGW/bin:$PATH"
 else
   BUILD="$V2/build/driver"; MINGW_PREFIX=i686-w64-mingw32
 fi
@@ -186,7 +193,17 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # -fno-strict-aliasing: the PE<->unix boundary structs and wmtcmd stream do
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
 # -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
-FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter)
+if [ "$ARCH" = arm64ec ]; then
+  # clang fuses a*b+c into fmadd on ARM64EC; the x86 builds never fuse (no FMA
+  # in the baseline ISA), so float results could differ (docs/arm64ec-port.md).
+  # -Wno-microsoft-exception-spec: llvm-mingw's COM headers declare the
+  # interface methods nothrow and DXVK's overrides don't; benign (they never
+  # throw out), GCC doesn't diagnose it, and DXMT's meson.build disables it too.
+  FLAGS+=(-ffp-contract=off -Wno-microsoft-exception-spec)
+else
+  FLAGS+=(-msse -msse2 -mfpmath=sse)
+fi
 # STATE_CACHE_TESTING=1: a test build of the pipeline state cache (fault injection and
 # D9MT_STATE_CACHE_TEST_* switches, docs/state-cache.md); never for release.
 [ "${STATE_CACHE_TESTING:-0}" = 1 ] && FLAGS+=(-DD9MT_STATE_CACHE_TESTING) && echo "=== [driver] STATE_CACHE_TESTING=1: test build ==="
@@ -200,6 +217,8 @@ FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_W
 # flag is unset. Runtime is additionally gated on D9MT_PROFILE_INSTRUMENT=1 in
 # the environment (hooks return immediately otherwise).
 PROFILE_INSTRUMENT="${PROFILE_INSTRUMENT:-0}"
+# mtl_instrument.cpp reads rdtsc and relies on GCC's exclude list; x86 only for now.
+[ "$PROFILE_INSTRUMENT" = 1 ] && [ "$ARCH" = arm64ec ] && { echo "FATAL: PROFILE_INSTRUMENT=1 is x86/x64 only" >&2; exit 1; }
 INSTRUMENT_TUS=" mtl_context_record.cpp mtl_context_transfer.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp "
 # GCC instruments pre-inline, so trivial getters (std::array::operator[],
 # Rc<>::operator->, MtlBufferSlice::defined, ...) each cost two hook calls that
@@ -464,7 +483,11 @@ if "$MINGW" -shared -static -static-libgcc -static-libstdc++ -o "$BUILD/d3d9.dll
       "$D3D9DEF" "${OBJS[@]}" "$DXBCSM3_LIB" "$WMIMP" \
       -lgdi32 -luser32 -lole32 -lsetupapi 2>"$LINK_LOG"; then
   echo "  d3d9.dll LINKED: $BUILD/d3d9.dll ($(wc -c < "$BUILD/d3d9.dll") bytes)"
-  nexp="$("$MINGW_PREFIX-objdump" -p "$BUILD/d3d9.dll" | grep -cE 'Export RVA' || true)"
+  if [ "$ARCH" = arm64ec ]; then
+    nexp="$(llvm-readobj --coff-exports "$BUILD/d3d9.dll" | grep -E '^ +RVA: ' | grep -vc 'RVA: 0x0$' || true)"
+  else
+    nexp="$("$MINGW_PREFIX-objdump" -p "$BUILD/d3d9.dll" | grep -cE 'Export RVA' || true)"
+  fi
   echo "  d3d9.dll exports (Export Address Table RVA entries): $nexp"
 else
   undef="$( { grep -oE 'undefined reference to [`'"'"'"][^'"'"'\"\`]+' "$LINK_LOG" || true; } | sed 's/.*to .//' | sort -u)"
