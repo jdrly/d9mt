@@ -63,12 +63,20 @@ struct FakeState {
 #include "d3d9_state.h"
 
 int main() {
+  // ~300 ms of work first, so the core is at full clock for the first case
+  { auto t0 = std::chrono::steady_clock::now(); volatile uint64_t x = 0;
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(300)) x = x + 1; }
 #if defined(__aarch64__)
   std::printf("arm64 (NEON paths = ARM64EC's), native\n");
 #else
   std::printf("x86_64 (SSE paths = the shipping x64 build's)\n");
 #endif
-  std::vector<Vector4> fApi(256), fOut(260);
+  // Destinations walk through 16 offsets over 4 KB, as the constant ring's
+  // allocations do: the copy's speed depends on where the destination sits
+  // relative to the source (3.8 to 6.8 ns for 32 vectors on an M5 Max), so a
+  // single placement would measure luck.
+  std::vector<Vector4> fApi(256), fArena(256 * 17 + 4);
+  auto fOut = [&](uint32_t i) { return fArena.data() + 16u * (i % 16u); };
   for (uint32_t i = 0; i < 256; i++)
     fApi[i] = Vector4(float(i), -float(i), 0.5f * float(i), 1.0f);
   std::vector<Vector4i> iApi(16), iOut(20);
@@ -83,7 +91,7 @@ int main() {
       D3D9ConstantBufferLayout(1u, imask), D3D9ConstantBufferLayout(1u, bmask));
     for (bool flush : { false, true }) {
       D3D9ConstantBufferCopyArgs a = {};
-      a.floatBuffer = fOut.data();
+      a.floatBuffer = fOut(0u);
       a.floatBufferSize = count * 16u;
       a.flushNan = flush;
       a.intBuffer = iOut.data();
@@ -95,7 +103,7 @@ int main() {
       a.constBoolApi = bApi.data();
       char name[96];
       std::snprintf(name, sizeof(name), "copyConstantData %3u f + 8 i + 16 b%s", count, flush ? " flushNan" : "");
-      bench(name, 200000u, [&](uint32_t) { copy.copyConstantData(a); });
+      bench(name, 200000u, [&](uint32_t i) { a.floatBuffer = fOut(i); copy.copyConstantData(a); });
     }
   }
 

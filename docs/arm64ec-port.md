@@ -232,25 +232,28 @@ cross-thread variable in scope (all of `driver/`, `bridge/`, `airlib/`, `air/`):
 
 ## Benchmarks
 
-M5 Max, macOS 27, median ns per call of 15 runs
-(`BENCH=1 scripts/test-arm64-port.sh`). "x86_64" is today's x64 build's
-code (the SSE paths) translated by Rosetta, "arm64" the code ARM64EC
-compiles, native.
+M5 Max, macOS 27, `BENCH=1 scripts/test-arm64-port.sh`
+(`test/native/arm64_port_bench.cpp`): median ns per call of 15 runs, range
+over 4 interleaved rounds per architecture. "x86_64" is today's x64 build's
+code (the SSE paths) translated by Rosetta, "arm64" the code ARM64EC compiles
+(NEON), native. The benchmark warms the core up first and moves the
+constant-copy destination through 16 offsets over 4 KB, as the constant ring
+does: a single placement varies by up to 3 ns per call on its own.
 
 | Hot path | x86_64 (Rosetta) | arm64 NEON |
 |---|---|---|
-| `copyConstantData` 32 float + 8 int + 16 bool | 10.7 | 10.1–10.5 |
-| ″ with NaN flush | 14.7 | 12.0–13.1 |
-| ″ 128 float | 25.2 | 21.3–22.6 |
-| ″ 128 float, NaN flush | 38.1 | 27.6 |
-| ″ 256 float | 44.4 | 36.3 |
-| ″ 256 float, NaN flush | 73.5 | 48.1 |
-| `UpdateStateConstants` ×1 unchanged / changed | 0.7 / 6.5 | 0.5 / 2.2 |
-| ″ ×4 | 1.8 / 7.4 | 1.2 / 1.6 |
-| ″ ×16 | 5.6 / 9.1 | 4.6 / 3.2 |
-| ″ ×64 | 23.0 / 18.4 | 16.3 / 17.6 |
-| ″ ×256 | 102.7 / 75.9 | 81.1 / 40.8 |
-| `D3D9InputSignature::find` (12 entries) | 2.0 | 0.8 |
+| `copyConstantData` 32 float + 8 int + 16 bool | 11.5–11.8 | 10.0–10.5 |
+| ″ with NaN flush | 14.8–15.6 | 12.2–12.8 |
+| ″ 128 float | 25.4–26.3 | 21.2–21.7 |
+| ″ 128 float, NaN flush | 37.1–38.8 | 26.5–27.4 |
+| ″ 256 float | 44.5–46.6 | 35.7–36.2 |
+| ″ 256 float, NaN flush | 70.8–71.2 | 45.4–46.3 |
+| `UpdateStateConstants` ×1 unchanged / changed | 0.7–0.8 / 6.5–7.1 | 0.5 / 2.3–2.4 |
+| ″ ×4 | 1.7–1.8 / 6.8–7.7 | 1.2 / 1.7–2.0 |
+| ″ ×16 | 5.8–6.0 / 8.6–9.4 | 4.3–4.4 / 3.2 |
+| ″ ×64 | 22.6–23.1 / 17.6–18.3 | 15.9–16.2 / 9.0–9.4 |
+| ″ ×256 | 98.3–99.6 / 71.7–72.9 | 78.5–79.4 / 34.3–39.9 |
+| `D3D9InputSignature::find` (12 entries) | 1.9 | 0.8 |
 
 - The portable code these replace (DXVK's non-x86 branches, compiled for
   arm64) was slower in places: `find` 4.3 ns (2.2× SSE), `copyConstantData`
