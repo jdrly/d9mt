@@ -43,7 +43,9 @@ BINS=("$CORPUS"/*.bin)
 echo "[xarch] corpus: ${#BINS[@]} shaders (seed $SEED)"
 
 build() { # <arch> <airlib obj dir>
-  clang++ -std=c++17 -O2 -arch "$1" -I"$DX" -I"$V2/airlib" \
+  # the arm64 objects are built with -ffp-contract=off (build-d9mtair.sh); so is this
+  local fl=(); [ "$1" = arm64 ] && fl=(-ffp-contract=off)
+  clang++ -std=c++17 -O2 -arch "$1" ${fl[@]+"${fl[@]}"} -I"$DX" -I"$V2/airlib" \
     "$V2/airlib/xarch_dump.cpp" "$2"/third_party_dxbc-spirv_*.o \
     -o "$OUT/xarch_dump-$1"
 }
