@@ -597,4 +597,27 @@ struct unixcall_mtl4_barrier {
 
 #pragma pack(pop)
 
+/* d9mt, unix side: after the CPU observes GPU completion (a shared event's
+ * value, a finished wait), the caller reads memory the GPU wrote: occlusion
+ * query results, readbacks, locked buffers. On arm64 those loads must not be
+ * satisfied before the observation; x86_64 (TSO, and Rosetta's) keeps loads in
+ * order, and its build stays unchanged. docs/arm64ec-port.md (R1).
+ * Defined here, after all code, so winemetal_unix.c's line numbers (assert
+ * messages, and with them the x86_64 build's LC_UUID) stay as they are. */
+#if defined(__aarch64__) && !defined(_WIN32)
+#define D9MT_GPU_ACQUIRE() atomic_thread_fence(memory_order_acquire)
+#else
+#define D9MT_GPU_ACQUIRE() ((void)0)
+#endif
+
+/* d9mt: default AIR cache file (winemetal_unix.c, air_cache_init). Each build
+ * drops the tables of every other build when it opens the cache, so arm64
+ * builds keep a file of their own: an arm64 and an x86_64 (Rosetta) engine on
+ * the same Mac would otherwise wipe each other's cache on every launch. */
+#if defined(__aarch64__) && !defined(_WIN32)
+#define D9MT_AIR_CACHE_DEFAULT @"d9mt/air-cache-arm64.sqlite3"
+#else
+#define D9MT_AIR_CACHE_DEFAULT @"d9mt/air-cache.sqlite3"
+#endif
+
 #endif

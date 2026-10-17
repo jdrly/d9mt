@@ -313,8 +313,16 @@ extern NTSTATUS(WINAPI *__wine_unix_call_dispatcher)(unixlib_handle_t,
                                                      unsigned int, void *);
 extern NTSTATUS WINAPI __wine_init_unix_call(void);
 
+#ifdef __arm64ec__
+/* arm64 Wine: branches to ntdll's dispatcher (winecrt0_compat.c) */
+extern NTSTATUS __wine_unix_call_arm64ec(unixlib_handle_t handle,
+                                         unsigned int code, void *args);
+#define WINE_UNIX_CALL(code, args)                                             \
+  __wine_unix_call_arm64ec(__wine_unixlib_handle, (code), (args))
+#else
 #define WINE_UNIX_CALL(code, args)                                             \
   __wine_unix_call_dispatcher(__wine_unixlib_handle, (code), (args))
+#endif
 
 #endif
 

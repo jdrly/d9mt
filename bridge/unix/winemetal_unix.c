@@ -1722,7 +1722,7 @@ _MTLCommandBuffer_commit(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_waitUntilCompleted(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
-  [(id<MTLCommandBuffer>)params->handle waitUntilCompleted];
+  [(id<MTLCommandBuffer>)params->handle waitUntilCompleted]; D9MT_GPU_ACQUIRE();
   return STATUS_SUCCESS;
 }
 
@@ -1743,7 +1743,7 @@ _MTLDevice_newSharedEvent(void *obj) {
 static NTSTATUS
 _MTLSharedEvent_signaledValue(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
-  params->ret = [(id<MTLSharedEvent>)params->handle signaledValue];
+  params->ret = [(id<MTLSharedEvent>)params->handle signaledValue]; D9MT_GPU_ACQUIRE();
   return STATUS_SUCCESS;
 }
 
@@ -2061,7 +2061,7 @@ _MTLDevice_updateSparseTextureMappings(void *obj) {
                       operations:mtl_ops
                            count:(NSUInteger)params->operation_count];
     [queue signalEvent:event value:1];
-    params->ret = [event waitUntilSignaledValue:1 timeoutMS:UINT64_MAX] ? 1 : 0;
+    params->ret = [event waitUntilSignaledValue:1 timeoutMS:UINT64_MAX] ? 1 : 0; D9MT_GPU_ACQUIRE();
 
     free(mtl_ops);
     [queue release];
@@ -5506,7 +5506,7 @@ _MTLSharedEvent_waitUntilSignaledValue(void *obj) {
     fprintf(stderr, "D9MT-WSI[unix] waitUntilSignaledValue value=%llu tmo=%llu ENTER (cur=%llu)\n",
             (unsigned long long)params->value, (unsigned long long)params->timeout_ms,
             (unsigned long long)[(id<MTLSharedEvent>)params->event signaledValue]);
-  bool timeout = [(id<MTLSharedEvent>)params->event waitUntilSignaledValue:params->value timeoutMS:params->timeout_ms];
+  bool timeout = [(id<MTLSharedEvent>)params->event waitUntilSignaledValue:params->value timeoutMS:params->timeout_ms]; D9MT_GPU_ACQUIRE();
   params->ret_timeout = timeout;
   if (getenv("D9MT_WSILOG"))
     fprintf(stderr, "D9MT-WSI[unix] waitUntilSignaledValue value=%llu EXIT signaled=%d\n",
@@ -5829,8 +5829,8 @@ thunk_D9MTAirVersion(void *args) {
  * never reads stale metallibs and the file does not grow without bound).
  * Every failure degrades to a plain compile.
  *   D9MT_AIR_CACHE=0            disable
- *   D9MT_AIR_CACHE=<unix path>  database file (relative = under the macOS
- *                               user cache dir, default d9mt/air-cache.sqlite3) */
+ *   D9MT_AIR_CACHE=<unix path>  database file (relative = under the macOS user
+ *                               cache dir, default D9MT_AIR_CACHE_DEFAULT) */
 @interface CacheReader : NSObject
 - (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
 - (dispatch_data_t)get:(NSData *)key;
@@ -5894,7 +5894,7 @@ air_cache_init(void) {
   memcpy(&version, g_air_build_id, sizeof(version));
   version = (version ^ ((uint64_t)D9MT_AIR_ABI_VERSION << 56)) & 0x7fffffffffffffffull;
 
-  NSString *path = env ? [NSString stringWithUTF8String:env] : @"d9mt/air-cache.sqlite3";
+  NSString *path = env ? [NSString stringWithUTF8String:env] : D9MT_AIR_CACHE_DEFAULT;
   if (!path)
     return;
   d9mt_cache_drop_other_versions(path, version);
