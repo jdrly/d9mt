@@ -7,17 +7,27 @@
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
 # Heavy (GPU compiler service + LLVM on 6 threads): prefix with
 # `taskpolicy -b` while something latency-sensitive runs.
+# ARCH=arm64 runs the same against the arm64 unix side
+# (ARCH=arm64ec scripts/build-bridge.sh), natively: the weak memory model the
+# x86_64 build never sees under Rosetta's TSO.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 BR="$V2/bridge"
 DX="$V2/third_party/dxbc-spirv"
-LLVM="$V2/toolchains/llvm-x86_64"
-AIRLIB_OBJ="$V2/build/airlib/obj"
-OUT="$V2/build/compile-mt"
+ARCH="${ARCH:-x86_64}"
+case "$ARCH" in
+  x86_64) AIRLIB_OBJ="$V2/build/airlib/obj"; SO="$V2/build/bridge/winemetal.so"
+          OUT="$V2/build/compile-mt"; ARCH_FLAGS=() ;;
+  arm64)  AIRLIB_OBJ="$V2/build/airlib-arm64/obj"; SO="$V2/build/bridge-arm64ec/winemetal.so"
+          OUT="$V2/build/compile-mt-arm64"; ARCH_FLAGS=(-ffp-contract=off) ;;
+  *) echo "FATAL: ARCH must be x86_64 or arm64" >&2; exit 1 ;;
+esac
+LLVM="$V2/toolchains/llvm-$ARCH"
 mkdir -p "$OUT"
 
-INC=(-std=c++17 -O1 -g -arch x86_64 -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
-     -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
+INC=(-std=c++17 -O1 -g -arch "$ARCH" -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
+     -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+     ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})
 DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 # MT_BINS="a.bin b.bin" limits the shader set (all of air/tests/bin by default)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
@@ -45,13 +55,13 @@ fi
 
 echo "[compile-mt] harness"
 clang++ "${INC[@]}" "$BR/tests/compile_mt_test.cpp" "${DXBC_OBJS[@]}" -lpthread -o "$OUT/compile_mt_test"
-run_pair "$OUT/compile_mt_test" "$V2/build/bridge/winemetal.so" "$OUT/work"
+run_pair "$OUT/compile_mt_test" "$SO" "$OUT/work"
 
 [ "${TSAN:-1}" = 0 ] && exit 0
 
 echo "[compile-mt] ThreadSanitizer build of the unix side"
 TS=(-fsanitize=thread -g -O1)
-CFLAGS_UNIX=(-ObjC -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")
+CFLAGS_UNIX=(-ObjC -arch "$ARCH" -I"$BR" -I"$BR/unix" -I"$V2/airlib" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})
 for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
   clang "${CFLAGS_UNIX[@]}" "${TS[@]}" -c "$src" -o "$OUT/$(basename "$src").tsan.o"
 done
@@ -63,7 +73,7 @@ printf '%s\n' ___wine_unix_call_funcs ___wine_unix_call_wow64_funcs _d9mtair_ver
   > "$OUT/exports.list"
 # AirBuilder/LLVM/dxbc-spirv stay uninstrumented (prebuilt): TSan still sees
 # every lock and shared access in the bridge code that drives them.
-clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
+clang++ -arch "$ARCH" -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
   "$OUT"/winemetal_unix.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT/airlib_unix.tsan.o" \
   "$AIRLIB_OBJ"/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OBJ"/third_party_dxbc-spirv_util_*.o \
   "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" \
