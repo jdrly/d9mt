@@ -9,6 +9,8 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+#include "../mtl/mtl_state_cache.h"
+
 #include "mtl_profiler.h"
 
 namespace dxvk::backend {
@@ -24,12 +26,42 @@ namespace dxvk::backend {
     }
   }
 
-  RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device)
-  : m_compiler(compiler), m_device(device) { }
+  static_assert(sizeof(RenderPsoKey) == RenderPsoKey::StateOffset + statecache::KeyBytes,
+    "the state cache records RenderPsoKey after its two cookies");
+
+  uint64_t RenderPsoKey::signature() {
+    const uint64_t layout[] = {
+      sizeof(RenderPsoKey),
+      offsetof(RenderPsoKey, attrs),       offsetof(RenderPsoKey, layouts),
+      offsetof(RenderPsoKey, attrCount),   offsetof(RenderPsoKey, layoutCount),
+      offsetof(RenderPsoKey, colors),      offsetof(RenderPsoKey, colorCount),
+      offsetof(RenderPsoKey, sampleCount), offsetof(RenderPsoKey, topologyClass),
+      offsetof(RenderPsoKey, alphaToCoverage),
+      offsetof(RenderPsoKey, depthFormat), offsetof(RenderPsoKey, stencilFormat),
+      sizeof(PsoVertexAttr), sizeof(PsoVertexLayout), sizeof(PsoColorAttachment),
+      kPsoKeyMappingVersion,
+    };
+    return statecache::fnv1a(layout, sizeof(layout));
+  }
+
+  Rc<RenderPsoCache::Entry> RenderPsoCache::Registry::adoptOrInsert(
+    const RenderPsoKey& key, const Rc<Entry>& fresh) {
+    std::lock_guard lock(m_mutex);
+    return m_map.emplace(key, fresh).first->second;
+  }
+
+  bool RenderPsoCache::Registry::insertIfAbsent(const Rc<Entry>& e) {
+    std::lock_guard lock(m_mutex);
+    return m_map.emplace(e->m_key, e).second;
+  }
+
+  RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry)
+  : m_compiler(compiler), m_device(device), m_registry(registry) { }
 
   RenderPsoCache::Entry* RenderPsoCache::get(
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
-    const char* vsEntry, const char* fsEntry) {
+    const char* vsEntry, const char* fsEntry,
+    const MtlShaderFunction* vsFn, const MtlShaderFunction* fsFn) {
     static const bool s_noPsoCache = std::getenv("D9MT_NOPSOCACHE") != nullptr;
     if (s_noPsoCache) {
       m_last = nullptr;
@@ -51,8 +83,24 @@ namespace dxvk::backend {
       e->m_vsEntry   = vsEntry;
       e->m_fsEntry   = fsEntry;
 
+      // State cache: a prewarmed entry for this key replaces ours; either
+      // way the miss is recorded (once per key: m_cache keeps it).
+      MtlStateCache* stateCache = s_noPsoCache ? nullptr : m_device->stateCache();
+      MtlPsoUse use = MtlPsoUse::Miss;
+
+      if (unlikely(stateCache != nullptr) && m_registry) {
+        e = m_registry->adoptOrInsert(key, e);
+        if (e->prewarmed())
+          use = e->isDone() ? MtlPsoUse::Hit : MtlPsoUse::Late;
+      }
+
       entry = m_cache.emplace(key, e).first;
-      m_device->submitCompile(e, true);
+
+      if (!e->isDone())
+        m_device->submitCompile(e, true);
+
+      if (unlikely(stateCache != nullptr))
+        stateCache->record(key.stateBytes(), vsFn, fsFn, e.ptr(), use);
     }
 
     m_lastKey = key;
@@ -68,14 +116,32 @@ namespace dxvk::backend {
     return e->handle();
   }
 
+  Rc<RenderPsoCache::Entry> RenderPsoCache::createPrewarmEntry(
+    obj_handle_t compiler, const RenderPsoKey& key,
+    obj_handle_t vsLibrary, obj_handle_t fsLibrary,
+    const char* vsEntry, const char* fsEntry) {
+    Rc<Entry> e = new Entry();
+    e->m_key       = key;
+    e->m_compiler  = compiler;
+    e->m_vsLibrary = vsLibrary;
+    e->m_fsLibrary = fsLibrary;
+    e->m_vsEntry   = vsEntry;
+    e->m_fsEntry   = fsEntry;
+    e->m_prewarmed = true;
+    return e;
+  }
+
   void RenderPsoCache::Entry::run() {
     const uint64_t t0 = compile_stats::nowNs();
     m_pso = WmtRenderPso::adopt(build(m_compiler, m_key,
-      m_vsLibrary, m_fsLibrary, m_vsEntry, m_fsEntry));
+      m_vsLibrary, m_fsLibrary, m_vsEntry, m_fsEntry, m_prewarmed));
+    m_buildNs = compile_stats::nowNs() - t0;
 
-    if (compile_stats::g_enabled) {
+    // Prewarm builds run in the background: counted by the state cache
+    // (STATECACHE lines), not as the render path's PSO builds.
+    if (compile_stats::g_enabled && !m_prewarmed) {
       static std::atomic<uint64_t> s_total = { 0u };
-      const uint64_t dt = compile_stats::nowNs() - t0;
+      const uint64_t dt = m_buildNs;
       const uint64_t n = ++s_total;
       compile_stats::g_psos.add(dt);
       const double ms = double(dt) * 1e-6;
@@ -86,7 +152,7 @@ namespace dxvk::backend {
 
   obj_handle_t RenderPsoCache::build(obj_handle_t compiler,
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
-    const char* vsEntry, const char* fsEntry) {
+    const char* vsEntry, const char* fsEntry, bool quiet) {
 
     WMTMtl4RenderPipelineInfo info = {};
     info.vertex_library            = vsLibrary;
@@ -160,8 +226,15 @@ namespace dxvk::backend {
           NSString_getCString(desc, buf, sizeof(buf) - 1u, WMTUTF8StringEncoding);
           NSObject_release(desc);
         }
-        Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
+        // A recorded pipeline that no longer builds is dropped from the
+        // state cache; not an error of the game's rendering.
+        if (quiet)
+          Logger::debug(str::format("RenderPsoCache: prewarm pipeline build failed: ", buf));
+        else
+          Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
         NSObject_release(err);
+      } else if (quiet) {
+        Logger::debug("RenderPsoCache: prewarm pipeline build failed (no error object)");
       } else {
         Logger::err("RenderPsoCache: pipeline build failed (no error object)");
       }

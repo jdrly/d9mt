@@ -225,7 +225,8 @@ namespace dxvk::backend {
 
     const char* vsEntry = m_vs->entryName ? m_vs->entryName : "main";
     const char* fsEntry = (m_fs != nullptr && m_fs->entryName) ? m_fs->entryName : "main";
-    RenderPsoCache::Entry* pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
+    RenderPsoCache::Entry* pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry,
+      m_vs.ptr(), m_fs.ptr());
 
     m_psoMruKey[m_psoMruCursor] = snap;
     m_psoMruPso[m_psoMruCursor] = pso;

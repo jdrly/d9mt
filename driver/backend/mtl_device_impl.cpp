@@ -208,6 +208,40 @@ namespace dxvk::backend {
     return m_compileWorkers->pending();
   }
 
+  Rc<MtlCompileTask> MtlDeviceImpl::createPrewarmPso(
+    const uint8_t* pState, const MtlShaderFunction* pVs, const MtlShaderFunction* pFs) {
+    // The key resolvePso() builds for these functions: the recorded bytes
+    // plus this session's library handles and entry names.
+    RenderPsoKey key = {};
+    std::memcpy(reinterpret_cast<uint8_t*>(&key) + RenderPsoKey::StateOffset, pState, statecache::KeyBytes);
+    key.vsCookie = uint64_t(pVs->library);
+    key.fsCookie = pFs != nullptr ? uint64_t(pFs->library) : 0u;
+
+    const char* vsEntry = pVs->entryName ? pVs->entryName : "main";
+    const char* fsEntry = (pFs != nullptr && pFs->entryName) ? pFs->entryName : "main";
+
+    Rc<RenderPsoCache::Entry> e = RenderPsoCache::createPrewarmEntry(m_compiler.handle(), key,
+      pVs->library, pFs != nullptr ? obj_handle_t(pFs->library) : 0u, vsEntry, fsEntry);
+
+    if (!m_psoRegistry.insertIfAbsent(e))
+      return nullptr;
+    return e;
+  }
+
+  bool MtlDeviceImpl::psoSucceeded(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() && e->handle();
+  }
+
+  uint64_t MtlDeviceImpl::psoBuildNs(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() ? e->buildNs() : 0u;
+  }
+
+  uint32_t MtlDeviceImpl::urgentCompilesQueued() {
+    return m_compileWorkers->urgentQueued();
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
     m_compileWorkers = nullptr;
 
