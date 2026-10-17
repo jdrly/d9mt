@@ -1,6 +1,7 @@
 # Pipeline state cache (design, issue #10)
 
-Status: design for review; nothing implemented yet.
+Status: implemented on `feat/state-cache` (phase 2). §12 has the
+measurements. The design below is updated to match the code.
 
 The goal: record the render pipelines (PSOs) a game used and rebuild them in the
 background in later sessions, before a draw needs them. That should hold after a
@@ -186,10 +187,10 @@ Header, 64 bytes, little-endian:
   uint64   keySignature    see §2
   uint32   session         incremented by every process that writes the file
   uint32   reserved[5]
-  uint64   headerCheck     first 8 bytes of SHA-1(header bytes 0..55)
+  uint64   headerCheck     64-bit FNV-1a of header bytes 0..55
 
-Entry (fixed size, currently 384 bytes):
-  uint64   check           first 8 bytes of SHA-1(rest of the entry)
+Entry (fixed size, 384 bytes):
+  uint64   check           64-bit FNV-1a of the rest of the entry
   uint8    vsOrigin        0 = none, 1 = D3D9 shader, 2 = fixed function
   uint8    psOrigin        same
   uint8    psLinked        1 = PS linked against the programmable VS
@@ -199,8 +200,8 @@ Entry (fixed size, currently 384 bytes):
   uint32   firstUseMs      earliest first use, ms after device creation
   uint8    vsSha[20]
   uint8    psSha[20]
-  uint8    key[320]        RenderPsoKey, cookies zeroed
-  padding to entrySize
+  uint8    key[304]        RenderPsoKey after its two 8-byte library cookies
+  uint8    reserved[16]
 ```
 
 - **Versioned**:
@@ -215,7 +216,7 @@ Entry (fixed size, currently 384 bytes):
   - An entry with a bad `check`, an origin out of range or counts above 20/4
     is skipped and counted. A corrupt file is never fatal.
 - **Atomic writes**:
-  - The file is written to `<file>.tmp-<pid>`, then `FlushFileBuffers`, then
+  - The file is written to `<file>.tmp-<pid>-<n>`, then `FlushFileBuffers`, then
     `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which
     Wine turns into `rename(2)`.
   - Leftover `.tmp-*` files older than 10 minutes are deleted on load.
@@ -224,12 +225,18 @@ Entry (fixed size, currently 384 bytes):
   therefore don't drop each other's entries; whoever writes last wins only
   the counters.
 - **Bounded size**:
-  - Cap 4096 entries ≈ 1.6 MB; SWTOR uses ~350 per session.
+  - Cap 4096 entries ≈ 1.5 MB; SWTOR uses ~350 per session.
   - Over the cap, entries with the lowest `lastSession` are dropped first,
     then the lowest `sessionsUsed`.
-  - Unlike DXVK, the state cache holds no reference to unmatched shaders. It
-    keeps a program only while some entry still waits for it, and drops it
-    once that entry has been prewarmed.
+  - The cache keeps only a pointer to each announced shader, no reference:
+    `RcObject` has no virtual destructor, so a type-erased `Rc` would be
+    unsafe as the last owner. The D3D9 shader module set keeps every module
+    for the device's lifetime, and the fixed-function adaptors are device
+    members. `shutdown()`, called from the device destructor before either
+    goes away, drops the pointers.
+  - The checks are FNV-1a rather than SHA-1. They detect damage; they are
+    not meant to resist tampering, since nothing in the file is executed or
+    trusted: a forged entry can only cause a wasted background build.
   - Entries whose build failed in the current d9mt are dropped.
 
 ## 4. Location
@@ -245,20 +252,37 @@ the PSO archives it survives macOS updates and GPU changes.
 d3d9.dll is a PE module and cannot call `confstr`, so the path is resolved
 like this:
 
-1. `D9MT_STATE_CACHE=<unix path>`, a directory or a file. This is the test
-   override, and what the launcher should set (one line in `som.sh`:
+1. `D9MT_STATE_CACHE=<unix path>`, a directory or a `.d9mtstate` file. This
+   is the test override, and what the launcher should set (one line in
+   `som.sh`:
    `export D9MT_STATE_CACHE="$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"`).
-2. Otherwise from `TMPDIR`, which Wine passes through to the Windows
-   environment unchanged.
+   A path not starting with `/` is taken as a Windows path. `0` turns the
+   cache off; an empty value counts as unset.
+2. Otherwise from `TMPDIR`, if the Windows environment has it.
    - launchd sets it to `/var/folders/<a>/<b>/T/`, and the user cache dir is
      its sibling `/var/folders/<a>/<b>/C/`.
    - It is used only if it matches that pattern and `…/C/d9mt/` exists (the
      AIR cache creates it).
-3. Otherwise the cache is off, with a `STATECACHE off (no cache dir)` line.
+   - **Measured: CrossOver 26.3's Wine (SWTOR on Mac's engine) does not pass
+     `TMPDIR` to Windows programs.** `TEMP`/`TMP` are Windows paths, and only
+     `WINEHOMEDIR` arrives, from which the per-user `/var/folders/<random>`
+     can't be derived. On that engine this fallback never triggers. It stays
+     in the code because it is harmless and other Wine builds pass `TMPDIR`
+     through.
+3. Otherwise the cache is off, with a
+   `STATECACHE off (no cache dir: …; set D9MT_STATE_CACHE)` line.
 
-The Unix path is opened as `\\?\unix\<path>`, the NT path form Wine itself
-uses for `WINEHOMEDIR`. `kernel32!wine_get_dos_file_name` is the fallback.
-Phase 2 tests both on the shipped engine before relying on either.
+So on SWTOR on Mac the launcher line is required. A possible further
+fallback is `~/Library/Caches/d9mt/state`, which can be derived from
+`WINEHOMEDIR`. It is not implemented: it would put d9mt's files in a second
+place, and that is Jan's call.
+
+The Unix path is converted with `kernel32!wine_get_dos_file_name`, Wine's own
+mapping, which gives a drive path such as `Z:\…`. If that function is missing
+or fails, the path is opened as `\\?\unix\<path>`. On the shipped engine the
+explicit path works: every Wine test in §12 wrote and read its file in
+`/tmp`. The `TMPDIR` fallback was tested with a fake `TMPDIR` under `/tmp`
+and stays off, as described above.
 
 Rejected: reusing the bridge's sqlite `CacheReader`/`CacheWriter` thunks (they
 resolve relative paths under the cache dir). `CacheReader_get` returns a
@@ -267,92 +291,116 @@ would need a winemetal.so change (§8).
 
 ## 5. Flow
 
+All of it lives in `driver/mtl/mtl_state_cache.{h,cpp}` (threads, IO,
+recording) and `driver/mtl/mtl_state_cache_core.{h,cpp}` (format, database,
+index, ring; plain C++, unit-tested natively).
+
 ### Load (device creation)
-- A `d9mt-statecache` thread (lowest priority) reads and validates the file,
-  then builds an index `shader SHA-1 → entries` and a per-entry count of
-  missing shaders.
-- Expected ≈ 2 ms for 1.6 MB. Nothing waits for it.
-- Shaders announced before the index is ready are queued and matched
-  afterwards.
+- `D3D9DeviceEx::InitStateCache` resolves the file (§4), creates the cache
+  and announces the fixed-function shaders.
+- The `d9mt-statecache` thread (lowest priority) reads and validates the
+  file, applies the cap and builds the prewarm index: shader → entries, plus
+  a per-entry count of missing shaders. On the synthetic test this takes
+  2–4 ms. Nothing waits for it.
+- Shaders announced before the index exists are kept and matched once it
+  does.
+- Only entries used within the last 32 sessions are prewarmed. Older ones
+  stay in the file until the cap pushes them out.
 
-### Shader announcement (app thread, `D3D9ShaderModuleSet::GetShaderModule`, new modules only)
-- `onShaderCreated(stage, sha, program)`:
-  - one hash lookup under the state cache's mutex;
-  - if the SHA is referenced, it stores `Rc<D3D9ShaderProgram>` (modules
-    live as long as the device) and decrements each entry's missing count;
-  - an entry at 0 goes into the ready queue.
-- The fixed-function shaders are announced at device init.
-- Cost: 1925 lookups at startup, nothing per frame.
+### Shader announcement (`D3D9ShaderModuleSet::GetShaderModule`, new modules only)
+- `MtlStateCache::announce(stage, id, keepAlive, shader)`: one hash insert
+  and lookup under the cache's mutex. Entries whose missing count reaches 0
+  go into the ready queue.
+- `D3D9ShaderProgram` implements `MtlStateCacheShader`. Its identity
+  (`MtlShaderStateId`: origin, the module key's SHA-1) is stamped on every
+  `MtlShaderFunction` it creates, with `linked` set for functions linked
+  against a VS.
+- The fixed-function module set announces its two ubershader functions.
+- Cost: one lookup per new shader (SWTOR: 1925 at startup), nothing per
+  frame.
 
-### Prewarm (1–2 `d9mt-prewarm` threads, `THREAD_PRIORITY_LOWEST`)
-- Takes ready entries ordered by `firstUseMs`, so character-select PSOs come
-  before the world's; `sessionsUsed` breaks ties.
+### Prewarm (`d9mt-prewarm` threads, `ThreadPriority::Lowest`)
+- Ready entries come out ordered by first use in earlier sessions
+  (`firstUseMs`), then `sessionsUsed`, then `lastSession`. Character-select
+  pipelines therefore come before the world's.
 - Per entry:
   1. **Functions.**
-     - The VS standalone function, and the PS function linked to it, come
-       from `GetFunction(prev, urgent = false)`. The new `urgent` parameter
-       keeps the prewarm from filling the urgent queue.
-     - If the task is still pending, the prewarm thread runs it itself
-       (`tryRun`). If another thread is running it, `waitFor` in 5 ms steps
-       while checking the pause rules.
-  2. **Key.** The recorded bytes plus the live library handles as
-     cookies, and the entry names from the functions.
-  3. **De-dup and publish.**
-     - The key goes into the device's `PsoRegistry`, a mutex-protected map
-       `RenderPsoKey → Rc<RenderPsoCache::Entry>` that both the prewarm and
-       the render thread's miss path use.
-     - If the key is already there, the render thread got there first, and
-       the entry is skipped.
-  4. **Build.** `entry->tryRun()` on the prewarm thread, with the same
-     `RenderPsoCache::build`.
-     - A failure is logged once at debug level, not as the current
-       `Logger::err`, and the entry is dropped from the file.
-- Pause rules, checked before each entry and while waiting:
-  - **Pause** while the compile pool has urgent tasks queued.
-  - **Pause** for 50 ms after any render-thread compile wait
-    (`waitOnRenderThread` and the wait budget store an atomic timestamp when,
-    and only when, they actually wait).
-  - **Never more than one build in flight per prewarm thread.**
-  - Threads: default 2 while the ready queue is longer than 32, otherwise 1.
-    `D9MT_STATE_CACHE_THREADS` overrides it (0–4). Phase 2 measures 1 vs 2.
+     - `prewarmFunction(prev)` returns the same function object a draw
+       would get: `GetFunction`'s slot for that (shader, linked VS) pair.
+       It creates the slot if needed, but never queues it.
+     - If the function's task is still pending, the prewarm thread runs it
+       itself (`tryRun`): Phase A, AIR compile, `newLibrary`.
+     - If a worker or a draw is already running it, the thread waits for it
+       in 5 ms steps (`waitFor`, never inline), checking for shutdown.
+  2. **Key.** `MtlDeviceImpl::createPrewarmPso` puts the recorded 304 bytes
+     after this session's library handles, as `resolvePso` would, and uses
+     the functions' entry names.
+  3. **De-dup.**
+     - The key goes into the device's `RenderPsoCache::Registry` (mutex +
+       map), which the render thread's misses also use while the cache is
+       on.
+     - If the key is already there (a draw got there first), the entry is
+       counted as `dup` and skipped.
+  4. **Build.** `tryRun()` on the prewarm thread, through the same
+     `RenderPsoCache::build` and compiler as a draw.
+     - A pipeline that no longer builds is logged at debug level, not as an
+       error, and dropped from the file.
+     - Prewarm builds are not counted in the render path's
+       `COMPILE psos=` and `PSOBUILD` lines; the `STATECACHE` lines report
+       them.
+- **Yield rules**, checked before the functions and again before the build:
+  - Wait in 2 ms steps while the compile pool has urgent tasks queued
+    (`MtlCompileWorkers::urgentQueued()`, a relaxed atomic).
+  - Wait while the render thread is blocked on a compile
+    (`compile_stats::RenderWaitScope`: two relaxed atomics, only when the
+    render thread actually waits). The design had a 50 ms grace period after
+    each wait. Measured (§12), that starved the prewarm exactly when the
+    draws caught up with it, while on-demand builds got no faster from it,
+    so it was dropped.
+  - At most one build in flight per prewarm thread.
+  - Default 2 threads. The second only takes work while more than 32
+    entries are ready. `D9MT_STATE_CACHE_THREADS` (0–4) overrides the count.
 
 ### Render thread (`RenderPsoCache::get`)
-- Unchanged on every hit path: `m_last`, PSO MRU, `m_cache`.
-- The miss path, about 350 times per session, which already allocates an
+- Unchanged on every hit path (`m_last`, the PSO MRU in `resolvePso`,
+  `m_cache`). With the cache off, the only addition to the miss path is one
+  atomic pointer load.
+- The miss path (SWTOR: ~350 per session), which already allocates an
   `Entry`:
-  1. Lock the registry. If a prewarmed entry exists, adopt it into `m_cache`.
-     - Done: no wait (a **hit**).
-     - Pending: submit it urgent as today.
-     - Running on a prewarm thread: wait for it as today (a **late hit**,
-       still shorter than a fresh build).
-  2. Otherwise create the entry as today and insert it into the registry.
-  3. Record: copy one `StateCacheEntry` (384 B) into a preallocated
-     single-producer ring of 1024 slots.
+  1. `Registry::adoptOrInsert` under its mutex. A prewarmed entry replaces
+     the fresh one.
+     - Done: no wait, a **hit**.
+     - Not done: submitted urgent as today. If a prewarm thread is already
+       building it, the draw waits for that build: a **late** hit.
+  2. `MtlStateCache::record` copies the key bytes and both shader identities
+     into a preallocated single-producer ring of 1024 records.
      - No allocation, no lock, no IO.
-     - If the ring is full the record is dropped and counted. It is
-       recorded again next session.
-- `resolvePso` passes the shader identities, which come from new fields on
-  `MtlShaderFunction` set at creation (origin, SHA-1, linked).
+     - If the ring is full, the record is dropped and counted (`ringDrops`).
+       It is recorded again next session.
+  3. Internal clear/blit pipelines (`getSync`) carry no shader identity and
+     are counted as `unrecorded`.
 
-### Write (state cache thread)
-- Drains the ring.
-- Keeps an entry only once its build has succeeded (`isDone() && handle()`).
-  A failed descriptor is never replayed.
-- Writes the file 20 s after the last new record, and at most every 5 min
-  while new records keep coming.
-- On device destruction it writes the file. The device destructor waits at most 500 ms
-  and never blocks on IO otherwise.
+### Write (`d9mt-statecache` thread)
+- Every 250 ms: drains the ring. A record is kept only once its pipeline
+  has built successfully (`isDone() && handle()`), so a failing descriptor
+  is never replayed. Prewarm failures are removed.
+- Writes the file 20 s after the last change, at most every 5 min while
+  changes keep coming, and once more in `shutdown()`.
+- `D3D9DeviceEx::~D3D9DeviceEx` calls `shutdown()` after the CS thread is
+  synchronized. It joins the prewarm threads (at most one in-flight build
+  each), then the writer (one final write, a few ms), and drops all shader
+  and pipeline references.
 - A killed process loses at most the last 20 s of records.
 
 ### Threading summary
 
 | Thread | Work | Locks |
 |---|---|---|
-| App (D3D9) | `onShaderCreated` hash lookup | state cache mutex, short |
-| CS (render) | miss path: registry lookup/insert + ring push | registry mutex, short, only on a miss |
-| Compile workers | unchanged | |
-| `d9mt-prewarm` × 1–2 | functions + PSO builds, low priority, pausing | registry, state cache mutex |
-| `d9mt-statecache` | load, merge, write, stats | file IO |
+| App (D3D9) | `announce`: hash insert/lookup per new shader | state cache mutex, short |
+| CS (render) | per PSO miss: registry adopt/insert, ring push | registry mutex, only on a miss |
+| Compile workers | unchanged (plus an atomic urgent count) | |
+| `d9mt-prewarm` × 2 | functions + PSO builds, lowest priority, yielding | state cache mutex to pop; registry |
+| `d9mt-statecache` | load, intake, merge, atomic writes, stats | file IO only here |
 
 ## 6. Interaction with the AIR cache and PSO archives
 
@@ -368,9 +416,8 @@ would need a winemetal.so change (§8).
   - Consequence 1: the current session's archive contains every prewarmed
     PSO. Eviction after 8 sessions no longer loses recorded PSOs.
   - Consequence 2: each session's archive gets bigger (all recorded PSOs
-    instead of ~350), and the newest 8 are kept. Phase 2 measures bytes per
-    PSO in an archive. If the total is a concern, the cap on prewarmed
-    entries (default all 4096; `lastSession` within 32 sessions) bounds it.
+    instead of ~350), and the newest 8 are kept. §12 measures the bytes per
+    PSO. The 4096-entry cap and the 32-session prewarm window bound it.
   - Consequence 3: the 256-PSO flush happens during the prewarm at startup.
     That moves the 0.5–0.67 s flush out of the world, but more prewarmed
     PSOs mean more flushes at startup (one per 256). Builds the render thread
@@ -378,31 +425,39 @@ would need a winemetal.so change (§8).
 
 ## 7. Opt-out and logging
 
-- `D9MT_STATE_CACHE=0` (or empty): off. No load, no record, no prewarm, no
-  registry; the miss path is exactly today's.
-- `D9MT_STATE_CACHE=<unix dir|file>`: location override (tests point it at
-  `/tmp`).
-- `D9MT_STATE_CACHE_THREADS=<0..4>`: prewarm threads. 0 records and loads,
-  but never prewarms; this is the A/B switch for measurements.
-- `dxvk.conf`: `d9mt.stateCache = True|False`, same as the env var.
+- `D9MT_STATE_CACHE=0`: off. No load, no record, no prewarm, no registry;
+  the miss path is today's plus one atomic load.
+- `D9MT_STATE_CACHE=<unix dir|file>`: location (the launcher sets it; tests
+  point it at `/tmp`).
+- `D9MT_STATE_CACHE_THREADS=<0..4>`: prewarm threads. `0` loads and records
+  but never prewarms; this is the A/B switch.
+- `dxvk.conf`: `d9mt.stateCache = False` turns it off like the env var.
 
 Log lines (info level, so they show with Debug Logging; a few per session):
 
 ```
-STATECACHE load path=<unix path> entries=812 dropped: corrupt=0 version=0 failed=0 cap=0 ms=2.1
-STATECACHE prewarm t=12.4s ready=790 built=790 hit=0 failed=2 paused=840ms threads=2
-STATECACHE use t=60s hits=301 late=4 misses=38 recorded=38 ringDrops=0 internal=6 hitBuildMs=15230
-STATECACHE write entries=850 bytes=326464 ms=3.0
+STATECACHE load path=<unix path> status=ok entries=400 session=2 prewarmable=400 readyAtLoad=0 corrupt=0 truncated=0 capped=0 threads=2 ms=3.8
+STATECACHE prewarm t=0.83s built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201
+STATECACHE write entries=400 bytes=153664 ms=1.7
+STATECACHE use t=5s hits=399 late=0 misses=1 recorded=0 unrecorded=0 ringDrops=0 hitBuildMs=991 | prewarm built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201 ready=0 | entries=400 (final)
 ```
 
+- `status`: `ok`, `new` (no file), `bad-header`, `older-version`,
+  `newer-version` (left alone, never written), `key-changed` (the
+  `RenderPsoKey` layout or mapping changed; entries dropped).
+- `prewarmable`: entries used within the last 32 sessions.
 - `hits`: a draw needed a PSO that was already prewarmed and done.
 - `late`: prewarmed, but still building when the draw needed it.
 - `misses`: not in the cache.
-- `hitBuildMs`: the sum of the prewarm build times of the hit entries, an
-  upper bound on the render-thread wait avoided.
-- `internal`: clear/blit PSOs built (not recorded).
-- The `use` line is printed every 60 s while something changes, and at the
-  end.
+- `recorded`: new entries this session.
+- `unrecorded`: internal clear/blit pipelines.
+- `hitBuildMs`: the sum of the prewarm build times of the hits, an upper
+  bound on the render-thread wait they saved.
+- `dup`: a draw built it first.
+- `skipped`: its shader didn't compile in this d9mt.
+- `pausedMs`: time spent yielding to the render thread.
+- The `prewarm` line is printed each time the queue drains. The `use` line
+  is printed every 60 s while something changed, and at shutdown.
 
 ## 8. Which files change; winemetal.so stays byte-identical
 
@@ -410,21 +465,31 @@ d3d9.dll only:
 
 | File | Change |
 |---|---|
-| `driver/d3d9/d3d9_state_cache.{h,cpp}` (new) | file format, load/merge/write, index, prewarm threads, stats |
-| `driver/backend/mtl_pso_registry.h` (new) | `PsoRegistry` (mutex + map), owned by `MtlDeviceImpl` |
-| `driver/backend/mtl_pso_cache.{h,cpp}` | miss path: registry adopt/insert + record hook; quiet failure for prewarm builds |
-| `driver/backend/mtl_context_transfer.cpp` | `resolvePso` passes the shader identities |
-| `driver/mtl/mtl_context.h` | `MtlShaderFunction`: origin, SHA-1, linked (set once at creation) |
-| `driver/mtl/mtl_compile.h` | last-render-wait timestamp; urgent-queue size; `waitFor` used by the prewarm |
-| `driver/d3d9/d3d9_shader.{h,cpp}` | program knows its module SHA-1; `GetFunction(prev, urgent)`; `onShaderCreated` hook |
-| `driver/d3d9/d3d9_device.cpp`, `d3d9_fixed_function.cpp` | create/destroy the state cache; announce FF shaders |
-| `test/native/state_cache_test.cpp` (new) | format, corruption, version, cap, merge, concurrency (TSan) |
-| `README.md` | env vars, `STATECACHE` lines |
+| `driver/mtl/mtl_state_cache_core.{h,cpp}` (new) | file format, parse/serialize, database (merge, use, cap), prewarm index, SPSC ring |
+| `driver/mtl/mtl_state_cache.{h,cpp}` (new) | `MtlStateCache`: path resolution, threads, record, prewarm, Win32/POSIX file IO, stats |
+| `driver/mtl/mtl_types.h` | `MtlShaderStateId` |
+| `driver/mtl/mtl_context.h` | `MtlShaderFunction::stateId` (set once at creation, not copied when functions share a library) |
+| `driver/mtl/mtl_compile.h` | `urgentQueued()`; `RenderWaitScope` / `renderWaitedWithin()` |
+| `driver/mtl/mtl_device.h`, `mtl_device_stub.cpp` | `stateCacheBackend()`, `psoKeySignature()`, `stateCache()` / `setStateCache()` |
+| `driver/backend/mtl_pso_cache.{h,cpp}` | `RenderPsoKey::signature()`, `kPsoKeyMappingVersion`, `Registry`, record hook in the miss path, prewarm entries (quiet failures, not counted as render-path builds) |
+| `driver/backend/mtl_device_impl.{h,cpp}` | implements `MtlStateCacheBackend`; owns the registry |
+| `driver/backend/mtl_context_record.cpp`, `mtl_context_transfer.cpp` | pass the registry, and the bound functions to `get()` |
+| `driver/d3d9/d3d9_shader.{h,cpp}` | program identity, `prewarmFunction()`, announce new modules |
+| `driver/d3d9/d3d9_fixed_function.{h,cpp}` | FF identity and announcement |
+| `driver/d3d9/d3d9_device.{h,cpp}`, `d3d9_options.{h,cpp}` | create/shut down the cache; `d9mt.stateCache` |
+| `scripts/build-driver.sh` | the two new sources |
+| `test/native/state_cache_test.cpp`, `scripts/test-state-cache.sh` (new) | unit tests, TSan, record micro-benchmark |
+| `test/code_statecache.c`, `scripts/run-statecache-bench.sh` (new) | synthetic many-pipeline workload under Wine |
 
-**winemetal.so is not changed.** Its `LC_UUID` stays
-2BBB585C-5076-3157-9A6A-BAE494B00ACC, so users' AIR caches stay valid.
-winemetal.dll doesn't change either: only existing thunks are used, and the
-file IO is plain Win32 in d3d9.dll.
+For #8's later rebase: the only shader-path files touched are
+`d3d9_shader.{h,cpp}`, and only in `D3D9ShaderProgram` (constructor, identity,
+`prewarmFunction`, `CreateFunction`) and `GetShaderModule`. The SM3
+converter (`d3d9_shader_compiler.cpp`) is untouched.
+
+**winemetal.so is not changed.** Nothing under `bridge/` or `airlib/` was
+touched, so its `LC_UUID` stays 2BBB585C-5076-3157-9A6A-BAE494B00ACC and
+users' AIR caches stay valid. winemetal.dll doesn't change either: only
+existing thunks are used, and the file IO is plain Win32 in d3d9.dll.
 
 ## 9. Bridge follow-ups worth bundling into the next winemetal.so change
 
@@ -437,11 +502,13 @@ These are not part of this work; each one changes `LC_UUID`.
      to the new one, without holding builds exclusively for the whole
      write.
 2. A QoS thunk (`pthread_set_qos_class_self_np(QOS_CLASS_UTILITY)`) for the
-   prewarm threads. Until then, `THREAD_PRIORITY_LOWEST` is all there is.
-   - How Wine maps it on macOS, and whether it reaches `MTLCompilerService`
-     (XPC carries QoS, not Mach precedence), is measured in phase 2.
+   prewarm threads. Until then, `THREAD_PRIORITY_LOWEST` is all there is
+   (§12 measures what it does).
 3. A thunk returning the user cache dir, which would replace the `TMPDIR`
-   derivation.
+   derivation (which CrossOver's Wine doesn't support anyway, §4).
+4. Fewer PSO archive sessions while the state cache is on: 2–3 instead of 8.
+   Every session's archive then holds all recorded pipelines (§12, archive
+   growth).
 
 ## 10. DXVK's state cache, and why DXVK's reason for dropping it doesn't apply
 
@@ -511,30 +578,192 @@ Other Metal layers:
 - D3DMetal's `d3dm/<game>/shaders.cache` is closed source, and its content
   is unknown.
 
-## 11. Phase 2 plan
+## 11. Tests
 
-- **Unit tests** (`test/native/state_cache_test.cpp`, no Wine or GPU):
-  - record → write → load → index → ready queue on shader announcement;
-  - a corrupt header, entry and truncation;
-  - an older/newer `formatVersion` and a changed `keySignature`;
-  - the cap eviction order;
-  - merge with a concurrently written file;
-  - ring producer/consumer and registry adopt/insert races under TSan.
-- **Overhead on the render thread**:
-  - a micro-benchmark of the miss path with and without recording (ring
-    push), and of the hit paths (they must be identical code);
-  - a hit-path A/B with `D9MT_STATE_CACHE=0` on a test program.
-- **Wine runs**:
-  - a synthetic many-pipeline test, N VS×PS×blend×format combinations
-    created up front and drawn later;
-  - run 1 records; run 2 with the state cache vs `D9MT_STATE_CACHE_THREADS=0`;
-  - cold simulation: `D9MT_AIR_CACHE` and `D9MT_PSO_ARCHIVE_DIR` pointed at
-    empty `/tmp` dirs, state cache from run 1;
-  - measured: `renderWait`, `STATECACHE` hits/late, the latency of urgent
-    builds while the prewarm runs, the flush timing and archive bytes per PSO;
-  - also checks `\\?\unix\` and `TMPDIR` on the shipped engine.
-- **Game route (Jan)**: exact steps delivered with the implementation, for
-  three cases:
-  - fresh `/tmp` AIR+PSO dirs with a state cache from a previous session;
-  - the same with `D9MT_STATE_CACHE_THREADS=0`;
-  - a warm A/B on the standard route with `session-report.sh --compare`.
+- `scripts/test-state-cache.sh` (`test/native/state_cache_test.cpp`, no Wine
+  or GPU), plain `-O2` and under ThreadSanitizer, both passing:
+  - file format round trip;
+  - single-byte damage anywhere (2000 random cases: never a damaged entry
+    out), truncation mid-entry and at a boundary, a damaged header, random
+    garbage;
+  - older/newer format versions, a key signature change;
+  - the cap on the database and on a 4396-entry file (loaded capped,
+    rewritten capped);
+  - `use()`/`merge()` counters; the prewarm index (readiness, order, stale
+    entries, FF and linked identities);
+  - the SPSC ring (200 000 items, in order, references released);
+  - the whole cache with a fake backend:
+    - record → write → load → announce → prewarm → all 300 draws hit;
+    - prewarm off;
+    - partial shader sets;
+    - failing pipelines dropped from the file;
+    - a corrupt, garbage, newer or key-changed file;
+    - two processes on one file;
+    - announce/record/prewarm on separate threads with the urgent-queue
+      pause toggling, including shutdown during the prewarm.
+- The existing native tests (`buffer_tracking`, `fenced_pool`, `hitch`,
+  `memory_profile`, `upload_ring`, `attachment_opt`, `stats`, `pace`) and
+  the compile-pool TSan test (`mtl_compile_test`) still pass.
+- `scripts/run-hang-test.sh --runs 3`: PASS with the new `d3d9.dll`. The
+  script now also keeps the state cache in its scratch dir.
+
+## 12. Measurements (phase 2)
+
+### Setup
+- Wine: a copy of SWTOR on Mac's engine (CrossOver 26.3, `winemetal.so`
+  2BBB585C-…, unchanged) in `/tmp`, with a throwaway prefix.
+- Driver: `d3d9.dll` from this branch (x64, clean build), against `main`'s
+  (4b7ab26).
+- Workload: `test/code_statecache.c`, SWTOR-shaped:
+  - 16 VS and 200 PS created up front (generated SM3, 40–120 ALU rounds);
+  - 3 s of "loading" with one pipeline;
+  - then a "world" bringing in 4 new pipelines per frame (400 in total:
+    VS/PS pairs × 3 blend modes × 3 render target formats), 160 world frames
+    at vsync.
+- Every AIR cache, PSO archive and state cache is in `/tmp`
+  (`scripts/run-statecache-bench.sh`); 3–4 runs per arm.
+- "Fastmath" runs use `D9MT_AIR_FASTMATH=1`: the AIR bytes differ from the
+  recording run, so Metal gets nothing for free. That is exactly a bridge
+  update that changes the AIR. A rerun with the same AIR flags and fresh
+  d9mt caches cost as much as the first run (8.0–8.4 s vs 8.0–8.8 s), so
+  Metal's own shader cache doesn't help MTL4 pipeline builds either.
+
+### Results
+
+| Scenario | Arm | World max frame | World frames > 50 ms (of 160) | Render-thread compile wait | Prewarm hits / late / misses |
+|---|---|---|---|---|---|
+| (a) warm | `main` | 436–475 ms | 1 (the archive flush) | 622–1004 ms | – |
+| (a) warm | branch, state cache off | 451–479 ms | 1 | 748–1010 ms | – |
+| (a) warm | branch, state cache on | **18.3–18.6 ms** | **0** | 193–388 ms, 3 waits, all during loading | 399 / 0 / 1 |
+| (b') AIR-changing update | off | 331–351 ms | 99 | 6.8–6.9 s | – |
+| (b') AIR-changing update | on, 2 threads | 58–68 ms | **4.7** | **0.29–0.55 s** | 378 / 2 / 20 |
+| (b') AIR-changing update | on, 1 thread | 329–344 ms | 55 | 3.9–4.1 s | 171 / 4 / 225 |
+| (b) fresh AIR + PSO dirs, same AIR | off | 331–369 ms | 100 | 8.0–8.1 s | – |
+| (b) fresh AIR + PSO dirs, same AIR | on | 34–108 ms | 19 | 0.1–2.7 s | 324 / 3 / 73 |
+| (c) eviction (warm AIR, no archives) | off | 352–363 ms | 100 | 8.1–8.4 s | – |
+| (c) eviction (warm AIR, no archives) | on | 90–101 ms | 27 | 1.9–2.4 s | 292 / 5 / 103 |
+
+- **(a) warm, no regression:**
+  - `main` vs this branch with the cache off, paired runs 2–4: render
+    waits differ by +3, +6 and +10 ms on 830–1010 ms; per-PSO build
+    2.2 vs 2.3 ms. That is noise; the code difference is one atomic load per
+    PSO miss.
+  - With the cache on, the world is flat (16.7 ms frames, max 18.6 ms). The
+    0.44 s archive flush moves into the loading phase, where the prewarm's
+    256th build triggers it.
+  - The 399-pipeline prewarm (archive hits) finishes 0.8 s after startup
+    and is paused 0.2–0.7 s of that.
+- **Render-thread cost of recording:** 47–62 ns per PSO miss (native arm64
+  micro-benchmark, `state_cache_test bench`). That is ≈ 20 µs per SWTOR
+  session (350 misses), against ≥ 0.45 ms that each miss already costs.
+  The hit paths are unchanged code.
+- **Cold:**
+  - The remaining misses are the pipelines the draws reached before the
+    prewarm did. Here the lead is 3 s for 400 builds at ≈ 21–26 ms each
+    (5.3 s of work on 2 threads), and in (b)/(c) the AIR compiles of the
+    fresh shaders take part of those 3 s too.
+  - SWTOR's lead is ≈ 20 s to the world (§1.2) for ≈ 350 pipelines, so the
+    world set should be ready well before it is needed.
+  - One thread is too slow for the cold case; 2 is the default.
+- **Prewarm vs the game's own compiles and frames ("overlap": the world
+  starts at frame 0 while the prewarm has 400 cold builds queued):**
+  - The prewarm yields almost completely: paused 13.7 s, 7–13 builds.
+  - On-demand builds are not slower: 23.0 vs 22.6 ms per PSO with no
+    prewarm. World frames: 50.9 vs 50.3 ms average.
+  - In (b') the misses built on demand while the prewarm ran took
+    20.5 ms vs 21.8 ms without a prewarm.
+  - So with the yield rule the prewarm costs the game nothing measurable.
+    The measured case where it can't help is a game that needs everything
+    at once.
+- **The grace period that was dropped.** The design paused the prewarm for
+  50 ms after every render-thread wait. With it, (b) and (c) paused
+  4.3–4.7 s and missed 104–114 of 400 pipelines (first measurement batch):
+  once the draws catch up, each miss is a wait, and each wait stopped the
+  prewarm. Without it: 73–103 misses, (b') 20 instead of 21. The pause now
+  lasts only while an on-demand compile is pending.
+- **`THREAD_PRIORITY_LOWEST` under Wine.**
+  - `ps -M` during a run shows it maps to a lower Mach priority: 17 instead
+    of the default 31, for the prewarm and writer threads and for compile
+    workers doing prefetch.
+  - That is scheduling precedence, not a QoS class. It does not move the
+    threads to E-cores, nor the XPC requests to `MTLCompilerService`, which
+    carry the caller's QoS.
+  - The yield rule, not the priority, is what keeps the prewarm out of the
+    game's way (above). A real QoS class is the bridge follow-up (§9).
+
+### PSO archive growth
+- The synthetic pipelines take ≈ 51 KB each in an archive (400 PSOs = 12.6 +
+  8.0 MB per session). SWTOR's real archives are 9–18 MB per session for
+  340–370 PSOs, ≈ 30–50 KB each (file sizes only).
+- Every session's archive captures every pipeline the compiler builds, so
+  with the state cache it holds every prewarmed pipeline, not just the
+  ~350 used.
+- With N recorded pipelines, a session archive is ≈ N × 45 KB, and 8 are
+  kept:
+
+  | N | Per session | 8 sessions |
+  |---|---|---|
+  | today's ~350 | ≈ 16 MB | ≈ 130 MB |
+  | 1000 | ≈ 45 MB | ≈ 360 MB |
+  | the cap, 4096 | ≈ 185 MB | ≈ 1.5 GB |
+
+- Proposed bridge follow-up, with #11 and the QoS thunk: with a state
+  cache, the newest one or two sessions already hold everything recorded,
+  so the bridge could keep 2–3 sessions instead of 8. That bounds the total
+  near 2–3 × N × 45 KB.
+
+## 13. In-game A/B (Jan)
+
+The `som.sh` line for shipping:
+
+```sh
+export D9MT_STATE_CACHE="$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"
+```
+
+`getconf` prints the directory with a trailing `/`, hence no slash before
+`d9mt`. This is required on SWTOR on Mac's engine; see §4.
+
+For the A/B, quit SWTOR, then:
+
+1. **Install.** Put this branch's `build/driver-x64/d3d9.dll` into the
+   prefix's `system32` the way you install dev builds, and keep the
+   original. `winemetal` stays as it is: the engine's bridge is
+   byte-identical.
+2. **Env.** Add these lines to `~/Library/Application Support/SWTOR on
+   Mac/env`, below the d9mt block. The Settings window rewrites that file,
+   so add them again after changing settings.
+
+   ```sh
+   D9MT_STATE_CACHE=/tmp/swtor-sc/state
+   D9MT_AIR_CACHE=/tmp/swtor-sc/<run>/air-cache.sqlite3
+   D9MT_PSO_ARCHIVE_DIR=/tmp/swtor-sc/<run>/pso
+   ```
+
+   Use a new `<run>` name for each cold session. Debug Logging stays on, for
+   `STATECACHE`, `COMPILE`, `PSOBUILD` and `HITCH`.
+3. **Session R (record).** `<run>=R`, the standard route. This is also a
+   fully cold session without a state cache.
+   - At the end, `wine.log` has `STATECACHE write entries=…`.
+   - `/tmp/swtor-sc/state/swtor.exe.d9mtstate` exists, ≈ 384 bytes per
+     pipeline.
+4. **Session C1 (cold, no state cache).** `<run>=C1` plus
+   `D9MT_STATE_CACHE=0`, the same route.
+5. **Session S1 (cold, with the state cache).** `<run>=S1`, with
+   `D9MT_STATE_CACHE=/tmp/swtor-sc/state` as in step 2, the same route.
+   - `STATECACHE prewarm t=…` should show the prewarm finishing during
+     login/character select.
+   - The `use` lines show hits/late/misses.
+6. **Compare.** `session-report.sh --compare <C1 wine.log> <S1 wine.log>`.
+   Expect most of C1's in-world `renderWait(compiles)` to disappear in S1.
+7. **Warm A/B.** Remove the `D9MT_AIR_CACHE` / `D9MT_PSO_ARCHIVE_DIR` lines
+   to use your real caches, and run the route:
+   - once with `D9MT_STATE_CACHE=0`;
+   - once with `D9MT_STATE_CACHE=/tmp/swtor-sc/state`.
+
+   Compare with `--compare`. Expected: no regression. In-world PSO waits
+   drop to ≈ 0, and the 0.5 s flush moves to login.
+8. **Optional.** Repeat 4–5 once more with fresh `<run>` names (C2, S2) for
+   a second pair.
+
+Afterwards, delete `/tmp/swtor-sc` and the env lines, and restore the
+original `d3d9.dll`.
