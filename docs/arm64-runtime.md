@@ -14,7 +14,7 @@ d9mt itself needs goes here.
 
 | Problem | Why | Ways around it |
 |---|---|---|
-| **x18** | Windows ARM64 (and ARM64EC) keeps the TEB in x18; macOS clears x18 on every return to user space for current binaries | (a) the restricted `cross-architecture-support` entitlement plus the self-granted `custom-x18-abi-toggle`; (b) link the Wine loader for an old macOS: **checked here, macOS 27.0.1 keeps x18 for a binary with `LC_BUILD_VERSION` minos 11.0 or 12.0** (0 of 20000 checks lost, with syscalls, `sched_yield`, `usleep` and 16 spinning threads forcing preemption) and clears it for 26.0 (13333 of 20000 lost); (c) change the ABI: keep the TEB in a TSD slot read through `TPIDRRO_EL0`, rebuild the CRT startup code, and repair the remaining x18 accesses in a SIGSEGV handler (neutron) |
+| **x18** | Windows ARM64 (and ARM64EC) keeps the TEB in x18; macOS clears x18 on every return to user space for current binaries | (a) the restricted `cross-architecture-support` entitlement plus the self-granted `custom-x18-abi-toggle`; (b) mark the Wine loader as built with an old SDK: **checked here, macOS 27.0.1 keeps x18 when the main executable's `LC_BUILD_VERSION` records SDK 12.0 or lower, whatever its minimum OS** (0 of 20000 checks lost, with syscalls, `sched_yield`, `usleep` and 16 spinning threads forcing preemption; SDK 13.0, 14.0, 15.0, 26.0 or 27.0: x18 lost on every syscall, 13333 of 20000; minos 26.0 with SDK 12.0 keeps it; also after the fact with `vtool -set-build-version` and an ad-hoc re-sign). The catch: Apple's frameworks then treat the process as linked against the macOS 12 SDK, and some of their behaviour switches on that; (c) change the ABI: keep the TEB in a TSD slot read through `TPIDRRO_EL0`, rebuild the CRT startup code, and repair the remaining x18 accesses in a SIGSEGV handler (neutron) |
 | **`__PAGEZERO`** | arm64 macOS rejects executables whose page zero ends below 4 GB, so nothing maps there: no `KUSER_SHARED_DATA` at 0x7ffe0000, no i386 address space | move `KUSER_SHARED_DATA` above 4 GB (all routes); for i386: the entitlement (the kernel leaves page zero replaceable) or a translated guest window (FEX-darwin) |
 | **16K pages** | Windows code assumes 4K pages (protections, guard pages, self-modifying code tracking) | the entitlement (4K-page processes), or emulate 4K on 16K (Wine 11, with 16K guard pages in FEX) |
 | **W^X JIT** | FEX generates code at run time | `MAP_JIT` + per-thread `pthread_jit_write_protect_np` (not restricted; hardened runtime needs `com.apple.security.cs.allow-jit`) |
@@ -72,10 +72,11 @@ source and tested with real games on this Mac model and OS, and SWTOR is
 
 Then, as a second variant from the same sources: **the loader linked for
 macOS 12 and the standard x18 ABI** (neutron's `WINE_TEB_IN_TSD` off), which
-the x18 test above makes possible without an entitlement. It would run stock
-ARM64EC binaries (ours, and later anyone's) without signal repairs and keep
-the ABI CrossOver and upstream use. Risk: macOS compatibility behaviours keyed
-to an old linked SDK (AppKit, Metal) in the Wine processes.
+the x18 test above makes possible without an entitlement (the loader's
+`LC_BUILD_VERSION` SDK set to 12.0). It would run stock ARM64EC binaries
+(ours, and later anyone's) without signal repairs and keep the ABI CrossOver
+and upstream use. Risk: macOS behaviour keyed to the linked SDK (AppKit,
+Metal) in the Wine processes, which then look like macOS 12 SDK apps.
 
 The entitled route (athei, CrossOver) stays the long-term best case
 (hardware TSO, 4K pages, i386) for whoever has a paid developer account.
