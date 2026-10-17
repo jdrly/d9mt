@@ -133,12 +133,12 @@ public:
 
     return bit::tzcnt(bits0 | (bits1 << 16u));
     #else
-    for (uint32_t i = 0u; i < SizeIndex; i++) {
-      if (m_entries[i] == packed)
-        return i;
-    }
+    // Non-x86 (arm64, ARM64EC): NEON (util_bit.h) with the SSE path's result,
+    // which also compares the count byte; callers only use indices below
+    // size(), where the two agree with the old loop anyway.
+    static_assert(SizeIndex + 1u == 32u);
+    return bit::findByte32(m_entries.data(), packed);
 
-    return m_entries.size();
     #endif
   }
 

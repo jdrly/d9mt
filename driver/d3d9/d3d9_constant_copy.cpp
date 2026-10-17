@@ -309,16 +309,16 @@ namespace dxvk {
       _mm_stream_ps(dstPtr[index].data, src0);
     }
     #else
-    for (uint32_t i = 0u; i < dstCount; i++) {
-      for (uint32_t j = 0u; j < 4u; j++) {
-        float f = srcPtr[i][j];
+    // Non-x86 (arm64, ARM64EC): NEON, with the SSE path's results: NaN lanes
+    // become +0 when flushing, all other lanes keep their bits. The helper
+    // makes no CRT call; under arm64 Wine those are generic C.
+    // Results: test/native/arm64_xarch_test.cpp; speed: arm64_port_bench.cpp.
+    // This branch keeps the line count of the loop it replaced, so the lines
+    // after it (and with them the x86 builds' debug info) don't move.
+    bit::copyVec4<FlushNan>(dstPtr, srcPtr, dstCount);
 
-        if (FlushNan)
-          f = std::isnan(f) ? 0.0f : f;
 
-        dstPtr[i][j] = f;
-      }
-    }
+
     #endif
   }
 
@@ -340,8 +340,8 @@ namespace dxvk {
 
     for (uint32_t i = 0u; i < range.count; i++)
       _mm_stream_si128(dstPtr + i, _mm_loadu_si128(srcPtr + i));
-    #else
-    std::memcpy(reinterpret_cast<Vector4i*>(args.intBuffer) + range.dstIndex,
+    #else // non-x86: NEON (util_bit.h), no CRT call
+    bit::copyDwords(reinterpret_cast<Vector4i*>(args.intBuffer) + range.dstIndex,
       args.constIntApi + range.srcIndex, range.count * sizeof(Vector4i));
     #endif
   }
@@ -366,8 +366,8 @@ namespace dxvk {
       auto data = _mm_loadu_si128(reinterpret_cast<const __m128i*>(srcPtr + i));
       _mm_stream_si128(reinterpret_cast<__m128i*>(dstPtr + i), data);
     }
-    #else
-    std::memcpy(reinterpret_cast<uint32_t*>(args.boolBuffer) + range.dstIndex,
+    #else // non-x86: NEON (util_bit.h); copies exactly count, SSE whole groups of 4
+    bit::copyDwords(reinterpret_cast<uint32_t*>(args.boolBuffer) + range.dstIndex,
       args.constBoolApi + range.srcIndex, range.count * sizeof(uint32_t));
     #endif
   }
@@ -383,8 +383,8 @@ namespace dxvk {
 
       for (uint32_t i = 0u; i < dstCount; i++)
         _mm_stream_si128(dstPtr + i, zero);
-      #else
-      std::memset(reinterpret_cast<char*>(dst) + start, 0, end - start);
+      #else // non-x86: NEON (util_bit.h), to the end (SSE: whole 16-byte blocks)
+      bit::zeroDwords(reinterpret_cast<char*>(dst) + start, end - start);
       #endif
     }
   }

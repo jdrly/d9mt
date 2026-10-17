@@ -757,3 +757,117 @@ namespace dxvk::bit {
 #define D9MT_U32(f) uint32_t(f)
 #endif
 
+// Non-x86 builds (arm64, ARM64EC): the copies and compares that x86 does with
+// SSE in d3d9_constant_copy.cpp, d3d9_state.h and d3d9_shader_analysis.h.
+// NEON on ARM, so these hot paths make no CRT calls (Wine's ARM64EC memcpy,
+// memcmp and memset are generic C); results are those of the SSE paths
+// (test/native/arm64_xarch_test.cpp, docs/arm64ec-port.md). Kept out of x86
+// builds entirely, and down here so no line above moves (x86 debug info).
+#if !defined(DXVK_ARCH_X86)
+#if defined(DXVK_ARCH_ARM64)
+#include <arm_neon.h>
+#endif
+namespace dxvk::bit {
+
+  // count 16-byte vectors of 4 floats; FlushNan: NaN lanes become +0, every
+  // other lane keeps its bits (SSE: and(v, cmpeq(v, v)))
+  template<bool FlushNan>
+  inline void copyVec4(void* dst, const void* src, size_t count) {
+    auto d = reinterpret_cast<      uint32_t*>(dst);
+    auto s = reinterpret_cast<const uint32_t*>(src);
+    #if defined(DXVK_ARCH_ARM64)
+    for (size_t i = 0u; i < count; i++) {
+      uint32x4_t v = vld1q_u32(s + 4u * i);
+      if (FlushNan) {
+        float32x4_t f = vreinterpretq_f32_u32(v);
+        v = vandq_u32(v, vceqq_f32(f, f));
+      }
+      vst1q_u32(d + 4u * i, v);
+    }
+    #else
+    for (size_t i = 0u; i < 4u * count; i++) {
+      float f;
+      std::memcpy(&f, &s[i], sizeof(f));
+      d[i] = FlushNan && f != f ? 0u : s[i];
+    }
+    #endif
+  }
+
+  // size bytes, a multiple of 4
+  inline void copyDwords(void* dst, const void* src, size_t size) {
+    #if defined(DXVK_ARCH_ARM64)
+    auto d = reinterpret_cast<      uint8_t*>(dst);
+    auto s = reinterpret_cast<const uint8_t*>(src);
+    size_t i = 0u;
+    for ( ; i + 16u <= size; i += 16u)
+      vst1q_u8(d + i, vld1q_u8(s + i));
+    for ( ; i < size; i += 4u)
+      vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vld1q_dup_u32(reinterpret_cast<const uint32_t*>(s + i)), 0);
+    #else
+    std::memcpy(dst, src, size);
+    #endif
+  }
+
+  // size bytes, a multiple of 4
+  inline void zeroDwords(void* dst, size_t size) {
+    #if defined(DXVK_ARCH_ARM64)
+    auto d = reinterpret_cast<uint8_t*>(dst);
+    size_t i = 0u;
+    for ( ; i + 16u <= size; i += 16u)
+      vst1q_u8(d + i, vdupq_n_u8(0u));
+    for ( ; i < size; i += 4u)
+      vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vdupq_n_u32(0u), 0);
+    #else
+    std::memset(dst, 0, size);
+    #endif
+  }
+
+  // Copies count 16-byte vectors if any differs; returns whether one did
+  // (d3d9_state.h UpdateStateConstants)
+  inline bool cndcpyVec4(void* dst, const void* src, size_t count) {
+    #if defined(DXVK_ARCH_ARM64)
+    auto d = reinterpret_cast<      uint32_t*>(dst);
+    auto s = reinterpret_cast<const uint32_t*>(src);
+    size_t i = 0u;
+    for ( ; i < count; i++) {
+      uint32x4_t v = vld1q_u32(s + 4u * i);
+      if (vminvq_u32(vceqq_u32(v, vld1q_u32(d + 4u * i))) != ~0u)
+        break;
+    }
+    if (i == count)
+      return false;
+    for ( ; i < count; i++)
+      vst1q_u32(d + 4u * i, vld1q_u32(s + 4u * i));
+    return true;
+    #else
+    if (!std::memcmp(dst, src, 16u * count))
+      return false;
+    std::memcpy(dst, src, 16u * count);
+    return true;
+    #endif
+  }
+
+  // Index of the first of 32 bytes equal to value, 32 if none: the SSE
+  // D3D9InputSignature::find, which also compares its count byte (31)
+  inline uint32_t findByte32(const uint8_t* data, uint8_t value) {
+    #if defined(DXVK_ARCH_ARM64)
+    uint8x16_t v = vdupq_n_u8(value);
+    // 4 mask bits per byte (shift-right-narrow), as SSE's movemask gives 1
+    uint64_t m0 = vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(
+      vreinterpretq_u16_u8(vceqq_u8(vld1q_u8(data), v)), 4)), 0);
+    if (m0)
+      return tzcnt(m0) / 4u;
+    uint64_t m1 = vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(
+      vreinterpretq_u16_u8(vceqq_u8(vld1q_u8(data + 16u), v)), 4)), 0);
+    return m1 ? 16u + tzcnt(m1) / 4u : 32u;
+    #else
+    for (uint32_t i = 0u; i < 32u; i++) {
+      if (data[i] == value)
+        return i;
+    }
+    return 32u;
+    #endif
+  }
+
+}
+#endif
