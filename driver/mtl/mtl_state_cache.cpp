@@ -133,6 +133,38 @@ namespace dxvk {
       return s;
     }
 
+    /// The Unix home directory: Wine sets WINEHOMEDIR to its NT path,
+    /// "\??\Z:\Users\<name>" (a drive) or "\??\unix\Users\<name>".
+    std::string unixHome() {
+      std::string h = getEnv("WINEHOMEDIR");
+
+      if (!h.compare(0u, 4u, "\\??\\"))
+        h = h.substr(4u);
+
+      if (h.empty())
+        return std::string();
+
+      if (!h.compare(0u, 5u, "unix\\")) {
+        std::string u = h.substr(4u);
+        std::replace(u.begin(), u.end(), '\\', '/');
+        return u;
+      }
+
+      using PFN = char* (CDECL*)(LPCWSTR);
+      static PFN s_toUnix = reinterpret_cast<PFN>(reinterpret_cast<void*>(
+        ::GetProcAddress(::GetModuleHandleA("kernel32.dll"), "wine_get_unix_file_name")));
+
+      if (!s_toUnix)
+        return std::string();
+
+      std::string u;
+      if (char* p = s_toUnix(widen(h).c_str())) {
+        u = p;
+        ::HeapFree(::GetProcessHeap(), 0, p);
+      }
+      return u;
+    }
+
     bool dirExists(const std::string& path) {
       const DWORD a = ::GetFileAttributesW(widen(path).c_str());
       return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
@@ -250,6 +282,10 @@ namespace dxvk {
       return unixPath;
     }
 
+    std::string unixHome() {
+      return getEnv("HOME");
+    }
+
     bool dirExists(const std::string& path) {
       struct stat st;
       return !::stat(path.c_str(), &st) && S_ISDIR(st.st_mode);
@@ -363,6 +399,13 @@ namespace dxvk {
     if (!threads.empty())
       config.threads = std::min<uint32_t>(uint32_t(std::strtoul(threads.c_str(), nullptr, 10)), 4u);
 
+    const std::string maxEntries = getEnv("D9MT_STATE_CACHE_MAX");
+    if (!maxEntries.empty()) {
+      const unsigned long n = std::strtoul(maxEntries.c_str(), nullptr, 10);
+      if (n)
+        config.maxEntries = uint32_t(std::clamp<unsigned long>(n, MinMaxEntries, MaxMaxEntries));
+    }
+
     const std::string fileName = sanitizeName(exeName()) + ".d9mtstate";
     std::string unixPath;
 
@@ -377,24 +420,29 @@ namespace dxvk {
 
       unixPath = normalizeUnixPath(override);
     } else {
-      // launchd's TMPDIR is /var/folders/<a>/<b>/T/; the user cache dir
-      // (confstr _CS_DARWIN_USER_CACHE_DIR, where the AIR cache and PSO
-      // archives live) is its sibling C/.
-      std::string tmp = normalizeUnixPath(getEnv("TMPDIR"));
+      // 1. Next to the AIR cache and PSO archives, the macOS user cache dir
+      //    (confstr _CS_DARWIN_USER_CACHE_DIR): launchd's TMPDIR is
+      //    /var/folders/<a>/<b>/T/ and that dir is its sibling C/. Only if
+      //    the Windows side sees TMPDIR (CrossOver's Wine doesn't pass it).
+      // 2. ~/Library/Caches/d9mt/state, from Wine's WINEHOMEDIR.
+      const std::string tmp = normalizeUnixPath(getEnv("TMPDIR"));
 
-      if (tmp.find("/var/folders/") == std::string::npos || !endsWith(tmp, "/T")) {
-        reason = "off (no cache dir: TMPDIR is not /var/folders/.../T; set D9MT_STATE_CACHE)";
-        return false;
+      if (tmp.find("/var/folders/") != std::string::npos && endsWith(tmp, "/T")) {
+        const std::string cacheDir = tmp.substr(0u, tmp.size() - 1u) + "C";
+        if (dirExists(unixToPlatform(cacheDir + "/d9mt")))
+          unixPath = cacheDir + "/d9mt/state";
       }
 
-      const std::string cacheDir = tmp.substr(0u, tmp.size() - 1u) + "C";
-
-      if (!dirExists(unixToPlatform(cacheDir + "/d9mt"))) {
-        reason = "off (no " + cacheDir + "/d9mt; set D9MT_STATE_CACHE)";
-        return false;
+      if (unixPath.empty()) {
+        const std::string home = normalizeUnixPath(unixHome());
+        if (home.size() > 1u && home[0] == '/' && dirExists(unixToPlatform(home + "/Library/Caches")))
+          unixPath = home + "/Library/Caches/d9mt/state";
       }
 
-      unixPath = cacheDir + "/d9mt/state";
+      if (unixPath.empty()) {
+        reason = "off (no cache dir: no usable TMPDIR or ~/Library/Caches; set D9MT_STATE_CACHE)";
+        return false;
+      }
     }
 
     if (!endsWith(unixPath, ".d9mtstate"))
@@ -639,7 +687,7 @@ namespace dxvk {
     }
 
     m_session = r.session + 1u;
-    const uint32_t capped = m_db.applyCap(MaxEntries);
+    const uint32_t capped = m_db.applyCap(m_config.maxEntries);
     m_dirty |= capped != 0u;
     m_entries.store(m_db.size());
 
@@ -662,7 +710,7 @@ namespace dxvk {
     Logger::info(str::format("STATECACHE load path=", m_config.displayPath,
       " status=", statusName(r.status), " entries=", m_db.size(),
       " session=", m_session, " prewarmable=", indexed, " readyAtLoad=", ready,
-      " corrupt=", r.corrupt, " truncated=", r.truncated, " capped=", capped,
+      " corrupt=", r.corrupt, " truncated=", r.truncated, " capped=", capped, " max=", m_config.maxEntries,
       " threads=", m_config.threads,
       " ms=", std::chrono::duration<double, std::milli>(Clock::now() - t0).count()));
   }
@@ -751,7 +799,7 @@ namespace dxvk {
       }
     }
 
-    m_db.applyCap(MaxEntries);
+    m_db.applyCap(m_config.maxEntries);
 
     const std::vector<uint8_t> bytes = serialize(m_db.entries(), m_config.keySignature, session);
     const auto now = Clock::now();

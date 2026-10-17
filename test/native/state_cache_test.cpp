@@ -242,16 +242,18 @@ static void testDatabase() {
 }
 
 static void testCap() {
+  // The database cap is generic; the cache passes its configured maximum.
+  const uint32_t Cap = 4096u;
   Database db;
-  for (uint32_t i = 0u; i < MaxEntries + 1000u; i++) {
+  for (uint32_t i = 0u; i < Cap + 1000u; i++) {
     Entry e = makeEntry(i);
     e.lastSession  = 1u + i / 100u;   // later entries are newer
     e.sessionsUsed = 1u + (i % 7u);
     db.merge(e);
   }
 
-  CHECK(db.applyCap(MaxEntries) == 1000u);
-  CHECK(db.size() == MaxEntries);
+  CHECK(db.applyCap(Cap) == 1000u);
+  CHECK(db.size() == Cap);
 
   uint32_t minSession = ~0u;
   for (const Entry& e : db.entries())
@@ -260,11 +262,11 @@ static void testCap() {
   CHECK(minSession >= 10u);
 
   // Lookups still work after the cap rebuilt the index.
-  Entry newest = makeEntry(MaxEntries + 999u);
-  newest.lastSession = 1u + (MaxEntries + 999u) / 100u;
+  Entry newest = makeEntry(Cap + 999u);
+  newest.lastSession = 1u + (Cap + 999u) / 100u;
   CHECK(!db.merge(newest));
-  CHECK(db.size() == MaxEntries);
-  CHECK(db.applyCap(MaxEntries) == 0u);
+  CHECK(db.size() == Cap);
+  CHECK(db.applyCap(Cap) == 0u);
 }
 
 static ShaderRef ref(uint8_t stage, uint8_t origin, uint32_t id) {
@@ -753,10 +755,11 @@ static void testFailedAndCorrupt() {
     CHECK(r.status == ParseStatus::Ok && onDisk.empty() && r.session == 5u);
   }
 
-  // Cap: a file with more than MaxEntries loads capped and is rewritten capped.
+  // Cap: a file with more than the default maximum (1024) loads capped and
+  // is rewritten capped, keeping the most recently used entries.
   {
     std::vector<Entry> many;
-    for (uint32_t i = 0u; i < MaxEntries + 300u; i++) {
+    for (uint32_t i = 0u; i < DefaultMaxEntries + 300u; i++) {
       Entry e = makeEntry(i);
       e.lastSession = 1u + i / 1000u;
       many.push_back(e);
@@ -766,12 +769,36 @@ static void testFailedAndCorrupt() {
     Rc<MtlStateCache> sc = new MtlStateCache(&be, configFor(dir, 0u));
     waitLoaded(sc.ptr());
     sc->shutdown();
-    CHECK(sc->stats().entries == MaxEntries);
+    CHECK(sc->stats().entries == DefaultMaxEntries);
     std::vector<Entry> onDisk;
     auto d = readFile(cfg.file);
     parse(d.data(), d.size(), Sig, onDisk);
-    CHECK(onDisk.size() == MaxEntries);
-    CHECK(d.size() == HeaderSize + size_t(MaxEntries) * EntrySize);
+    CHECK(onDisk.size() == DefaultMaxEntries);
+    CHECK(d.size() == HeaderSize + size_t(DefaultMaxEntries) * EntrySize);
+    // Sessions: entries 0..999 last used in session 1, 1000..1323 in
+    // session 2. LRU keeps all 324 of session 2 and 700 of session 1.
+    uint32_t newest = 0u;
+    for (const Entry& e : onDisk)
+      newest += e.lastSession == 2u;
+    CHECK(newest == DefaultMaxEntries + 300u - 1000u);
+  }
+
+  // A larger configured maximum (D9MT_STATE_CACHE_MAX) keeps them all.
+  {
+    std::vector<Entry> many;
+    for (uint32_t i = 0u; i < DefaultMaxEntries + 300u; i++) {
+      Entry e = makeEntry(i);
+      e.lastSession = 1u + i / 1000u;
+      many.push_back(e);
+    }
+    writeFile(cfg.file, serialize(many, Sig, 6u));
+    FakeBackend be;
+    MtlStateCacheConfig big = configFor(dir, 0u);
+    big.maxEntries = 2000u;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, big);
+    waitLoaded(sc.ptr());
+    sc->shutdown();
+    CHECK(sc->stats().entries == DefaultMaxEntries + 300u);
   }
 }
 
@@ -857,6 +884,92 @@ static void testConcurrency() {
   }
 }
 
+// Location and limits from the environment (native build: HOME stands in
+// for Wine's WINEHOMEDIR). Real TMPDIR/HOME are replaced by fake dirs, so
+// nothing outside /tmp is looked at.
+static void testResolveConfig() {
+  struct SavedEnv {
+    std::string name; bool set; std::string value;
+    explicit SavedEnv(const char* n) : name(n) {
+      const char* v = std::getenv(n);
+      set = v != nullptr;
+      value = v ? v : "";
+    }
+    ~SavedEnv() { set ? setenv(name.c_str(), value.c_str(), 1) : unsetenv(name.c_str()); }
+  };
+  SavedEnv e1("D9MT_STATE_CACHE"), e2("TMPDIR"), e3("HOME"), e4("D9MT_STATE_CACHE_MAX"),
+           e5("D9MT_STATE_CACHE_THREADS"), e6("D9MT_STATE_CACHE_EXE");
+
+  const std::string root = tempDir();
+  const std::string home = root + "/home", tmpT = root + "/var/folders/ab/cdef/T";
+  std::string cmd = "mkdir -p '" + home + "' '" + tmpT + "'";
+  CHECK(!std::system(cmd.c_str()));
+  setenv("D9MT_STATE_CACHE_EXE", "swtor.exe", 1);
+  setenv("TMPDIR", (tmpT + "/").c_str(), 1);
+  setenv("HOME", home.c_str(), 1);
+  unsetenv("D9MT_STATE_CACHE_MAX");
+  unsetenv("D9MT_STATE_CACHE_THREADS");
+
+  auto resolve = [] (MtlStateCacheConfig& c, std::string& reason) {
+    c = MtlStateCacheConfig();
+    reason.clear();
+    return MtlStateCache::resolveConfig(c, reason);
+  };
+  MtlStateCacheConfig c;
+  std::string reason;
+
+  // Neither TMPDIR's sibling C/d9mt nor ~/Library/Caches exists: off, with a reason.
+  unsetenv("D9MT_STATE_CACHE");
+  CHECK(!resolve(c, reason) && reason.find("set D9MT_STATE_CACHE") != std::string::npos);
+
+  // ~/Library/Caches exists: the fallback.
+  cmd = "mkdir -p '" + home + "/Library/Caches'";
+  CHECK(!std::system(cmd.c_str()));
+  CHECK(resolve(c, reason) && c.file == home + "/Library/Caches/d9mt/state/swtor.exe.d9mtstate");
+
+  // The user cache dir next to the AIR cache wins over ~/Library/Caches.
+  const std::string cDir = root + "/var/folders/ab/cdef/C";
+  cmd = "mkdir -p '" + cDir + "/d9mt'";
+  CHECK(!std::system(cmd.c_str()));
+  CHECK(resolve(c, reason) && c.file == cDir + "/d9mt/state/swtor.exe.d9mtstate");
+
+  // The explicit variable wins over both: a directory, or a file.
+  setenv("D9MT_STATE_CACHE", (root + "//explicit/").c_str(), 1);
+  CHECK(resolve(c, reason) && c.file == root + "/explicit/swtor.exe.d9mtstate");
+  setenv("D9MT_STATE_CACHE", (root + "/x/my.d9mtstate").c_str(), 1);
+  CHECK(resolve(c, reason) && c.file == root + "/x/my.d9mtstate");
+
+  // =0 turns it off whatever else exists; an empty value counts as unset.
+  setenv("D9MT_STATE_CACHE", "0", 1);
+  CHECK(!resolve(c, reason) && reason.find("D9MT_STATE_CACHE=0") != std::string::npos);
+  setenv("D9MT_STATE_CACHE", "", 1);
+  CHECK(resolve(c, reason) && c.file == cDir + "/d9mt/state/swtor.exe.d9mtstate");
+
+  // A HOME that isn't a usable absolute path doesn't count.
+  unsetenv("D9MT_STATE_CACHE");
+  setenv("TMPDIR", "/nonexistent/T/", 1);
+  setenv("HOME", "relative/home", 1);
+  CHECK(!resolve(c, reason));
+  setenv("HOME", home.c_str(), 1);
+  CHECK(resolve(c, reason) && c.file == home + "/Library/Caches/d9mt/state/swtor.exe.d9mtstate");
+
+  // The entry cap: default 1024, D9MT_STATE_CACHE_MAX within [64, 16384].
+  CHECK(c.maxEntries == DefaultMaxEntries && DefaultMaxEntries == 1024u);
+  setenv("D9MT_STATE_CACHE_MAX", "3000", 1);
+  CHECK(resolve(c, reason) && c.maxEntries == 3000u);
+  setenv("D9MT_STATE_CACHE_MAX", "10", 1);
+  CHECK(resolve(c, reason) && c.maxEntries == MinMaxEntries);
+  setenv("D9MT_STATE_CACHE_MAX", "999999", 1);
+  CHECK(resolve(c, reason) && c.maxEntries == MaxMaxEntries);
+  setenv("D9MT_STATE_CACHE_MAX", "junk", 1);
+  CHECK(resolve(c, reason) && c.maxEntries == DefaultMaxEntries);
+
+  setenv("D9MT_STATE_CACHE_THREADS", "9", 1);
+  CHECK(resolve(c, reason) && c.threads == 4u);
+  setenv("D9MT_STATE_CACHE_THREADS", "0", 1);
+  CHECK(resolve(c, reason) && c.threads == 0u);
+}
+
 // Render-thread cost of recording one PSO miss (the only state cache work
 // on the render thread), against the same loop without it. `bench` mode.
 static void benchRecord() {
@@ -917,6 +1030,7 @@ int main(int argc, char** argv) {
   testFailedAndCorrupt();
   testTwoProcessesMerge();
   testConcurrency();
+  testResolveConfig();
 
   if (g_failures) {
     std::printf("state_cache_test: %d FAILED\n", g_failures);

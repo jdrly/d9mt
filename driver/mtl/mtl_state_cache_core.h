@@ -22,7 +22,14 @@ namespace dxvk::statecache {
   constexpr uint32_t HeaderSize    = 64u;
   constexpr uint32_t EntrySize     = 384u;  // 8-byte check + Entry
   constexpr uint32_t KeyBytes      = 304u;  // RenderPsoKey without its two library cookies
-  constexpr uint32_t MaxEntries    = 4096u;
+  /// Entries kept per game (least recently used dropped first). 1024
+  /// bounds the PSO archives too: every session's archive captures every
+  /// prewarmed pipeline (docs/state-cache.md §12) until the bridge keeps
+  /// fewer archive sessions. D9MT_STATE_CACHE_MAX overrides it within
+  /// [MinMaxEntries, MaxMaxEntries].
+  constexpr uint32_t DefaultMaxEntries = 1024u;
+  constexpr uint32_t MinMaxEntries     = 64u;
+  constexpr uint32_t MaxMaxEntries     = 16384u;
   /// Entries not used in this many sessions are kept (until the cap) but not prewarmed.
   constexpr uint32_t PrewarmSessions = 32u;
 

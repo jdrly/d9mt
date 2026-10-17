@@ -81,6 +81,7 @@ namespace dxvk {
     std::string displayPath;       // for log lines (the Unix path when known)
     uint64_t    keySignature = 0u;
     uint32_t    threads      = 2u; // prewarm threads; 0 = record and load only
+    uint32_t    maxEntries   = statecache::DefaultMaxEntries;
   };
 
   /**
