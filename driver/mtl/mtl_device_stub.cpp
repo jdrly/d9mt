@@ -4,6 +4,7 @@
 
 #include "../wsi/wsi_platform.h"
 #include "mtl_context.h"
+#include "mtl_state_cache.h"
 
 #include "../util/log/log.h"
 #include "../util/util_env.h"
@@ -34,6 +35,11 @@ namespace dxvk {
 
   MtlDevice::MtlDevice() { }
   MtlDevice::~MtlDevice() { }
+
+  void MtlDevice::setStateCache(const Rc<MtlStateCache>& cache) {
+    m_stateCache = cache;
+    m_stateCachePtr.store(cache.ptr(), std::memory_order_release);
+  }
 
   Rc<MtlBuffer> MtlDevice::createBuffer(const MtlBufferCreateInfo& info) {
     Logger::warn("MtlDevice::createBuffer: stub");

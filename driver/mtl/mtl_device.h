@@ -20,6 +20,8 @@ namespace dxvk {
   class MtlEvent;
   class MtlShaderFunction;
   class MtlCompileTask;
+  class MtlStateCache;
+  class MtlStateCacheBackend;
   enum class MtlQueryType : uint32_t;
 
   // What a resource is for, set by the frontend. Only feeds the byte
@@ -171,7 +173,24 @@ namespace dxvk {
     // (mtl_restore_stats.h), for the RESTORE lines.
     rstore::Log& restoreLog() { return m_restoreLog; }
 
+    // Pipeline state cache (mtl_state_cache.h). The backend side the cache
+    // builds through (nullptr: not supported) and the signature of the PSO
+    // key layout it records.
+    virtual MtlStateCacheBackend* stateCacheBackend() { return nullptr; }
+    virtual uint64_t psoKeySignature() const { return 0u; }
+
+    // The cache, once the frontend has created it (nullptr: off). Set once
+    // before the first draw; read by the render thread on PSO misses.
+    MtlStateCache* stateCache() const {
+      return m_stateCachePtr.load(std::memory_order_acquire);
+    }
+
+    void setStateCache(const Rc<MtlStateCache>& cache);
+
   protected:
+
+    Rc<MtlStateCache>           m_stateCache;
+    std::atomic<MtlStateCache*> m_stateCachePtr = { nullptr };
 
     FrontendStats    m_frontendStats;
     rstats::Totals   m_renderStats;

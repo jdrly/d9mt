@@ -241,6 +241,8 @@ CORE+=("$DRV"/dxvk/dxvk_allocator.cpp)
 CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
        "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp \
        "$DRV"/mtl/mtl_memory_profile.cpp)
+# Pipeline state cache (docs/state-cache.md): file format/index core + threads.
+CORE+=("$DRV"/mtl/mtl_state_cache_core.cpp "$DRV"/mtl/mtl_state_cache.cpp)
 # backend/ — the real winemetal-backed Metal 3 backend (MtlContextImpl +
 # device/ring/submission/pso-cache/presenter). These override the seam-base
 # stub methods; the stubs still supply the MtlContext/MtlDevice base vtable

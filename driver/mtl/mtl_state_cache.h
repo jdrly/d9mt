@@ -1,0 +1,232 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "mtl_state_cache_core.h"
+#include "mtl_compile.h"
+#include "mtl_types.h"
+
+#include "../util/thread.h"
+#include "../util/rc/util_rc.h"
+#include "../util/rc/util_rc_ptr.h"
+
+namespace dxvk {
+
+  class MtlShaderFunction;
+
+  /**
+   * \brief A shader the prewarm can get functions from
+   *
+   * Implemented by D3D9ShaderProgram and the fixed-function module set.
+   */
+  class MtlStateCacheShader {
+
+  public:
+
+    /// The function linked against pPrev (nullptr = standalone), created
+    /// if needed but never submitted to the compile workers: the prewarm
+    /// runs it itself, or a draw does if it gets there first.
+    virtual Rc<MtlShaderFunction> prewarmFunction(MtlStateCacheShader* pPrev) = 0;
+
+  protected:
+
+    ~MtlStateCacheShader() = default;
+
+  };
+
+  /**
+   * \brief What the state cache needs from the backend
+   */
+  class MtlStateCacheBackend {
+
+  public:
+
+    /// Registers a PSO build for the recorded key bytes with the two
+    /// functions' libraries. nullptr if that PSO is already registered
+    /// (built, building or queued by a draw).
+    virtual Rc<MtlCompileTask> createPrewarmPso(
+      const uint8_t*            pState,
+      const MtlShaderFunction*  pVs,
+      const MtlShaderFunction*  pFs) = 0;
+
+    /// Done and produced a pipeline.
+    virtual bool psoSucceeded(MtlCompileTask* pPso) = 0;
+
+    /// Time the build took (0 if unknown).
+    virtual uint64_t psoBuildNs(MtlCompileTask* pPso) = 0;
+
+    /// Urgent compile tasks queued on the worker pool.
+    virtual uint32_t urgentCompilesQueued() = 0;
+
+  protected:
+
+    ~MtlStateCacheBackend() = default;
+
+  };
+
+  /// How a PSO miss of the render thread's cache was served.
+  enum class MtlPsoUse : uint8_t {
+    Miss,   // not prewarmed: built on demand
+    Hit,    // prewarmed and done
+    Late,   // prewarmed, still building
+  };
+
+  struct MtlStateCacheConfig {
+    std::string file;              // platform path of the cache file
+    std::string displayPath;       // for log lines (the Unix path when known)
+    uint64_t    keySignature = 0u;
+    uint32_t    threads      = 2u; // prewarm threads; 0 = record and load only
+  };
+
+  /**
+   * \brief Pipeline state cache (docs/state-cache.md)
+   *
+   * Records the PSOs the render thread misses on, keyed by D3D9-side shader
+   * identity plus the derived key bytes, persists them per executable, and
+   * in later sessions rebuilds them in the background once the game has
+   * created the shaders they need. Thread roles:
+   *  - announce(): the thread creating shaders (D3D9 app thread)
+   *  - record():   the render (CS) thread only; no allocation, no lock, no IO
+   *  - one writer thread: load, record intake, merge and atomic writes
+   *  - prewarm threads (lowest priority): function and PSO builds; they
+   *    yield while urgent compiles are queued or the render thread waits
+   */
+  class MtlStateCache : public RcObject {
+
+  public:
+
+    /// Resolves the file from D9MT_STATE_CACHE / TMPDIR (docs/state-cache.md
+    /// §4). False if the cache is off or there is no usable location.
+    static bool resolveConfig(MtlStateCacheConfig& config, std::string& reason);
+
+    MtlStateCache(MtlStateCacheBackend* pBackend, const MtlStateCacheConfig& config);
+
+    ~MtlStateCache();
+
+    /// A new shader exists. pShader must stay valid until shutdown():
+    /// the cache keeps only this pointer (D3D9 shader modules live as long
+    /// as the device, the fixed-function set is a device member).
+    void announce(
+            MtlShaderStage        stage,
+      const MtlShaderStateId&     id,
+            MtlStateCacheShader*  pShader);
+
+    /// Render thread, once per miss of its PSO cache. pState: the PSO
+    /// key bytes after the two library cookies (statecache::KeyBytes).
+    void record(
+      const uint8_t*            pState,
+      const MtlShaderFunction*  pVs,
+      const MtlShaderFunction*  pFs,
+            MtlCompileTask*     pPso,
+            MtlPsoUse           use);
+
+    /// Render thread: a PSO miss that can't be recorded (internal shaders).
+    void noteUnrecorded() {
+      m_unrecorded.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    /// Stops the threads, writes the file and drops every reference to
+    /// shaders and pipelines. Idempotent; call before the device goes away.
+    void shutdown();
+
+    /// For tests: true once the file was loaded and the index built.
+    bool loaded() const { return m_loaded.load(std::memory_order_acquire); }
+
+    /// For tests: blocks until the ready queue is empty and no prewarm
+    /// job is running, or the timeout passes.
+    bool waitPrewarmIdle(uint32_t timeoutMs);
+
+    struct Stats {
+      uint64_t hits = 0u, late = 0u, misses = 0u, unrecorded = 0u, ringDrops = 0u;
+      uint64_t recorded = 0u, built = 0u, dup = 0u, failed = 0u, skipped = 0u;
+      uint64_t writes = 0u, entries = 0u;
+    };
+
+    Stats stats();
+
+  private:
+
+    struct Record {
+      statecache::Entry   entry;
+      Rc<MtlCompileTask>  pso;
+      uint8_t             use = 0u;
+    };
+
+    struct ShaderSlot {
+      MtlStateCacheShader*  shader = nullptr;
+    };
+
+    using Clock = std::chrono::steady_clock;
+
+    MtlStateCacheBackend*   m_backend;
+    MtlStateCacheConfig     m_config;
+    const Clock::time_point m_t0 = Clock::now();
+
+    // Render thread -> writer.
+    statecache::SpscRing<Record, 1024u> m_ring;
+
+    // Index, shaders, failures: m_mutex.
+    dxvk::mutex                   m_mutex;
+    dxvk::condition_variable      m_prewarmCond;
+    statecache::PrewarmIndex      m_index;
+    std::unordered_map<statecache::ShaderRef, ShaderSlot, statecache::ShaderRefHash> m_shaders;
+    std::vector<statecache::Entry> m_failed;
+    uint32_t                      m_activeJobs = 0u;
+    bool                          m_indexBuilt = false;
+
+    // Writer thread only.
+    statecache::Database          m_db;
+    std::vector<Record>           m_pendingRecords;
+    uint32_t                      m_session  = 1u;
+    bool                          m_readOnly = false;
+    bool                          m_dirty    = false;
+    Clock::time_point             m_lastChange = Clock::now();
+    Clock::time_point             m_lastWrite = Clock::now();
+    Clock::time_point             m_lastLog   = Clock::now();
+    uint64_t                      m_loggedSum = 0u;
+    uint32_t                      m_writeFailures = 0u;
+    std::unordered_set<uint64_t>  m_dropped;   // identities of failed entries
+
+    dxvk::mutex                   m_writerMutex;
+    dxvk::condition_variable      m_writerCond;
+    bool                          m_stopWriter = false;   // m_writerMutex
+
+    std::atomic<bool>             m_stop    = { false };
+    std::atomic<bool>             m_stopped = { false };
+    std::atomic<bool>             m_loaded  = { false };
+
+    std::atomic<uint64_t> m_hits = { 0u }, m_late = { 0u }, m_misses = { 0u };
+    std::atomic<uint64_t> m_unrecorded = { 0u }, m_ringDrops = { 0u };
+    std::atomic<uint64_t> m_recorded = { 0u }, m_built = { 0u }, m_dup = { 0u };
+    std::atomic<uint64_t> m_failedCount = { 0u }, m_skipped = { 0u };
+    std::atomic<uint64_t> m_pausedNs = { 0u }, m_buildNs = { 0u }, m_hitBuildNs = { 0u };
+    std::atomic<uint64_t> m_writes = { 0u }, m_entries = { 0u };
+    std::atomic<uint64_t> m_prewarmLogged = { 0u };
+
+    dxvk::thread              m_writer;
+    std::vector<dxvk::thread> m_prewarmThreads;
+
+    void writerMain();
+    void load();
+    void intake(bool final);
+    bool ingest(Record& r);
+    bool write();
+    void logUse(bool final);
+
+    void prewarmMain(uint32_t index);
+    bool prewarmOne(const statecache::Entry& e, const ShaderSlot& vs, const ShaderSlot& ps);
+    bool finishFunction(MtlShaderFunction* pFn);
+    bool yieldToRenderThread();
+
+    double seconds() const {
+      return std::chrono::duration<double>(Clock::now() - m_t0).count();
+    }
+
+  };
+
+}
