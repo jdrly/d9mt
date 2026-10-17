@@ -1,6 +1,7 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -456,12 +457,16 @@ namespace dxvk::backend {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
           m_pass.clearColor[i] = true;
           m_pass.clearValues[i] = value;
+          if (unlikely(prof::g_profEnabled))
+            m_rs[rstats::ClearsFolded]++;
           return;
         }
       }
       if (sameAttachment(m_pass.targets.depthStencil, view)) {
         if (clear & MtlAspectDepth)   { m_pass.clearDepth = true;   m_pass.depthClear = value.depth; }
         if (clear & MtlAspectStencil) { m_pass.clearStencil = true; m_pass.stencilClear = value.stencil; }
+        if (unlikely(prof::g_profEnabled))
+          m_rs[rstats::ClearsFolded]++;
         return;
       }
     }
@@ -479,6 +484,8 @@ namespace dxvk::backend {
     }
     m_pass.pending = true;
     prof::bump(prof::CntPassCloseClear);
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearPasses]++;
     materializePass();
     closePass();
     m_pass = std::move(saved);
@@ -493,6 +500,8 @@ namespace dxvk::backend {
     if (!any)
       return;
     prof::bump(prof::CntPassCloseClear);
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearPasses]++;
     materializePass();
     closePass();
   }
@@ -712,6 +721,36 @@ namespace dxvk::backend {
 
   namespace {
 
+    // D9MT_PROFILE: render-thread CPU time in the attachment optimization
+    // (rstats::AttNs), outermost scope only (a restore can close a pass);
+    // nothing without D9MT_PROFILE.
+    class AttTimer {
+    public:
+      explicit AttTimer(uint64_t* acc) : m_acc(acc && !s_depth++ ? acc : nullptr), m_on(acc != nullptr) {
+        if (m_acc)
+          m_t0 = now();
+      }
+      ~AttTimer() { stop(); }
+      // Ends the scope early (before work the pass needs either way).
+      void stop() {
+        if (m_acc)
+          *m_acc += now() - m_t0;
+        if (m_on)
+          s_depth--;
+        m_acc = nullptr;
+        m_on  = false;
+      }
+    private:
+      static uint64_t now() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+      }
+      static inline thread_local uint32_t s_depth = 0u;
+      uint64_t* m_acc;
+      bool      m_on;
+      uint64_t  m_t0 = 0u;
+    };
+
     // Images the attachment optimization tracks: one subresource, so a
     // load/store action covers all of it. Everything else stays Defined.
     bool attImageEligible(const MtlTexture* img) {
@@ -788,6 +827,7 @@ namespace dxvk::backend {
 
 
   bool MtlContextImpl::createPassEncoder(bool early) {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
     const uint32_t dbg   = d9mtdbg::flags();
     const bool     optOn = !(dbg & d9mtdbg::NoAttachOpt);
     const bool     full  = !early;
@@ -951,6 +991,8 @@ namespace dxvk::backend {
       m_attTraceOn = false;
     }
 
+    // The encoder itself is created with or without the optimization.
+    attTimer.stop();
     if (skip)
       return false;
 
@@ -964,6 +1006,7 @@ namespace dxvk::backend {
 
 
   void MtlContextImpl::attApplyAfter() {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
     for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
       AttSlot& a = m_pass.att[s];
       if (!a.used)
@@ -1075,6 +1118,7 @@ namespace dxvk::backend {
 
 
   void MtlContextImpl::attRestore(MtlTextureImpl* t, rstore::Reason why, MtlAspectMask aspects) {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
     // Something reads an image whose clear was never stored: store it now.
     // Its own pass, before whatever reads; an encoder already open ends first.
     // Only `aspects` are re-cleared; another Lazy aspect is loaded and stored

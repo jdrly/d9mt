@@ -26,6 +26,9 @@ namespace dxvk::rstats {
     ResolveFolded,   // MSAA color resolves done by the rendering pass's store action
     Restores,        // re-clears of skipped stores because something read the attachment
     BytesSaved,      // estimated attachment bytes not loaded/stored vs. Load/Store (signed, two's complement)
+    AttNs,           // render-thread CPU time in the attachment optimization (pass decisions, state, restores), ns
+    ClearsFolded,    // clears folded into the load action of the pass that renders to the target next
+    ClearPasses,     // clears that needed a pass of their own (no pass of that target pending)
     Count
   };
 

@@ -5,7 +5,8 @@
 //
 //   STATS t=63 fps=59.9 ms=16.7/18.0/21.4 slow33=0 slow50=0 | rp=31.4 skip=2.1
 //     cb=13.0 draws=1520 | ld=12.1 clr=9.0 ldDc=4.0 st=15.2 stDc=6.0 rsv=0.0
-//     restore=0.0 savedMiB=231.4 | sh=0 pso=0 wait=0/0.0ms | allocMiB=5210 att=on
+//     restore=0.0 savedMiB=231.4 attMs=1.3 clrFold=6.0 clrPass=1.0 | sh=0 pso=0 wait=0/0.0ms
+//     | allocMiB=5210 att=on
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -21,6 +22,11 @@
 //     rsv       MSAA resolves folded into the rendering pass's store
 //     restore   skipped stores that had to be redone because something read them
 //     savedMiB  estimated attachment traffic avoided vs. Load/Store everywhere
+//     attMs     render-thread CPU time in the attachment optimization (pass decisions,
+//               state tracking, restores), ms per second: its cost, apart from
+//               the compile waits below (cold shader/PSO caches)
+//     clrFold   clears folded into the load action of the target's next pass
+//     clrPass   clears that needed a pass of their own
 //   sh/pso      shaders / pipelines compiled in the window
 //   wait        render-thread waits for compiles: count / total ms
 //   allocMiB    Metal's currentAllocatedSize
@@ -112,6 +118,7 @@ namespace dxvk::stats {
         "STATS t=%.0f fps=%.1f ms=%.1f/%.1f/%.1f slow33=%u slow50=%u"
         " | rp=%.1f skip=%.1f cb=%.1f draws=%.0f"
         " | ld=%.1f clr=%.1f ldDc=%.1f st=%.1f stDc=%.1f rsv=%.1f restore=%.1f savedMiB=%.1f"
+        " attMs=%.2f clrFold=%.1f clrPass=%.1f"
         " | sh=%llu pso=%llu wait=%llu/%.1fms | allocMiB=%llu att=%s",
         double(nowNs - m_startNs) * 1e-9, winS > 0.0 ? double(n) / winS : 0.0,
         n ? sum / double(n) : 0.0, p99, mx, slow33, slow50,
@@ -119,6 +126,8 @@ namespace dxvk::stats {
         pf(rstats::LoadLoad), pf(rstats::LoadClear), pf(rstats::LoadDontCare),
         pf(rstats::StoreStore), pf(rstats::StoreDontCare), pf(rstats::ResolveFolded),
         pf(rstats::Restores), savedMiB,
+        winS > 0.0 ? double(d[rstats::AttNs]) * 1e-6 / winS : 0.0,
+        pf(rstats::ClearsFolded), pf(rstats::ClearPasses),
         (unsigned long long)(ct.shaders - m_ct.shaders), (unsigned long long)(ct.psos - m_ct.psos),
         (unsigned long long)(ct.waits - m_ct.waits), double(ct.waitsNs - m_ct.waitsNs) * 1e-6,
         (unsigned long long)(extra.allocBytes >> 20), extra.att);

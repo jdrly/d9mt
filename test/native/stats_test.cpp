@@ -41,6 +41,9 @@ int main() {
   rs.v[rstats::LoadLoad]      = 60u * 12u;
   rs.v[rstats::StoreDontCare] = 60u * 6u;
   rs.v[rstats::BytesSaved]    = 60u * (32u << 20);
+  rs.v[rstats::AttNs]         = 2024000u;   // 2.024 ms in a 1.012 s window: 2 ms per second
+  rs.v[rstats::ClearsFolded]  = 60u * 6u;
+  rs.v[rstats::ClearPasses]   = 60u * 1u;
   stats::CompileTotals ct;
   ct.shaders = 3u; ct.psos = 2u; ct.waits = 1u; ct.waitsNs = 12500000u;
   stats::Extra extra;
@@ -52,6 +55,7 @@ int main() {
   CHECK(has(line, " ms=17.2/60.0/60.0 slow33=2 slow50=1 "));
   CHECK(has(line, "| rp=30.0 skip=2.0 cb=13.0 draws=1500 "));
   CHECK(has(line, "| ld=12.0 clr=0.0 ldDc=0.0 st=0.0 stDc=6.0 rsv=0.0 restore=0.0 savedMiB=32.0 "));
+  CHECK(has(line, " savedMiB=32.0 attMs=2.00 clrFold=6.0 clrPass=1.0 | sh=3 "));
   CHECK(has(line, "| sh=3 pso=2 wait=1/12.5ms | allocMiB=5000 att=on"));
 
   // The next window reports deltas only, and a negative saving (restores).
@@ -67,7 +71,7 @@ int main() {
   std::printf("%s\n", line.c_str());
   CHECK(has(line, " ms=16.0/16.0/16.0 slow33=0 slow50=0 "));
   CHECK(has(line, " rp=0.0 "));
-  CHECK(has(line, " restore=1.0 savedMiB=-1.0 "));
+  CHECK(has(line, " restore=1.0 savedMiB=-1.0 attMs=0.00 clrFold=0.0 clrPass=0.0 "));
   CHECK(has(line, "| sh=0 pso=0 wait=0/0.0ms "));
   CHECK(has(line, " att=live-off"));
 
