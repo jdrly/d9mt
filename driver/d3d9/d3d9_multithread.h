@@ -3,6 +3,7 @@
 #include "d3d9_include.h"
 #include "d3d9_hitch.h"
 #include "d3d9_stats.h"
+#include "d3d9_pace.h"
 
 namespace dxvk {
 

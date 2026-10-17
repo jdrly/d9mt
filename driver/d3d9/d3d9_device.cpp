@@ -5662,10 +5662,24 @@ namespace dxvk {
 
     const uint64_t nowNs = hitch::nowNs();
     uint64_t frame = 0u;
-    hitch::FrameStats stats;
+    hitch::FrameStats stats, every;
     if (m_hitch.endFrame(hitch::ticks(), nowNs, compile,
-          dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats))
+          dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats, &every))
       Logger::warn(hitch::formatHitch(frame, stats));
+
+    // PACE: the blocked part of the time inside d9mt (these don't nest in each other)
+    const double waitMs = every.cat[hitch::Latency].ms + every.cat[hitch::CsSync].ms
+                        + every.cat[hitch::GpuWait].ms + every.cat[hitch::Throttle].ms;
+    if (m_paceWindow.frameEnd(nowNs, every.dtMs, every.inMs, waitMs)) {
+      // The Present thread's CPU time (100 ns units), once a second
+      FILETIME created, exited, kernel, user;
+      uint64_t cpuNs = 0u;
+      if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
+        auto ft = [] (const FILETIME& f) { return (uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+        cpuNs = (ft(kernel) + ft(user)) * 100u;
+      }
+      Logger::warn(m_paceWindow.take(nowNs, cpuNs));
+    }
 
     if (m_statsWindow.addFrame(nowNs)) {
       static const bool deferred = std::getenv("D9MT_DEFERRED") != nullptr;

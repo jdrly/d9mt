@@ -975,6 +975,9 @@ namespace dxvk {
 
     hitch::Profiler& Hitch() { return m_hitch; }
 
+    // D9MT_PROFILE: the game entered Present (PACE, d3d9_pace.h).
+    void PaceEntry() { m_paceWindow.presentEntry(hitch::nowNs()); }
+
     // D9MT_PROFILE: end of a Present (all swapchains); logs a HITCH line for
     // a long frame, and a STATS line (plus RESTORE when there were restores)
     // once a second.
@@ -1486,6 +1489,7 @@ namespace dxvk {
     hitch::Profiler                 m_hitch;
     double                          m_hitchMs = 50.0;
     stats::Window                   m_statsWindow;
+    pace::Window                    m_paceWindow;
     rstore::Window                  m_restoreWindow;
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;

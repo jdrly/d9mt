@@ -186,6 +186,9 @@ namespace dxvk {
     HRESULT hr;
     high_resolution_clock::time_point until = { };
 
+    if (unlikely(hitch::g_enabled))
+      m_parent->PaceEntry();
+
     { hitch::Scope hs(m_parent->Hitch(), hitch::Present, true);
 
       { D3D9DeviceLock lock = m_parent->LockDevice();
