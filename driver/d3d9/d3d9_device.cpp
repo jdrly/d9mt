@@ -867,7 +867,6 @@ namespace dxvk {
           IDirect3DSurface9* pDestinationSurface,
     const POINT*             pDestPoint) {
     D3D9DeviceLock lock = LockDevice();
-    ProfApi(rstore::Api::UpdateSurface);
 
     D3D9Surface* src = static_cast<D3D9Surface*>(pSourceSurface);
     D3D9Surface* dst = static_cast<D3D9Surface*>(pDestinationSurface);
@@ -929,6 +928,7 @@ namespace dxvk {
                     0u };
     }
 
+    ProfApi(rstore::Api::UpdateSurface);
     UpdateTextureFromBuffer(dstTextureInfo, srcTextureInfo, dst->GetSubresource(), src->GetSubresource(), srcOffset, extent, dstOffset);
 
     dstTextureInfo->SetNeedsReadback(dst->GetSubresource(), true);
@@ -944,7 +944,6 @@ namespace dxvk {
           IDirect3DBaseTexture9* pSourceTexture,
           IDirect3DBaseTexture9* pDestinationTexture) {
     D3D9DeviceLock lock = LockDevice();
-    ProfApi(rstore::Api::UpdateTexture);
 
     if (!pDestinationTexture || !pSourceTexture)
       return D3DERR_INVALIDCALL;
@@ -990,6 +989,7 @@ namespace dxvk {
         Logger::warn("D3D9DeviceEx::UpdateTexture: Source dimensions exceed the destination");
     }
 
+    ProfApi(rstore::Api::UpdateTexture);
     for (uint32_t a = 0; a < arraySlices; a++) {
       const D3DBOX& box = srcTexInfo->GetDirtyBox(a);
       { static int n=0; if (n++<8) Logger::info(str::format(
@@ -4738,7 +4738,10 @@ namespace dxvk {
       const D3DBOX*                 pBox,
             DWORD                   Flags) {
     D3D9DeviceLock lock = LockDevice();
-    ProfApi(rstore::Api::LockRect);
+    // No ProfApi here: games lock managed and system-memory textures from their streaming
+    // threads, on devices without D3DCREATE_MULTITHREADED (SWTOR), where the device lock
+    // is a no-op. Such a lock touches only system memory and must not emit CS work; the
+    // tag goes in below, where the readback emits commands anyway.
     hitch::Scope hs(m_hitch, hitch::TexLock);
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
@@ -4832,6 +4835,7 @@ namespace dxvk {
       }
 
       if (pResource->GetImage() != nullptr) {
+        ProfApi(rstore::Api::LockRect);
         Rc<MtlTexture> resourceImage = pResource->GetImage();
 
         Rc<MtlTexture> mappedImage;

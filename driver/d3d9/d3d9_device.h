@@ -983,6 +983,11 @@ namespace dxvk {
     // D9MT_PROFILE: tags the CS stream with the D3D9 call its next commands
     // come from (rstore::Api), so the backend can attribute restores. Emitted
     // only when the call kind changes; nothing without D9MT_PROFILE.
+    // Call it only where the same call emits CS work anyway: without
+    // D3DCREATE_MULTITHREADED the device lock is a no-op, and a game may make
+    // CPU-only calls (LockRect of a managed or system-memory texture) from its
+    // streaming threads; a CS command from there races the render thread's
+    // and corrupts the chunk (0.0.6-dev.2: SWTOR hung at startup).
     void ProfApi(rstore::Api api) {
       if (likely(!hitch::g_enabled) || api == m_profApi)
         return;

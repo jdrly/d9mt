@@ -160,6 +160,17 @@ ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
 and `scripts/dump-verify.sh` drive the D3D9 test programs in `test/` under a
 CrossOver bottle (`CX` and `BOTTLE` must be set).
 
+`scripts/run-hang-test.sh` is the profiling/debug regression test: it runs
+`test/code_mtlock.c` (a render thread presenting frames while a second thread
+locks managed textures, on a device without `D3DCREATE_MULTITHREADED`, as
+SWTOR does) with `D9MT_PROFILE`, `D9MT_MEMSTATS`, `DXVK_LOG_LEVEL=info` and a
+`D9MT_DEBUG_FILE` flags file, in a throwaway prefix, and fails if a run doesn't
+finish within the timeout:
+
+```bash
+ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
+```
+
 ## Install & run
 
 > **Use a dedicated Wine engine copy.** d9mt's `winemetal` replaces the
