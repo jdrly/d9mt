@@ -276,6 +276,12 @@ contents are a known clear value:
   its store is skipped. Its contents are still the clear value: the next pass
   Clear-loads it, and any other reader (sampling, copies, blits, resolves,
   readbacks, Present) gets it by a re-clear first (`restore` in `STATS`).
+  Sampling reads only the view's aspects: a depth-stencil texture sampled as a
+  shadow map or INTZ (depth) doesn't need its unstored stencil clear.
+- Once a reader has needed such a clear (a target cleared every frame and
+  sampled or copied later in the frame), the passes of the next 8 frames store
+  it as before instead of leaving it to a re-clear; the hint lapses when the
+  reads stop.
 - A pass without draws whose clears needn't be stored gets no encoder at all;
   the clear moves into the next pass's load action.
 - An MSAA color resolve (StretchRect) right after the pass that rendered the

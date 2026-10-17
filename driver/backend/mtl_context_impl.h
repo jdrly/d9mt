@@ -394,13 +394,15 @@ namespace dxvk::backend {
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
     uint32_t     m_attTraceBudget = 0u;
     bool         m_attTraceOn = false;
+    uint32_t     m_attFrame = 1u;       // 1-based frame counter for the read hint (attopt::readRecently)
     uint32_t     m_apiTag = 0u;         // D9MT_PROFILE: rstore::Api of the commands being recorded
     bool         createPassEncoder(bool early);
     void         attApplyAfter();
     uint8_t      attComputeWriteMask() const;
     bool         attSampled(const MtlTexture* img) const;
     // `why`: the operation that needs memory to hold the contents, for the
-    // RESTORE attribution. `aspects`: the aspects it reads.
+    // RESTORE attribution. `aspects`: the aspects it reads (sampling a
+    // depth-stencil image reads depth only).
     void         attBindSampled(const MtlTextureView* view);
     void         attRestore(MtlTextureImpl* img, rstore::Reason why, MtlAspectMask aspects);
     void         attRead(const MtlTexture* img, rstore::Reason why,

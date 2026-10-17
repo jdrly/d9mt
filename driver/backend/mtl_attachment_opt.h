@@ -19,9 +19,16 @@
 //              depth-stencil at Present): no load, and nothing to keep.
 //
 // A store is skipped only when the attachment is not written in the pass,
-// nothing samples it during the pass, and its contents are a known clear
-// (Lazy afterwards) or undefined. Contents that only memory holds (Defined)
-// are always loaded and stored.
+// nothing samples it during the pass, no reader needed its known clear in
+// memory in the last kReadHintFrames frames (readHint), and its contents are
+// a known clear (Lazy afterwards) or undefined. Contents that only memory
+// holds (Defined) are always loaded and stored.
+//
+// The read hint: a target cleared every frame and then read outside a pass
+// every frame (sampled by a later pass, copied, read back) would otherwise be
+// left Lazy and re-cleared for its reader every frame, a pass of its own.
+// Once a reader has needed such a clear, the passes of the next frames store
+// it as before; the hint lapses when the reads stop.
 //
 // Header-only and dependency-free so the decision table can be unit-tested
 // natively (test/native/attachment_opt_test.cpp); mtl_context_record.cpp
@@ -42,10 +49,30 @@ namespace dxvk::backend::attopt {
     uint32_t stencil = 0u;
   };
 
+  // Frames a read of a known clear keeps the aspect's stores (readHint).
+  constexpr uint32_t kReadHintFrames = 8u;
+
   struct AspectState {
-    Content content = Content::Defined;
-    Value   value   = { };   // Cleared / Lazy
+    Content  content   = Content::Defined;
+    Value    value     = { };   // Cleared / Lazy
+    uint32_t readFrame = 0u;    // frame (1-based) a reader last needed its known clear in memory; 0: never
   };
+
+  // A reader outside a render pass (sampling bind, copy, blit, resolve,
+  // readback, present, partial write) needs memory to hold this aspect.
+  // Remembers a known clear being read (the read hint) and returns whether
+  // the aspect must be restored first (Lazy). `frame` is 1-based.
+  inline bool noteRead(AspectState& st, uint32_t frame) {
+    if (st.content == Content::Lazy || st.content == Content::Cleared)
+      st.readFrame = frame;
+    return st.content == Content::Lazy;
+  }
+
+  // A reader needed this aspect's known clear in one of the last
+  // kReadHintFrames frames.
+  inline bool readRecently(const AspectState& st, uint32_t frame) {
+    return st.readFrame != 0u && frame - st.readFrame < kReadHintFrames;
+  }
 
   struct SlotInput {
     Content content       = Content::Defined;  // before the pass
@@ -55,6 +82,7 @@ namespace dxvk::backend::attopt {
     bool    fullKnowledge = true;   // decided at the end of the pass: `written` and `sampled` are final
     bool    written       = false;  // a draw in the pass may write this aspect
     bool    sampled       = false;  // bound for sampling during the pass, or still bound
+    bool    readHint      = false;  // readRecently(): a reader needed this known clear lately
     bool    discardAfter  = false;  // the contents are discarded right after the pass (D3D9 discard)
   };
 
@@ -106,9 +134,10 @@ namespace dxvk::backend::attopt {
       if (in.discardAfter) {
         d.store = Store::DontCare;
       } else if (!in.written && !in.sampled
-              && (d.load == Load::Clear || in.content == Content::Undefined)) {
-        // Nothing changes the contents and they are a known clear (or
-        // undefined): memory needn't hold them.
+              && (d.load == Load::Clear ? !in.readHint : in.content == Content::Undefined)) {
+        // Nothing changes the contents, they are a known clear (or
+        // undefined) and no reader wanted them lately: memory needn't hold
+        // them.
         d.store = Store::DontCare;
       }
     }

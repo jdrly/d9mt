@@ -295,6 +295,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::endFrame() {
     m_frameBoundaryFlush = true;
+    m_attFrame++;
 
     uint64_t completed = m_device->submissions().completedSerial();
     {
@@ -822,6 +823,7 @@ namespace dxvk::backend {
       a.in.discardAfter  = s >= kAttDepth && m_pass.discardDs;
       // The bindings scan only matters when a store could be skipped.
       a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
+      a.in.readHint = attopt::readRecently(st, m_attFrame);
       a.d = attopt::decide(a.in);
       if (a.d.restoreFirst) {
         attRestore(img, rstore::Reason::RtView,
@@ -938,7 +940,7 @@ namespace dxvk::backend {
           line += str::format(" ", kSlot[s], "=", img ? img->info().extent.width : 0u, "x",
             img ? img->info().extent.height : 0u, "/", img ? uint32_t(img->info().format) : 0u,
             a.in.eligible ? "" : "(untracked)", " ", attContentName(a.in.content),
-            a.in.written ? " w" : "", a.in.sampled ? " sampled" : "",
+            a.in.written ? " w" : "", a.in.sampled ? " sampled" : "", a.in.readHint ? " hint" : "",
             " ", attLoadName(a.d.load, a.d.loadFromState), "/",
             a.d.store == attopt::Store::Store ? "store" : "dontcare",
             s < kAttDepth && m_pass.resolveTo[s] != nullptr ? "+resolve" : "");
@@ -1027,7 +1029,10 @@ namespace dxvk::backend {
     auto* t = static_cast<MtlTextureImpl*>(view->image.ptr());
     // A bind while no pass is open counts for the pass that opens next.
     t->attSampledEpoch = m_pass.active ? m_pass.epoch : m_attEpoch + 1u;
-    attRead(t, rstore::Reason::Sample);
+    // Sampling reads the view's aspects only: D3D9 samples the depth of a
+    // depth-stencil texture (shadow maps, INTZ), never its stencil, so a
+    // stencil cleared but never stored stays Lazy instead of being re-cleared.
+    attRead(t, rstore::Reason::Sample, view->key.aspects ? view->key.aspects : MtlAspectColor);
   }
 
 
@@ -1035,15 +1040,27 @@ namespace dxvk::backend {
     auto* t = static_cast<MtlTextureImpl*>(const_cast<MtlTexture*>(img));
     if (t == nullptr)
       return;
-    auto lazy = [] (const attopt::AspectState& st) { return st.content == attopt::Content::Lazy; };
-    if (likely(!lazy(t->attColor) && !lazy(t->attDepth) && !lazy(t->attStencil)))
+    using attopt::Content;
+    auto known = [] (const attopt::AspectState& st) {
+      return st.content == Content::Lazy || st.content == Content::Cleared;
+    };
+    if (likely(!known(t->attColor) && !known(t->attDepth) && !known(t->attStencil)))
       return;
-    MtlAspectMask need = 0u;
-    if ((aspects & MtlAspectColor)   && lazy(t->attColor))   need |= MtlAspectColor;
-    if ((aspects & MtlAspectDepth)   && lazy(t->attDepth))   need |= MtlAspectDepth;
-    if ((aspects & MtlAspectStencil) && lazy(t->attStencil)) need |= MtlAspectStencil;
-    if (need)
-      attRestore(t, why, need);
+
+    // Only the aspects the image has: initImage marks all three Cleared.
+    const MtlFormatInfo* fi = lookupFormatInfo(t->format);
+    MtlAspectMask has = 0u;
+    if (fi->flags & MtlFormatFlagDepth)   has |= MtlAspectDepth;
+    if (fi->flags & MtlFormatFlagStencil) has |= MtlAspectStencil;
+    if (!has)                             has  = MtlAspectColor;
+    aspects &= has;
+
+    MtlAspectMask lazy = 0u;
+    if ((aspects & MtlAspectColor)   && attopt::noteRead(t->attColor,   m_attFrame)) lazy |= MtlAspectColor;
+    if ((aspects & MtlAspectDepth)   && attopt::noteRead(t->attDepth,   m_attFrame)) lazy |= MtlAspectDepth;
+    if ((aspects & MtlAspectStencil) && attopt::noteRead(t->attStencil, m_attFrame)) lazy |= MtlAspectStencil;
+    if (lazy)
+      attRestore(t, why, lazy);
   }
 
 

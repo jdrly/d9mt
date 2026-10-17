@@ -39,12 +39,19 @@ struct Sim {
     return d;
   }
 
-  // A reader outside a pass (sampling, copy, readback, present).
-  void read() {
-    if (st.content == Content::Lazy) {
+  // A reader outside a pass (sampling, copy, readback, present), as
+  // MtlContextImpl::attRead applies it.
+  void read(uint32_t frame = 1u) {
+    if (noteRead(st, frame)) {
       restores++;
       st.content = Content::Cleared;
     }
+  }
+
+  // A pass in frame `frame`, with the read hint as createPassEncoder sets it.
+  SlotDecision passAt(uint32_t frame, SlotInput i, const Value* clear = nullptr) {
+    i.readHint = readRecently(st, frame);
+    return pass(i, clear);
   }
 };
 
@@ -211,6 +218,87 @@ int main() {
     SlotDecision d = s.pass(i);
     CHECK(d.load == Load::Clear && d.loadFromState && d.store == Store::Store);
     CHECK(s.st.content == Content::Defined && s.restores == 0);
+  }
+
+  // The read hint keeps the store of a known clear; it doesn't touch loads,
+  // written, Defined or Undefined contents.
+  {
+    SlotInput i = in(Content::Cleared);
+    i.readHint = true;
+    SlotDecision d = decide(i);
+    CHECK(d.load == Load::Clear && d.loadFromState && d.store == Store::Store);
+    CHECK(stateAfter(i, d).content == Content::Cleared);
+    CHECK(bytesSaved(i, d, 100u, false) == 100);
+    i.explicitClear = true;
+    d = decide(i);
+    CHECK(d.store == Store::Store && slotNeedsPass(i, d));
+    i = in(Content::Undefined);
+    i.readHint = true;
+    d = decide(i);
+    CHECK(d.load == Load::DontCare && d.store == Store::DontCare);
+    i = in(Content::Defined);
+    i.readHint = true;
+    d = decide(i);
+    CHECK(d.load == Load::Load && d.store == Store::Store);
+  }
+
+  // noteRead: only known clears are remembered; only Lazy needs a restore.
+  {
+    AspectState st;
+    CHECK(!noteRead(st, 5u) && st.readFrame == 0u);           // Defined
+    st.content = Content::Cleared;
+    CHECK(!noteRead(st, 5u) && st.readFrame == 5u);
+    st.content = Content::Lazy;
+    CHECK(noteRead(st, 6u) && st.readFrame == 6u);
+    st.content = Content::Undefined;
+    CHECK(!noteRead(st, 9u) && st.readFrame == 6u);
+    CHECK(readRecently(st, 6u) && readRecently(st, 6u + kReadHintFrames - 1u));
+    CHECK(!readRecently(st, 6u + kReadHintFrames));
+    CHECK(!readRecently(AspectState(), 1u));
+  }
+
+  // A target cleared every frame, never drawn into, sampled by a later pass
+  // every frame: re-cleared for its reader in the first frame only; from then
+  // on its pass stores the clear (no pass of its own, nothing re-cleared).
+  // When the reads stop, the hint lapses and the store is skipped again.
+  {
+    Sim s;
+    const Value v = { { 0.0f, 0.8f, 0.0f, 1.0f }, 0u };
+    for (uint32_t f = 1u; f <= 20u; f++) {
+      SlotDecision d = s.passAt(f, in(Content::Defined), &v);
+      CHECK(d.load == Load::Clear && !d.loadFromState);
+      CHECK(d.store == (f == 1u ? Store::DontCare : Store::Store));
+      s.read(f);
+      CHECK(s.st.content == Content::Cleared && s.st.value.c[1] == 0.8f);
+    }
+    CHECK(s.restores == 1);
+    for (uint32_t f = 21u; f <= 40u; f++) {
+      SlotDecision d = s.passAt(f, in(Content::Defined), &v);
+      CHECK(d.store == (f < 20u + kReadHintFrames ? Store::Store : Store::DontCare));
+    }
+    CHECK(s.st.content == Content::Lazy && s.restores == 1);
+    s.read(41u);                                               // reads again: one restore, hint back
+    CHECK(s.restores == 2);
+    CHECK(s.passAt(42u, in(Content::Defined), &v).store == Store::Store);
+  }
+
+  // SWTOR's shadow atlas (D24S8): depth and stencil cleared, depth written,
+  // stencil never; then sampled as a shadow map, which reads depth only. The
+  // stencil isn't a reader's concern: it stays Lazy, no restore, no hint, and
+  // the next pass on the atlas Clear-loads it.
+  {
+    Sim depth, stencil;
+    const Value z = { { 1.0f, 0.0f, 0.0f, 0.0f }, 0u }, s0 = { { }, 0u };
+    for (uint32_t f = 1u; f <= 10u; f++) {
+      SlotInput w = in(Content::Defined);
+      w.written = true;
+      depth.passAt(f, w, &z);
+      SlotDecision ds = stencil.passAt(f, in(Content::Defined), &s0);
+      CHECK(ds.load == Load::Clear && ds.store == Store::DontCare);
+      depth.read(f);                                           // the sampling bind: depth aspect only
+      CHECK(depth.st.content == Content::Defined && stencil.st.content == Content::Lazy);
+    }
+    CHECK(depth.restores == 0 && stencil.restores == 0);
   }
 
   if (g_fail) {

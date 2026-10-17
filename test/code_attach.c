@@ -4,10 +4,20 @@
 //  2. a clear-only target (green), never drawn into;
 //  3. a 4x MSAA target: cleared blue, a quad sampling the clear-only target, then resolved by
 //     StretchRect into a texture (the resolve the rendering pass's store can do);
-//  4. the backbuffer: three quads sampling the R32F target, the clear-only target and the
-//     resolved texture; every 30 frames GetRenderTargetData reads the clear-only target back.
-// Expected picture: left quad (128,255,255), middle green, right green on blue (MSAA edges).
-// Run with D9MT_NO_ATTACHMENT_OPT=1 for the reference: the dumps must match.
+//  4. a D24S8 depth texture (SWTOR's shadow atlas): depth and stencil cleared (stencil 5), depth
+//     written with color writes off, stencil never; then sampled as a shadow map (reads depth
+//     only: its unstored stencil clear must not be re-cleared for that), then used as the
+//     depth-stencil of a pass with stencil test EQUAL 5 (needs the stencil clear);
+//  5. the backbuffer: three quads sampling the R32F target, the clear-only target and the
+//     resolved texture, and a bottom row sampling the stencil-tested target and the depth
+//     texture; every 30 frames GetRenderTargetData reads the clear-only target back.
+// Expected picture: left quad (128,255,255), middle green, right green on blue (MSAA edges);
+// bottom left: the depth texture's shadow-map sample (left), black (middle), green (right);
+// bottom right: the shadow-map sample.
+// Run with D9MT_NO_ATTACHMENT_OPT=1 for the reference: the dumps must match. At frame 100 the
+// test creates C:\d9mt-test\DUMP (a steady-state frame for a D9MT_DUMP_TRIGGER=1 run, after
+// the read hint has settled) and it quits after 200 frames (device released: the
+// RESTORE-SUMMARY line under D9MT_PROFILE).
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
@@ -83,11 +93,13 @@ int main(void) {
   IDirect3DVertexDeclaration9 *decl = NULL;
   CHECK_HR(IDirect3DDevice9_CreateVertexDeclaration(dev, declElems, &decl));
 
-  // quads: 0 full target, 1 left, 2 middle, 3 right
-  static const float xs[4][2] = {{-0.8f, 0.8f}, {-0.95f, -0.35f}, {-0.3f, 0.3f}, {0.35f, 0.95f}};
-  struct Vertex verts[24];
-  for (int q = 0; q < 4; q++) {
-    float x0 = xs[q][0], x1 = xs[q][1], y0 = q ? -0.4f : -0.8f, y1 = q ? 0.4f : 0.8f;
+  // quads: 0 full target, 1 left, 2 middle, 3 right, 4 bottom left, 5 bottom right
+  static const float xs[6][2] = {{-0.8f, 0.8f}, {-0.95f, -0.35f}, {-0.3f, 0.3f}, {0.35f, 0.95f},
+                                 {-0.95f, -0.35f}, {0.35f, 0.95f}};
+  struct Vertex verts[36];
+  for (int q = 0; q < 6; q++) {
+    float x0 = xs[q][0], x1 = xs[q][1];
+    float y0 = q >= 4 ? -0.95f : q ? -0.4f : -0.8f, y1 = q >= 4 ? -0.5f : q ? 0.4f : 0.8f;
     struct Vertex v[6] = {{x0, y1, 0.5f, 0, 0}, {x1, y1, 0.5f, 1, 0}, {x1, y0, 0.5f, 1, 1},
                           {x0, y1, 0.5f, 0, 0}, {x1, y0, 0.5f, 1, 1}, {x0, y0, 0.5f, 0, 1}};
     memcpy(&verts[q * 6], v, sizeof(v));
@@ -106,6 +118,14 @@ int main(void) {
                                           D3DPOOL_DEFAULT, &clearTex, NULL));
   CHECK_HR(IDirect3DDevice9_CreateTexture(dev, 800, 600, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
                                           D3DPOOL_DEFAULT, &resolveTex, NULL));
+  IDirect3DTexture9 *depthTex = NULL, *stencilTex = NULL;
+  CHECK_HR(IDirect3DDevice9_CreateTexture(dev, 256, 256, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8,
+                                          D3DPOOL_DEFAULT, &depthTex, NULL));
+  CHECK_HR(IDirect3DDevice9_CreateTexture(dev, 256, 256, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                          D3DPOOL_DEFAULT, &stencilTex, NULL));
+  IDirect3DSurface9 *depthSurf, *stencilSurf;
+  IDirect3DTexture9_GetSurfaceLevel(depthTex, 0, &depthSurf);
+  IDirect3DTexture9_GetSurfaceLevel(stencilTex, 0, &stencilSurf);
   IDirect3DSurface9 *shadowSurf, *clearSurf, *resolveSurf, *shadowDepth, *msaa, *readback, *backBuffer, *autoDepth;
   IDirect3DTexture9_GetSurfaceLevel(shadowTex, 0, &shadowSurf);
   IDirect3DTexture9_GetSurfaceLevel(clearTex, 0, &clearSurf);
@@ -167,7 +187,35 @@ int main(void) {
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 2);
     IDirect3DDevice9_StretchRect(dev, msaa, NULL, resolveSurf, NULL, D3DTEXF_NONE);
 
-    // 4. backbuffer
+    // 4. shadow atlas: depth written, stencil cleared to 5 and never written
+    IDirect3DDevice9_SetTexture(dev, 0, NULL);
+    IDirect3DDevice9_SetRenderTarget(dev, 0, shadowSurf);
+    IDirect3DDevice9_SetDepthStencilSurface(dev, depthSurf);
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 5);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_COLORWRITEENABLE, 0);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, TRUE);
+    IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 2);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_COLORWRITEENABLE, 0xf);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, FALSE);
+    //    sampled as a shadow map (depth only) ...
+    IDirect3DDevice9_SetDepthStencilSurface(dev, NULL);
+    IDirect3DDevice9_SetRenderTarget(dev, 0, stencilSurf);
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)depthTex);
+    IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 6, 2);
+    //    ... then its stencil clear is tested: green where it is still 5
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)clearTex);
+    IDirect3DDevice9_SetDepthStencilSurface(dev, depthSurf);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILREF, 5);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILMASK, 0xff);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
+    IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 18, 2);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILENABLE, FALSE);
+
+    // 5. backbuffer
     IDirect3DDevice9_SetRenderTarget(dev, 0, backBuffer);
     IDirect3DDevice9_SetDepthStencilSurface(dev, autoDepth);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(24, 24, 40), 1.0f, 0);
@@ -177,6 +225,10 @@ int main(void) {
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 12, 2);
     IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)resolveTex);
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 18, 2);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)stencilTex);
+    IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 24, 2);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)depthTex);
+    IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 30, 2);
 
     IDirect3DDevice9_EndScene(dev);
 
@@ -194,10 +246,37 @@ int main(void) {
 
     IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
     frames++;
+    if (frames == 100) {
+      HANDLE h = CreateFileA("C:\\d9mt-test\\DUMP", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+      if (h != INVALID_HANDLE_VALUE)
+        CloseHandle(h);
+    }
+    if (frames == 200)
+      break;
   }
 
 done:
-  IDirect3DDevice9_Release(dev);
+  // Everything the device created, so that releasing it destroys it.
+  IDirect3DDevice9_SetTexture(dev, 0, NULL);
+  IDirect3DDevice9_SetStreamSource(dev, 0, NULL, 0, 0);
+  IDirect3DDevice9_SetVertexDeclaration(dev, NULL);
+  IDirect3DDevice9_SetVertexShader(dev, NULL);
+  IDirect3DDevice9_SetPixelShader(dev, NULL);
+  IDirect3DDevice9_SetRenderTarget(dev, 0, backBuffer);
+  IDirect3DDevice9_SetDepthStencilSurface(dev, autoDepth);
+  IDirect3DSurface9 *surfs[] = {shadowSurf, clearSurf, resolveSurf, shadowDepth, msaa, readback,
+                                backBuffer, autoDepth, depthSurf, stencilSurf};
+  for (unsigned i = 0; i < sizeof(surfs) / sizeof(surfs[0]); i++)
+    IDirect3DSurface9_Release(surfs[i]);
+  IDirect3DTexture9 *texs[] = {shadowTex, clearTex, resolveTex, depthTex, stencilTex};
+  for (unsigned i = 0; i < sizeof(texs) / sizeof(texs[0]); i++)
+    IDirect3DTexture9_Release(texs[i]);
+  IDirect3DVertexBuffer9_Release(vb);
+  IDirect3DVertexDeclaration9_Release(decl);
+  IDirect3DVertexShader9_Release(vs);
+  IDirect3DPixelShader9_Release(ps);
+  printf("device refs left: %lu\n", (unsigned long)IDirect3DDevice9_Release(dev));
+  fflush(stdout);
   IDirect3D9_Release(d3d);
   return 0;
 }
