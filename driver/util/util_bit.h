@@ -770,53 +770,80 @@ namespace dxvk::bit {
 namespace dxvk::bit {
 
   // count 16-byte vectors of 4 floats; FlushNan: NaN lanes become +0, every
-  // other lane keeps its bits (SSE: and(v, cmpeq(v, v)))
+  // other lane keeps its bits (SSE: and(v, cmpeq(v, v))). The flushing copy is
+  // the scalar loop on ARM too: clang vectorizes it (fcmeq/and, two vectors per
+  // iteration), which measured faster than one NEON vector per iteration; the
+  // plain copy is NEON, which measured faster than the loop (arm64_port_bench).
   template<bool FlushNan>
   inline void copyVec4(void* dst, const void* src, size_t count) {
-    auto d = reinterpret_cast<      uint32_t*>(dst);
-    auto s = reinterpret_cast<const uint32_t*>(src);
     #if defined(DXVK_ARCH_ARM64)
-    for (size_t i = 0u; i < count; i++) {
-      uint32x4_t v = vld1q_u32(s + 4u * i);
-      if (FlushNan) {
-        float32x4_t f = vreinterpretq_f32_u32(v);
-        v = vandq_u32(v, vceqq_f32(f, f));
-      }
-      vst1q_u32(d + 4u * i, v);
-    }
-    #else
-    for (size_t i = 0u; i < 4u * count; i++) {
-      float f;
-      std::memcpy(&f, &s[i], sizeof(f));
-      d[i] = FlushNan && f != f ? 0u : s[i];
+    if (!FlushNan) {
+      auto d = reinterpret_cast<      uint32_t*>(dst);
+      auto s = reinterpret_cast<const uint32_t*>(src);
+      for (size_t i = 0u; i < count; i++)
+        vst1q_u32(d + 4u * i, vld1q_u32(s + 4u * i));
+      return;
     }
     #endif
+    // as DXVK's portable loop, in the float domain: a non-NaN float is stored
+    // with its bits unchanged
+    auto d = reinterpret_cast<      float*>(dst);
+    auto s = reinterpret_cast<const float*>(src);
+    for (size_t i = 0u; i < 4u * count; i++) {
+      float f = s[i];
+      if (FlushNan)
+        f = f != f ? 0.0f : f;
+      d[i] = f;
+    }
   }
 
-  // size bytes, a multiple of 4
+  // size bytes, a multiple of 4; dst and src don't overlap. Whole 32-byte
+  // blocks, then the last 32 (or 16) bytes once more from the end, as
+  // memcpy implementations do: the same bytes, written twice.
   inline void copyDwords(void* dst, const void* src, size_t size) {
     #if defined(DXVK_ARCH_ARM64)
     auto d = reinterpret_cast<      uint8_t*>(dst);
     auto s = reinterpret_cast<const uint8_t*>(src);
-    size_t i = 0u;
-    for ( ; i + 16u <= size; i += 16u)
-      vst1q_u8(d + i, vld1q_u8(s + i));
-    for ( ; i < size; i += 4u)
-      vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vld1q_dup_u32(reinterpret_cast<const uint32_t*>(s + i)), 0);
+    if (size >= 32u) {
+      size_t i = 0u;
+      for ( ; i + 32u <= size; i += 32u)
+        vst1q_u8_x2(d + i, vld1q_u8_x2(s + i));
+      if (i < size)
+        vst1q_u8_x2(d + size - 32u, vld1q_u8_x2(s + size - 32u));
+    } else if (size >= 16u) {
+      uint8x16_t head = vld1q_u8(s), tail = vld1q_u8(s + size - 16u);
+      vst1q_u8(d, head);
+      vst1q_u8(d + size - 16u, tail);
+    } else {
+      for (size_t i = 0u; i + 4u <= size; i += 4u)
+        vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vld1q_dup_u32(reinterpret_cast<const uint32_t*>(s + i)), 0);
+    }
     #else
     std::memcpy(dst, src, size);
     #endif
   }
 
-  // size bytes, a multiple of 4
+  // size bytes, a multiple of 4; as copyDwords
   inline void zeroDwords(void* dst, size_t size) {
     #if defined(DXVK_ARCH_ARM64)
     auto d = reinterpret_cast<uint8_t*>(dst);
-    size_t i = 0u;
-    for ( ; i + 16u <= size; i += 16u)
-      vst1q_u8(d + i, vdupq_n_u8(0u));
-    for ( ; i < size; i += 4u)
-      vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vdupq_n_u32(0u), 0);
+    // a zero the optimizer can't see, or it turns the stores back into memset
+    uint8x16_t zero = vdupq_n_u8(0u);
+    __asm__("" : "+w"(zero));
+    uint8x16x2_t zero2 = { { zero, zero } };
+    if (size >= 32u) {
+      size_t i = 0u;
+      for ( ; i + 32u <= size; i += 32u)
+        vst1q_u8_x2(d + i, zero2);
+      if (i < size)
+        vst1q_u8_x2(d + size - 32u, zero2);
+    } else if (size >= 16u) {
+      vst1q_u8(d, zero);
+      vst1q_u8(d + size - 16u, zero);
+    } else {
+      for (size_t i = 0u; i + 4u <= size; i += 4u)
+        vst1q_lane_u32(reinterpret_cast<uint32_t*>(d + i), vreinterpretq_u32_u8(zero), 0);
+    }
     #else
     std::memset(dst, 0, size);
     #endif
@@ -828,14 +855,20 @@ namespace dxvk::bit {
     #if defined(DXVK_ARCH_ARM64)
     auto d = reinterpret_cast<      uint32_t*>(dst);
     auto s = reinterpret_cast<const uint32_t*>(src);
+    auto eq = [d, s] (size_t i) { return vceqq_u32(vld1q_u32(s + 4u * i), vld1q_u32(d + 4u * i)); };
+    // four vectors per test; on a difference copy from that block on (the
+    // equal vectors before the first differing one get their own bytes again)
     size_t i = 0u;
-    for ( ; i < count; i++) {
-      uint32x4_t v = vld1q_u32(s + 4u * i);
-      if (vminvq_u32(vceqq_u32(v, vld1q_u32(d + 4u * i))) != ~0u)
-        break;
+    for ( ; i + 4u <= count; i += 4u) {
+      if (vminvq_u32(vandq_u32(vandq_u32(eq(i), eq(i + 1u)), vandq_u32(eq(i + 2u), eq(i + 3u)))) != ~0u)
+        goto copy;
     }
-    if (i == count)
-      return false;
+    for ( ; i < count; i++) {
+      if (vminvq_u32(eq(i)) != ~0u)
+        goto copy;
+    }
+    return false;
+  copy:
     for ( ; i < count; i++)
       vst1q_u32(d + 4u * i, vld1q_u32(s + 4u * i));
     return true;
