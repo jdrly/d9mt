@@ -3,28 +3,39 @@
 # AirBuilder + LLVM on wine's unix side, plus builtin-marked PE dlls and
 # the import lib the driver links. Mirrors tools/build-d9mtmetal.sh.
 #
-# Also builds the x86_64 host loopback driver (airlib/loopback_main.cpp).
+# Also builds the host loopback driver (airlib/loopback_main.cpp).
 #
 #   bash scripts/build-d9mtair.sh              # build only
 #   CX=<engine> BOTTLE=<name> bash scripts/build-d9mtair.sh --install
 #        # + install into a (dedicated) CrossOver engine copy and bottle
+#   ARCH=arm64 bash scripts/build-d9mtair.sh   # arm64 unix side (arm64 Wine):
+#        # build/airlib-arm64/{d9mtair.so,airlib_loopback} only; the d9mtair
+#        # PE dlls are not built (d3d9.dll reaches the compiler through winemetal)
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$V2/airlib"
 DX="$V2/third_party/dxbc-spirv"
-OUT="$V2/build/airlib"
+ARCH="${ARCH:-x86_64}"
+case "$ARCH" in
+  x86_64) OUT="$V2/build/airlib"; ARCH_FLAGS=() ;;
+  # -ffp-contract=off: clang fuses a*b+c into fmadd on arm64 but not on x86_64,
+  # so float results (and the AIR they feed) could differ (docs/arm64ec-port.md).
+  arm64)  OUT="$V2/build/airlib-arm64"; ARCH_FLAGS=(-ffp-contract=off) ;;
+  *) echo "FATAL: ARCH must be x86_64 or arm64" >&2; exit 1 ;;
+esac
 OBJ="$OUT/obj"
 mkdir -p "$OBJ"
 
 # Toolchain LLVM was built with LLVM_BUILD_TOOLS=Off (no llvm-config), so
 # flags/archives are spelled out (matches `llvm-config --libs bitwriter
 # core support` on a stock 15.0.7).
-LLVM="$V2/toolchains/llvm-x86_64"
+LLVM="$V2/toolchains/llvm-$ARCH"
 [ -f "$LLVM/lib/libLLVMBitWriter.a" ] || { echo "FATAL: run scripts/build-llvm-unixside.sh first" >&2; exit 1; }
 
-CXXFLAGS=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
+CXXFLAGS=(-std=c++17 -O2 -arch "$ARCH" -fvisibility=hidden -ffile-prefix-map="$V2"=.
           -I"$DX" -I"$V2" -I"$LLVM/include"
-          -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
+          -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+          ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"})
 # Link the full archive set (built with no codegen targets, so it is lean);
 # ld64 dead-strips unused members. Explicit subsetting kept missing
 # transitive deps (MC/Analysis/Object behind BitcodeWriter's symtab path).
@@ -59,7 +70,7 @@ CORE_OBJS=(); compile CORE_OBJS "${IR_CORE[@]}" \
   "$V2/air/air_builder.cpp" "$V2/air/air_metallib.cpp"
 FRONT_OBJS=(); compile FRONT_OBJS "${FRONT[@]}"
 
-echo "[d9mtair] unix .so (x86_64: wine's unix side runs under Rosetta)"
+echo "[d9mtair] unix .so ($ARCH: wine's unix side)"
 clang++ "${CXXFLAGS[@]}" -dynamiclib \
   -o "$OUT/d9mtair.so" \
   "$SRC/unix.cpp" "${CORE_OBJS[@]}" "${LLVM_LIBS[@]}" \
@@ -74,11 +85,16 @@ ___wine_unix_call_wow64_funcs
 EOF
 echo "  -> $OUT/d9mtair.so ($(wc -c < "$OUT/d9mtair.so") bytes)"
 
-echo "[d9mtair] loopback driver (x86_64 host)"
+echo "[d9mtair] loopback driver ($ARCH host)"
 clang++ "${CXXFLAGS[@]}" \
   "$SRC/loopback_main.cpp" "${FRONT_OBJS[@]}" "${CORE_OBJS[@]}" \
   "${LLVM_LIBS[@]}" -lm -lpthread \
   -o "$OUT/airlib_loopback"
+
+if [ "$ARCH" != x86_64 ]; then
+  echo "[d9mtair] done ($ARCH: unix side only)"
+  exit 0
+fi
 
 echo "[d9mtair] ntdll import libs"
 cat > "$OUT/ntdll-cx32.def" <<'EOF'
