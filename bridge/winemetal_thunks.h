@@ -598,7 +598,8 @@ struct unixcall_mtl4_barrier {
 #pragma pack(pop)
 
 /* d9mt, unix side: after the CPU observes GPU completion (a shared event's
- * value, a finished wait), the caller reads memory the GPU wrote: occlusion
+ * value, a finished wait, a command buffer's status; the driver uses the
+ * first two today), the caller reads memory the GPU wrote: occlusion
  * query results, readbacks, locked buffers. On arm64 those loads must not be
  * satisfied before the observation; x86_64 (TSO, and Rosetta's) keeps loads in
  * order, and its build stays unchanged. docs/arm64ec-port.md (R1).

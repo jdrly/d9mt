@@ -1729,7 +1729,7 @@ _MTLCommandBuffer_waitUntilCompleted(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_status(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
-  params->ret = [(id<MTLCommandBuffer>)params->handle status];
+  params->ret = [(id<MTLCommandBuffer>)params->handle status]; D9MT_GPU_ACQUIRE();
   return STATUS_SUCCESS;
 }
 
