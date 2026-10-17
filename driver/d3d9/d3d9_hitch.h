@@ -45,13 +45,14 @@ namespace dxvk::hitch {
     GpuWait,      // app thread waiting for a resource on the GPU
     Throttle,     // staging memory throttle waiting for the GPU
     Query,        // IDirect3DQuery9::GetData
+    BgSleep,      // Present's sleep while the window is in the background (inside present)
     Count
   };
 
   inline const char* catName(uint32_t c) {
     static constexpr const char* kNames[Count] = {
       "present", "latencyWait", "texCreate", "texLock", "texUpload", "bufCreate",
-      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query"
+      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query", "bgSleep"
     };
     return c < Count ? kNames[c] : "?";
   }
@@ -185,9 +186,11 @@ namespace dxvk::hitch {
     }
 
     // Called once per Present, after it returned. Fills `out` and returns true
-    // if the frame (Present to Present) took at least the threshold.
+    // if the frame (Present to Present) took at least the threshold. `every`, if
+    // given, gets every frame's numbers (PACE, d3d9_pace.h).
     bool endFrame(uint64_t nowTicks, uint64_t nowNanos, const CompileTotals& compile,
-                  uint64_t csBehind, double thresholdMs, uint64_t& frameOut, FrameStats& out) {
+                  uint64_t csBehind, double thresholdMs, uint64_t& frameOut, FrameStats& out,
+                  FrameStats* every = nullptr) {
       if (!m_calibTicks) {
         m_calibTicks = nowTicks;
         m_calibNs    = nowNanos;
@@ -226,7 +229,13 @@ namespace dxvk::hitch {
 
       // The first frame has no previous Present; before calibration the
       // tick ratio is a guess.
-      if (frame < 2u || m_nsPerTick <= 0.0 || dtMs < thresholdMs)
+      const bool valid = frame >= 2u && m_nsPerTick > 0.0;
+      if (every) {
+        *every = s;
+        if (!valid)
+          every->dtMs = 0.0;
+      }
+      if (!valid || dtMs < thresholdMs)
         return false;
 
       frameOut = frame;

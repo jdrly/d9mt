@@ -21,7 +21,7 @@ d9mt's own code (not from DXVK):
   mtl/         the Metal context/device/presenter seam and memory profiles
   backend/     the Metal 4 backend on the winemetal bridge
   d3d9/ files with no DXVK counterpart: d3d9_shader_compiler.*,
-               d3d9_debug.*, d3d9_buffer_tracking.h, d3d9_hitch.h,
+               d3d9_debug.*, d3d9_buffer_tracking.h, d3d9_hitch.h, d3d9_pace.h,
                d3d9_com_guid.cpp, phasec_probe.cpp; plus the Metal-specific
                parts of the DXVK-derived d3d9 files (see EXTRACTION-LOG.md
                and the git history)
