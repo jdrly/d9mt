@@ -45,10 +45,12 @@ namespace dxvk {
     ConstantMask constMaskF;
     ConstantMask constMaskI;
 
+    D3D9IoDclList ioDcls;
+
     while (parser) {
       dxbc_spv::sm3::Instruction instruction = parser.parseInstruction();
 
-      if (!instruction || !HandleInstruction(instruction, constMaskF, constMaskI, shaderDefs))
+      if (!instruction || !HandleInstruction(instruction, constMaskF, constMaskI, shaderDefs, ioDcls))
         return false;
     }
 
@@ -102,7 +104,10 @@ namespace dxvk {
     const dxbc_spv::sm3::Instruction&   op,
           ConstantMask&                 constMaskF,
           ConstantMask&                 constMaskI,
-          D3D9ImmediateConstantsData&   shaderDefs) {
+          D3D9ImmediateConstantsData&   shaderDefs,
+          D3D9IoDclList&                ioDcls) {
+    ScanConverterHazards(op, ioDcls);
+
     auto matrixSize = getMatrixSize(op.getOpCode());
 
     for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
@@ -322,6 +327,178 @@ namespace dxvk {
     }
 
     return true;
+  }
+
+
+  static std::string HazardRegName(RegisterType type, uint32_t index) {
+    switch (type) {
+      case RegisterType::eTemp:       return str::format("r", index);
+      case RegisterType::eInput:      return str::format("v", index);
+      case RegisterType::eOutput:     return str::format("o", index);
+      case RegisterType::eAttributeOut: return str::format("oD", index);
+      case RegisterType::eColorOut:   return str::format("oC", index);
+      case RegisterType::eDepthOut:   return "oDepth";
+      case RegisterType::ePredicate:  return str::format("p", index);
+      case RegisterType::eTexture:
+      case RegisterType::ePixelTexCoord: return str::format("t", index);
+      case RegisterType::eMiscType:
+        return index == uint32_t(MiscTypeIndex::eMiscTypeFace) ? "vFace" : "vPos";
+      default:                        return str::format("reg", uint32_t(type), "_", index);
+    }
+  }
+
+
+  static std::string HazardMask(uint8_t mask, bool omitFull = true) {
+    if (mask == 0xfu && omitFull)
+      return std::string();
+
+    std::string s = ".";
+    for (uint32_t i = 0u; i < 4u; i++) {
+      if (mask & (1u << i))
+        s += "xyzw"[i];
+    }
+    return s;
+  }
+
+
+  static std::string HazardSemantic(Semantic semantic) {
+    static const char* const s_names[] = {
+      "position", "blendweight", "blendindices", "normal", "psize", "texcoord", "tangent",
+      "binormal", "tessfactor", "positiont", "color", "fog", "depth", "sample" };
+    uint32_t usage = uint32_t(semantic.usage);
+
+    return usage < sizeof(s_names) / sizeof(s_names[0])
+      ? str::format(s_names[usage], semantic.index)
+      : str::format("usage", usage, "_", semantic.index);
+  }
+
+
+  void D3D9ShaderAnalysis::ScanConverterHazards(
+    const Instruction&                  op,
+          D3D9IoDclList&                ioDcls) {
+    const ShaderType stage = GetShaderInfo().getType();
+    const uint32_t major = GetShaderInfo().getVersion().first;
+
+    switch (op.getOpCode()) {
+      case OpCode::eCrs:
+      case OpCode::eSetP: {
+        // Converter::handleCrs/handleSetP build one value per written component,
+        // packed, but composite() indexes that list by component: only masks
+        // that start at .x without gaps (and .xyzw for setp) come out right.
+        const auto& dst = op.getDst();
+        uint8_t mask = uint8_t(dst.getWriteMask(GetShaderInfo()));
+        bool isCrs = op.getOpCode() == OpCode::eCrs;
+
+        if (mask != 0x1u && mask != 0x3u && mask != 0x7u && (isCrs || mask != 0xfu)) {
+          AddConverterHazard(str::format(isCrs ? "crs-partial-mask:" : "setp-partial-mask:",
+            HazardRegName(dst.getRegisterType(), dst.getIndex()), HazardMask(mask, false)));
+        }
+      } break;
+
+      case OpCode::eDcl: {
+        // Mirrors IoMap::handleDclIoVar: which dcls declare I/O, and the
+        // semantic it uses (SM1/2 varyings get one from the register).
+        const auto& dst = op.getDst();
+        RegisterType type = dst.getRegisterType();
+
+        if (type != RegisterType::eAttributeOut && type != RegisterType::eOutput
+         && type != RegisterType::eInput && type != RegisterType::eTexture
+         && type != RegisterType::ePixelTexCoord && type != RegisterType::eMiscType
+         && type != RegisterType::eColorOut)
+          break;
+
+        D3D9IoDclEntry entry = { };
+        entry.registerType  = type;
+        entry.registerIndex = dst.getIndex();
+        entry.mask          = uint8_t(dst.getWriteMask(GetShaderInfo()));
+        entry.isInput       = type == RegisterType::eInput
+          || (type == RegisterType::eTexture && stage == ShaderType::ePixel)
+          || type == RegisterType::eMiscType
+          || type == RegisterType::ePixelTexCoord;
+
+        const auto& dcl = op.getDcl();
+        entry.semantic = Semantic { dcl.getSemanticUsage(), dcl.getSemanticIndex() };
+
+        bool isVarying = entry.isInput == (stage == ShaderType::ePixel);
+
+        if (isVarying && major < 3u) {
+          if (type == RegisterType::eInput)
+            entry.semantic = Semantic { SemanticUsage::eColor, entry.registerIndex };
+          else if (type == RegisterType::eTexture || type == RegisterType::ePixelTexCoord)
+            entry.semantic = Semantic { SemanticUsage::eTexCoord, entry.registerIndex };
+          else if (type == RegisterType::eMiscType)
+            entry.semantic = Semantic { SemanticUsage::ePosition, 0u };
+        }
+
+        AddIoDcl(ioDcls, entry, false);
+      } break;
+
+      default: {
+        // IoMap::emitLoad/emitStore declare an undeclared v# (any stage) or
+        // SM3 o# on first use, with the semantic determineSemanticForRegister
+        // picks: color<n> for v#, texcoord<n> for o#.
+        for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
+          const auto& src = op.getSrc(i);
+
+          if (src.getRegisterType() == RegisterType::eInput && !src.hasRelativeAddressing()) {
+            D3D9IoDclEntry entry = { RegisterType::eInput, src.getIndex(),
+              Semantic { SemanticUsage::eColor, src.getIndex() }, 0xfu, true };
+            AddIoDcl(ioDcls, entry, true);
+          }
+        }
+
+        if (stage == ShaderType::eVertex && major >= 3u && op.hasDst()
+         && op.getDst().getRegisterType() == RegisterType::eOutput
+         && !op.getDst().hasRelativeAddressing()) {
+          D3D9IoDclEntry entry = { RegisterType::eOutput, op.getDst().getIndex(),
+            Semantic { SemanticUsage::eTexCoord, op.getDst().getIndex() }, 0xfu, false };
+          AddIoDcl(ioDcls, entry, true);
+        }
+      } break;
+    }
+  }
+
+
+  void D3D9ShaderAnalysis::AddIoDcl(
+          D3D9IoDclList&                ioDcls,
+          D3D9IoDclEntry                entry,
+          bool                          isImplicit) {
+    // The conflict test of IoMap::dclIoVar, which asserts there isn't one.
+    bool isRegularRegister = entry.registerType == RegisterType::eInput
+                          || entry.registerType == RegisterType::eOutput;
+
+    if (isImplicit) {
+      for (const auto& e : ioDcls) {
+        if (e.isInput == entry.isInput && e.registerType == entry.registerType
+         && e.registerIndex == entry.registerIndex)
+          return; // declared already, nothing to declare
+      }
+    }
+
+    for (const auto& e : ioDcls) {
+      if (e.isInput != entry.isInput)
+        continue;
+
+      bool sameRegister = e.registerType == entry.registerType && e.registerIndex == entry.registerIndex;
+
+      if (sameRegister || (isRegularRegister && e.semantic == entry.semantic)) {
+        AddConverterHazard(str::format("packed-io:",
+          HazardRegName(e.registerType, e.registerIndex), HazardMask(e.mask), "=", HazardSemantic(e.semantic), "+",
+          HazardRegName(entry.registerType, entry.registerIndex), HazardMask(entry.mask),
+          isImplicit ? "(undeclared)=" : "=", HazardSemantic(entry.semantic)));
+        break;
+      }
+    }
+
+    ioDcls.push_back(entry);
+  }
+
+
+  void D3D9ShaderAnalysis::AddConverterHazard(const std::string& item) {
+    if (!m_converterHazards.empty())
+      m_converterHazards += ' ';
+
+    m_converterHazards += item;
   }
 
 

@@ -155,6 +155,12 @@ clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp
 clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 ```
 
+`scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
+patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
+`ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
+scripts/sm3_hazard_test.py build/driver-x64/d3d9.dll [<dir of .asm/.bin>...]`
+(corpora from `scripts/sm3_corpus.py gen`).
+
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
 and `scripts/dump-verify.sh` drive the D3D9 test programs in `test/` under a

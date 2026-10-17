@@ -233,6 +233,13 @@ namespace dxvk {
 
     m_name = str::format(stage == MtlShaderStage::Vertex ? "vs_" : "ps_", ShaderKey.hash());
 
+    // Once per distinct shader: patterns dxbc-spirv's sm3 converter aborts on
+    // or miscompiles (issue #8), so logs show whether a game uses them.
+    if (unlikely(!m_analysis.GetConverterHazards().empty())) {
+      Logger::warn(str::format("D3D9 SM3 hazard: ", m_name, " ",
+        stage == MtlShaderStage::Vertex ? "VS" : "PS", " ", m_analysis.GetConverterHazards()));
+    }
+
     // The game may free the bytecode once Create*Shader returns; the
     // program keeps its own copy until Phase A has run.
     m_program = new D3D9ShaderProgram(pDevice->GetDXVKDevice().ptr(),
