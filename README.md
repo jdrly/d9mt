@@ -151,12 +151,25 @@ clang++ -std=c++17 -I driver/util test/native/fenced_pool_test.cpp -o /tmp/fpt &
 clang++ -std=c++17 -I driver/d3d9 test/native/hitch_test.cpp -o /tmp/ht && /tmp/ht
 clang++ -std=c++17 -I driver/mtl test/native/memory_profile_test.cpp -o /tmp/mpt && /tmp/mpt
 clang++ -std=c++17 -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp -o /tmp/urt && /tmp/urt
+clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp/aot && /tmp/aot
+clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 ```
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
 and `scripts/dump-verify.sh` drive the D3D9 test programs in `test/` under a
 CrossOver bottle (`CX` and `BOTTLE` must be set).
+
+`scripts/run-hang-test.sh` is the profiling/debug regression test: it runs
+`test/code_mtlock.c` (a render thread presenting frames while a second thread
+locks managed textures, on a device without `D3DCREATE_MULTITHREADED`, as
+SWTOR does) with `D9MT_PROFILE`, `D9MT_MEMSTATS`, `DXVK_LOG_LEVEL=info` and a
+`D9MT_DEBUG_FILE` flags file, in a throwaway prefix, and fails if a run doesn't
+finish within the timeout:
+
+```bash
+ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
+```
 
 ## Install & run
 
@@ -231,6 +244,8 @@ The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
 | `d9mt.writeOnlyDemoteLocks` | `2` (`0` in `unlimited`) | a directly mapped buffer locked in place more often than this goes back to a staging copy; `0` = never; env `D9MT_WRITEONLY_DEMOTE` |
 | `d9mt.memoryStats` | `False` | log a `DIAG MEM` line every 256 frames; env `D9MT_MEMSTATS` (`1`, or a frame interval ≥ 16) |
 | `d9mt.resourceLabels` | `False` | label Metal resources for Xcode's GPU tools; env `D9MT_LABELS` |
+| `d9mt.pipelineWaitBudgetMs` | `-1` (off: wait as long as it takes) | most the render thread waits per frame for shaders/pipelines still compiling before it skips the draws that need them (see below); `0` = never wait (= `D9MT_ASYNC_SKIP=1`); max `10000`; env `D9MT_PSO_WAIT_MS` |
+| `d9mt.attachmentOpt` | `True` | attachment load/store optimization (see below); `D9MT_NO_ATTACHMENT_OPT=1` turns it off |
 
 **Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
 to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
@@ -240,6 +255,68 @@ to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
 upload-ring chunks, command allocators). `unlimited` behaves like the driver
 before profiles existed and is meant for A/B comparisons.
 
+**Pipeline wait budget.** When a draw needs a shader or pipeline that is
+still compiling on the worker threads, the render thread waits for it by
+default: no draw is ever missing, but a slow compile is a hitch.
+`D9MT_ASYNC_SKIP=1` never waits and skips such draws instead: no hitch, but
+objects pop in a few frames late. `d9mt.pipelineWaitBudgetMs = N` sits in
+between: the render thread waits for pending compiles, but at most N ms per
+frame in total (each wait gets what is left of the frame's N ms, so many
+pending pipelines can't stack up their waits). Draws whose compile isn't done
+when the budget runs out are skipped for that frame, as with
+`D9MT_ASYNC_SKIP`; the compile carries on and the draws come back once it is
+done. Most compiles finish within a few ms and are still waited for; only
+the rare slow one is skipped, so a budget of e.g. `30` caps compile hitches
+at about 30 ms in exchange for occasional brief pop-in. While a draw is
+skipped, occlusion queries that cover it count fewer samples. Clears and
+blits are never skipped (their pipelines are built on the spot). `D9MT_ASYNC_SKIP=1` takes
+precedence and acts as a budget of `0`; without compile workers
+(`D9MT_COMPILE_THREADS=0`) the budget is ignored. With `D9MT_PROFILE`, the
+`COMPILE` and `HITCH` lines count skipped draws (`skipped=`) and waits cut
+short by the budget (`budgetHit=`).
+
+**Attachment load/store optimization.** A Metal render pass loads each
+attachment from memory when it starts and stores it when it ends. d9mt
+creates a pass's encoder only when the pass ends, so it knows what the pass
+did, and it tracks for each single-subresource attachment image whether its
+contents are a known clear value:
+
+- An attachment that holds a known clear (from creation or a clear) is
+  Clear-loaded instead of read from memory.
+- If no draw of the pass writes it and nothing samples it during the pass,
+  its store is skipped. Its contents are still the clear value: the next pass
+  Clear-loads it, and any other reader (sampling, copies, blits, resolves,
+  readbacks, Present) gets it by a re-clear first (`restore` in `STATS`).
+  Sampling reads only the view's aspects: a depth-stencil texture sampled as a
+  shadow map or INTZ (depth) doesn't need its unstored stencil clear.
+- Once a reader has needed such a clear (a target cleared every frame and
+  sampled or copied later in the frame), the passes of the next 8 frames store
+  it as before instead of leaving it to a re-clear; the hint lapses when the
+  reads stop.
+- A pass without draws whose clears needn't be stored gets no encoder at all;
+  the clear moves into the next pass's load action.
+- An MSAA color resolve (StretchRect) right after the pass that rendered the
+  source becomes that pass's `StoreAndMultisampleResolve`, instead of a pass
+  of its own that loads every sample again.
+- With `D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL`, the pass still rendering into
+  the auto depth-stencil at Present doesn't store it, and the next pass
+  doesn't load it (wined3d discards it too).
+
+Everything else is loaded and stored as before. Written contents are never
+dropped: when a pass ends, nothing tells whether a later pass needs them
+(only `D9MT_DEFERRED`'s whole-frame rules can). In SWTOR this removes the
+load and store of the 2048² R32F color target that its shadow passes bind with
+color writes off, about 32 MB per shadow pass. Memoryless textures aren't
+used: D3D9 surfaces outlive the pass. `no_attach_opt` in the
+`D9MT_DEBUG_FILE` flags switches back to the previous actions live, for A/B
+tests; `att_trace` logs the decisions and the restores. With `D9MT_PROFILE`, a
+`RESTORE` line follows each second's `STATS` line when there were restores:
+the most frequent images (Metal format, size, aspects re-cleared), why (`sample`,
+`copy`, `blit`, `resolve`, `readback`, `partial-clear`, ...) and the D3D9 call
+they came from, e.g. `120x 2048x2048 Depth32Float_Stencil8 s sample@Draw`;
+`RESTORE-SUMMARY` has the session's totals when the device is destroyed. `D9MT_DEFERRED` turns it off (deferred
+passes have their own load/store rules).
+
 ### Environment variables
 
 | Variable | Default | Effect |
@@ -248,7 +325,9 @@ before profiles existed and is meant for A/B comparisons.
 | `D9MT_PSO_ARCHIVE` / `D9MT_PSO_ARCHIVE_DIR` | on | Metal 4 pipeline archives in `<user cache dir>/d9mt/pso/` (last 8 sessions); `0` turns them off, `_DIR` relocates them |
 | `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
-| `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in |
+| `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
+| `D9MT_PSO_WAIT_MS` | off | wait at most this many ms per frame for pending pipelines, then skip (see `d9mt.pipelineWaitBudgetMs`); `off` or `-1` overrides a `dxvk.conf` value |
+| `D9MT_NO_ATTACHMENT_OPT` | off | `1` turns the attachment load/store optimization off (see `d9mt.attachmentOpt`) |
 | `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | frame cap while the window is hidden / minimized; `0` turns it off |
 | `D9MT_DRAWABLE_TIMEOUT_MS` | max(3 frames, 50 ms) | longest wait for a drawable before a present is skipped |
 | `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
@@ -260,10 +339,10 @@ before profiles existed and is meant for A/B comparisons.
 
 | Variable | Effect |
 |---|---|
-| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters) and `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game |
+| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, the render thread's CPU time in the attachment optimization (`attMs`, ms per second) and clears folded into a pass or given one of their own, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`), plus a `RESTORE` line in seconds with attachment restores and `RESTORE-SUMMARY` at device destruction (`driver/mtl/mtl_restore_stats.h`). No GPU time: MTL4 command buffers don't report it |
 | `D9MT_TRACE` | verbose trace lines |
 | `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
-| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, and `dump` to dump the next frame's draws. Off unless set |
+| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
 | `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
 | `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |
@@ -288,7 +367,9 @@ before profiles existed and is meant for A/B comparisons.
   pending.
 - **First-time stutter** in new areas while shaders and pipelines compile.
   Compiles run on worker threads and are cached on disk, so later visits are
-  smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in.
+  smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in;
+  `d9mt.pipelineWaitBudgetMs` caps the stutter and only skips what takes
+  longer.
 - **The disk caches have no size cap.** The AIR cache is one sqlite file
   shared by all games (entries from other driver builds are dropped); the
   pipeline archives keep the last 8 sessions.

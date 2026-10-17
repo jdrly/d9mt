@@ -69,6 +69,27 @@ int main() {
   CHECK(parseSwitch("0") == 0 && parseSwitch("false") == 0 && parseSwitch("No") == 0 && parseSwitch("off") == 0);
   CHECK(parseSwitch("") == -1 && parseSwitch("256") == -1 && parseSwitch("maybe") == -1);
 
+  // Pipeline wait budget (D9MT_PSO_WAIT_MS over d9mt.pipelineWaitBudgetMs):
+  // off in every tier; env wins when it parses, else the config value.
+  for (MtlMemoryTier x : { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High,
+                           MtlMemoryTier::Ultra, MtlMemoryTier::Unlimited })
+    CHECK(memoryProfileForTier(x).pipelineWaitBudgetMs == -1);
+  // Attachment load/store optimization: on in every tier (unlimited included;
+  // D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt turn it off).
+  for (MtlMemoryTier x : { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High,
+                           MtlMemoryTier::Ultra, MtlMemoryTier::Unlimited })
+    CHECK(memoryProfileForTier(x).attachmentOpt);
+  CHECK(parseWaitBudgetMs("", -1) == -1 && parseWaitBudgetMs("", 25) == 25);
+  CHECK(parseWaitBudgetMs("50", -1) == 50 && parseWaitBudgetMs("50", 10) == 50);
+  CHECK(parseWaitBudgetMs("0", 25) == 0 && parseWaitBudgetMs("1", -1) == 1);
+  CHECK(parseWaitBudgetMs("-1", 25) == -1 && parseWaitBudgetMs("off", 25) == -1);
+  CHECK(parseWaitBudgetMs("False", 25) == -1 && parseWaitBudgetMs("no", 25) == -1);
+  CHECK(parseWaitBudgetMs("99999", -1) == 10000);
+  CHECK(parseWaitBudgetMs("abc", 25) == 25 && parseWaitBudgetMs("5ms", -1) == -1);
+  CHECK(parseWaitBudgetMs("1234567890", 25) == 25);
+  CHECK(clampWaitBudgetMs(-1) == -1 && clampWaitBudgetMs(-7) == -1);
+  CHECK(clampWaitBudgetMs(0) == 0 && clampWaitBudgetMs(30) == 30 && clampWaitBudgetMs(50000) == 10000);
+
   // Smaller tiers never exceed the larger ones.
   const MtlMemoryTier order[] = { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High, MtlMemoryTier::Ultra };
   for (int i = 0; i + 1 < 4; i++) {

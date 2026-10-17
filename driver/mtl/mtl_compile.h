@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -64,6 +65,30 @@ namespace dxvk {
 
       std::unique_lock lock(m_mutex);
       m_cond.wait(lock, [this] { return isDone(); });
+    }
+
+    /// Waits at most timeoutNs for whoever runs the task; never runs it
+    /// inline (its cost is unknown). True if it is done.
+    bool waitFor(uint64_t timeoutNs) {
+      if (isDone())
+        return true;
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeoutNs);
+      std::unique_lock lock(m_mutex);
+
+      while (!isDone()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+          return false;
+
+        // Whole milliseconds, rounded up: the Win32 condition variable
+        // truncates to them, and 0 would spin.
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - now + std::chrono::nanoseconds(999999));
+        m_cond.wait_for(lock, ms);
+      }
+
+      return true;
     }
 
   protected:
@@ -210,10 +235,10 @@ namespace dxvk {
       std::atomic<uint64_t> totalN  = { 0u };
       std::atomic<uint64_t> totalNs = { 0u };
 
-      void add(uint64_t dns) {
-        n.fetch_add(1u, std::memory_order_relaxed);
+      void add(uint64_t dns, uint64_t count = 1u) {
+        n.fetch_add(count, std::memory_order_relaxed);
         ns.fetch_add(dns, std::memory_order_relaxed);
-        totalN.fetch_add(1u, std::memory_order_relaxed);
+        totalN.fetch_add(count, std::memory_order_relaxed);
         totalNs.fetch_add(dns, std::memory_order_relaxed);
       }
     };
@@ -232,7 +257,8 @@ namespace dxvk {
     inline Counter g_shared;    // linkages that reused an identical library
     inline Counter g_psos;      // render PSO builds
     inline Counter g_wait;      // render (CS) thread blocked on a compile
-    inline Counter g_skips;     // draws dropped by D9MT_ASYNC_SKIP
+    inline Counter g_skips;     // draws dropped: D9MT_ASYNC_SKIP or wait budget spent
+    inline Counter g_budgetHits; // waits cut short (or not started) by the wait budget; ns = time waited
 
     inline uint64_t nowNs() {
       return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -271,14 +297,15 @@ namespace dxvk {
         return double(c.ns.exchange(0u, std::memory_order_relaxed)) * 1e-6;
       };
 
-      uint64_t nSh, nShared, nPso, nWait, nSkip;
+      uint64_t nSh, nShared, nPso, nWait, nSkip, nBudget;
       double msSh = take(g_shaders, nSh);
       take(g_shared, nShared);
       double msPso = take(g_psos, nPso);
       double msWait = take(g_wait, nWait);
       take(g_skips, nSkip);
+      take(g_budgetHits, nBudget);
 
-      if (!(nSh | nShared | nPso | nWait | nSkip) && dtMs < 33.4)
+      if (!(nSh | nShared | nPso | nWait | nSkip | nBudget) && dtMs < 33.4)
         return;
 
       // Render-thread frames: a long one is part of a hitch, so make it
@@ -286,7 +313,7 @@ namespace dxvk {
       std::string line = str::format("COMPILE frame=", s_frame, " dtMs=", dtMs,
         " shaders=", nSh, "/", msSh, "ms shared=", nShared,
         " psos=", nPso, "/", msPso, "ms renderWait=", nWait, "/", msWait,
-        "ms skipped=", nSkip, " queued=", queued);
+        "ms skipped=", nSkip, " budgetHit=", nBudget, " queued=", queued);
       if (dtMs >= hitchMs())
         Logger::warn(line);
       else
@@ -294,5 +321,75 @@ namespace dxvk {
     }
 
   }
+
+
+  /**
+   * \brief Per-frame cap on render-thread compile waits
+   *
+   * d9mt.pipelineWaitBudgetMs / D9MT_PSO_WAIT_MS. Off (the default): wait()
+   * is waitOnRenderThread(), unbounded. On: each wait for a still-compiling
+   * shader or PSO lasts at most what is left of this frame's budget, so one
+   * wait is at most the budget and all waits of a frame together are too. A
+   * wait that runs out returns false (the caller skips the draw); the task
+   * keeps compiling and a later draw picks it up. Render (CS) thread only.
+   */
+  class MtlCompileWaitBudget {
+
+  public:
+
+    /// < 0: off.
+    void setBudgetMs(int32_t ms) {
+      m_budgetNs = ms < 0 ? Off : uint64_t(ms) * 1000000u;
+      m_leftNs   = m_budgetNs;
+    }
+
+    bool enabled() const {
+      return m_budgetNs != Off;
+    }
+
+    uint64_t leftNs() const {
+      return m_leftNs;
+    }
+
+    void onFrameEnd() {
+      m_leftNs = m_budgetNs;
+    }
+
+    /// True if the task is done (always, when off).
+    bool wait(MtlCompileTask* task) {
+      if (task == nullptr || task->isDone())
+        return true;
+
+      if (!enabled()) {
+        compile_stats::waitOnRenderThread(task);
+        return true;
+      }
+
+      bool done = false;
+      uint64_t dt = 0u;
+
+      if (m_leftNs) {
+        const uint64_t t0 = compile_stats::nowNs();
+        done = task->waitFor(m_leftNs);
+        dt = compile_stats::nowNs() - t0;
+        m_leftNs -= std::min(dt, m_leftNs);
+
+        if (compile_stats::g_enabled)
+          compile_stats::g_wait.add(dt);
+      }
+
+      if (!done && compile_stats::g_enabled)
+        compile_stats::g_budgetHits.add(dt);
+      return done;
+    }
+
+  private:
+
+    static constexpr uint64_t Off = ~0ull;
+
+    uint64_t m_budgetNs = Off;
+    uint64_t m_leftNs   = Off;
+
+  };
 
 }

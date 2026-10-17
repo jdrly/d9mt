@@ -139,6 +139,12 @@ namespace dxvk {
     ExecuteFlush(true);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
+    // D9MT_PROFILE: the session's restores (a game that exits without
+    // releasing the device has only its RESTORE lines).
+    if (unlikely(hitch::g_enabled))
+      Logger::warn(rstore::summary(m_dxvkDevice->renderStats().snapshot().v[rstats::Frames],
+        m_dxvkDevice->restoreLog().snapshot()));
+
     if (m_annotation)
       delete m_annotation;
 
@@ -922,6 +928,7 @@ namespace dxvk {
                     0u };
     }
 
+    ProfApi(rstore::Api::UpdateSurface);
     UpdateTextureFromBuffer(dstTextureInfo, srcTextureInfo, dst->GetSubresource(), src->GetSubresource(), srcOffset, extent, dstOffset);
 
     dstTextureInfo->SetNeedsReadback(dst->GetSubresource(), true);
@@ -982,6 +989,7 @@ namespace dxvk {
         Logger::warn("D3D9DeviceEx::UpdateTexture: Source dimensions exceed the destination");
     }
 
+    ProfApi(rstore::Api::UpdateTexture);
     for (uint32_t a = 0; a < arraySlices; a++) {
       const D3DBOX& box = srcTexInfo->GetDirtyBox(a);
       { static int n=0; if (n++<8) Logger::info(str::format(
@@ -1024,6 +1032,7 @@ namespace dxvk {
           IDirect3DSurface9* pRenderTarget,
           IDirect3DSurface9* pDestSurface) {
     D3D9DeviceLock lock = LockDevice();
+    ProfApi(rstore::Api::GetRenderTargetData);
 
     if (unlikely(IsDeviceLost())) {
       return D3DERR_DEVICELOST;
@@ -1091,6 +1100,7 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     D3D9DeviceLock lock = LockDevice();
+    ProfApi(rstore::Api::GetFrontBufferData);
 
     return m_mostRecentlyUsedSwapchain->GetFrontBufferData(pDestSurface);
   }
@@ -1103,6 +1113,7 @@ namespace dxvk {
     const RECT*                pDestRect,
           D3DTEXTUREFILTERTYPE Filter) {
     D3D9DeviceLock lock = LockDevice();
+    ProfApi(rstore::Api::StretchRect);
 
     D3D9Surface* dst = static_cast<D3D9Surface*>(pDestSurface);
     D3D9Surface* src = static_cast<D3D9Surface*>(pSourceSurface);
@@ -1367,6 +1378,7 @@ namespace dxvk {
     const RECT*              pRect,
           D3DCOLOR           Color) {
     D3D9DeviceLock lock = LockDevice();
+    ProfApi(rstore::Api::ColorFill);
 
     D3D9Surface* dst = static_cast<D3D9Surface*>(pSurface);
 
@@ -1764,6 +1776,7 @@ namespace dxvk {
         ") Count=", Count, " Color=0x", std::hex, Color, std::dec));
 
     D3D9DeviceLock lock = LockDevice();
+    ProfApi(rstore::Api::Clear);
     BindFramebuffer();
 
     if (unlikely(m_dbg.dumping)) {
@@ -4725,6 +4738,10 @@ namespace dxvk {
       const D3DBOX*                 pBox,
             DWORD                   Flags) {
     D3D9DeviceLock lock = LockDevice();
+    // No ProfApi here: games lock managed and system-memory textures from their streaming
+    // threads, on devices without D3DCREATE_MULTITHREADED (SWTOR), where the device lock
+    // is a no-op. Such a lock touches only system memory and must not emit CS work; the
+    // tag goes in below, where the readback emits commands anyway.
     hitch::Scope hs(m_hitch, hitch::TexLock);
 
     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
@@ -4818,6 +4835,7 @@ namespace dxvk {
       }
 
       if (pResource->GetImage() != nullptr) {
+        ProfApi(rstore::Api::LockRect);
         Rc<MtlTexture> resourceImage = pResource->GetImage();
 
         Rc<MtlTexture> mappedImage;
@@ -5636,15 +5654,60 @@ namespace dxvk {
     compile.psosNs    = compile_stats::g_psos.totalNs.load(std::memory_order_relaxed);
     compile.waits     = compile_stats::g_wait.totalN.load(std::memory_order_relaxed);
     compile.waitsNs   = compile_stats::g_wait.totalNs.load(std::memory_order_relaxed);
+    compile.skipped   = compile_stats::g_skips.totalN.load(std::memory_order_relaxed);
+    compile.budgetHits = compile_stats::g_budgetHits.totalN.load(std::memory_order_relaxed);
 
     const uint64_t dispatched = m_csSeqNum;
     const uint64_t executed   = m_csThread.lastSequenceNumber();
 
+    const uint64_t nowNs = hitch::nowNs();
     uint64_t frame = 0u;
     hitch::FrameStats stats;
-    if (m_hitch.endFrame(hitch::ticks(), hitch::nowNs(), compile,
+    if (m_hitch.endFrame(hitch::ticks(), nowNs, compile,
           dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats))
       Logger::warn(hitch::formatHitch(frame, stats));
+
+    if (m_statsWindow.addFrame(nowNs)) {
+      static const bool deferred = std::getenv("D9MT_DEFERRED") != nullptr;
+      stats::CompileTotals ct;
+      ct.shaders = compile.shaders;
+      ct.psos    = compile.psos;
+      ct.waits   = compile.waits;
+      ct.waitsNs = compile.waitsNs;
+      stats::Extra extra;
+      extra.allocBytes = m_dxvkDevice->allocatedBytes();
+      extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
+                : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
+      const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
+      const double t = m_statsWindow.seconds(nowNs);
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra));
+      std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
+        m_dxvkDevice->restoreLog().snapshot());
+      if (!restores.empty())
+        Logger::warn(restores);
+    }
+  }
+
+
+  void D3D9DeviceEx::DiscardAutoDepthStencilAtPresent() {
+    if (m_autoDepthStencil == nullptr)
+      return;
+
+    D3D9CommonTexture* tex = m_autoDepthStencil->GetCommonTexture();
+    const bool discard = tex->Desc()->Discard;
+
+    if (!m_discardLogged) {
+      m_discardLogged = true;
+      Logger::warn(str::format("D9MT: auto depth-stencil discard at Present ",
+        discard ? "on (D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL)" : "off (flag not set)"));
+    }
+
+    if (!discard)
+      return;
+
+    EmitCs([cImage = tex->GetImage()] (MtlContext* ctx) {
+      ctx->discardImage(cImage);
+    });
   }
 
 
@@ -6944,6 +7007,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBO) {
+    ProfApi(rstore::Api::Draw);
     if (unlikely(!UseProgrammablePS()) && m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader))
       UpdateFixedFunctionPS();
 
@@ -7184,7 +7248,8 @@ namespace dxvk {
     // Programmable pixel shaders are bound here, at draw time, linked against
     // the programmable VS (or standalone under fixed-function VS). Binding
     // never blocks: the function is a future the CS thread waits on (or, with
-    // D9MT_ASYNC_SKIP, skips draws for) only if it is still compiling.
+    // D9MT_ASYNC_SKIP or a spent wait budget, skips draws for) only if it is
+    // still compiling.
     if (!UseProgrammablePS())
       return;
 
@@ -8009,6 +8074,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::ResolveZ() {
+    ProfApi(rstore::Api::ResolveZ);
     D3D9Surface*           src = m_state.depthStencil.ptr();
     IDirect3DBaseTexture9* dst = m_state.textures[0];
 

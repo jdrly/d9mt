@@ -267,6 +267,7 @@ namespace dxvk {
     } ();
 
     m_parent->DebugOnPresent();
+    m_parent->ProfApi(rstore::Api::Present);
 
     m_parent->SetMostRecentlyUsedSwapchain(this);
 
@@ -773,6 +774,8 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
+    // Before the flush below ends the pass that may still render into it.
+    m_parent->DiscardAutoDepthStencilAtPresent();
     m_parent->EndFrame(m_latencyTracker);
     m_parent->Flush();
 

@@ -149,6 +149,9 @@ namespace dxvk {
 
     virtual void initBuffer(const Rc<MtlBuffer>& buffer);
     virtual void initImage(const Rc<MtlTexture>& image);
+    // The image's contents are no longer needed (D3D9 discard of the auto
+    // depth-stencil at Present). A hint: a no-op where unsupported.
+    virtual void discardImage(const Rc<MtlTexture>& image);
     // Buffer binds resolve against the storage snapshot captured at record
     // time; a rename only reaches already-bound slices through this call's
     // CS-time refresh, so ordering here is what keeps renames from
@@ -170,6 +173,10 @@ namespace dxvk {
     virtual void beginDebugLabel(const char* label);
     virtual void endDebugLabel();
     virtual void insertDebugLabel(const char* label);
+
+    // D9MT_PROFILE: the D3D9 call the following commands come from
+    // (rstore::Api), for the RESTORE attribution. A no-op where unsupported.
+    virtual void setApiTag(uint32_t api);
 
   private:
 

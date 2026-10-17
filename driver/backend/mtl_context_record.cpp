@@ -1,6 +1,7 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,10 +34,30 @@ namespace dxvk::backend {
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
     m_psoCache(m_device->wmtCompiler(), m_device.ptr()) {
+    // D9MT_ASYNC_SKIP=1 wins and is the same as a wait budget of 0.
+    const int32_t budgetMs = m_device->memoryProfile().pipelineWaitBudgetMs;
+    const bool workers = m_device->m_compileWorkers->maxThreads() != 0u;
+
     if (const char* v = std::getenv("D9MT_ASYNC_SKIP"); v && v[0] == '1') {
-      m_asyncSkip = m_device->m_compileWorkers->maxThreads() != 0u;
+      m_asyncSkip = workers;
       Logger::warn(str::format("D9MT: async skip ", m_asyncSkip ? "on" : "ignored (no compile workers)"));
+    } else if (budgetMs == 0) {
+      m_asyncSkip = workers;
+      Logger::warn(str::format("D9MT: pipeline wait budget 0 ms = async skip ",
+        m_asyncSkip ? "on" : "ignored (no compile workers)"));
+    } else if (budgetMs > 0) {
+      if (workers)
+        m_waitBudget.setBudgetMs(budgetMs);
+      Logger::warn(str::format("D9MT: pipeline wait budget ", budgetMs, " ms per frame",
+        workers ? "" : " ignored (no compile workers)"));
     }
+
+    m_attOpt = m_device->memoryProfile().attachmentOpt && !deferredPassesEnabled();
+    if (m_attOpt)
+      Logger::info("D9MT: attachment load/store optimization on");
+    else
+      Logger::warn(str::format("D9MT: attachment load/store optimization off (",
+        deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
 
     obj_handle_t dev = m_device->wmtDevice();
 
@@ -213,6 +234,8 @@ namespace dxvk::backend {
     gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), cbs, cbCount);
     gpuCaptureAfterCommit();
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::CmdBufs] += cbCount;
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
@@ -273,6 +296,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::endFrame() {
     m_frameBoundaryFlush = true;
+    m_attFrame++;
 
     uint64_t completed = m_device->submissions().completedSerial();
     {
@@ -283,7 +307,12 @@ namespace dxvk::backend {
       m_device->uploadRing().onFrame();
     }
     prof::onFrameEnd();
+    if (unlikely(prof::g_profEnabled)) {
+      m_rs[rstats::Frames]++;
+      m_device->renderStats().publish(m_rs);
+    }
     compile_stats::onFrameEnd(compile_stats::g_enabled ? m_device->pendingCompiles() : 0u);
+    m_waitBudget.onFrameEnd();
 
     static uint64_t s_diagFrame = 0u;
     if (const uint32_t memEvery = m_device->memStatsInterval(); unlikely(memEvery)
@@ -428,12 +457,16 @@ namespace dxvk::backend {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
           m_pass.clearColor[i] = true;
           m_pass.clearValues[i] = value;
+          if (unlikely(prof::g_profEnabled))
+            m_rs[rstats::ClearsFolded]++;
           return;
         }
       }
       if (sameAttachment(m_pass.targets.depthStencil, view)) {
         if (clear & MtlAspectDepth)   { m_pass.clearDepth = true;   m_pass.depthClear = value.depth; }
         if (clear & MtlAspectStencil) { m_pass.clearStencil = true; m_pass.stencilClear = value.stencil; }
+        if (unlikely(prof::g_profEnabled))
+          m_rs[rstats::ClearsFolded]++;
         return;
       }
     }
@@ -451,6 +484,8 @@ namespace dxvk::backend {
     }
     m_pass.pending = true;
     prof::bump(prof::CntPassCloseClear);
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearPasses]++;
     materializePass();
     closePass();
     m_pass = std::move(saved);
@@ -465,6 +500,8 @@ namespace dxvk::backend {
     if (!any)
       return;
     prof::bump(prof::CntPassCloseClear);
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearPasses]++;
     materializePass();
     closePass();
   }
@@ -489,6 +526,24 @@ namespace dxvk::backend {
       return;
     }
 
+    if (m_attOpt) {
+      // Load and store actions are chosen when the pass ends (createPassEncoder).
+      m_pass.encoder      = 0;
+      m_pass.active       = true;
+      m_pass.pending      = false;
+      m_pass.encodedDraws = 0u;
+      m_pass.writtenMask  = 0u;
+      m_pass.discardDs    = false;
+      m_pass.epoch        = ++m_attEpoch;
+      m_dirty = DirtyEverything;
+      m_argTablesBound = false;
+      m_lastEncodedPso = nullptr;
+      m_dynValid       = false;
+      armVisibility();
+      return;
+    }
+
+    const bool count = prof::g_profEnabled;
     WMTRenderPassInfo info = {};
     info.visibility_buffer = m_visBuffer.handle();
     for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
@@ -500,6 +555,10 @@ namespace dxvk::backend {
       info.colors[i].load_action = m_pass.clearColor[i]
         ? WMTLoadActionClear : WMTLoadActionLoad;
       info.colors[i].store_action = WMTStoreActionStore;
+      if (unlikely(count)) {
+        m_rs[m_pass.clearColor[i] ? rstats::LoadClear : rstats::LoadLoad]++;
+        m_rs[rstats::StoreStore]++;
+      }
       if (d9mtTrace() && i == 0)
         Logger::info(str::format("MAT color img=", (void*)impl->image.ptr(),
           " load=", m_pass.clearColor[i] ? "CLEAR" : "LOAD"));
@@ -515,16 +574,24 @@ namespace dxvk::backend {
       info.depth.load_action = m_pass.clearDepth ? WMTLoadActionClear : WMTLoadActionLoad;
       info.depth.store_action = WMTStoreActionStore;
       info.depth.clear_depth = m_pass.depthClear;
+      if (unlikely(count)) {
+        m_rs[m_pass.clearDepth ? rstats::LoadClear : rstats::LoadLoad]++;
+        m_rs[rstats::StoreStore]++;
+      }
       const auto* fmtInfo = lookupFormatInfo(impl->key.format);
       if (fmtInfo->flags & MtlFormatFlagStencil) {
         info.stencil.texture = impl->owned.handle();
         info.stencil.load_action = m_pass.clearStencil ? WMTLoadActionClear : WMTLoadActionLoad;
         info.stencil.store_action = WMTStoreActionStore;
         info.stencil.clear_stencil = m_pass.stencilClear;
+        if (unlikely(count)) {
+          m_rs[m_pass.clearStencil ? rstats::LoadClear : rstats::LoadLoad]++;
+          m_rs[rstats::StoreStore]++;
+        }
       }
     }
 
-    m_pass.encoder = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+    m_pass.encoder = newRenderEncoder(m_cmdbuf.handle(), &info);
     m_pass.active = true;
     m_pass.pending = false;
     m_dirty = DirtyEverything;
@@ -590,8 +657,13 @@ namespace dxvk::backend {
   void MtlContextImpl::flushCmdChunk() {
     if (m_cmdChunk.empty())
       return;
-    if (!m_pass.encoder)
-      return;
+    if (!m_pass.encoder) {
+      // Commands must be encoded before the pass ends (a full chunk or a
+      // barrier): decide now, without skipping stores.
+      if (!m_attOpt || !m_pass.active)
+        return;
+      createPassEncoder(true);
+    }
     prof::Scope profScope(prof::FlushCmdChunk);
     prof::bump(prof::CntChunkFlush);
     resolvePsoPatches();
@@ -608,6 +680,29 @@ namespace dxvk::backend {
       return;
     }
 
+    if (m_attOpt) {
+      const bool encoded = m_pass.encoder != 0 || createPassEncoder(false);
+      if (encoded) {
+        flushCmdChunk();
+        emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+        MTLCommandEncoder_endEncoding(m_pass.encoder);
+        NSObject_release(m_pass.encoder);
+      } else {
+        // No draws and nothing to store: only visibility-mode commands.
+        m_cmdChunk.reset();
+      }
+      attApplyAfter();
+      m_pass.encoder = 0;
+      m_pass.active = false;
+      m_pass.pending = true;
+      m_argTablesBound = false;
+      for (auto& c : m_pass.clearColor) c = false;
+      m_pass.clearDepth = m_pass.clearStencil = false;
+      for (auto& r : m_pass.resolveTo) r = nullptr;
+      m_pass.discardDs = false;
+      return;
+    }
+
     flushCmdChunk();
 
     /* Metal 4 does no implicit render-pass transition: a later encoder that
@@ -621,6 +716,512 @@ namespace dxvk::backend {
     m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
+  }
+
+
+  namespace {
+
+    // D9MT_PROFILE: render-thread CPU time in the attachment optimization
+    // (rstats::AttNs), outermost scope only (a restore can close a pass);
+    // nothing without D9MT_PROFILE.
+    class AttTimer {
+    public:
+      explicit AttTimer(uint64_t* acc) : m_acc(acc && !s_depth++ ? acc : nullptr), m_on(acc != nullptr) {
+        if (m_acc)
+          m_t0 = now();
+      }
+      ~AttTimer() { stop(); }
+      // Ends the scope early (before work the pass needs either way).
+      void stop() {
+        if (m_acc)
+          *m_acc += now() - m_t0;
+        if (m_on)
+          s_depth--;
+        m_acc = nullptr;
+        m_on  = false;
+      }
+    private:
+      static uint64_t now() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+      }
+      static inline thread_local uint32_t s_depth = 0u;
+      uint64_t* m_acc;
+      bool      m_on;
+      uint64_t  m_t0 = 0u;
+    };
+
+    // Images the attachment optimization tracks: one subresource, so a
+    // load/store action covers all of it. Everything else stays Defined.
+    bool attImageEligible(const MtlTexture* img) {
+      const MtlImageInfo& i = img->info();
+      return i.type == MtlImageType::e2D && i.mipLevels == 1u && i.numLayers == 1u;
+    }
+
+    // Attachment views in the image's own format: clear values recorded
+    // through them are what a re-clear of the image writes.
+    bool attViewEligible(const MtlTextureView* v) {
+      return v->image != nullptr && attImageEligible(v->image.ptr())
+          && v->key.format == v->image->info().format
+          && v->key.baseMip == 0u && v->key.baseLayer == 0u;
+    }
+
+    // Bytes one load or store of an aspect moves (estimate for STATS).
+    uint64_t attBytes(const MtlTexture* img, uint32_t slot) {
+      if (img == nullptr)
+        return 0u;
+      const MtlImageInfo& i = img->info();
+      const MtlFormatInfo* fi = lookupFormatInfo(i.format);
+      uint64_t bpp = fi->elementSize ? fi->elementSize : 4u;
+      if (slot == 5u)                                    // stencil
+        bpp = 1u;
+      else if (slot == 4u && (fi->flags & MtlFormatFlagStencil))
+        bpp = bpp > 4u ? 4u : bpp;                       // depth of a depth+stencil format
+      return uint64_t(i.extent.width) * i.extent.height * std::max(i.sampleCount, 1u) * bpp;
+    }
+
+    WMTLoadAction wmtLoad(attopt::Load l) {
+      switch (l) {
+        case attopt::Load::Clear:    return WMTLoadActionClear;
+        case attopt::Load::DontCare: return WMTLoadActionDontCare;
+        default:                     return WMTLoadActionLoad;
+      }
+    }
+
+    const char* attLoadName(attopt::Load l, bool fromState) {
+      switch (l) {
+        case attopt::Load::Clear:    return fromState ? "clear(state)" : "clear";
+        case attopt::Load::DontCare: return "dontcare";
+        default:                     return "load";
+      }
+    }
+
+    const char* attContentName(attopt::Content c) {
+      switch (c) {
+        case attopt::Content::Cleared:   return "cleared";
+        case attopt::Content::Lazy:      return "lazy";
+        case attopt::Content::Undefined: return "undefined";
+        default:                         return "defined";
+      }
+    }
+
+  }
+
+
+  obj_handle_t MtlContextImpl::newRenderEncoder(obj_handle_t cmdbuf, WMTRenderPassInfo* info) {
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::RenderPasses]++;
+    return MTL4CommandBuffer_renderCommandEncoder(cmdbuf, info);
+  }
+
+
+  bool MtlContextImpl::chunkHasNoWork() const {
+    for (auto* c = const_cast<wmtcmd_base*>(m_cmdChunk.head()); c != nullptr;
+         c = static_cast<wmtcmd_base*>(c->next.get())) {
+      if (c->type != WMTMtl4RenderCommandNop
+       && c->type != WMTMtl4RenderCommandSetVisibilityResultMode)
+        return false;
+    }
+    return true;
+  }
+
+
+  bool MtlContextImpl::createPassEncoder(bool early) {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
+    const uint32_t dbg   = d9mtdbg::flags();
+    const bool     optOn = !(dbg & d9mtdbg::NoAttachOpt);
+    const bool     full  = !early;
+
+    const Rc<MtlTextureView>& dsv = m_pass.targets.depthStencil;
+    const MtlTexture* imgs[5] = { };
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++)
+      imgs[i] = m_pass.targets.color[i] != nullptr ? m_pass.targets.color[i]->image.ptr() : nullptr;
+    imgs[4] = dsv != nullptr ? dsv->image.ptr() : nullptr;
+    // An image bound to two slots (not expected) is left to Load/Store.
+    auto unique = [&imgs] (uint32_t i) {
+      for (uint32_t j = 0u; j < 5u; j++) {
+        if (j != i && imgs[j] == imgs[i])
+          return false;
+      }
+      return true;
+    };
+
+    bool needed = early || m_pass.encodedDraws != 0u || !m_psoPatches.empty() || !chunkHasNoWork();
+    attopt::AspectState dummy;
+
+    auto decideSlot = [&] (uint32_t s, MtlTextureImpl* img, attopt::AspectState& st,
+                           bool eligible, bool clear) -> AttSlot& {
+      AttSlot& a = m_pass.att[s];
+      a = AttSlot();
+      a.used             = true;
+      a.in.content       = st.content;
+      a.in.explicitClear = clear;
+      a.in.eligible      = eligible;
+      a.in.optOn         = optOn;
+      a.in.fullKnowledge = full;
+      a.in.written       = ((m_pass.writtenMask >> s) & 1u) != 0u;
+      a.in.discardAfter  = s >= kAttDepth && m_pass.discardDs;
+      // The bindings scan only matters when a store could be skipped.
+      a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
+      a.in.readHint = attopt::readRecently(st, m_attFrame);
+      a.d = attopt::decide(a.in);
+      if (a.d.restoreFirst) {
+        attRestore(img, rstore::Reason::RtView,
+          s < kAttDepth ? MtlAspectColor : s == kAttDepth ? MtlAspectDepth : MtlAspectStencil);
+        a.in.content = st.content;
+        a.d = attopt::decide(a.in);
+      }
+      return a;
+    };
+
+    WMTRenderPassInfo info = {};
+    info.visibility_buffer = m_visBuffer.handle();
+
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+      m_pass.att[i] = AttSlot();
+      const auto& view = m_pass.targets.color[i];
+      if (view == nullptr)
+        continue;
+      auto* vimpl = static_cast<MtlTextureViewImpl*>(view.ptr());
+      auto* img   = static_cast<MtlTextureImpl*>(view->image.ptr());
+      attopt::AspectState& st = img ? img->attColor : dummy;
+      const bool eligible = img && attViewEligible(view.ptr()) && unique(i);
+      AttSlot& a = decideSlot(i, img, st, eligible, m_pass.clearColor[i]);
+
+      info.colors[i].texture     = vimpl->owned.handle();
+      info.colors[i].load_action = wmtLoad(a.d.load);
+      const bool store = a.d.store == attopt::Store::Store;
+      if (m_pass.resolveTo[i] != nullptr) {
+        info.colors[i].store_action = store
+          ? WMTStoreActionStoreAndMultisampleResolve : WMTStoreActionMultisampleResolve;
+        info.colors[i].resolve_texture = static_cast<MtlTextureImpl*>(m_pass.resolveTo[i].ptr())->texture.tex;
+        needed = true;
+      } else {
+        info.colors[i].store_action = store ? WMTStoreActionStore : WMTStoreActionDontCare;
+      }
+      if (a.d.load == attopt::Load::Clear) {
+        if (a.d.loadFromState) {
+          const float* c = st.value.c;
+          info.colors[i].clear_color = { c[0], c[1], c[2], c[3] };
+        } else {
+          const auto& v = m_pass.clearValues[i];
+          info.colors[i].clear_color = { v.color.r, v.color.g, v.color.b, v.color.a };
+        }
+      }
+      needed = needed || attopt::slotNeedsPass(a.in, a.d);
+    }
+
+    for (uint32_t s = kAttDepth; s <= kAttStencil; s++)
+      m_pass.att[s] = AttSlot();
+
+    if (dsv != nullptr) {
+      auto* vimpl = static_cast<MtlTextureViewImpl*>(dsv.ptr());
+      auto* img   = static_cast<MtlTextureImpl*>(dsv->image.ptr());
+      const bool eligible = img && attViewEligible(dsv.ptr()) && unique(4u);
+
+      attopt::AspectState& sd = img ? img->attDepth : dummy;
+      AttSlot& a = decideSlot(kAttDepth, img, sd, eligible, m_pass.clearDepth);
+      info.depth.texture      = vimpl->owned.handle();
+      info.depth.load_action  = wmtLoad(a.d.load);
+      info.depth.store_action = a.d.store == attopt::Store::Store ? WMTStoreActionStore : WMTStoreActionDontCare;
+      info.depth.clear_depth  = a.d.loadFromState ? sd.value.c[0] : m_pass.depthClear;
+      needed = needed || attopt::slotNeedsPass(a.in, a.d);
+
+      if (lookupFormatInfo(vimpl->key.format)->flags & MtlFormatFlagStencil) {
+        attopt::AspectState& ss = img ? img->attStencil : dummy;
+        AttSlot& b = decideSlot(kAttStencil, img, ss, eligible, m_pass.clearStencil);
+        info.stencil.texture       = vimpl->owned.handle();
+        info.stencil.load_action   = wmtLoad(b.d.load);
+        info.stencil.store_action  = b.d.store == attopt::Store::Store ? WMTStoreActionStore : WMTStoreActionDontCare;
+        info.stencil.clear_stencil = b.d.loadFromState ? ss.value.stencil : m_pass.stencilClear;
+        needed = needed || attopt::slotNeedsPass(b.in, b.d);
+      }
+    }
+
+    // No draws, no resolve and nothing to store: the pass is a no-op.
+    const bool skip = full && optOn && !needed;
+
+    if (unlikely(prof::g_profEnabled)) {
+      int64_t saved = 0;
+      for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
+        const AttSlot& a = m_pass.att[s];
+        if (!a.used)
+          continue;
+        saved += attopt::bytesSaved(a.in, a.d, attBytes(imgs[s < kAttDepth ? s : 4u], s), skip);
+        if (skip)
+          continue;
+        m_rs[a.d.load == attopt::Load::Load  ? rstats::LoadLoad
+           : a.d.load == attopt::Load::Clear ? rstats::LoadClear : rstats::LoadDontCare]++;
+        m_rs[a.d.store == attopt::Store::Store ? rstats::StoreStore : rstats::StoreDontCare]++;
+        if (a.d.store == attopt::Store::DontCare)
+          prof::bump(prof::CntStoreDontCare);
+      }
+      m_rs[rstats::BytesSaved] += uint64_t(saved);
+      if (skip)
+        m_rs[rstats::PassesSkipped]++;
+    }
+
+    if (unlikely(dbg & d9mtdbg::AttTrace)) {
+      if (!m_attTraceOn) {
+        m_attTraceOn = true;
+        m_attTraceBudget = 400u;
+      }
+      if (m_attTraceBudget) {
+        m_attTraceBudget--;
+        std::string line = str::format("D9MT-ATT pass=", m_pass.epoch,
+          skip ? " skipped" : early ? " early" : "", " draws=", m_pass.encodedDraws,
+          optOn ? "" : " (no_attach_opt)");
+        static const char* kSlot[6] = { "c0", "c1", "c2", "c3", "d", "s" };
+        for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
+          const AttSlot& a = m_pass.att[s];
+          if (!a.used)
+            continue;
+          const MtlTexture* img = imgs[s < kAttDepth ? s : 4u];
+          line += str::format(" ", kSlot[s], "=", img ? img->info().extent.width : 0u, "x",
+            img ? img->info().extent.height : 0u, "/", img ? uint32_t(img->info().format) : 0u,
+            a.in.eligible ? "" : "(untracked)", " ", attContentName(a.in.content),
+            a.in.written ? " w" : "", a.in.sampled ? " sampled" : "", a.in.readHint ? " hint" : "",
+            " ", attLoadName(a.d.load, a.d.loadFromState), "/",
+            a.d.store == attopt::Store::Store ? "store" : "dontcare",
+            s < kAttDepth && m_pass.resolveTo[s] != nullptr ? "+resolve" : "");
+        }
+        Logger::warn(line);
+      }
+    } else {
+      m_attTraceOn = false;
+    }
+
+    // The encoder itself is created with or without the optimization.
+    attTimer.stop();
+    if (skip)
+      return false;
+
+    m_pass.encoder = newRenderEncoder(m_cmdbuf.handle(), &info);
+    for (const auto& r : m_pass.resolveTo) {
+      if (r != nullptr)
+        m_keepAlive.push_back(r);
+    }
+    return true;
+  }
+
+
+  void MtlContextImpl::attApplyAfter() {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
+    for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
+      AttSlot& a = m_pass.att[s];
+      if (!a.used)
+        continue;
+      a.used = false;
+      const Rc<MtlTextureView>& view = s < kAttDepth ? m_pass.targets.color[s] : m_pass.targets.depthStencil;
+      auto* img = view != nullptr ? static_cast<MtlTextureImpl*>(view->image.ptr()) : nullptr;
+      if (img == nullptr || !attImageEligible(img))
+        continue;
+      a.in.written      = ((m_pass.writtenMask >> s) & 1u) != 0u;
+      a.in.discardAfter = s >= kAttDepth && m_pass.discardDs;
+      const attopt::After after = attopt::stateAfter(a.in, a.d);
+      attopt::AspectState& st = s < kAttDepth ? img->attColor
+                              : s == kAttDepth ? img->attDepth : img->attStencil;
+      st.content = after.content;
+      if (after.passValue) {
+        if (s < kAttDepth) {
+          const auto& v = m_pass.clearValues[s];
+          st.value.c[0] = v.color.r; st.value.c[1] = v.color.g;
+          st.value.c[2] = v.color.b; st.value.c[3] = v.color.a;
+        } else if (s == kAttDepth) {
+          st.value.c[0] = m_pass.depthClear;
+        } else {
+          st.value.stencil = m_pass.stencilClear;
+        }
+      }
+    }
+  }
+
+
+  uint8_t MtlContextImpl::attComputeWriteMask() const {
+    uint8_t mask = 0u;
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+      if (m_pass.targets.color[i] != nullptr && (m_blend[i].writeMask & 0xFu))
+        mask |= uint8_t(1u << i);
+    }
+    if (m_pass.targets.depthStencil != nullptr) {
+      if (m_depthStencil.depthWrite)
+        mask |= uint8_t(1u << kAttDepth);
+      if (m_depthStencil.stencilEnable)
+        mask |= uint8_t(1u << kAttStencil);
+    }
+    return mask;
+  }
+
+
+  bool MtlContextImpl::attSampled(const MtlTexture* img) const {
+    if (img == nullptr)
+      return false;
+    if (static_cast<const MtlTextureImpl*>(img)->attSampledEpoch == m_pass.epoch)
+      return true;
+    for (const auto& b : m_bindings) {
+      for (const auto& t : b.textures) {
+        if (t != nullptr && t->image.ptr() == img)
+          return true;
+      }
+    }
+    return false;
+  }
+
+
+  void MtlContextImpl::attBindSampled(const MtlTextureView* view) {
+    auto* t = static_cast<MtlTextureImpl*>(view->image.ptr());
+    // A bind while no pass is open counts for the pass that opens next.
+    t->attSampledEpoch = m_pass.active ? m_pass.epoch : m_attEpoch + 1u;
+    // Sampling reads the view's aspects only: D3D9 samples the depth of a
+    // depth-stencil texture (shadow maps, INTZ), never its stencil, so a
+    // stencil cleared but never stored stays Lazy instead of being re-cleared.
+    attRead(t, rstore::Reason::Sample, view->key.aspects ? view->key.aspects : MtlAspectColor);
+  }
+
+
+  void MtlContextImpl::attRead(const MtlTexture* img, rstore::Reason why, MtlAspectMask aspects) {
+    auto* t = static_cast<MtlTextureImpl*>(const_cast<MtlTexture*>(img));
+    if (t == nullptr)
+      return;
+    using attopt::Content;
+    auto known = [] (const attopt::AspectState& st) {
+      return st.content == Content::Lazy || st.content == Content::Cleared;
+    };
+    if (likely(!known(t->attColor) && !known(t->attDepth) && !known(t->attStencil)))
+      return;
+
+    // Only the aspects the image has: initImage marks all three Cleared.
+    const MtlFormatInfo* fi = lookupFormatInfo(t->format);
+    MtlAspectMask has = 0u;
+    if (fi->flags & MtlFormatFlagDepth)   has |= MtlAspectDepth;
+    if (fi->flags & MtlFormatFlagStencil) has |= MtlAspectStencil;
+    if (!has)                             has  = MtlAspectColor;
+    aspects &= has;
+
+    MtlAspectMask lazy = 0u;
+    if ((aspects & MtlAspectColor)   && attopt::noteRead(t->attColor,   m_attFrame)) lazy |= MtlAspectColor;
+    if ((aspects & MtlAspectDepth)   && attopt::noteRead(t->attDepth,   m_attFrame)) lazy |= MtlAspectDepth;
+    if ((aspects & MtlAspectStencil) && attopt::noteRead(t->attStencil, m_attFrame)) lazy |= MtlAspectStencil;
+    if (lazy)
+      attRestore(t, why, lazy);
+  }
+
+
+  void MtlContextImpl::attWrite(const MtlTexture* img, rstore::Reason why) {
+    if (img == nullptr)
+      return;
+    // Partial writes keep the rest of the contents: make memory hold them first.
+    attRead(img, why);
+    auto* t = static_cast<MtlTextureImpl*>(const_cast<MtlTexture*>(img));
+    t->attColor.content = t->attDepth.content = t->attStencil.content = attopt::Content::Defined;
+  }
+
+
+  void MtlContextImpl::attRestore(MtlTextureImpl* t, rstore::Reason why, MtlAspectMask aspects) {
+    AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
+    // Something reads an image whose clear was never stored: store it now.
+    // Its own pass, before whatever reads; an encoder already open ends first.
+    // Only `aspects` are re-cleared; another Lazy aspect is loaded and stored
+    // unchanged and stays Lazy (memory never holds it).
+    if (m_pass.encoder) {
+      prof::bump(prof::CntPassCloseBlit);
+      closePass();
+    }
+    ensureCommandBuffer();
+    t->setTrackingSerial(m_currentSerial);
+
+    const MtlFormatInfo* fi = lookupFormatInfo(t->format);
+    const bool hasDepth   = (fi->flags & MtlFormatFlagDepth) != 0u;
+    const bool hasStencil = (fi->flags & MtlFormatFlagStencil) != 0u;
+    auto lazy = [] (const attopt::AspectState& st) { return st.content == attopt::Content::Lazy; };
+    const bool clearColor   = (aspects & MtlAspectColor)   && lazy(t->attColor);
+    const bool clearDepth   = (aspects & MtlAspectDepth)   && lazy(t->attDepth);
+    const bool clearStencil = (aspects & MtlAspectStencil) && lazy(t->attStencil);
+
+    WMTRenderPassInfo info = {};
+    info.render_target_width  = t->extent.width;
+    info.render_target_height = t->extent.height;
+    uint64_t bytes = 0u;
+    if (hasDepth || hasStencil) {
+      if (hasDepth) {
+        info.depth.texture      = t->owned.handle();
+        info.depth.load_action  = clearDepth ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.depth.store_action = WMTStoreActionStore;
+        info.depth.clear_depth  = t->attDepth.value.c[0];
+        bytes += attBytes(t, 4u);
+      }
+      if (hasStencil) {
+        info.stencil.texture       = t->owned.handle();
+        info.stencil.load_action   = clearStencil ? WMTLoadActionClear : WMTLoadActionLoad;
+        info.stencil.store_action  = WMTStoreActionStore;
+        info.stencil.clear_stencil = t->attStencil.value.stencil;
+        bytes += attBytes(t, 5u);
+      }
+    } else {
+      const float* c = t->attColor.value.c;
+      info.colors[0].texture      = t->owned.handle();
+      info.colors[0].load_action  = clearColor ? WMTLoadActionClear : WMTLoadActionLoad;
+      info.colors[0].store_action = WMTStoreActionStore;
+      info.colors[0].clear_color  = { c[0], c[1], c[2], c[3] };
+      bytes += attBytes(t, 0u);
+    }
+
+    obj_handle_t enc = newRenderEncoder(m_cmdbuf.handle(), &info);
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment));
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+    m_keepAlive.push_back(Rc<MtlTexture>(t));
+
+    uint8_t restored = 0u;
+    if (clearColor)   { t->attColor.content   = attopt::Content::Cleared; restored |= rstore::AspectColor; }
+    if (clearDepth)   { t->attDepth.content   = attopt::Content::Cleared; restored |= rstore::AspectDepth; }
+    if (clearStencil) { t->attStencil.content = attopt::Content::Cleared; restored |= rstore::AspectStencil; }
+
+    if (unlikely(prof::g_profEnabled)) {
+      m_rs[rstats::Restores]++;
+      m_rs[rstats::BytesSaved] -= bytes;
+      rstore::Key k;
+      k.format  = uint32_t(t->format);
+      k.width   = t->extent.width;
+      k.height  = t->extent.height;
+      k.aspects = restored;
+      k.reason  = why;
+      k.api     = rstore::Api(m_apiTag < uint32_t(rstore::Api::Count) ? m_apiTag : 0u);
+      m_device->restoreLog().add(k);
+    }
+
+    // att_trace: the restores share the pass decisions' line budget.
+    if (unlikely(d9mtdbg::flags() & d9mtdbg::AttTrace) && m_attTraceOn && m_attTraceBudget) {
+      m_attTraceBudget--;
+      rstore::Key k;
+      k.format  = uint32_t(t->format);
+      k.width   = t->extent.width;
+      k.height  = t->extent.height;
+      k.aspects = restored;
+      k.reason  = why;
+      k.api     = rstore::Api(m_apiTag < uint32_t(rstore::Api::Count) ? m_apiTag : 0u);
+      Logger::warn(str::format("D9MT-ATT restore after pass=", m_attEpoch, " ", rstore::describe(k),
+        m_apiTag ? "" : " (api tags need D9MT_PROFILE)"));
+    }
+  }
+
+
+  void MtlContextImpl::setApiTag(uint32_t api) {
+    m_apiTag = api;
+  }
+
+
+  void MtlContextImpl::discardImage(const Rc<MtlTexture>& image) {
+    if (!m_attOpt || image == nullptr || !attImageEligible(image.ptr()))
+      return;
+    auto* t = static_cast<MtlTextureImpl*>(image.ptr());
+    const Rc<MtlTextureView>& dsv = m_pass.targets.depthStencil;
+    if (m_pass.active && dsv != nullptr && dsv->image.ptr() == t) {
+      // The open pass needn't store it.
+      m_pass.discardDs = true;
+      return;
+    }
+    t->attColor.content = t->attDepth.content = t->attStencil.content = attopt::Content::Undefined;
   }
 
 
@@ -796,6 +1397,8 @@ namespace dxvk::backend {
       m_dirty |= DirtyResources;
       if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
         m_frameSampled.insert(view->image.ptr());
+      if (m_attOpt && view != nullptr && view->image != nullptr)
+        attBindSampled(view.ptr());
     }
   }
 
@@ -939,6 +1542,7 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::PrepareDraw);
     if (unlikely(!m_pass.active))
       materializePass();
+    const uint32_t dirtyIn = m_dirty;
 
     if (!deferredPassesEnabled()
      && m_cmdChunk.approxBytes() >= kCmdChunkFlushBytes)
@@ -979,8 +1583,17 @@ namespace dxvk::backend {
       m_lastStampSerial = m_currentSerial;
     }
 
+    // Aspects the pass may write: a store can only be skipped without.
+    if (m_attOpt) {
+      if (dirtyIn & (DirtyPso | DirtyDepthStencil))
+        m_attWriteMask = attComputeWriteMask();
+      m_pass.writtenMask |= m_attWriteMask;
+    }
+
     m_dirty = 0u;
     prof::bump(prof::CntDraws);
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::Draws]++;
     return true;
   }
 
@@ -1308,7 +1921,7 @@ namespace dxvk::backend {
         }
       }
 
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(m_cmdbuf.handle(), &info);
+      obj_handle_t enc = newRenderEncoder(m_cmdbuf.handle(), &info);
       for (auto& ch : e.chunks) {
         if (!ch.empty())
           MTL4RenderCommandEncoder_encodeCommands(enc, ch.head());

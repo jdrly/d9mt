@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -11,7 +12,10 @@
 
 namespace dxvk {
 
-  /* Live debug facility (all on the API thread, under the device lock).
+  /* Live debug facility, on the API thread that presents (without
+   * D3DCREATE_MULTITHREADED the device lock is a no-op), except the shader text
+   * dumps: shaders may be created on any thread, so the path setup and the
+   * shader files are under `shaderMutex`.
    * Strictly opt-in: with neither env var set nothing is polled or written.
    *  - D9MT_DEBUG_FILE=<Windows path>: flags file polled at most once a
    *    second on Present, one flag per line, '#' comments;
@@ -29,6 +33,7 @@ namespace dxvk {
     std::string flagsPath;     // empty: flags file disabled
     std::string dir;
     std::string shaderDir;     // empty: shader text dumps disabled
+    std::mutex  shaderMutex;   // path setup, shadersWritten and the shader files
     bool        pathResolved  = false;
     bool        pathInit      = false;
     uint64_t    lastPollMs    = 0u;

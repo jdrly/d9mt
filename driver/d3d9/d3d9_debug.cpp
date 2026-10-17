@@ -39,6 +39,8 @@ namespace dxvk {
       { "no_sameview_skip", d9mtdbg::NoSameViewSkip },
       { "no_clipplanes",    d9mtdbg::NoClipPlanes   },
       { "bools_off",        d9mtdbg::BoolsOff       },
+      { "no_attach_opt",    d9mtdbg::NoAttachOpt    },
+      { "att_trace",        d9mtdbg::AttTrace       },
     };
 
     constexpr uint32_t kLogLinesPerSecond = 400u;
@@ -117,6 +119,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugInitPath() {
+    std::lock_guard<std::mutex> lock(m_dbg.shaderMutex);
     if (m_dbg.pathResolved)
       return;
     m_dbg.pathResolved = true;
@@ -398,6 +401,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugWriteShader(const std::string& name, const void* code, size_t size) {
+    std::lock_guard<std::mutex> lock(m_dbg.shaderMutex);
     if (m_dbg.shaderDir.empty())
       return;
     if (!m_dbg.shadersWritten.insert(name).second)
@@ -477,7 +481,10 @@ namespace dxvk {
     if (!shader)
       return "FF";
     std::string name = shader->GetCommonShader()->GetName();
-    if (m_dbg.shadersWritten.find(name) == m_dbg.shadersWritten.end()) {
+    bool written;
+    { std::lock_guard<std::mutex> lock(m_dbg.shaderMutex);
+      written = m_dbg.shadersWritten.find(name) != m_dbg.shadersWritten.end(); }
+    if (!written) {
       UINT size = 0u;
       if (SUCCEEDED(shader->GetFunction(nullptr, &size)) && size) {
         std::vector<uint8_t> code(size);

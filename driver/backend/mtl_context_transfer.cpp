@@ -1,6 +1,7 @@
 #include "mtl_context_impl.h"
 #include "../util/util_bit.h"
 #include "../util/util_string.h"
+#include "../util/util_d9mt_debug.h"
 
 #include <algorithm>
 #include <cstring>
@@ -95,19 +96,24 @@ namespace dxvk::backend {
     // Shaders compile on the worker pool; the PSO key needs their libraries.
     if (unlikely(!m_vs->ready() || (m_fs != nullptr && !m_fs->ready()))) {
       if (m_asyncSkip) {
-        // Move still-queued prefetch compiles ahead (once per function).
-        const MtlShaderFunction* fns[2] = { m_vs.ptr(), m_fs.ptr() };
-
-        for (uint32_t i = 0u; i < 2u; i++) {
-          if (fns[i] != nullptr && !fns[i]->ready() && fns[i]->task != m_lastBoosted[i]) {
-            m_lastBoosted[i] = fns[i]->task;
-            m_device->submitCompile(fns[i]->task, true);
-          }
-        }
+        boostPendingShaders();
 
         if (compile_stats::g_enabled)
           compile_stats::g_skips.add(0u);
         return false;
+      }
+
+      // Wait budget: the waits below never run a queued task inline, so
+      // queue it ahead first. Out of budget: skip, as with m_asyncSkip.
+      if (unlikely(m_waitBudget.enabled())) {
+        boostPendingShaders();
+
+        if (!m_waitBudget.wait(m_vs->task.ptr())
+         || (m_fs != nullptr && !m_waitBudget.wait(m_fs->task.ptr()))) {
+          if (compile_stats::g_enabled)
+            compile_stats::g_skips.add(0u);
+          return false;
+        }
       }
 
       compile_stats::waitOnRenderThread(m_vs->task.ptr());
@@ -228,6 +234,18 @@ namespace dxvk::backend {
     return emitPso(pso);
   }
 
+  void MtlContextImpl::boostPendingShaders() {
+    // Move still-queued prefetch compiles ahead (once per function).
+    const MtlShaderFunction* fns[2] = { m_vs.ptr(), m_fs.ptr() };
+
+    for (uint32_t i = 0u; i < 2u; i++) {
+      if (fns[i] != nullptr && !fns[i]->ready() && fns[i]->task != m_lastBoosted[i]) {
+        m_lastBoosted[i] = fns[i]->task;
+        m_device->submitCompile(fns[i]->task, true);
+      }
+    }
+  }
+
   bool MtlContextImpl::emitPso(RenderPsoCache::Entry* pso) {
     const bool done = pso->isDone();
 
@@ -262,6 +280,18 @@ namespace dxvk::backend {
     bool failed = false;
 
     for (auto& p : m_psoPatches) {
+      // Still building and this frame's wait budget is spent: drop the bind
+      // and its draws for now, like a failed build but not cached as one.
+      // The PSO keeps building; the next draw binds it again.
+      if (unlikely(m_waitBudget.enabled()) && !m_waitBudget.wait(p.pso.ptr())) {
+        failed = true;
+        uint32_t draws = dropPsoBind(p.cmd);
+
+        if (compile_stats::g_enabled && draws)
+          compile_stats::g_skips.add(0u, draws);
+        continue;
+      }
+
       compile_stats::waitOnRenderThread(p.pso.ptr());
       p.cmd->pso = p.pso->handle();
 
@@ -271,15 +301,7 @@ namespace dxvk::backend {
       // Build failed: drop the bind and the draws that relied on it, as a
       // synchronous failure would have.
       failed = true;
-      p.cmd->type = WMTMtl4RenderCommandNop;
-
-      for (auto* c = static_cast<wmtcmd_base*>(p.cmd->next.get()); c != nullptr;
-           c = static_cast<wmtcmd_base*>(c->next.get())) {
-        if (c->type == WMTMtl4RenderCommandSetPSO)
-          break;
-        if (c->type == WMTMtl4RenderCommandDraw || c->type == WMTMtl4RenderCommandDrawIndexed)
-          c->type = WMTMtl4RenderCommandNop;
-      }
+      dropPsoBind(p.cmd);
     }
 
     m_psoPatches.clear();
@@ -288,6 +310,23 @@ namespace dxvk::backend {
       m_lastEncodedPso = nullptr;
       m_dirty |= DirtyPso;
     }
+  }
+
+  uint32_t MtlContextImpl::dropPsoBind(wmtcmd_mtl4_setpso* cmd) {
+    uint32_t draws = 0u;
+    cmd->type = WMTMtl4RenderCommandNop;
+
+    for (auto* c = static_cast<wmtcmd_base*>(cmd->next.get()); c != nullptr;
+         c = static_cast<wmtcmd_base*>(c->next.get())) {
+      if (c->type == WMTMtl4RenderCommandSetPSO)
+        break;
+      if (c->type == WMTMtl4RenderCommandDraw || c->type == WMTMtl4RenderCommandDrawIndexed) {
+        c->type = WMTMtl4RenderCommandNop;
+        draws++;
+      }
+    }
+
+    return draws;
   }
 
   void MtlContextImpl::appendTableAddress(ArgTableShadow& shadow, obj_handle_t table, uint64_t gpuAddress, uint32_t index) {
@@ -730,6 +769,10 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (m_attOpt) {
+      attRead(s, rstore::Reason::Copy);
+      attWrite(d, rstore::Reason::CopyDst);
+    }
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
@@ -811,6 +854,10 @@ namespace dxvk::backend {
     }
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (m_attOpt) {
+      attRead(s, rstore::Reason::Present);
+      attWrite(d, rstore::Reason::Present);
+    }
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
@@ -850,6 +897,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (m_attOpt)
+      attWrite(d, rstore::Reason::Upload);
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     WMTSize   size   = { extent.width, extent.height, extent.depth };
@@ -880,6 +929,8 @@ namespace dxvk::backend {
     if (!d || !s)
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (m_attOpt)
+      attRead(s, rstore::Reason::Readback);
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
@@ -949,7 +1000,44 @@ namespace dxvk::backend {
       }
     }
 
+    // The pass rendering the source is still open and has no encoder yet:
+    // resolve with its store action instead of loading every sample again
+    // in a pass of its own.
+    if (m_attOpt && m_pass.active && !m_pass.encoder
+     && !(d9mtdbg::flags() & d9mtdbg::NoAttachOpt)
+     && !region.srcOffset.x && !region.srcOffset.y && !region.dstOffset.x && !region.dstOffset.y
+     && region.extent.width >= srcExtent.width && region.extent.height >= srcExtent.height
+     && !region.srcSubresource.mipLevel && !region.srcSubresource.baseLayer
+     && !region.dstSubresource.mipLevel && !region.dstSubresource.baseLayer
+     && d->format == s->format && dst->info().sampleCount <= 1u) {
+      for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+        const Rc<MtlTextureView>& v = m_pass.targets.color[i];
+        if (v == nullptr || v->image.ptr() != src.ptr() || m_pass.resolveTo[i] != nullptr
+         || v->key.format != s->format || v->key.baseMip || v->key.baseLayer)
+          continue;
+        d->setTrackingSerial(m_currentSerial);
+        s->setTrackingSerial(m_currentSerial);
+        // Overwritten completely: no restore of a skipped clear needed.
+        d->attColor.content = d->attDepth.content = d->attStencil.content = attopt::Content::Defined;
+        m_pass.resolveTo[i] = dst;
+        if (unlikely(prof::g_profEnabled)) {
+          const MtlImageInfo& si = src->info();
+          const MtlFormatInfo* sfi = lookupFormatInfo(si.format);
+          m_rs[rstats::ResolveFolded]++;
+          m_rs[rstats::BytesSaved] += uint64_t(si.extent.width) * si.extent.height
+            * std::max(si.sampleCount, 1u) * (sfi->elementSize ? sfi->elementSize : 4u);
+        }
+        prof::bump(prof::CntPassCloseBlit);
+        closePass();
+        return;
+      }
+    }
+
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
+    if (m_attOpt) {
+      attRead(s, rstore::Reason::Resolve);
+      attWrite(d, rstore::Reason::Resolve);
+    }
 
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
@@ -967,7 +1055,7 @@ namespace dxvk::backend {
     info.render_target_width       = srcExtent.width;
     info.render_target_height      = srcExtent.height;
     encodeDirect([this, keepD = dst, keepS = src, info](obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       emitProducerBarrier(enc, uint64_t(WMTStageFragment));
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);
@@ -1004,6 +1092,10 @@ namespace dxvk::backend {
     const MtlExtent3D srcExtent = src->mipLevelExtent(region.srcSubresource.mipLevel);
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
+    if (m_attOpt) {
+      attRead(s, rstore::Reason::Resolve);
+      attWrite(d, rstore::Reason::Resolve);
+    }
 
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
@@ -1036,7 +1128,7 @@ namespace dxvk::backend {
     info.render_target_width       = srcExtent.width;
     info.render_target_height      = srcExtent.height;
     encodeDirect([this, keepD = dst, keepS = src, info](obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       emitProducerBarrier(enc, uint64_t(WMTStageFragment));
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);
@@ -1153,6 +1245,8 @@ namespace dxvk::backend {
       return;
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
+    if (m_attOpt)
+      attWrite(view->image.ptr(), rstore::Reason::PartialClear);
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -1191,7 +1285,7 @@ namespace dxvk::backend {
 
     encodeDirect([this, keepView = view, info, pso, vp, sc, table]
                  (obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
       MTL4RenderCommandEncoder_setViewport(enc, vp);
       MTL4RenderCommandEncoder_setScissorRect(enc, sc);
@@ -1252,6 +1346,8 @@ namespace dxvk::backend {
     obj_handle_t dsso = m_device->getDepthStencilState(ds);
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
+    if (m_attOpt)
+      attWrite(view->image.ptr(), rstore::Reason::PartialClear);
 
     auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
     view->image->setTrackingSerial(m_currentSerial);
@@ -1303,7 +1399,7 @@ namespace dxvk::backend {
     encodeDirect([this, keepView = view, info, pso, dsso, clearStencil,
                   stencilRef, vp, sc, table]
                  (obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
       MTL4RenderCommandEncoder_setDepthStencilState(enc, dsso);
       if (clearStencil)
@@ -1404,6 +1500,10 @@ namespace dxvk::backend {
       return;
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseBlit));
+    if (m_attOpt) {
+      attRead(srcView->image.ptr(), rstore::Reason::Blit);
+      attWrite(dstView->image.ptr(), rstore::Reason::Blit);
+    }
 
     auto* dstTv = static_cast<MtlTextureViewImpl*>(dstView.ptr());
     auto* srcTv = static_cast<MtlTextureViewImpl*>(srcView.ptr());
@@ -1450,7 +1550,7 @@ namespace dxvk::backend {
 
     encodeDirect([this, keepDst = dstView, keepSrc = srcView, info, pso, vp, sc, table]
                  (obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       MTL4RenderCommandEncoder_setRenderPipelineState(enc, pso);
       MTL4RenderCommandEncoder_setViewport(enc, vp);
       MTL4RenderCommandEncoder_setScissorRect(enc, sc);
@@ -1476,6 +1576,8 @@ namespace dxvk::backend {
     if (!tex)
       return;
     prepareDirectEncode(uint32_t(prof::CntPassCloseXfer));
+    if (m_attOpt)
+      attWrite(view->image.ptr(), rstore::Reason::MipGen);
     if (view->image != nullptr) {
       view->image->setTrackingSerial(m_currentSerial);
       noteTransferRead(view->image.ptr());
@@ -1553,11 +1655,22 @@ namespace dxvk::backend {
     }
 
     encodeDirect([this, keep = image, info](obj_handle_t cmdbuf) mutable {
-      obj_handle_t enc = MTL4CommandBuffer_renderCommandEncoder(cmdbuf, &info);
+      obj_handle_t enc = newRenderEncoder(cmdbuf, &info);
       emitProducerBarrier(enc, uint64_t(WMTStageFragment));
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);
     });
+
+    // Memory now holds a known clear: passes can Clear-load it, and skip
+    // storing it while nothing writes it.
+    if (m_attOpt) {
+      if (t->info.mipLevels <= 1u && t->info.arrayLayers <= 1u && !t->info.cube
+       && t->info.type == MtlImageType::e2D) {
+        t->attColor = t->attDepth = t->attStencil = attopt::AspectState();
+        t->attColor.content = t->attDepth.content = t->attStencil.content = attopt::Content::Cleared;
+        t->attDepth.value.c[0] = 1.0f;
+      }
+    }
   }
 
   void MtlContextImpl::invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) {

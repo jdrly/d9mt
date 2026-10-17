@@ -81,6 +81,8 @@ namespace dxvk {
 
   void MtlContext::initBuffer(const Rc<MtlBuffer>&)                            { MTL_STUB("initBuffer"); }
   void MtlContext::initImage(const Rc<MtlTexture>&)                            { MTL_STUB("initImage"); }
+  void MtlContext::discardImage(const Rc<MtlTexture>&)                         { }
+  void MtlContext::setApiTag(uint32_t)                                         { }
   void MtlContext::invalidateBuffer(const Rc<MtlBuffer>&, Rc<MtlAllocation>&&) { MTL_STUB("invalidateBuffer"); }
   void MtlContext::uploadBuffer(const Rc<MtlBuffer>&, MtlDeviceSize, const Rc<MtlBuffer>&, MtlDeviceSize, MtlDeviceSize) { MTL_STUB("uploadBuffer"); }
   bool MtlContext::ensureTextureUsage(const Rc<MtlTexture>&, MtlTextureUsage)  { MTL_STUB("ensureTextureUsage"); return false; }

@@ -11,6 +11,7 @@
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_presenter.h"
 
+#include "mtl_attachment_opt.h"
 #include "mtl_cmd_chunk.h"
 #include "mtl_device_impl.h"
 #include "mtl_pso_cache.h"
@@ -124,6 +125,7 @@ namespace dxvk::backend {
 
     void initBuffer(const Rc<MtlBuffer>& buffer) override;
     void initImage(const Rc<MtlTexture>& image) override;
+    void discardImage(const Rc<MtlTexture>& image) override;
     void invalidateBuffer(const Rc<MtlBuffer>& buffer, Rc<MtlAllocation>&& slice) override;
     void uploadBuffer(const Rc<MtlBuffer>& dst, MtlDeviceSize dstOff,
                       const Rc<MtlBuffer>& staging, MtlDeviceSize srcOff, MtlDeviceSize size) override;
@@ -141,6 +143,7 @@ namespace dxvk::backend {
     void beginDebugLabel(const char* label) override;
     void endDebugLabel() override;
     void insertDebugLabel(const char* label) override;
+    void setApiTag(uint32_t api) override;
 
     void setPresenter(Rc<MtlPresenter> presenter) { m_presenter = std::move(presenter); }
 
@@ -196,6 +199,15 @@ namespace dxvk::backend {
       uint64_t serial = 0u;
     };
 
+    // Attachment load/store optimization: one aspect of the pass's targets
+    // (color 0-3, depth, stencil) and what was decided for it.
+    struct AttSlot {
+      attopt::SlotInput    in;
+      attopt::SlotDecision d;
+      bool                 used = false;
+    };
+    static constexpr uint32_t kAttDepth = 4u, kAttStencil = 5u;
+
     struct PendingPass {
       MtlRenderTargets targets;
       bool active = false;
@@ -206,6 +218,13 @@ namespace dxvk::backend {
       float depthClear = 1.f; uint32_t stencilClear = 0;
       obj_handle_t encoder = 0;
       uint64_t encodedDraws = 0;
+      // m_attOpt only: the encoder is created when the pass ends (or its
+      // commands must be encoded before), once its load/store actions are known.
+      std::array<AttSlot, 6> att = { };
+      std::array<Rc<MtlTexture>, 4> resolveTo = { };  // MSAA color resolves folded into the store
+      uint64_t epoch = 0u;         // m_attEpoch when the pass started
+      uint8_t  writtenMask = 0u;   // aspects (AttSlot index bits) a draw may have written
+      bool     discardDs = false;  // the depth-stencil is discarded right after the pass
     };
 
     struct FrameEntry {
@@ -275,7 +294,12 @@ namespace dxvk::backend {
     // instead of waiting (no stalls, but objects pop in a few frames late).
     // Needs compile workers, or nothing would ever finish.
     bool         m_asyncSkip = false;
+    // d9mt.pipelineWaitBudgetMs / D9MT_PSO_WAIT_MS > 0: wait for such
+    // shaders/PSOs at most what is left of the frame's budget, then drop the
+    // draws like m_asyncSkip. Off by default (wait as long as it takes).
+    MtlCompileWaitBudget m_waitBudget;
     Rc<MtlCompileTask> m_lastBoosted[2];
+    void boostPendingShaders();
     bool         m_dynValid        = false;
     MtlViewport  m_lastViewport    = {};
     MtlRect      m_lastScissor     = {};
@@ -356,10 +380,38 @@ namespace dxvk::backend {
                              MtlResolveMode depthMode);
 
     void ensureCommandBuffer();
+    obj_handle_t newRenderEncoder(obj_handle_t cmdbuf, WMTRenderPassInfo* info);
     void materializePass();
     void flushPendingClears();
     void closePass();
     void flushCmdChunk();
+
+    // Attachment load/store optimization (mtl_attachment_opt.h). Off with
+    // D9MT_NO_ATTACHMENT_OPT=1 / d9mt.attachmentOpt = False and under
+    // D9MT_DEFERRED (deferred passes decide their own load/store actions).
+    bool         m_attOpt = false;
+    uint64_t     m_attEpoch = 0u;
+    uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
+    uint32_t     m_attTraceBudget = 0u;
+    bool         m_attTraceOn = false;
+    uint32_t     m_attFrame = 1u;       // 1-based frame counter for the read hint (attopt::readRecently)
+    uint32_t     m_apiTag = 0u;         // D9MT_PROFILE: rstore::Api of the commands being recorded
+    bool         createPassEncoder(bool early);
+    void         attApplyAfter();
+    uint8_t      attComputeWriteMask() const;
+    bool         attSampled(const MtlTexture* img) const;
+    // `why`: the operation that needs memory to hold the contents, for the
+    // RESTORE attribution. `aspects`: the aspects it reads (sampling a
+    // depth-stencil image reads depth only).
+    void         attBindSampled(const MtlTextureView* view);
+    void         attRestore(MtlTextureImpl* img, rstore::Reason why, MtlAspectMask aspects);
+    void         attRead(const MtlTexture* img, rstore::Reason why,
+                         MtlAspectMask aspects = MtlAspectColor | MtlAspectDepth | MtlAspectStencil);
+    void         attWrite(const MtlTexture* img, rstore::Reason why);
+    bool         chunkHasNoWork() const;
+
+    // D9MT_PROFILE: render-thread totals, published at endFrame (mtl_render_stats.h).
+    uint64_t     m_rs[rstats::Count] = { };
 
     void recordPassEntry();
     CmdChunk takeChunk();
@@ -377,6 +429,9 @@ namespace dxvk::backend {
     // Waits for PSOs still compiling and patches their SetPSO commands; must
     // run before m_cmdChunk is encoded or handed off.
     void resolvePsoPatches();
+    // Turns a SetPSO and the draws after it (up to the next SetPSO) into
+    // NOPs; returns the number of draws dropped.
+    static uint32_t dropPsoBind(wmtcmd_mtl4_setpso* cmd);
 
     struct PsoPatch {
       wmtcmd_mtl4_setpso*       cmd;

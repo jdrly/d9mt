@@ -4,6 +4,7 @@
 // tier table can be unit-tested natively (test/native/memory_profile_test.cpp);
 // config/env resolution lives in mtl_memory_profile.cpp.
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -44,6 +45,15 @@ namespace dxvk {
     // Diagnostics.
     uint32_t      statsInterval      = 0u;   // DIAG MEM line every N frames, 0 = off
     bool          labels             = false;
+    // Not memory, but resolved from the same config: the most the render
+    // thread waits per frame for shaders/PSOs still compiling before it skips
+    // draws (d9mt.pipelineWaitBudgetMs / D9MT_PSO_WAIT_MS). -1 = off (wait
+    // as long as it takes), 0 = never wait (= D9MT_ASYNC_SKIP=1).
+    int32_t       pipelineWaitBudgetMs = -1;
+    // Also not memory: attachment load/store optimization (Clear/DontCare
+    // loads, skipped stores, folded MSAA resolves; backend/mtl_attachment_opt.h).
+    // d9mt.attachmentOpt (default on); D9MT_NO_ATTACHMENT_OPT=1 turns it off.
+    bool          attachmentOpt = true;
   };
 
   inline const char* memoryTierName(MtlMemoryTier t) {
@@ -81,6 +91,30 @@ namespace dxvk {
       n = n * 10u + uint32_t(c - '0');
     }
     return n;
+  }
+
+  // D9MT_PSO_WAIT_MS: milliseconds (capped at 10000), or off/no/false/-1
+  // (= -1, wait as long as it takes). Unset or anything else keeps
+  // `fallback` (the dxvk.conf value).
+  inline int32_t parseWaitBudgetMs(std::string s, int32_t fallback) {
+    for (char& c : s)
+      c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+    if (s == "-1" || (s != "0" && parseSwitch(s) == 0))
+      return -1;
+    if (s.empty() || s.size() > 9u)
+      return fallback;
+    int32_t n = 0;
+    for (char c : s) {
+      if (c < '0' || c > '9')
+        return fallback;
+      n = n * 10 + int32_t(c - '0');
+    }
+    return std::min<int32_t>(n, 10000);
+  }
+
+  // dxvk.conf value: negative = off; capped like the env value.
+  inline int32_t clampWaitBudgetMs(int32_t ms) {
+    return ms < 0 ? -1 : std::min<int32_t>(ms, 10000);
   }
 
   // "auto" (or empty) -> isAuto. Returns false for unknown names.

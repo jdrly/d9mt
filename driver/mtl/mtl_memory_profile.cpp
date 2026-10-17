@@ -61,6 +61,13 @@ namespace dxvk {
 
     int labels = parseSwitch(env::getEnvVar("D9MT_LABELS"));
     p.labels = labels >= 0 ? labels != 0 : config.getOption<bool>("d9mt.resourceLabels", false);
+
+    p.pipelineWaitBudgetMs = parseWaitBudgetMs(env::getEnvVar("D9MT_PSO_WAIT_MS"),
+      clampWaitBudgetMs(config.getOption<int32_t>("d9mt.pipelineWaitBudgetMs", -1)));
+
+    p.attachmentOpt = config.getOption<bool>("d9mt.attachmentOpt", true);
+    if (parseSwitch(env::getEnvVar("D9MT_NO_ATTACHMENT_OPT")) == 1)
+      p.attachmentOpt = false;
     return p;
   }
 
