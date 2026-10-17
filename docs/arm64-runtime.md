@@ -128,4 +128,58 @@ FEX registered under `HKLM\Software\Microsoft\Wow64\amd64`):
   engine needs Homebrew's or a bundled FreeType for fonts (neutron bundles
   it); the tests don't draw text.
 
+### Crashes at process exit (a d9mt bug, both architectures)
+
+The first prototype runs ended some tests with a crash *after* their last
+frame: macOS crash reports and, Wine being a GUI app, "wine quit
+unexpectedly" dialogs. The hashes are not affected (the crash comes after the
+last readback). The runner now starts every Wine process through
+`test/harness/exc_guard.c`, which takes the corpse of a crashing process on
+a task exception port (`EXC_CORPSE_NOTIFY`, inherited by Wine's children)
+before ReportCrash gets it on the host port, logs all threads to
+`logs/<test>.exc` and reports `CRASH`. No report, no dialog, no system
+setting changed.
+
+What happens, from the guard's logs and a `pthread_exit` backtrace probe
+(`DYLD_INSERT_LIBRARIES`, test runs only):
+1. `ExitProcess` (or returning from `main`): wineserver has Wine SIGQUIT every
+   other thread, which `pthread_exit`s from the signal handler wherever it is.
+   d9mt's drawable acquirer (`d9mt-drawable`) is caught inside
+   `-[CAMetalLayer nextDrawable]` → `CAMetalLayerPrivateNextDrawableLocked`
+   allocating a drawable in every probed run: on arm64 Wine 8 of 8, **on
+   CX26 under Rosetta 10 of 10**. It dies holding the layer's lock; other
+   threads can die in `getenv` (libc's environment lock) or objc.
+2. Then libc's `exit()` runs d9mt's `pso_flush_atexit`
+   (`bridge/unix/winemetal_unix.c`), which serializes the PSO archive: Metal,
+   objc, `getenv`, XPC to the compiler service, tens to hundreds of ms.
+3. During it, either the flush itself takes a lock a dead thread owns
+   (`getenv`, `objc_lookUpImpOrForward`), or CoreAnimation's presented
+   callback for the last frame (`layer_presented`) takes the layer's lock:
+   `os_unfair_lock is corrupt, or owner thread exited without unlocking`.
+   The guard checks the lock's owner port: gone, every time. A lock that
+   blocks instead of aborting hangs the exit (one `code_index` run timed out
+   after all its frames).
+
+| arm64 Wine + FEX, 20 tests | PSO archive on (default) | `D9MT_PSO_ARCHIVE=0` |
+|---|---|---|
+| ARM64EC d3d9 | 20/20 hashes identical; `code_updatetex` crashes at exit 7 of 10 alone | 20/20, no crash |
+| x64 d3d9 under FEX | 20/20 identical; 3 crashes at exit (`code_alpha`, `code_rtt3d`, `code_updatetex`), 1 exit hang | 20/20, no crash |
+| CX26, `code_updatetex` ×20 | no crash (acquirer killed in `nextDrawable` all the same) | |
+
+`code_updatetex` hits it most: it never releases its shaders, declaration and
+vertex buffer, so its `IDirect3DDevice9_Release` leaves the device alive, and
+it exits two frames in, while the layer is still allocating drawables (the
+tests that exit at frame 5 have their drawables). A crashed flush also leaves
+`*.mtl4archive.tmp` and loose `<UUID>.metallib` files in the PSO directory.
+
+So the latent bug is d9mt's, on every architecture: heavy work in an
+`atexit` handler after Wine has killed the threads, plus a background thread
+that is often inside CoreAnimation. On Rosetta the window is apparently too
+short or the timing different (no crash in 20 runs), not absent. The fix
+changes the x86_64 `winemetal.so`, so it is not made on this branch without
+Jan's decision. Proposed: drop the `atexit` flush and flush at points where
+every thread still runs (device destruction, and a few seconds after the last
+new PSO on a worker thread, next to the existing every-256 flush); sweep
+stale `.tmp`/`.metallib` files from the PSO directory at startup.
+
 Timings: pending, measured on an idle machine.
