@@ -627,13 +627,13 @@ namespace dxvk {
 
       return true;
       #else
-      size_t dataSize = Count * sizeof(*dstData);
+      // Non-x86 (arm64, ARM64EC): NEON compare-and-copy (util_bit.h), same
+      // result and stores as the SSE path, and no CRT memcmp/memcpy calls
+      // (generic C under arm64 Wine). Results: test/native/arm64_xarch_test.cpp,
+      // speed: test/native/arm64_port_bench.cpp.
+      static_assert(sizeof(*dstData) == 16u);
+      return bit::cndcpyVec4(&dstData->data, pConstantData, Count);
 
-      if (!std::memcmp(&dstData->data, pConstantData, dataSize))
-        return false;
-
-      std::memcpy(&dstData->data, pConstantData, dataSize);
-      return true;
       #endif
     }
   }
