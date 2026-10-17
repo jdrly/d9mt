@@ -16,6 +16,7 @@ D3D9 semantics computed here.
               is and with each crs replaced by mul/mul/add (no crs left);
               both must give the same words
 --list        print the case names and exit
+--x86         the driver is the 32-bit build (i686 harness)
 --skip file   leave out the cases whose names the file lists (one per line)
 
 Comparison: exact bits, except that +0 and -0 are equal, any NaN equals
@@ -565,7 +566,7 @@ def main(argv):
             print(c.name)
         return 0
 
-    runner = WineRunner(dll)
+    runner = WineRunner(dll, 'x86' if '--x86' in argv else 'x64')
     sdir = runner.reset_dir('s')
     files = {}
 
