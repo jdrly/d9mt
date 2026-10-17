@@ -568,7 +568,7 @@ namespace dxvk::backend {
           w = m_pass.targets.depthStencil->image->extent.width;
           h = m_pass.targets.depthStencil->image->extent.height;
         }
-        if (!w) { w = uint32_t(m_viewport.width); h = uint32_t(m_viewport.height); }
+        if (!w) { w = D9MT_U32(m_viewport.width); h = D9MT_U32(m_viewport.height); }
         sc = { 0u, 0u, w, h };
       }
       if (first

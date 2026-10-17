@@ -7,9 +7,9 @@
 // apart as driver work (inD9mtMs close to dtMs) or the game's own (disk
 // streaming, its own threads: inD9mtMs small).
 //
-// Off (D9MT_PROFILE unset): one predictable branch per scope. On: rdtsc (or
-// the steady clock off x86) and a few relaxed atomics per scope; ticks are
-// converted with a ratio calibrated against the steady clock at every frame.
+// Off (D9MT_PROFILE unset): one predictable branch per scope. On: rdtsc (on
+// arm64 and ARM64EC the virtual counter) and a few relaxed atomics per scope; ticks
+// are converted with a ratio calibrated against the steady clock at every frame.
 //
 // Header-only and dependency-free so the formatting and the frame logic can
 // be unit-tested natively (test/native/hitch_test.cpp).
@@ -22,7 +22,7 @@
 #include <cstdlib>
 #include <string>
 
-#if defined(__x86_64__) || defined(__i386__)
+#if (defined(__x86_64__) && !defined(__arm64ec__)) || defined(__i386__) // ARM64EC defines __x86_64__
 #include <x86intrin.h>
 #endif
 
@@ -57,11 +57,11 @@ namespace dxvk::hitch {
   }
 
   inline uint64_t ticks() {
-#if defined(__x86_64__) || defined(__i386__)
+#if (defined(__x86_64__) && !defined(__arm64ec__)) || defined(__i386__)
     return __rdtsc();
-#else
-    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count());
+#else // arm64, ARM64EC: the virtual counter, like rdtsc not ordered against other code
+    uint64_t v; __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
 #endif
   }
 
@@ -252,7 +252,7 @@ namespace dxvk::hitch {
     uint64_t      m_lastNs     = 0u;
     uint64_t      m_calibTicks = 0u;
     uint64_t      m_calibNs    = 0u;
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__) // counters, calibrated
     double        m_nsPerTick  = 0.0;
 #else
     double        m_nsPerTick  = 1.0;
