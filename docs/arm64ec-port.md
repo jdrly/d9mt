@@ -72,9 +72,16 @@ ARCH=arm64ec scripts/build-driver.sh          # build/driver-arm64ec/d3d9.dll
 | Bridge ABI | `scripts/test-arm64-port.sh` [1]: clang record layouts of every struct in `bridge/*.h` and `airlib/d9mtair.h` for x86_64 mingw, ARM64EC mingw, x86_64 macOS, arm64 macOS | 264 records identical on all four (negative test: a `long` field is caught) |
 | Unit tests | [2]: the 7 `test/native` tests on arm64 and x86_64 | 7/7 on both |
 | Driver CPU routines | [3]: `test/native/arm64_xarch_test.cpp`, real driver code, x86_64 (SSE/asm paths, Rosetta) vs arm64 (the paths ARM64EC compiles) | 9 digests identical (below) |
-| Shader compile path | [4]: `scripts/run-air-xarch.sh`: x86_64 front end + `build/bridge/winemetal.so` under Rosetta vs arm64 front end + `build/bridge-arm64ec/winemetal.so`, 3047 shaders (42 committed, 5 from the test programs, 3000 generated) × front-end variants × 4 compile flag sets | 50059 manifest lines identical: 39884 metallibs (30212 distinct), IR and reflection blobs; the same 204 front-end aborts on both |
+| Shader compile path | [4]: `scripts/run-air-xarch.sh`: x86_64 front end + `build/bridge/winemetal.so` under Rosetta vs arm64 front end + `build/bridge-arm64ec/winemetal.so`, 3047 shaders (42 committed, 5 from the test programs, 3000 generated) × front-end variants × 4 compile flag sets | 50026 manifest lines identical: 39860 metallibs (30240 distinct), IR and reflection blobs; the same 201 front-end aborts on both |
 | Compile path concurrency | `ARCH=arm64 scripts/test-compile-mt.sh` (also `MT=1` in [5]): the harness and a ThreadSanitizer build of the unix side, natively on arm64 | OK, 0 ThreadSanitizer reports (x86_64: the same) |
 | Speed | `BENCH=1` [5]: `test/native/arm64_port_bench.cpp` | § Benchmarks |
+| PE compilers | `PE=1` [5]: [3] built by mingw GCC for x64 and llvm-mingw clang for ARM64EC, run under Wine (`RUN_X64`, `RUN_ARM64EC`), digests compared with [3] | builds; not run yet (no arm64 Wine). The undefined float→int conversions compile to the same `cvttss2si` forms with mingw GCC and with clang |
+
+The native tests compile driver code on macOS against DXVK's native
+Windows headers, including its `include/native/directx` submodule:
+`scripts/fetch-dxvk-native.sh` fetches them pinned (DXVK 3a4c6fa3, the
+commit `d3d9.def` matches; mingw-directx-headers 9df86f23) into
+`third_party/dxvk-native`, or `DXVK_NATIVE` points at a checkout.
 
 `arm64_xarch_test.cpp` covers: `bit::tzcnt/lzcnt/bsf/popcnt` (all 2^32 32-bit
 values, 2^27 64-bit values plus edge patterns, each against an integer
@@ -129,14 +136,14 @@ therefore true on ARM64EC.
 | `util/util_bit.h:649-737` interleave, FNV-1a | integer | same | [3] |
 | `util/util_bit.h:741-` (new) `D9MT_U32`, NEON helpers | not compiled (`!DXVK_ARCH_X86`) | `cvtF32U32X86`, `copyVec4`, `copyDwords`, `zeroDwords`, `cndcpyVec4`, `findByte32` | [3], [5] |
 | `util/sync/sync_spinlock.h:16-20` spin pause | `_mm_pause` | `yield` (before the fix above: nothing) | disassembly: `yield` in the ARM64EC dll |
-| `d3d9/d3d9_constant_copy.cpp:285-390` constant upload (per draw) | SSE loads, NaN flush `and(v, cmpeq(v,v))`, streaming stores, `pad16` | **NEON** via `bit::copyVec4/copyDwords/zeroDwords`: same lanes (NaN → +0, every other lane's bits kept, also under FTZ/DAZ, since `fcmeq`/`cmpeq` keep a denormal equal to itself), no CRT calls | [3]: identical over the bytes shaders read; [5] |
-| ″ bool padding | SSE copies whole groups of 4 bools and `pad16` whole 16-byte blocks: bytes after the last used bool can hold other source bools or stale data | exact copy, zero to the end | the differing bytes lie past every index a shader reads (the layout packs used bools); `arm64_xarch_test.cpp` documents it |
+| `d3d9/d3d9_constant_copy.cpp:285-390` constant upload (per draw) | SSE loads, NaN flush `and(v, cmpeq(v,v))`, streaming stores, `pad16` | `bit::copyVec4/copyDwords/zeroDwords`: same lanes (NaN → +0, every other lane's bits kept, also under FTZ/DAZ, since `fcmeq`/`cmpeq` keep a denormal equal to itself). The flushing float copy is the portable loop, which clang vectorizes (two `fcmeq`/`and` per iteration), faster than one NEON vector per iteration; the plain float copy and the int/bool copies and padding are NEON. No CRT calls (ARM64EC disassembly; the zeroing loop hides its zero from the optimizer, which otherwise turns it into `memset`) | [3]; [5] |
+| ″ bool padding | SSE copies whole groups of 4 bools and `pad16` whole 16-byte blocks | exact copy, zero to the end | the driver's bool layouts are one range of `align(dwordCount, 4)` dwords (`d3d9_shader_analysis.cpp:87`) on 16-byte-aligned buffers, so both write identical bytes ([3] digests the whole bool buffer for such layouts); only arbitrary test layouts differ, past the used bools |
 | `d3d9/d3d9_state.h:587-627` `UpdateStateConstants` dirty test (every `Set*ShaderConstant*`) | SSE compare to the first difference, copy from there | **NEON** `bit::cndcpyVec4`: same return value, same final memory | [3], [5] |
 | `d3d9/d3d9_shader_analysis.h:100-115` `D3D9InputSignature::find` | SSE: first match of 32 bytes (the count byte at 31 included), 32 if none | **NEON** `bit::findByte32`: the same result in every case (the old loop gave 32 where SSE gives 31 when the semantic packs to the count; callers only use indices below the count) | [3]: exact equality |
-| `d3d9/d3d9_hitch.h:25,60-66,265` profiler ticks (`D9MT_PROFILE`) | `__rdtsc` | `__x86_64__` is set on ARM64EC, so it would have used `__rdtsc`: **`mrs cntvct_el0`** (no syscall; the steady clock goes through QueryPerformanceCounter under Wine); the per-frame calibration handles its frequency | `hitch_test` on arm64 (calibrated ms checks); 262 `CNTVCT_EL0` reads, no `rdtsc` in the ARM64EC dll |
+| `d3d9/d3d9_hitch.h:25,60-66,255` profiler ticks (`D9MT_PROFILE`) | `__rdtsc` | `__x86_64__` is set on ARM64EC, so it would have used `__rdtsc`: **`mrs cntvct_el0`** (no syscall; the steady clock goes through QueryPerformanceCounter under Wine); the per-frame calibration handles its frequency | `hitch_test` on arm64 (calibrated ms checks); 262 `CNTVCT_EL0` reads, no `rdtsc` in the ARM64EC dll |
 | `d3d9/d3d9_device.cpp:5714-5741` `SetupFPU` | x87 control word: exceptions masked, 24-bit precision, round to nearest | skipped (upstream DXVK excludes `__arm64ec__`), logs "not supported". The x87 state is FEX's (emulated); x64 MSVC code uses SSE | accepted; affects only x87 code in a 64-bit game |
 | `d3d9/d3d9_adapter.cpp:21` vendor DLL names | `aticfx64.dll` etc. on x64 | the same (`__x86_64__`): right, a 64-bit process | reading |
-| `backend/mtl_context_transfer.cpp:571` `uint32_t(m_viewport.width)` when a pass has no attachment and a zero scissor | `cvttss2si` (64-bit): ≥ 2^32 → 0 | ARM saturates → `D9MT_U32` emulates x86 | [3]: all 2^32 floats identical to the x86 cast |
+| `backend/mtl_context_transfer.cpp:571` `uint32_t(m_viewport.width)` when a pass has no attachment and a zero scissor | `cvttss2si` to 64 bits, low 32 bits kept: 2^32 → 0, 2^32 + 512 → 512, NaN and \|f\| ≥ 2^63 → 0 (mingw GCC and clang emit the same `cvttss2siq`) | ARM saturates → `D9MT_U32` emulates x86 | [3]: all 2^32 floats identical to the x86 cast |
 | `d3d9/d3d9_device.h:1404` `EncodePointSize` | NaN → `cvttss2si` → low 16 bits 0 | NaN → 0 | [3]: all 2^32 values |
 | `backend/mtl_instrument.cpp:52` (`PROFILE_INSTRUMENT=1` builds) | `__builtin_ia32_rdtsc`, GCC's exclude list | not ported; `build-driver.sh` refuses `PROFILE_INSTRUMENT=1` with `ARCH=arm64ec` | — |
 | `util/util_unmap.h:12` | 32-bit only | not compiled | — |
@@ -145,7 +152,7 @@ therefore true on ARM64EC.
 
 | Where | x86 | ARM64EC / arm64 | Verified |
 |---|---|---|---|
-| `winecrt0_compat.c` unix call dispatch | `WINE_UNIX_CALL` → `__wine_unix_call_dispatcher` → ntdll's `__wine_unix_call` (CrossOver 24 exports it) | Upstream Wine (11.0, master) exports no `__wine_unix_call` function, only dispatcher pointers. In an ARM64EC process the unix loader sets ntdll's `__wine_unix_call_dispatcher` to ntdll's own ARM64EC stub (`dlls/ntdll/unix/loader.c`), and `__wine_unix_call_dispatcher_arm64ec` to the native unix dispatcher, which may only be reached by a branch. **Mirrors winecrt0** (`dlls/winecrt0/unix_lib.c`, identical in 11.0 and master): `LdrGetDllHandle` + `RtlFindExportedRoutineByName("__wine_unix_call_dispatcher")` once in `DllMain`, and a naked `__wine_unix_call_arm64ec` that `br`s to it (no ARM64EC indirect-call check). A missing export fails the DLL load. | ARM64EC dll imports only `NtQueryVirtualMemory`, `LdrGetDllHandle`, `RtlFindExportedRoutineByName` from ntdll; runtime: § Runtime |
+| `winecrt0_compat.c` unix call dispatch | `WINE_UNIX_CALL` → `__wine_unix_call_dispatcher` → ntdll's `__wine_unix_call` (CrossOver 24 exports it) | Upstream Wine (11.0, master) exports no `__wine_unix_call` function, only dispatcher pointers. In an ARM64EC process the unix loader sets ntdll's `__wine_unix_call_dispatcher` to ntdll's own ARM64EC stub (`dlls/ntdll/unix/loader.c`), and `__wine_unix_call_dispatcher_arm64ec` to the native unix dispatcher, which may only be reached by a branch. **Mirrors winecrt0** (since Wine 9.10; `dlls/winecrt0/unix_lib.c`, `libs/winecrt0/unix_lib.c` in master, the same code): the pointer starts at an init-and-forward function, `LdrGetDllHandle` + `RtlFindExportedRoutineByName("__wine_unix_call_dispatcher")` resolve it (also early, in `DllMain`), and a naked `__wine_unix_call_arm64ec` `br`s to it (no ARM64EC indirect-call check). A missing export fails the DLL load. | ARM64EC dll imports only `NtQueryVirtualMemory`, `LdrGetDllHandle`, `RtlFindExportedRoutineByName` from ntdll; runtime: § Runtime |
 | `wineunixlib.h:38-58` `__wine_jmp_buf` | unix side only (`WINE_UNIX_LIB`) | aarch64 branch, Wine's layout | — |
 | `wineunixlib.h` `WINE_UNIX_CALL` | dispatcher pointer | `__wine_unix_call_arm64ec` | — |
 | `main.c:17-48` Forza Horizon 4 `gs:0x20` fix (DXMT) | x64 asm | excluded by DXMT for ARM64EC | — |
@@ -171,7 +178,8 @@ the corpus, and with and without `-ffp-contract=off` alike.
 | `build-bridge.sh` | `ARCH=arm64ec` → `build/bridge-arm64ec`: arm64 `winemetal.so`, ARM64EC `winemetal-arm64ec.dll` (builtin-marked), `winemetal.def`. Passes its arch to `build-d9mtair.sh` explicitly |
 | `build-driver.sh` | `ARCH=arm64ec` → `build/driver-arm64ec/d3d9.dll`; exports counted with `llvm-readobj` |
 | `llvm-mingw.sh` (new) | pinned, checksummed llvm-mingw |
-| `test-compile-mt.sh` | `ARCH=arm64` |
+| `test-compile-mt.sh` | `ARCH=arm64`; uses `third_party/dxvk-native` when there's no DXVK checkout |
+| `fetch-dxvk-native.sh` (new) | pinned DXVK native headers for the native tests |
 | `check-x86-identity.sh`, `test-arm64-port.sh`, `run-air-xarch.sh`, `sm3_corpus.py`, `layout_cmp.py` (new) | verification above |
 | `install-bridge-builtins.sh`, `run-*.sh`, `dump-verify.sh` | x86_64 Wine layout only; arm64 Wine needs `lib/wine/aarch64-unix/winemetal.so` and `lib/wine/aarch64-windows/winemetal.dll` (to do with the runtime work) |
 
@@ -210,10 +218,14 @@ cross-thread variable in scope (all of `driver/`, `bridge/`, `airlib/`, `air/`):
 ## Float results
 
 - **FMA contraction**: `-ffp-contract=off` everywhere on arm64/ARM64EC (above).
-- **float → int conversions** (38 sites, found with clang's AST, scanned as
-  x86_64 and as ARM64EC: the same set): one could differ,
-  `mtl_context_transfer.cpp:571` (`D9MT_U32`); point size is identical;
-  everything else is clamped first, log-only, or runs on the GPU.
+- **float → int conversions**, found with clang's AST: 38 sites across
+  `driver/`, `bridge/`, `airlib/`, `air/` and dxbc-spirv (scanned as x86_64
+  and as ARM64EC: the same set); an independent scan of today's ARM64EC
+  `driver/` finds 14 there (`mtl_context_transfer.cpp:571` now converts
+  inside `D9MT_U32`). One could differ, `mtl_context_transfer.cpp:571`
+  (`D9MT_U32`); point size is identical (both compilers emit `cvttss2si` to
+  32 bits on x64); everything else is clamped first, log-only, or runs on the
+  GPU.
 - **Not under our control, to check under Wine**:
   - the game thread's FP state: x64 code can set MXCSR (FTZ, DAZ, rounding)
     and d3d9 runs on that thread. Under ARM64EC it depends on how FEX maps
@@ -222,8 +234,9 @@ cross-thread variable in scope (all of `driver/`, `bridge/`, `airlib/`, `air/`):
   - libm: `cosf` (light cone angles, `d3d9_state.h:301`) comes from Wine's
     x64 msvcrt vs its ARM64EC ucrtbase, possibly an ulp apart.
   - the front end runs in `d3d9.dll`, built by GCC for x64 and by clang for
-    ARM64EC; [3] and [4] build both architectures with clang. A PE test
-    program under Wine for both closes that gap.
+    ARM64EC; [3] and [4] build both architectures with clang. `PE=1` builds
+    [3] with the real PE compilers and runs it under Wine (`RUN_X64`,
+    `RUN_ARM64EC`); built, not run yet (no arm64 Wine).
 - **No dependence**: rounding-mode-sensitive functions (`lrint` etc.): none.
   `long double`: none in shared code. Hash keys: FNV/SHA-1 on integers;
   `std::hash` (libstdc++ vs libc++ on the PE side) is used only for in-memory
@@ -234,49 +247,62 @@ cross-thread variable in scope (all of `driver/`, `bridge/`, `airlib/`, `air/`):
 
 M5 Max, macOS 27, `BENCH=1 scripts/test-arm64-port.sh`
 (`test/native/arm64_port_bench.cpp`): median ns per call of 15 runs, range
-over 4 interleaved rounds per architecture. "x86_64" is today's x64 build's
-code (the SSE paths) translated by Rosetta, "arm64" the code ARM64EC compiles
-(NEON), native. The benchmark warms the core up first and moves the
-constant-copy destination through 16 offsets over 4 KB, as the constant ring
-does: a single placement varies by up to 3 ns per call on its own.
+over 4 interleaved rounds. Three builds of the same benchmark around the real
+driver code:
+- **x86_64**: today's x64 build's code, the SSE paths, translated by Rosetta;
+- **arm64, main**: `main`'s driver sources on arm64, i.e. DXVK's portable
+  branches, which ARM64EC would compile without this port;
+- **arm64, this tree**: what ARM64EC compiles now.
 
-| Hot path | x86_64 (Rosetta) | arm64 NEON |
-|---|---|---|
-| `copyConstantData` 32 float + 8 int + 16 bool | 11.5–11.8 | 10.0–10.5 |
-| ″ with NaN flush | 14.8–15.6 | 12.2–12.8 |
-| ″ 128 float | 25.4–26.3 | 21.2–21.7 |
-| ″ 128 float, NaN flush | 37.1–38.8 | 26.5–27.4 |
-| ″ 256 float | 44.5–46.6 | 35.7–36.2 |
-| ″ 256 float, NaN flush | 70.8–71.2 | 45.4–46.3 |
-| `UpdateStateConstants` ×1 unchanged / changed | 0.7–0.8 / 6.5–7.1 | 0.5 / 2.3–2.4 |
-| ″ ×4 | 1.7–1.8 / 6.8–7.7 | 1.2 / 1.7–2.0 |
-| ″ ×16 | 5.8–6.0 / 8.6–9.4 | 4.3–4.4 / 3.2 |
-| ″ ×64 | 22.6–23.1 / 17.6–18.3 | 15.9–16.2 / 9.0–9.4 |
-| ″ ×256 | 98.3–99.6 / 71.7–72.9 | 78.5–79.4 / 34.3–39.9 |
-| `D3D9InputSignature::find` (12 entries) | 1.9 | 0.8 |
+The benchmark warms the core up first and moves the constant-copy destination
+through 16 offsets over 4 KB, as the constant ring does: one placement alone
+varies by up to 3 ns per call.
 
-- The portable code these replace (DXVK's non-x86 branches, compiled for
-  arm64) was slower in places: `find` 4.3 ns (2.2× SSE), `copyConstantData`
-  32 float 12.6 ns, `UpdateStateConstants` ×1 unchanged 1.1 ns. It also
-  called `memcpy`/`memcmp`/`memset`, which under arm64 Wine are Wine's
-  generic C (`dlls/msvcrt/string.c`; its SSE2 `memmove` is x86-only), so its
-  native numbers above are optimistic. The NEON versions make no CRT calls.
-- Shader compile path: the whole AIR corpus (3047 shaders, 50059 compiles and
-  front-end runs) takes 39.7 s for x86_64 under Rosetta and 19.7 s natively:
-  **2.0× faster** shader compiles.
+| Hot path | x86_64 (Rosetta) | arm64, main | arm64, this tree |
+|---|---|---|---|
+| `copyConstantData` 32 float + 8 int + 16 bool | 11.4–11.8 | 9.9–10.3 | 9.0–9.8 |
+| ″ with NaN flush (SWTOR: float emulation on) | 14.7–15.0 | 9.2–9.6 | 9.4–10.0 |
+| ″ 128 float | 25.4–26.7 | 20.7–21.1 | 20.3–21.3 |
+| ″ 128 float, NaN flush | 37.6–39.5 | 20.7–21.1 | 20.6–21.4 |
+| ″ 256 float | 44.7–46.6 | 40.0–41.6 | 34.8–36.1 |
+| ″ 256 float, NaN flush | 70.8–71.3 | 35.9–36.9 | 36.0–37.7 |
+| `UpdateStateConstants` ×1 unchanged / changed | 0.7–0.8 / 6.5–7.2 | 1.0–1.1 / 2.6–2.8 | 0.5–0.6 / 2.2 |
+| ″ ×4 | 1.7–1.8 / 6.8–7.5 | 1.5–1.8 / 2.0–2.3 | 0.8–0.9 / 1.8–1.9 |
+| ″ ×16 | 5.7–6.0 / 8.7–9.4 | 4.6–4.8 / 3.4–3.5 | 2.8–2.9 / 3.3–3.4 |
+| ″ ×64 | 22.6–23.1 / 17.7–18.4 | 15.8–16.4 / 9.5–9.9 | 11.0 / 9.8–10.1 |
+| ″ ×256 | 97.8–98.9 / 71.0–71.9 | 74.1–78.0 / 34.7–41.8 | 44.0–44.6 / 34.8–41.7 |
+| `D3D9InputSignature::find` (12 entries) | 1.9–2.0 | 4.4–4.6 | 0.8 |
+
+- This tree is at least as fast as both everywhere, within noise where the
+  ranges overlap. The flushing float copy is the portable loop itself: clang
+  vectorizes it (two `fcmeq`/`and` per iteration), which measured faster than
+  one NEON vector per iteration (32/128/256 vectors: 4.1/16.7/33.3 ns vs
+  5.7/20.9/41.7 in isolation). The plain copy is NEON (29 vs 33–37 ns at
+  256); the dirty test compares four vectors per step; the int/bool copies
+  and padding copy whole 32-byte blocks plus an overlapping tail, as memcpy
+  implementations do.
+- The `main` column calls Apple's `memcpy`/`memcmp`/`memset` here. Under
+  arm64 Wine those are Wine's generic C (`dlls/msvcrt/string.c`; its SSE2
+  `memmove` is x86-only), so that column is optimistic for Wine. This tree's
+  paths make no CRT calls (checked in the ARM64EC disassembly).
+- Shader compile path: the whole AIR corpus (3047 shaders, 50026 compiles and
+  front-end runs) takes 39.7–40.8 s for x86_64 under Rosetta and
+  19.7–20.2 s natively: **2.0× faster** shader compiles.
 
 ## Found on the way (not port issues, the same on x86)
 
-- **dxbc-spirv asserts are live in all builds** (no `NDEBUG`): a pixel shader
-  reading `vPos.xyxy`, an input with an undeclared component, or a
-  `rep`/`if`/partial `crs` combination aborts in `ir_utils.cpp:103`
-  (`normalizeTypeForConsume`) or `sm3_io_map.cpp:269`, which on Windows ends
-  the game. 204 of 3047 corpus shaders abort, on both architectures alike.
-  Unknown whether real game shaders hit it (fxc doesn't emit the first two).
-- **`pad16`'s SSE path** (`d3d9_constant_copy.cpp:378-385`) uses
-  `_mm_stream_si128` at `start = count * 4`, which isn't always 16-byte
-  aligned (bool constants); real x86 hardware faults on that. Upstream DXVK
-  code; not reached on ARM.
+- **dxbc-spirv `crs` with a write mask of .y, .z, .xz or .yz** (upstream
+  bug): `Converter::handleCrs` (`sm3_converter.cpp:1751`) passes the packed
+  list of computed components to `composite()` with the write mask, which
+  expects them indexed by component. dxbc-spirv's asserts are live in all
+  our builds (no `NDEBUG`), so such a shader aborts (`ir_utils.cpp:103`
+  `normalizeTypeForConsume`, `ir_utils.cpp:346` `composite` for .y), which
+  ends the game; the independent check also found 616 corpus shaders that
+  compile without asserting but wrongly. All 201 aborts of the corpus are
+  this `crs` bug, the same on both architectures. Unknown whether real game
+  shaders use such a `crs`. (A duplicate register declaration asserts in
+  `sm3_io_map.cpp:269`; that input is invalid, the generator no longer emits
+  it.)
 - **Build directory in the PE binaries**: ld's automatic image base depends
   on the output path, so release DLLs differ by where they were built.
 - R2 and R6 above.
