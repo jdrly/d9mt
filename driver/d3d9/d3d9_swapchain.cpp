@@ -197,8 +197,10 @@ namespace dxvk {
       }
 
       // Sleep without the device lock; the CS thread never needs it.
-      if (until != high_resolution_clock::time_point())
+      if (until != high_resolution_clock::time_point()) {
+        hitch::Scope bs(m_parent->Hitch(), hitch::BgSleep);
         Sleep::sleepUntil(high_resolution_clock::now(), until);
+      }
     }
 
     if (unlikely(hitch::g_enabled))

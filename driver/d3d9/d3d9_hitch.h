@@ -45,13 +45,14 @@ namespace dxvk::hitch {
     GpuWait,      // app thread waiting for a resource on the GPU
     Throttle,     // staging memory throttle waiting for the GPU
     Query,        // IDirect3DQuery9::GetData
+    BgSleep,      // Present's sleep while the window is in the background (inside present)
     Count
   };
 
   inline const char* catName(uint32_t c) {
     static constexpr const char* kNames[Count] = {
       "present", "latencyWait", "texCreate", "texLock", "texUpload", "bufCreate",
-      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query"
+      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query", "bgSleep"
     };
     return c < Count ? kNames[c] : "?";
   }

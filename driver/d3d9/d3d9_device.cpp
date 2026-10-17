@@ -5669,7 +5669,8 @@ namespace dxvk {
 
     // PACE: the blocked part of the time inside d9mt (these don't nest in each other)
     const double waitMs = every.cat[hitch::Latency].ms + every.cat[hitch::CsSync].ms
-                        + every.cat[hitch::GpuWait].ms + every.cat[hitch::Throttle].ms;
+                        + every.cat[hitch::GpuWait].ms + every.cat[hitch::Throttle].ms
+                        + every.cat[hitch::BgSleep].ms;
     if (m_paceWindow.frameEnd(nowNs, every.dtMs, every.inMs, waitMs)) {
       // The Present thread's CPU time (100 ns units), once a second
       FILETIME created, exited, kernel, user;
