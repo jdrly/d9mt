@@ -6,7 +6,7 @@
   #if defined(__x86_64__) || defined(_M_X64) || defined(__e2k__)
     #define DXVK_ARCH_X86_64
   #endif
-#elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) || defined(__arm64ec__) // mingw ARM64EC: no __aarch64__/_M_*
   #define DXVK_ARCH_ARM64
 #endif
 
@@ -737,3 +737,23 @@ namespace dxvk::bit {
   }
 
 }
+
+// D9MT_U32(f): uint32_t(f) of a float with x86-64's result where C++ leaves it
+// undefined (NaN, negative, >= 2^32): x86-64 converts through a 64-bit
+// cvttss2si (NaN and |f| >= 2^63 give INT64_MIN) and keeps the low 32 bits,
+// ARM saturates. x86 builds keep the plain cast; as a macro whose name is as
+// long as "uint32_t" it leaves their code and debug info (columns included)
+// unchanged (docs/arm64ec-port.md).
+#if defined(DXVK_ARCH_ARM64)
+namespace dxvk::bit {
+  inline uint32_t cvtF32U32X86(float f) {
+    int64_t v = (f >= -9223372036854775808.0f && f < 9223372036854775808.0f)
+      ? int64_t(f) : INT64_MIN;
+    return uint32_t(uint64_t(v));
+  }
+}
+#define D9MT_U32(f) ::dxvk::bit::cvtF32U32X86(f)
+#else
+#define D9MT_U32(f) uint32_t(f)
+#endif
+
