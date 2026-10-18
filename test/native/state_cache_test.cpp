@@ -1009,6 +1009,23 @@ static void testResolveConfig() {
   CHECK(resolve(c, reason) && c.threads == 4u);
   setenv("D9MT_STATE_CACHE_THREADS", "0", 1);
   CHECK(resolve(c, reason) && c.threads == 0u);
+  setenv("D9MT_STATE_CACHE_THREADS", "junk", 1);
+  CHECK(resolve(c, reason) && c.threads == 2u);       // not a number: the default
+  setenv("D9MT_STATE_CACHE_THREADS", "1x", 1);
+  CHECK(resolve(c, reason) && c.threads == 2u);
+  unsetenv("D9MT_STATE_CACHE_THREADS");
+
+  // A relative D9MT_STATE_CACHE is ignored (logged): the default location.
+  setenv("D9MT_STATE_CACHE", "relative/dir", 1);
+  CHECK(resolve(c, reason) && c.file == home + "/Library/Caches/d9mt/state/swtor.exe.d9mtstate");
+  setenv("D9MT_STATE_CACHE", "..\\up", 1);
+  CHECK(resolve(c, reason) && c.file == home + "/Library/Caches/d9mt/state/swtor.exe.d9mtstate");
+  // Windows absolute paths are taken as they are.
+  setenv("D9MT_STATE_CACHE", "C:\\cache", 1);
+  CHECK(resolve(c, reason) && c.file == "C:\\cache\\swtor.exe.d9mtstate");
+  setenv("D9MT_STATE_CACHE", "\\\\server\\share\\x.d9mtstate", 1);
+  CHECK(resolve(c, reason) && c.file == "\\\\server\\share\\x.d9mtstate");
+  unsetenv("D9MT_STATE_CACHE");
 }
 
 // The key validator (backend/mtl_pso_key.h): a key shaped like resolvePso()'s

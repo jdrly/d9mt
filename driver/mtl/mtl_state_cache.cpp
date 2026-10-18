@@ -2,6 +2,7 @@
 #include "mtl_context.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
@@ -51,6 +52,18 @@ namespace dxvk {
 #else
       std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 #endif
+    }
+
+    /// A decimal number, all of it; false for empty or anything else.
+    bool parseNumber(const std::string& s, unsigned long& out) {
+      if (s.empty() || s.size() > 9u)
+        return false;
+      for (char c : s) {
+        if (c < '0' || c > '9')
+          return false;
+      }
+      out = std::strtoul(s.c_str(), nullptr, 10);
+      return true;
     }
 
     std::string sanitizeName(const std::string& s) {
@@ -458,16 +471,14 @@ namespace dxvk {
       return false;
     }
 
-    const std::string threads = getEnv("D9MT_STATE_CACHE_THREADS");
-    if (!threads.empty())
-      config.threads = std::min<uint32_t>(uint32_t(std::strtoul(threads.c_str(), nullptr, 10)), 4u);
+    // Numbers: anything that isn't one leaves the default.
+    unsigned long n = 0u;
 
-    const std::string maxEntries = getEnv("D9MT_STATE_CACHE_MAX");
-    if (!maxEntries.empty()) {
-      const unsigned long n = std::strtoul(maxEntries.c_str(), nullptr, 10);
-      if (n)
-        config.maxEntries = uint32_t(std::clamp<unsigned long>(n, MinMaxEntries, MaxMaxEntries));
-    }
+    if (parseNumber(getEnv("D9MT_STATE_CACHE_THREADS"), n))
+      config.threads = uint32_t(std::min<unsigned long>(n, MaxPrewarmThreads));
+
+    if (parseNumber(getEnv("D9MT_STATE_CACHE_MAX"), n) && n)
+      config.maxEntries = uint32_t(std::clamp<unsigned long>(n, MinMaxEntries, MaxMaxEntries));
 
     config.noValidate = getEnv("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
 
@@ -475,7 +486,12 @@ namespace dxvk {
     std::string unixPath;
 
     if (!override.empty()) {
-      if (override[0] != '/') {
+      const bool unixAbsolute = override[0] == '/';
+      const bool winAbsolute = (override.size() >= 3u && std::isalpha(uint8_t(override[0]))
+                                && override[1] == ':' && (override[2] == '\\' || override[2] == '/'))
+                            || !override.compare(0u, 2u, "\\\\");
+
+      if (winAbsolute) {
         // A Windows path, used as is.
         config.file = endsWith(override, ".d9mtstate")
           ? override : override + "\\" + fileName;
@@ -483,8 +499,14 @@ namespace dxvk {
         return true;
       }
 
-      unixPath = normalizeUnixPath(override);
-    } else {
+      if (unixAbsolute)
+        unixPath = normalizeUnixPath(override);
+      else
+        Logger::warn(str::format("STATECACHE ignoring D9MT_STATE_CACHE=", override,
+          ": not an absolute path; using the default location"));
+    }
+
+    if (unixPath.empty()) {
       // 1. Next to the AIR cache and PSO archives, the macOS user cache dir
       //    (confstr _CS_DARWIN_USER_CACHE_DIR): launchd's TMPDIR is
       //    /var/folders/<a>/<b>/T/ and that dir is its sibling C/. Only if
@@ -724,7 +746,10 @@ namespace dxvk {
 
     while (true) {
       { std::unique_lock lock(m_writerMutex);
-        m_writerCond.wait_for(lock, std::chrono::milliseconds(250), [this] { return m_stopWriter; });
+        // 250 ms normally; 20 ms right after a big intake, so a burst of
+        // misses doesn't overflow the record ring.
+        const auto poll = std::chrono::milliseconds(m_lastIntake >= 256u ? 20 : 250);
+        m_writerCond.wait_for(lock, poll, [this] { return m_stopWriter; });
 
         if (m_stopWriter)
           break;
@@ -874,7 +899,10 @@ namespace dxvk {
     }
 
     Record r;
+    m_lastIntake = 0u;
+
     while (m_ring.pop(r)) {
+      m_lastIntake++;
       if (!ingest(r))
         m_pendingRecords.push_back(std::move(r));
     }

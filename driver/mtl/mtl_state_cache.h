@@ -238,7 +238,7 @@ namespace dxvk {
     };
     static constexpr uint32_t MaxPrewarmThreads = 4u;
     PrewarmSlot                   m_slots[MaxPrewarmThreads];
-
+    uint32_t                      m_lastIntake = 0u;    // writer: records drained last time
 
     dxvk::thread              m_writer;
     std::vector<dxvk::thread> m_prewarmThreads;
