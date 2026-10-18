@@ -3,6 +3,8 @@
 #include "mtl_pso_cache.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <iterator>
 #include <atomic>
 #include <chrono>
 
@@ -28,6 +30,22 @@ namespace dxvk::backend {
 
   static_assert(sizeof(RenderPsoKey) == RenderPsoKey::StateOffset + statecache::KeyBytes,
     "the state cache records RenderPsoKey after its two cookies");
+
+  // The validator's numbers (mtl_pso_key.h) are winemetal.h's.
+  static_assert(WMTAttributeFormatUChar4 == 3 && WMTAttributeFormatUChar4Normalized == 9
+             && WMTAttributeFormatChar4Normalized == 12 && WMTAttributeFormatShort2 == 16
+             && WMTAttributeFormatShort4 == 18 && WMTAttributeFormatUShort2Normalized == 19
+             && WMTAttributeFormatUShort4Normalized == 21 && WMTAttributeFormatShort2Normalized == 22
+             && WMTAttributeFormatShort4Normalized == 24 && WMTAttributeFormatHalf2 == 25
+             && WMTAttributeFormatHalf4 == 27 && WMTAttributeFormatFloat == 28
+             && WMTAttributeFormatFloat2 == 29 && WMTAttributeFormatFloat3 == 30
+             && WMTAttributeFormatFloat4 == 31 && WMTAttributeFormatInt1010102Normalized == 40
+             && WMTAttributeFormatUInt1010102Normalized == 41
+             && WMTAttributeFormatUChar4Normalized_BGRA == 42 && WMTAttributeFormatHalf == 53,
+    "psoAttributeFormatProduced() must list attributeFormat()'s outputs");
+  static_assert(WMTBlendFactorOneMinusSource1Alpha == 18 && WMTBlendOperationMax == 4,
+    "psoStateValid() blend ranges");
+  static_assert(WMTPrimitiveTopologyClassTriangle == 3, "psoStateValid() topology range");
 
   uint64_t RenderPsoKey::signature() {
     const uint64_t layout[] = {
@@ -172,7 +190,9 @@ namespace dxvk::backend {
     info.alpha_to_coverage_enabled = key.alphaToCoverage != 0u ? 1u : 0u;
     info.input_primitive_topology  = uint32_t(WMTPrimitiveTopologyClass(key.topologyClass));
 
-    for (uint8_t i = 0u; i < key.colorCount && i < 8u; i++) {
+    // Never past the key's arrays, whatever the counts say (a state cache
+    // key is validated before it gets here, a draw's key is built in range).
+    for (uint32_t i = 0u; i < key.colorCount && i < std::size(key.colors); i++) {
       const PsoColorAttachment& k = key.colors[i];
       WMTColorAttachmentBlendInfo& c = info.colors[i];
       c.pixel_format          = WMTPixelFormat(k.pixelFormat);
@@ -187,8 +207,8 @@ namespace dxvk::backend {
     }
 
     WMTRenderPipelineVertexInfo& vinfo = info.vertex;
-    vinfo.num_attributes = key.attrCount;
-    for (uint8_t i = 0u; i < key.attrCount && i < 31u; i++) {
+    vinfo.num_attributes = std::min<uint32_t>(key.attrCount, uint32_t(std::size(key.attrs)));
+    for (uint32_t i = 0u; i < vinfo.num_attributes; i++) {
       const PsoVertexAttr& k = key.attrs[i];
       WMTVertexAttributeInfo& a = vinfo.attributes[i];
       a.format       = WMTAttributeFormat(k.format);
@@ -197,7 +217,7 @@ namespace dxvk::backend {
     }
 
     uint32_t numLayouts = 0u;
-    for (uint8_t i = 0u; i < key.layoutCount && i < 31u; i++) {
+    for (uint32_t i = 0u; i < key.layoutCount && i < std::size(key.layouts); i++) {
       const PsoVertexLayout& k = key.layouts[i];
       uint32_t idx = k.pad;
       if (idx >= 31u)

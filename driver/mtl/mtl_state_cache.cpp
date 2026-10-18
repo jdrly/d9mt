@@ -272,6 +272,28 @@ namespace dxvk {
       return env::getExeName();
     }
 
+    bool fileExists(const std::string& path) {
+      const DWORD a = ::GetFileAttributesW(widen(path).c_str());
+      return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    void removeFile(const std::string& path) {
+      ::DeleteFileW(widen(path).c_str());
+    }
+
+    /// A small marker file; contents don't matter, existence does.
+    bool writeMarkerFile(const std::string& path) {
+      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE)
+        return false;
+      static const char text[] = "d9mt state cache prewarm in progress\n";
+      DWORD n = 0u;
+      const bool ok = ::WriteFile(h, text, DWORD(sizeof(text) - 1u), &n, nullptr) && ::FlushFileBuffers(h);
+      ::CloseHandle(h);
+      return ok;
+    }
+
     void nameThread(const char* name) {
       env::setThreadName(name);
     }
@@ -368,6 +390,23 @@ namespace dxvk {
       return v.empty() ? std::string("native-test") : v;
     }
 
+    bool fileExists(const std::string& path) {
+      struct stat st;
+      return !::stat(path.c_str(), &st) && S_ISREG(st.st_mode);
+    }
+
+    void removeFile(const std::string& path) {
+      ::unlink(path.c_str());
+    }
+
+    bool writeMarkerFile(const std::string& path) {
+      FILE* f = std::fopen(path.c_str(), "wb");
+      if (!f)
+        return false;
+      const bool ok = std::fputs("d9mt state cache prewarm in progress\n", f) >= 0;
+      return !std::fclose(f) && ok;
+    }
+
     void nameThread(const char*) { }
 
 #endif
@@ -405,6 +444,8 @@ namespace dxvk {
       if (n)
         config.maxEntries = uint32_t(std::clamp<unsigned long>(n, MinMaxEntries, MaxMaxEntries));
     }
+
+    config.noValidate = getEnv("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
 
     const std::string fileName = sanitizeName(exeName()) + ".d9mtstate";
     std::string unixPath;
@@ -563,6 +604,14 @@ namespace dxvk {
       t.join();
     m_prewarmThreads.clear();
 
+    // A clean shutdown: whatever the prewarm did, it didn't crash us.
+    { std::lock_guard lock(m_markerMutex);
+      if (m_markerOnDisk) {
+        removeFile(markerPath());
+        m_markerOnDisk = false;
+      }
+    }
+
     { std::lock_guard lock(m_writerMutex);
       m_stopWriter = true;
     }
@@ -615,6 +664,8 @@ namespace dxvk {
     s.skipped    = m_skipped.load();
     s.writes     = m_writes.load();
     s.entries    = m_entries.load();
+    s.invalid    = m_invalid.load();
+    s.guardTripped = m_guardTripped.load();
     return s;
   }
 
@@ -659,17 +710,41 @@ namespace dxvk {
     makeDirs(parentOf(file));
     removeStaleTemps(file);
 
+    // Crash-loop guard: the marker outlived the last session, which ended
+    // (crashed or was killed) while prewarm builds were running. Whatever
+    // it was, the file is not replayed again: this session starts empty,
+    // prewarms nothing and records afresh from its own draws.
+    if (fileExists(markerPath())) {
+      m_guardTripped.store(true);
+      removeFile(file);
+      removeFile(markerPath());
+      Logger::warn(str::format("STATECACHE the last session ended while prewarm builds were running"
+        " (crash or kill): dropped ", m_config.displayPath, ", no prewarm this session"));
+    }
+
     std::vector<uint8_t> data;
     readAll(file, data);
 
     std::vector<Entry> entries;
     const ParseResult r = parse(data.data(), data.size(), m_config.keySignature, entries);
+    uint32_t invalid = 0u;
+    const char* invalidWhy = "";
 
     switch (r.status) {
       case ParseStatus::Ok:
-        for (const Entry& e : entries)
+        // Only what the draw path could have built is ever replayed.
+        for (const Entry& e : entries) {
+          const char* why = nullptr;
+          if (!m_config.noValidate && !m_backend->psoStateValid(e.key, &why)) {
+            if (!invalid++)
+              invalidWhy = why ? why : "?";
+            m_dropped.insert(identityHash(e));   // and not merged back from disk
+            continue;
+          }
           m_db.merge(e);
-        m_dirty = r.corrupt || r.truncated;
+        }
+        m_invalid.store(invalid);
+        m_dirty = r.corrupt || r.truncated || invalid;
         break;
 
       case ParseStatus::Empty:
@@ -710,7 +785,10 @@ namespace dxvk {
     Logger::info(str::format("STATECACHE load path=", m_config.displayPath,
       " status=", statusName(r.status), " entries=", m_db.size(),
       " session=", m_session, " prewarmable=", indexed, " readyAtLoad=", ready,
-      " corrupt=", r.corrupt, " truncated=", r.truncated, " capped=", capped, " max=", m_config.maxEntries,
+      " corrupt=", r.corrupt, " truncated=", r.truncated, " invalid=", invalid,
+      invalid ? str::format(" (first: ", invalidWhy, ")") : std::string(),
+      " capped=", capped, " max=", m_config.maxEntries,
+      m_guardTripped.load() ? " guard=tripped" : "",
       " threads=", m_config.threads,
       " ms=", std::chrono::duration<double, std::milli>(Clock::now() - t0).count()));
   }
@@ -791,8 +869,10 @@ namespace dxvk {
       }
 
       if (r.status == ParseStatus::Ok) {
+        // Another process's entries are checked like ours at load.
         for (const Entry& e : entries) {
-          if (!m_dropped.count(identityHash(e)))
+          if (!m_dropped.count(identityHash(e))
+           && (m_config.noValidate || m_backend->psoStateValid(e.key, nullptr)))
             m_db.merge(e);
         }
         session = std::max(session, r.session);
@@ -845,7 +925,7 @@ namespace dxvk {
       " | prewarm built=", s.built, " dup=", s.dup, " failed=", s.failed, " skipped=", s.skipped,
       " buildMs=", uint64_t(m_buildNs.load() / 1000000u),
       " pausedMs=", uint64_t(m_pausedNs.load() / 1000000u), " ready=", ready,
-      " | entries=", s.entries, final ? " (final)" : ""));
+      " | entries=", s.entries, " invalid=", s.invalid, final ? " (final)" : ""));
   }
 
 
@@ -897,6 +977,9 @@ namespace dxvk {
 
       m_prewarmCond.notify_all();
 
+      if (drained)
+        clearMarkerIfDrained();
+
       // One line each time the queue drains (start-up, then rarely).
       const uint64_t done = m_built.load() + m_dup.load() + m_failedCount.load() + m_skipped.load();
       if (drained && m_prewarmLogged.exchange(done) != done) {
@@ -942,6 +1025,10 @@ namespace dxvk {
       return true;
     }
 
+    // The crash-loop guard's marker is on disk before any recorded
+    // descriptor reaches Metal.
+    setMarker();
+
     const uint64_t t0 = compile_stats::nowNs();
 
     // False if a draw claimed it first; it then builds (or waits) there.
@@ -957,6 +1044,30 @@ namespace dxvk {
 
     m_failedCount.fetch_add(1u, std::memory_order_relaxed);
     return false;
+  }
+
+
+  void MtlStateCache::setMarker() {
+    std::lock_guard lock(m_markerMutex);
+    if (!m_markerOnDisk)
+      m_markerOnDisk = writeMarkerFile(markerPath());
+  }
+
+
+  void MtlStateCache::clearMarkerIfDrained() {
+    std::lock_guard lock(m_markerMutex);
+    if (!m_markerOnDisk)
+      return;
+
+    // Re-checked under the marker lock: a job that started after the drain
+    // was seen either holds m_activeJobs here, or writes the marker again.
+    { std::lock_guard indexLock(m_mutex);
+      if (m_activeJobs || m_index.readyCount())
+        return;
+    }
+
+    removeFile(markerPath());
+    m_markerOnDisk = false;
   }
 
 

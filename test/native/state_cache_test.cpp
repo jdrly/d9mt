@@ -27,6 +27,7 @@
 
 #include "mtl/mtl_state_cache.h"
 #include "mtl/mtl_context.h"
+#include "backend/mtl_pso_key.h"
 
 namespace dxvk {
   void Logger::trace(const std::string&) { }
@@ -59,6 +60,7 @@ static Entry makeEntry(uint32_t id, uint8_t vsOrigin = 1u, uint8_t psOrigin = 1u
   std::memcpy(e.psSha, &ps, sizeof(ps));
   for (uint32_t i = 0u; i < KeyBytes; i++)
     e.key[i] = uint8_t(id * 31u + i);
+  e.key[0] = uint8_t((id * 31u) % 200u);   // never the fake backend's "invalid" byte (0xee)
   return e;
 }
 
@@ -389,8 +391,21 @@ static void testRing() {
 struct FakePso : public MtlCompileTask {
   bool     fail = false;
   bool     ok = false;
+  bool     prewarmed = false;
   uint64_t ns = 0u;
+  // Optional: the build blocks until *gate is true, and records whether
+  // this file existed meanwhile (the crash-loop guard's marker).
+  std::atomic<bool>* gate = nullptr;
+  std::atomic<bool>* started = nullptr;
+  std::string        watchFile;
+  std::atomic<bool>  sawFile = { false };
   void run() override {
+    if (started)
+      started->store(true);
+    while (gate && !gate->load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (!watchFile.empty())
+      sawFile = access(watchFile.c_str(), F_OK) == 0;
     std::this_thread::sleep_for(std::chrono::microseconds(300));
     ok = !fail;
     ns = 300000u;
@@ -402,7 +417,12 @@ struct FakeBackend : public MtlStateCacheBackend {
   std::map<std::vector<uint8_t>, Rc<FakePso>> registry;
   std::atomic<uint32_t> urgent = { 0u };
   std::atomic<uint32_t> created = { 0u };
-  uint8_t failKeyByte = 0xffu;   // key[0] value whose builds fail
+  uint8_t failKeyByte = 0xffu;     // key[0] value whose builds fail
+  uint8_t invalidKeyByte = 0xeeu;  // key[0] value psoStateValid() rejects
+  std::atomic<bool>* gate = nullptr;     // passed to prewarm builds
+  std::atomic<bool>* started = nullptr;
+  std::string watchFile;
+  Rc<FakePso> lastPrewarm;
 
   static std::vector<uint8_t> keyOf(const uint8_t* state, const MtlShaderFunction* vs, const MtlShaderFunction* fs) {
     std::vector<uint8_t> k(state, state + KeyBytes);
@@ -416,18 +436,34 @@ struct FakeBackend : public MtlStateCacheBackend {
     Rc<FakePso> fresh = new FakePso();
     std::lock_guard lock(mutex);
     auto r = registry.emplace(keyOf(state, vs, fs), fresh);
-    use = r.second ? MtlPsoUse::Miss : (r.first->second->isDone() ? MtlPsoUse::Hit : MtlPsoUse::Late);
-    return r.first->second;
+    Rc<FakePso>& e = r.first->second;
+    use = !e->prewarmed ? MtlPsoUse::Miss : (e->isDone() ? MtlPsoUse::Hit : MtlPsoUse::Late);
+    return e;
   }
 
   Rc<MtlCompileTask> createPrewarmPso(const uint8_t* state, const MtlShaderFunction* vs, const MtlShaderFunction* fs) override {
+    if (!psoStateValid(state, nullptr))
+      return nullptr;
     Rc<FakePso> e = new FakePso();
     e->fail = state[0] == failKeyByte;
+    e->prewarmed = true;
+    e->gate = gate;
+    e->started = started;
+    e->watchFile = watchFile;
     std::lock_guard lock(mutex);
     if (!registry.emplace(keyOf(state, vs, fs), e).second)
       return nullptr;
     created++;
+    lastPrewarm = e;
     return e;
+  }
+
+  bool psoStateValid(const uint8_t* state, const char** why) override {
+    if (state[0] != invalidKeyByte)
+      return true;
+    if (why)
+      *why = "fake invalid";
+    return false;
   }
 
   bool psoSucceeded(MtlCompileTask* p) override {
@@ -970,6 +1006,253 @@ static void testResolveConfig() {
   CHECK(resolve(c, reason) && c.threads == 0u);
 }
 
+// The key validator (backend/mtl_pso_key.h): a key shaped like resolvePso()'s
+// passes; each forged variant (one invalid field) is rejected. These are the
+// descriptors Metal terminates the process on, or reads past arrays with.
+static backend::RenderPsoKey drawShapedKey() {
+  backend::RenderPsoKey k = {};
+  k.attrs[0] = { 30u /* Float3 */, 0u, 3u, 0u };
+  k.attrs[1] = { 9u /* UChar4Normalized */, 12u, 3u, 0u };
+  k.attrs[2] = { 31u /* Float4 */, 0u, 19u, 0u };   // the null stream
+  k.attrCount = 3u;
+  k.layouts[0] = { 16u, 1u, 3u };
+  k.layouts[1] = { 16u, 1u, 19u };
+  k.layoutCount = 2u;
+  k.colors[0].pixelFormat  = uint32_t(MtlFormat::BGRA8Unorm);
+  k.colors[0].blendEnabled = 1u;
+  k.colors[0].rgbSrcFactor = 4u;
+  k.colors[0].rgbDstFactor = 5u;
+  k.colorCount = 1u;
+  k.sampleCount = 1u;
+  k.topologyClass = 3u;
+  return k;
+}
+
+static void testKeyValidator() {
+  using backend::RenderPsoKey;
+  const char* why = nullptr;
+
+  RenderPsoKey ok = drawShapedKey();
+  CHECK(backend::psoStateValid(ok.stateBytes(), &why));
+
+  // Also valid: an empty slot inside the count, garbage past the counts,
+  // MSAA, blending on a 16-bit float target, 4 targets.
+  RenderPsoKey v = ok;
+  v.colors[1] = { };
+  v.colors[1].pixelFormat = 0u;
+  v.colors[2].pixelFormat = uint32_t(MtlFormat::RGBA16Float);
+  v.colors[2].blendEnabled = 1u;
+  v.colors[3].pixelFormat = uint32_t(MtlFormat::R32Uint);
+  v.colorCount = 4u;
+  v.attrs[10].format = 9999u;
+  v.layouts[15].stride = 0u;
+  v.sampleCount = 4u;
+  CHECK(backend::psoStateValid(v.stateBytes(), &why));
+
+  struct Case { const char* name; void (*mutate)(RenderPsoKey&); };
+  const Case cases[] = {
+    { "attrCount 21",          [] (RenderPsoKey& k) { k.attrCount = 21u; } },
+    { "layoutCount 21",        [] (RenderPsoKey& k) { k.layoutCount = 21u; } },
+    { "colorCount 5",          [] (RenderPsoKey& k) { k.colorCount = 5u; } },
+    { "colorCount 255",        [] (RenderPsoKey& k) { k.colorCount = 255u; } },
+    { "zero stride",           [] (RenderPsoKey& k) { k.layouts[0].stride = 0u; } },
+    { "buffer index 2",        [] (RenderPsoKey& k) { k.layouts[0].pad = 2u; k.attrs[0].bufferIndex = 2u; k.attrs[1].bufferIndex = 2u; } },
+    { "buffer index 20",       [] (RenderPsoKey& k) { k.layouts[1].pad = 20u; k.attrs[2].bufferIndex = 20u; } },
+    { "layout twice",          [] (RenderPsoKey& k) { k.layouts[1].pad = 3u; } },
+    { "step function 0",       [] (RenderPsoKey& k) { k.layouts[0].stepFunction = 0u; } },
+    { "vertex format 0",       [] (RenderPsoKey& k) { k.attrs[0].format = 0u; } },
+    { "vertex format UChar2",  [] (RenderPsoKey& k) { k.attrs[0].format = 1u; } },
+    { "vertex format 999",     [] (RenderPsoKey& k) { k.attrs[1].format = 999u; } },
+    { "buffer without layout", [] (RenderPsoKey& k) { k.attrs[1].bufferIndex = 5u; } },
+    { "pixel format 999",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = 999u; } },
+    { "pixel format depth",    [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::Depth32Float); } },
+    { "pixel format BC1",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::BC1_RGBA); } },
+    { "pixel format vtx-only", [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::RGB32Float); } },
+    { "blend on R32Uint",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::R32Uint); } },
+    { "blend on RGBA32Float",  [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::RGBA32Float); } },
+    { "blend on empty slot",   [] (RenderPsoKey& k) { k.colors[0].pixelFormat = 0u; } },
+    { "blendEnabled 2",        [] (RenderPsoKey& k) { k.colors[0].blendEnabled = 2u; } },
+    { "write mask 0x1f",       [] (RenderPsoKey& k) { k.colors[0].writeMask = 0x1fu; } },
+    { "blend factor 19",       [] (RenderPsoKey& k) { k.colors[0].alphaDstFactor = 19u; } },
+    { "blend op 5",            [] (RenderPsoKey& k) { k.colors[0].rgbBlendOp = 5u; } },
+    { "sample count 0",        [] (RenderPsoKey& k) { k.sampleCount = 0u; } },
+    { "sample count 3",        [] (RenderPsoKey& k) { k.sampleCount = 3u; } },
+    { "sample count 16",       [] (RenderPsoKey& k) { k.sampleCount = 16u; } },
+    { "topology 4",            [] (RenderPsoKey& k) { k.topologyClass = 4u; } },
+    { "alpha to coverage 2",   [] (RenderPsoKey& k) { k.alphaToCoverage = 2u; } },
+    { "depth format",          [] (RenderPsoKey& k) { k.depthFormat = uint32_t(MtlFormat::Depth32Float); } },
+    { "stencil format",        [] (RenderPsoKey& k) { k.stencilFormat = uint32_t(MtlFormat::Stencil8); } },
+  };
+
+  for (const Case& c : cases) {
+    RenderPsoKey k = ok;
+    c.mutate(k);
+    why = nullptr;
+    const bool valid = backend::psoStateValid(k.stateBytes(), &why);
+    if (valid)
+      std::fprintf(stderr, "validator accepted: %s\n", c.name);
+    CHECK(!valid && why != nullptr);
+  }
+
+  // 100 000 random keys: never accepted unless every invariant holds, and
+  // never a read past the arrays (ASan/TSan builds would see it).
+  std::mt19937 rng(7u);
+  uint32_t accepted = 0u;
+  for (uint32_t i = 0u; i < 100000u; i++) {
+    uint8_t state[statecache::KeyBytes];
+    for (auto& b : state)
+      b = uint8_t(rng());
+    accepted += backend::psoStateValid(state, nullptr);
+  }
+  CHECK(accepted == 0u);
+}
+
+// Entries the backend rejects are dropped at load, never prewarmed, and the
+// file is rewritten without them.
+static void testLoadValidation() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 2u);
+  uint32_t forged = 0u;
+
+  {
+    Workload w(4u, 20u, 100u, 9u);
+    for (uint32_t i = 0u; i < w.draws.size(); i += 7u) {
+      w.draws[i].state[0] = 0xeeu;
+      forged++;
+    }
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);   // the draw path doesn't validate: all recorded
+    sc->shutdown();
+    CHECK(sc->stats().entries == 100u);
+  }
+
+  {
+    Workload w(4u, 20u, 100u, 9u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    sc->shutdown();
+    const auto s = sc->stats();
+    CHECK(s.invalid == forged && s.built == 100u - forged && s.entries == 100u - forged);
+
+    std::vector<Entry> onDisk;
+    auto d = readFile(cfg.file);
+    parse(d.data(), d.size(), Sig, onDisk);
+    CHECK(onDisk.size() == 100u - forged);
+    for (const Entry& e : onDisk)
+      CHECK(e.key[0] != 0xeeu);
+  }
+}
+
+static bool exists(const std::string& path) {
+  return access(path.c_str(), F_OK) == 0;
+}
+
+// The crash-loop guard: <file>.prewarm exists while prewarm builds run, is
+// gone after the queue drains and after a clean shutdown, and if found at
+// load (the last session died during the prewarm) the file is dropped and
+// nothing is prewarmed.
+static void testCrashGuard() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 1u);
+  const std::string marker = cfg.file + ".prewarm";
+
+  {
+    Workload w(4u, 20u, 60u, 11u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+    CHECK(!exists(marker));   // no prewarm ran: no marker ever
+  }
+
+  // A session whose first prewarm build blocks: the marker is on disk
+  // during the build (seen from inside it), gone once the queue drains.
+  {
+    Workload w(4u, 20u, 60u, 11u);
+    std::atomic<bool> gate = { false }, started = { false };
+    FakeBackend be;
+    be.gate = &gate;
+    be.started = &started;
+    be.watchFile = marker;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    for (int i = 0; i < 5000 && !started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(started.load() && exists(marker));
+    gate = true;
+    CHECK(sc->waitPrewarmIdle(10000u));
+    for (int i = 0; i < 1000 && exists(marker); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(!exists(marker));
+    CHECK(be.lastPrewarm != nullptr && be.lastPrewarm->sawFile.load());
+    CHECK(sc->stats().built == 60u);
+    sc->shutdown();
+  }
+
+  // Shut down while the prewarm is busy (queue not drained): a clean
+  // shutdown removes the marker too.
+  {
+    Workload w(4u, 20u, 60u, 11u);
+    std::atomic<bool> gate = { false }, started = { false };
+    FakeBackend be;
+    be.gate = &gate;
+    be.started = &started;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    for (int i = 0; i < 5000 && !started.load(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(exists(marker));
+    std::thread releaser([&gate] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      gate = true;
+    });
+    sc->shutdown();
+    releaser.join();
+    CHECK(!exists(marker) && sc->stats().built < 60u);
+  }
+
+  // The last session died during the prewarm (the marker survived it).
+  {
+    writeFile(marker, std::vector<uint8_t>(4u, uint8_t('x')));
+    CHECK(exists(cfg.file));
+    Workload w(4u, 20u, 60u, 11u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(5000u));
+    const auto s = sc->stats();
+    CHECK(s.guardTripped && s.built == 0u && s.entries == 0u);
+    CHECK(!exists(marker) && !exists(cfg.file));
+
+    // The session still records its own draws, and the next session is
+    // normal again.
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+    CHECK(sc->stats().entries == 60u && exists(cfg.file));
+  }
+  {
+    Workload w(4u, 20u, 60u, 11u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    sc->shutdown();
+    CHECK(!sc->stats().guardTripped && sc->stats().built == 60u);
+  }
+}
+
 // Render-thread cost of recording one PSO miss (the only state cache work
 // on the render thread), against the same loop without it. `bench` mode.
 static void benchRecord() {
@@ -1031,6 +1314,9 @@ int main(int argc, char** argv) {
   testTwoProcessesMerge();
   testConcurrency();
   testResolveConfig();
+  testKeyValidator();
+  testLoadValidation();
+  testCrashGuard();
 
   if (g_failures) {
     std::printf("state_cache_test: %d FAILED\n", g_failures);

@@ -210,6 +210,14 @@ namespace dxvk::backend {
 
   Rc<MtlCompileTask> MtlDeviceImpl::createPrewarmPso(
     const uint8_t* pState, const MtlShaderFunction* pVs, const MtlShaderFunction* pFs) {
+    // Never hand Metal a descriptor the draw path couldn't have built: it
+    // terminates the process on invalid ones. (Load already dropped these.)
+    // D9MT_STATE_CACHE_TEST_NO_VALIDATE=1 exists only to test the state
+    // cache's crash-loop guard with a real crash.
+    static const bool s_testNoValidate = env::getEnvVar("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
+    if (!s_testNoValidate && !backend::psoStateValid(pState))
+      return nullptr;
+
     // The key resolvePso() builds for these functions: the recorded bytes
     // plus this session's library handles and entry names.
     RenderPsoKey key = {};
@@ -226,6 +234,10 @@ namespace dxvk::backend {
     if (!m_psoRegistry.insertIfAbsent(e))
       return nullptr;
     return e;
+  }
+
+  bool MtlDeviceImpl::psoStateValid(const uint8_t* pState, const char** pWhy) {
+    return backend::psoStateValid(pState, pWhy);
   }
 
   bool MtlDeviceImpl::psoSucceeded(MtlCompileTask* pPso) {

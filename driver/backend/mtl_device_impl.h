@@ -118,6 +118,7 @@ namespace dxvk::backend {
       const MtlShaderFunction*  pVs,
       const MtlShaderFunction*  pFs) override;
 
+    bool psoStateValid(const uint8_t* pState, const char** pWhy) override;
     bool psoSucceeded(MtlCompileTask* pPso) override;
     uint64_t psoBuildNs(MtlCompileTask* pPso) override;
     uint32_t urgentCompilesQueued() override;

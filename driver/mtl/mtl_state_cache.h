@@ -54,6 +54,11 @@ namespace dxvk {
       const MtlShaderFunction*  pVs,
       const MtlShaderFunction*  pFs) = 0;
 
+    /// The recorded key bytes are something the draw path can produce (see
+    /// backend::psoStateValid). Invalid entries are dropped at load, never
+    /// built: Metal terminates the process on invalid descriptors.
+    virtual bool psoStateValid(const uint8_t* pState, const char** pWhy) = 0;
+
     /// Done and produced a pipeline.
     virtual bool psoSucceeded(MtlCompileTask* pPso) = 0;
 
@@ -82,6 +87,7 @@ namespace dxvk {
     uint64_t    keySignature = 0u;
     uint32_t    threads      = 2u; // prewarm threads; 0 = record and load only
     uint32_t    maxEntries   = statecache::DefaultMaxEntries;
+    bool        noValidate   = false; // D9MT_STATE_CACHE_TEST_NO_VALIDATE=1: tests of the crash guard only
   };
 
   /**
@@ -146,6 +152,8 @@ namespace dxvk {
       uint64_t hits = 0u, late = 0u, misses = 0u, unrecorded = 0u, ringDrops = 0u;
       uint64_t recorded = 0u, built = 0u, dup = 0u, failed = 0u, skipped = 0u;
       uint64_t writes = 0u, entries = 0u;
+      uint64_t invalid = 0u;
+      bool     guardTripped = false;
     };
 
     Stats stats();
@@ -208,6 +216,14 @@ namespace dxvk {
     std::atomic<uint64_t> m_pausedNs = { 0u }, m_buildNs = { 0u }, m_hitBuildNs = { 0u };
     std::atomic<uint64_t> m_writes = { 0u }, m_entries = { 0u };
     std::atomic<uint64_t> m_prewarmLogged = { 0u };
+    std::atomic<uint64_t> m_invalid = { 0u };
+    std::atomic<bool>     m_guardTripped = { false };
+
+    // Crash-loop guard: <file>.prewarm exists while prewarm builds run
+    // (written before the first, removed when the queue drains and at
+    // shutdown). Found at load: the last session died during the prewarm.
+    dxvk::mutex                   m_markerMutex;
+    bool                          m_markerOnDisk = false;
 
     dxvk::thread              m_writer;
     std::vector<dxvk::thread> m_prewarmThreads;
@@ -223,6 +239,9 @@ namespace dxvk {
     bool prewarmOne(const statecache::Entry& e, const ShaderSlot& vs, const ShaderSlot& ps);
     bool finishFunction(MtlShaderFunction* pFn);
     bool yieldToRenderThread();
+    void setMarker();
+    void clearMarkerIfDrained();
+    std::string markerPath() const { return m_config.file + ".prewarm"; }
 
     double seconds() const {
       return std::chrono::duration<double>(Clock::now() - m_t0).count();
