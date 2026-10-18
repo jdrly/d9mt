@@ -217,9 +217,10 @@ namespace dxvk {
         || (srcFormat == D3D9Format::A4R4G4B4 && dstFormat == D3D9Format::X4R4G4B4);
   }
 
+  // Empty rects are invalid too (D3D9 returns D3DERR_INVALIDCALL for them).
   inline bool IsBlitRegionInvalid(MtlOffset3D offsets[2], MtlSize extent) {
-    return offsets[1].x < offsets[0].x ||
-           offsets[1].y < offsets[0].y ||
+    return offsets[1].x <= offsets[0].x ||
+           offsets[1].y <= offsets[0].y ||
            offsets[0].x < 0 ||
            offsets[0].y < 0 ||
            uint32_t(offsets[1].x) > extent.width ||

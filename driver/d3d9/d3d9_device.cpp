@@ -1252,6 +1252,10 @@ namespace dxvk {
       if (unlikely(!srcIsDS || !dstIsDS))
         return D3DERR_INVALIDCALL;
 
+      // Depth-stencil copies keep the format (D3D9 converts no depth formats).
+      if (unlikely(srcFormat != dstFormat))
+        return D3DERR_INVALIDCALL;
+
       if (unlikely(srcTextureInfo->Desc()->Discard || dstTextureInfo->Desc()->Discard))
         return D3DERR_INVALIDCALL;
 
@@ -1447,6 +1451,12 @@ namespace dxvk {
     if (unlikely(dstTextureInfo->Desc()->Pool != D3DPOOL_DEFAULT))
       return D3DERR_INVALIDCALL;
 
+    // D3D9 fills render targets and off-screen plain surfaces only: a
+    // texture's surface needs D3DUSAGE_RENDERTARGET (as on Windows).
+    if (unlikely(dstTextureInfo->GetType() != D3DRTYPE_SURFACE
+              && !(dstTextureInfo->Desc()->Usage & D3DUSAGE_RENDERTARGET)))
+      return D3DERR_INVALIDCALL;
+
     if (unlikely(m_dbg.dumping))
       DebugEvent(str::format("COLORFILL ", DebugSurfaceDesc(dstTextureInfo),
         pRect ? " rect" : " full", " color=0x", std::hex, Color, std::dec));
@@ -1456,8 +1466,14 @@ namespace dxvk {
     MtlOrigin offset = MtlOrigin{ 0u, 0u, 0u };
     MtlSize extent = mipExtent;
 
-    if (pRect != nullptr)
+    if (pRect != nullptr) {
+      // Empty, inverted or outside the surface: invalid, nothing filled.
+      if (unlikely(pRect->left < 0 || pRect->top < 0
+                || pRect->right <= pRect->left || pRect->bottom <= pRect->top
+                || uint32_t(pRect->right) > mipExtent.width || uint32_t(pRect->bottom) > mipExtent.height))
+        return D3DERR_INVALIDCALL;
       ConvertRect(*pRect, offset, extent);
+    }
 
     MtlClearValue clearValue = { };
     DecodeD3DCOLOR(Color, clearValue.color.float32);
@@ -1495,9 +1511,17 @@ namespace dxvk {
         }
         return D3D_OK;
       }
+      const MtlExtent3D blockSize = util::formatBlockSize(image->formatInfo());
+      // Whole blocks only: a rect edge inside a block is invalid, except
+      // where it is the mip's edge (as wined3d checks box dimensions).
+      if (unlikely(uint32_t(offset.x) % blockSize.width || uint32_t(offset.y) % blockSize.height
+                || ((uint32_t(offset.x) + extent.width) % blockSize.width
+                 && uint32_t(offset.x) + extent.width != mipExtent.width)
+                || ((uint32_t(offset.y) + extent.height) % blockSize.height
+                 && uint32_t(offset.y) + extent.height != mipExtent.height)))
+        return D3DERR_INVALIDCALL;
       ProfXfer(xfer::FillBc);
 
-      const MtlExtent3D blockSize = util::formatBlockSize(image->formatInfo());
       const uint32_t x1 = std::min(uint32_t(offset.x) + extent.width,  mipExtent.width);
       const uint32_t y1 = std::min(uint32_t(offset.y) + extent.height, mipExtent.height);
       if (uint32_t(offset.x) >= x1 || uint32_t(offset.y) >= y1)
@@ -1529,9 +1553,9 @@ namespace dxvk {
           cSlice.buffer(), cSlice.offset(), 0, 0, MtlFormat::Invalid);
       });
     } else {
-      // Filled by rendering: a texture without D3DUSAGE_RENDERTARGET can't
-      // take it (D3D9 allows ColorFill on render targets and off-screen plain
-      // surfaces only).
+      // Filled by rendering. Render targets and off-screen plain surfaces
+      // (render-target usage where the format renders) are all that get
+      // here; anything else is left alone rather than rendered into.
       if (unlikely(!(image->info().usage & MtlTextureUsageRenderTarget))) {
         ProfXfer(xfer::FillSkip);
         static bool warned = false;

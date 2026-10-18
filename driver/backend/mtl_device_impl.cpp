@@ -81,9 +81,9 @@ namespace dxvk::backend {
       // PixelFormatView turns off lossless compression on Apple GPUs. d9mt's
       // views keep the image's format or switch it between linear and sRGB,
       // with or without a swizzle, none of which needs the option
-      // (MTLTextureUsage.pixelFormatView). Only ColorFill views block-
-      // compressed data as RG32Uint / RGBA32Float, and block-compressed
-      // formats are never losslessly compressed anyway.
+      // (MTLTextureUsage.pixelFormatView). Block-compressed formats keep it:
+      // they are never losslessly compressed anyway (ColorFill no longer
+      // views them, #14).
       if (pixelFormatViewOnAll() || (lookupFormatInfo(format)->flags & MtlFormatFlagCompressed))
         result |= WMTTextureUsagePixelFormatView;
       return result;

@@ -121,9 +121,15 @@ static inline void x_done(XReadback *r) {
 static inline DWORD x_pixel(const XReadback *r, UINT x, UINT y) {
   const unsigned char *row = (const unsigned char *)r->lr.pBits + (size_t)y * r->lr.Pitch;
   switch (r->desc.Format) {
+    case D3DFMT_A8:
+    case D3DFMT_L8:
+      return row[x];
     case D3DFMT_R5G6B5:
     case D3DFMT_X1R5G5B5:
     case D3DFMT_A1R5G5B5:
+    case D3DFMT_A4R4G4B4:
+    case D3DFMT_X4R4G4B4:
+    case D3DFMT_A8L8:
       return ((const WORD *)row)[x];
     default:
       return ((const DWORD *)row)[x];
@@ -138,6 +144,17 @@ static inline void x_expect(const char *what, const XReadback *r, UINT x, UINT y
     x_failed++;
     printf("FAIL %s at %u,%u: got %08lx want %08lx (mask %08lx)\n", what, x, y,
            (unsigned long)got, (unsigned long)(want & mask), (unsigned long)mask);
+  }
+}
+
+#define X_INVALIDCALL ((HRESULT)0x8876086cL)
+
+/* An HRESULT that must be `want` (D3D9's answer on Windows). */
+static inline void x_expect_hr(const char *what, HRESULT got, HRESULT want) {
+  x_checks++;
+  if (got != want) {
+    x_failed++;
+    printf("FAIL %s: hr=%08lx want %08lx\n", what, (unsigned long)got, (unsigned long)want);
   }
 }
 

@@ -3,7 +3,9 @@
  * LINEAR filters, scaled down, up and not at all, into render-target
  * textures, render-target surfaces, an off-screen plain surface (read with
  * LockRect), a cube face, a mip level, a sub-rect and the backbuffer, converted to R5G6B5 and from X8R8G8B8 (alpha reads as 1),
- * and from a multisampled source. The quadrant centres must hold the
+ * and from a multisampled source. Empty source or destination rects and a
+ * depth-stencil copy that changes the format return D3DERR_INVALIDCALL, as on
+ * Windows (a same-format depth-stencil copy works). The quadrant centres must hold the
  * quadrant colours exactly (bilinear filtering only blends at the edges);
  * the results are drawn into the backbuffer too. */
 #include "t_xfer.h"
@@ -19,6 +21,7 @@ static const WORD  kQuad565[4] = {0xf800, 0x07e0, 0x001f, 0x8410};
 static IDirect3DTexture9 *src, *srcX8, *t32p, *t32l, *t128p, *t128l, *t64same, *t96, *t64rect, *tX8to32, *tMs32, *tMip;
 static IDirect3DSurface9 *srcS, *srcX8S, *s48, *s565, *s565small, *sMsaa, *cubeFace, *mip1, *plain;
 static IDirect3DCubeTexture9 *cube;
+static IDirect3DSurface9 *dsA, *dsB, *ds16;
 static BOOL has565, hasMsaa;
 
 static void quadrants(IDirect3DSurface9 *s, UINT w, UINT h) {
@@ -136,6 +139,13 @@ static void frame(int n) {
     x_expect("backbuffer outside", &r, 380, 30, 0xff181828u, 0x00ffffffu);
     x_done(&r);
   }
+  {
+    RECT emptySrc = {8, 8, 8, 16}, emptyDst = {4, 4, 20, 4};
+    x_expect_hr("empty source rect", IDirect3DDevice9_StretchRect(x_dev, srcS, &emptySrc, s48, NULL, D3DTEXF_POINT), X_INVALIDCALL);
+    x_expect_hr("empty destination rect", IDirect3DDevice9_StretchRect(x_dev, srcS, NULL, s48, &emptyDst, D3DTEXF_POINT), X_INVALIDCALL);
+    x_expect_hr("depth-stencil D24S8 to D16", IDirect3DDevice9_StretchRect(x_dev, dsA, NULL, ds16, NULL, D3DTEXF_NONE), X_INVALIDCALL);
+    x_expect_hr("depth-stencil D24S8 to D24S8", IDirect3DDevice9_StretchRect(x_dev, dsA, NULL, dsB, NULL, D3DTEXF_NONE), D3D_OK);
+  }
   printf("R5G6B5 %s, 4x MSAA %s\n", has565 ? "tested" : "not supported", hasMsaa ? "tested" : "not supported");
   x_report("code_stretch");
 }
@@ -177,5 +187,8 @@ int main(void) {
   X_CHECK(IDirect3DDevice9_CreateCubeTexture(x_dev, 32, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &cube, NULL));
   X_CHECK(IDirect3DCubeTexture9_GetCubeMapSurface(cube, D3DCUBEMAP_FACE_POSITIVE_Y, 0, &cubeFace));
   X_CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(x_dev, 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &plain, NULL));
+  X_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(x_dev, 64, 64, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &dsA, NULL));
+  X_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(x_dev, 64, 64, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &dsB, NULL));
+  X_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(x_dev, 64, 64, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, FALSE, &ds16, NULL));
   return x_loop(frame);
 }
