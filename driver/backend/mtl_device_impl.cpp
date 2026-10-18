@@ -336,6 +336,7 @@ namespace dxvk::backend {
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
     texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
     texture->residencyDevice = this;
+    texture->m_device = this;  // MtlTexture::createView (StretchRect, ColorFill)
     texture->bytes = textureBytes(info);
     memAdd(info.category, texture->bytes);
     m_residency->allocCreated(handle, texture->bytes);

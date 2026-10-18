@@ -351,6 +351,15 @@ namespace dxvk {
     if (isDS)
       imageInfo.usage = imageInfo.usage | MtlUsage::DepthStencil;
 
+    // An off-screen plain surface (CreateOffscreenPlainSurface) in the
+    // default pool: ColorFill and StretchRect render into it, so it needs
+    // render-target usage where its format can be rendered to (Metal can't
+    // render into block-compressed formats; ColorFill uploads those).
+    const MtlFormatInfo* primaryFormat = lookupFormatInfo(imageInfo.format);
+    if (m_desc.IsAttachmentOnly && !isRT && !isDS && m_desc.Pool == D3DPOOL_DEFAULT
+     && !(primaryFormat->flags & (MtlFormatFlagCompressed | MtlFormatFlagDepth | MtlFormatFlagStencil)))
+      imageInfo.usage = imageInfo.usage | MtlUsage::RenderTarget;
+
     if (m_desc.ImageUsage & MtlTextureUsageRenderTarget)
       imageInfo.usage = imageInfo.usage | MtlUsage::RenderTarget;
     if (m_desc.ImageUsage & MtlTextureUsageShaderRead)
