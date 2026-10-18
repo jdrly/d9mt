@@ -128,6 +128,10 @@ namespace dxvk {
     int32_t drefScaling;
 
     bool extraFrontbuffer;
+
+    /// d9mt.stateCache: pipeline state cache (docs/state-cache.md);
+    /// D9MT_STATE_CACHE=0 turns it off too.
+    bool stateCache;
   };
 
 }

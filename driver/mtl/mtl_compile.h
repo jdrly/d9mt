@@ -128,6 +128,7 @@ namespace dxvk {
         m_stop = true;
         dropped[0].swap(m_queue[0]);
         dropped[1].swap(m_queue[1]);
+        m_urgentQueued.store(0u, std::memory_order_relaxed);
       }
 
       m_cond.notify_all();
@@ -148,6 +149,9 @@ namespace dxvk {
 
         m_queue[urgent ? 0 : 1].push_back(task);
 
+        if (urgent)
+          m_urgentQueued.store(uint32_t(m_queue[0].size()), std::memory_order_relaxed);
+
         if (m_threads.size() < m_maxThreads)
           m_threads.emplace_back([this] { loop(); });
       }
@@ -164,6 +168,12 @@ namespace dxvk {
       return m_maxThreads;
     }
 
+    /// Urgent tasks queued, not yet taken by a worker; lock-free, for
+    /// background work that yields to them (state cache prewarm).
+    uint32_t urgentQueued() const {
+      return m_urgentQueued.load(std::memory_order_relaxed);
+    }
+
   private:
 
     dxvk::mutex               m_mutex;
@@ -172,6 +182,7 @@ namespace dxvk {
     std::vector<dxvk::thread> m_threads;
     uint32_t                  m_maxThreads = 0u;
     bool                      m_stop = false;
+    std::atomic<uint32_t>     m_urgentQueued = { 0u };   // m_queue[0].size(), written under m_mutex
 
     void loop() {
 #ifdef _WIN32
@@ -196,6 +207,9 @@ namespace dxvk {
           auto& q = m_queue[isUrgent ? 0 : 1];
           task = std::move(q.front());
           q.pop_front();
+
+          if (isUrgent)
+            m_urgentQueued.store(uint32_t(m_queue[0].size()), std::memory_order_relaxed);
         }
 
         if (task->isDone())
@@ -265,10 +279,32 @@ namespace dxvk {
         std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
+    // Render-thread compile waits as they happen, always on (not just under
+    // D9MT_PROFILE), for background work that must yield to them: the state
+    // cache prewarm. Touched only when the render thread actually blocks.
+    inline std::atomic<uint32_t> g_renderWaiting = { 0u };
+
+    struct RenderWaitScope {
+      RenderWaitScope() {
+        g_renderWaiting.fetch_add(1u, std::memory_order_relaxed);
+      }
+
+      ~RenderWaitScope() {
+        g_renderWaiting.fetch_sub(1u, std::memory_order_relaxed);
+      }
+    };
+
+    /// True while the render thread is blocked on a compile.
+    inline bool renderWaiting() {
+      return g_renderWaiting.load(std::memory_order_relaxed) != 0u;
+    }
+
     /// Waits for a task on the render thread, accounting the blocked time.
     inline void waitOnRenderThread(MtlCompileTask* task) {
       if (task == nullptr || task->isDone())
         return;
+
+      RenderWaitScope scope;
 
       if (!g_enabled) {
         task->wait();
@@ -369,6 +405,7 @@ namespace dxvk {
       uint64_t dt = 0u;
 
       if (m_leftNs) {
+        compile_stats::RenderWaitScope scope;
         const uint64_t t0 = compile_stats::nowNs();
         done = task->waitFor(m_leftNs);
         dt = compile_stats::nowNs() - t0;

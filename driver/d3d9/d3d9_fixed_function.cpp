@@ -30,6 +30,7 @@ namespace dxvk {
       // 3..19 are vertex streams (kVertexBufferBaseIndex + stream, 19 = null stream),
       // 20 push data, 21 argument buffer. 5 aliased vertex stream 2.
       m_vs->cbvSlotMap[CbvIndex::VSVertexBlendData] = 22;
+      m_vs->stateId.origin = uint8_t(statecache::Origin::FixedFunction);
     }
 
     m_fs = device->createShaderFunction(
@@ -40,7 +41,19 @@ namespace dxvk {
       m_fs->cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };
       m_fs->cbvSlotMap[CbvIndex::SpecData] = 0;
       m_fs->cbvSlotMap[CbvIndex::PSShared] = 1;
+      m_fs->stateId.origin = uint8_t(statecache::Origin::FixedFunction);
     }
+
+    m_vsPrewarm.fn = m_vs;
+    m_fsPrewarm.fn = m_fs;
+  }
+
+
+  void D3D9FFShaderModuleSet::AnnounceToStateCache(MtlStateCache* pStateCache) {
+    if (m_vs != nullptr)
+      pStateCache->announce(MtlShaderStage::Vertex, m_vs->stateId, &m_vsPrewarm);
+    if (m_fs != nullptr)
+      pStateCache->announce(MtlShaderStage::Fragment, m_fs->stateId, &m_fsPrewarm);
   }
 
   // Register order here must match the FF ubershader's [[attribute(n)]] locations.

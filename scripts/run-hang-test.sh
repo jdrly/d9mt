@@ -15,8 +15,8 @@
 #     --runs <n>        (default 3; the race it guards against is timing-dependent)
 #   FRAMEWORKS=<dir>    extra DYLD_FALLBACK_LIBRARY_PATH entry the engine needs (optional)
 #   WORK=<dir>          scratch dir (default: a new mktemp -d, removed afterwards unless
-#                       KEEP=1); holds the Wine prefix, the AIR cache and the PSO archives,
-#                       so nothing outside it is read or written
+#                       KEEP=1); holds the Wine prefix, the AIR cache, the PSO archives and
+#                       the pipeline state cache, so nothing outside it is read or written
 #   SAMPLE=1            on a timeout, `sample` the hung process into WORK first
 #
 # Uses the engine's own winemetal bridge. Exit 0: every run finished; 1: a run hung,
@@ -78,7 +78,7 @@ EOF
 export WINEDLLOVERRIDES="d3d9=n,b"
 export D9MT_PROFILE=1 D9MT_MEMSTATS=1 DXVK_LOG_LEVEL=info D9MT_MEMORY_PROFILE=auto DXVK_LOG_PATH=none
 export D9MT_DEBUG_FILE='C:\d9mt-test\flags.txt'
-export D9MT_AIR_CACHE="$WORK/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$WORK/pso"
+export D9MT_AIR_CACHE="$WORK/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$WORK/pso" D9MT_STATE_CACHE="$WORK/state"
 
 fail=0
 for run in $(seq 1 "$RUNS"); do
