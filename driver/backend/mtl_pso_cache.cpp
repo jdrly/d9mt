@@ -7,6 +7,7 @@
 #include <iterator>
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
@@ -97,6 +98,43 @@ namespace dxvk::backend {
     return m_map.emplace(e->m_key, e).second;
   }
 
+  void RenderPsoCache::Registry::replace(const RenderPsoKey& key, const Entry* old, const Rc<Entry>& fresh) {
+    std::lock_guard lock(m_mutex);
+    auto it = m_map.find(key);
+    if (it != m_map.end() && it->second.ptr() == old)
+      it->second = fresh;
+  }
+
+  RenderPsoCache::Entry* RenderPsoCache::replaceFailedPrewarm(Entry* pso) {
+    if (!pso->prewarmed() || !pso->isDone() || pso->handle())
+      return nullptr;
+
+    auto it = m_cache.find(pso->m_key);
+    if (it == m_cache.end())
+      return nullptr;
+
+    if (it->second.ptr() != pso)
+      return it->second.ptr();
+
+    Rc<Entry> fresh = new Entry();
+    fresh->m_key       = pso->m_key;
+    fresh->m_compiler  = pso->m_compiler;
+    fresh->m_vsLibrary = pso->m_vsLibrary;
+    fresh->m_fsLibrary = pso->m_fsLibrary;
+    fresh->m_vsEntry   = pso->m_vsEntry;
+    fresh->m_fsEntry   = pso->m_fsEntry;
+
+    // The caller's MRU and last-encoded references keep pso alive.
+    it->second = fresh;
+    if (m_registry)
+      m_registry->replace(pso->m_key, pso, fresh);
+    if (m_last == pso)
+      m_last = fresh.ptr();
+
+    m_device->submitCompile(fresh, true);
+    return fresh.ptr();
+  }
+
   RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry)
   : m_compiler(compiler), m_device(device), m_registry(registry) { }
 
@@ -181,6 +219,19 @@ namespace dxvk::backend {
 
   void RenderPsoCache::Entry::run() {
     const uint64_t t0 = compile_stats::nowNs();
+
+#ifdef D9MT_STATE_CACHE_TESTING
+    // Test builds only (STATE_CACHE_TESTING=1 scripts/build-driver.sh):
+    // prewarm builds that take 150 ms and then fail, so draws adopt them
+    // while they run and see them fail (RenderPsoCache::replaceFailedPrewarm).
+    static const bool s_failPrewarm = std::getenv("D9MT_STATE_CACHE_TEST_FAIL_PREWARM") != nullptr;
+    if (m_prewarmed && s_failPrewarm) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      m_buildNs = compile_stats::nowNs() - t0;
+      return;
+    }
+#endif
+
     m_pso = WmtRenderPso::adopt(build(m_compiler, m_key,
       m_vsLibrary, m_fsLibrary, m_vsEntry, m_fsEntry, m_prewarmed));
     m_buildNs = compile_stats::nowNs() - t0;

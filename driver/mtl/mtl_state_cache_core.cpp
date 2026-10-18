@@ -230,6 +230,17 @@ namespace dxvk::statecache {
   }
 
 
+  bool Database::eraseUnlessUsedIn(const Entry& e, uint32_t session) {
+    const int32_t i = find(e, identityHash(e));
+    if (i < 0 || m_entries[uint32_t(i)].lastSession == session)
+      return false;
+
+    m_entries.erase(m_entries.begin() + i);
+    rebuildIndex();
+    return true;
+  }
+
+
   uint32_t Database::applyCap(uint32_t max) {
     if (m_entries.size() <= max)
       return 0u;

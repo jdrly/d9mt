@@ -963,9 +963,11 @@ namespace dxvk {
       failed.swap(m_failed);
     }
 
+    // A prewarm build that failed doesn't remove an entry a draw built (and
+    // recorded) this session, whichever of the two arrived here first.
     for (const Entry& e : failed) {
-      m_dropped.insert(identityHash(e));
-      if (m_db.erase(e)) {
+      if (m_db.eraseUnlessUsedIn(e, m_session)) {
+        m_dropped.insert(identityHash(e));
         m_dirty = true;
         m_lastChange = Clock::now();
       }

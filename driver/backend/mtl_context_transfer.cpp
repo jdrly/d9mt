@@ -250,8 +250,20 @@ namespace dxvk::backend {
   bool MtlContextImpl::emitPso(RenderPsoCache::Entry* pso) {
     const bool done = pso->isDone();
 
-    if (done && !pso->handle())
+    if (done && !pso->handle()) {
+      // A state cache prewarm build this key adopted, which then failed:
+      // build the draw's own instead of skipping its draws all session.
+      if (unlikely(pso->prewarmed())) {
+        if (RenderPsoCache::Entry* fresh = m_psoCache.replaceFailedPrewarm(pso); fresh && fresh != pso) {
+          for (auto& mru : m_psoMruPso) {
+            if (mru.ptr() == pso)
+              mru = fresh;
+          }
+          return emitPso(fresh);
+        }
+      }
       return false;
+    }
 
     if (!done && m_asyncSkip) {
       if (compile_stats::g_enabled)

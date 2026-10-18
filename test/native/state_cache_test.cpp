@@ -240,6 +240,12 @@ static void testDatabase() {
   CHECK(db.size() == 4u);
 
   CHECK(db.erase(c) && db.size() == 3u && !db.erase(c));
+
+  // A failure doesn't erase what a draw used in this session.
+  Entry u = makeEntry(99u);
+  CHECK(db.use(u, 12u));
+  CHECK(!db.eraseUnlessUsedIn(u, 12u) && db.size() == 4u);
+  CHECK(db.eraseUnlessUsedIn(u, 13u) && db.size() == 3u);
   CHECK(!db.merge(b) && db.size() == 3u);   // index still right after erase
 }
 
@@ -1489,6 +1495,7 @@ static void testFailedPrewarmNotAdopted() {
   sc->shutdown();
   const auto s = sc->stats();
   CHECK(s.failed == failing && hits == 20u - failing && s.misses == failing);
+  CHECK(s.entries == 20u);   // the draws built them: they stay in the file
 }
 
 // Render-thread cost of recording one PSO miss (the only state cache work

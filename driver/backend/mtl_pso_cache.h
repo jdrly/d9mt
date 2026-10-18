@@ -65,6 +65,8 @@ namespace dxvk::backend {
       Rc<Entry> adoptOrInsert(const RenderPsoKey& key, const Rc<Entry>& fresh);
       /// Prewarm: registers e unless the key is taken. True if registered.
       bool insertIfAbsent(const Rc<Entry>& e);
+      /// Render thread: fresh replaces old for key, if old is registered.
+      void replace(const RenderPsoKey& key, const Entry* old, const Rc<Entry>& fresh);
     private:
       std::mutex m_mutex;
       std::unordered_map<RenderPsoKey, Rc<Entry>, KeyHash> m_map;
@@ -83,6 +85,14 @@ namespace dxvk::backend {
             const char*         fsEntry = "main",
             const MtlShaderFunction* vsFn = nullptr,
             const MtlShaderFunction* fsFn = nullptr);
+
+    /// Render thread, failure path only: pso is a prewarm build a draw
+    /// adopted that then failed (done, no pipeline). A fresh build of the
+    /// same key replaces it here and in the registry, so the draws aren't
+    /// skipped for the rest of the session. Returns the entry to use now
+    /// (the fresh one, or whatever already replaced pso), or nullptr if pso
+    /// is not a failed prewarm build.
+    Entry* replaceFailedPrewarm(Entry* pso);
 
     /// A not yet built entry for the state cache prewarm.
     static Rc<Entry> createPrewarmEntry(

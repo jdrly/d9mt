@@ -187,6 +187,9 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
 # -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
 FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+# STATE_CACHE_TESTING=1: a test build of the pipeline state cache (fault injection and
+# D9MT_STATE_CACHE_TEST_* switches, docs/state-cache.md); never for release.
+[ "${STATE_CACHE_TESTING:-0}" = 1 ] && FLAGS+=(-DD9MT_STATE_CACHE_TESTING) && echo "=== [driver] STATE_CACHE_TESTING=1: test build ==="
 
 # --- PROFILE_INSTRUMENT=1 — per-function CPU profiler build mode -------------
 # Compiles ONLY the backend hot-path TUs (the CS-thread draw loop) with GCC

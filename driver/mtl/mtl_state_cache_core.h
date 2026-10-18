@@ -112,6 +112,10 @@ namespace dxvk::statecache {
 
     bool erase(const Entry& e);
 
+    /// Erases e unless it was used in `session` (a draw built it then,
+    /// which proves it fine). True if erased.
+    bool eraseUnlessUsedIn(const Entry& e, uint32_t session);
+
     /// Drops the least recently used entries (lastSession, then
     /// sessionsUsed) above `max`. Returns how many were dropped.
     uint32_t applyCap(uint32_t max);
