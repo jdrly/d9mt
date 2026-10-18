@@ -141,9 +141,11 @@ namespace dxvk {
 
     // D9MT_PROFILE: the session's restores (a game that exits without
     // releasing the device has only its RESTORE lines).
-    if (unlikely(hitch::g_enabled))
+    if (unlikely(hitch::g_enabled)) {
       Logger::warn(rstore::summary(m_dxvkDevice->renderStats().snapshot().v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot()));
+      Logger::warn(m_xferStats.summary());
+    }
 
     if (m_annotation)
       delete m_annotation;
@@ -1288,6 +1290,7 @@ namespace dxvk {
     }
 
     if (fastPath) {
+      ProfXfer(needsResolve ? xfer::StretchResolve : xfer::StretchCopy);
       if (needsResolve) {
         static bool s_dsResolveLogged = false;
         if (unlikely(srcIsDS && !s_dsResolveLogged)) {
@@ -1330,6 +1333,7 @@ namespace dxvk {
     else {
       // The blit renders into the destination.
       if (unlikely(!(dstImage->info().usage & MtlTextureUsageRenderTarget))) {
+        ProfXfer(xfer::StretchSkip);
         static bool warned = false;
         if (!warned) {
           warned = true;
@@ -1338,10 +1342,18 @@ namespace dxvk {
         }
         return D3D_OK;
       }
+      ProfXfer(xfer::StretchBlit);
+      if (stretch)
+        ProfXfer(xfer::BlitScaled);
+      if (stretch && DecodeFilter(Filter) == MtlSamplerFilter::Linear)
+        ProfXfer(xfer::BlitLinear);
+      if (!similar)
+        ProfXfer(xfer::BlitConvert);
 
       // A multisampled source can't be sampled: resolve it into the
       // texture's single-sampled resolve image first (as DXVK does).
       if (srcImage->info().sampleCount > 1u) {
+        ProfXfer(xfer::BlitMsaa);
         Rc<MtlTexture> resolved = srcTextureInfo->GetResolveImage();
         if (resolved == nullptr)
           return D3DERR_INVALIDCALL;
@@ -1467,6 +1479,7 @@ namespace dxvk {
       uint8_t block[16];
       const uint32_t blockBytes = util::encodeSolidBlock(image->info().format, Color, block);
       if (!blockBytes) {
+        ProfXfer(xfer::FillSkip);
         static bool warned = false;
         if (!warned) {
           warned = true;
@@ -1475,6 +1488,7 @@ namespace dxvk {
         }
         return D3D_OK;
       }
+      ProfXfer(xfer::FillBc);
 
       const MtlExtent3D blockSize = util::formatBlockSize(image->formatInfo());
       const uint32_t x1 = std::min(uint32_t(offset.x) + extent.width,  mipExtent.width);
@@ -1512,6 +1526,7 @@ namespace dxvk {
       // take it (D3D9 allows ColorFill on render targets and off-screen plain
       // surfaces only).
       if (unlikely(!(image->info().usage & MtlTextureUsageRenderTarget))) {
+        ProfXfer(xfer::FillSkip);
         static bool warned = false;
         if (!warned) {
           warned = true;
@@ -1520,6 +1535,7 @@ namespace dxvk {
         }
         return D3D_OK;
       }
+      ProfXfer(offset == MtlOrigin() && extent == mipExtent ? xfer::FillRt : xfer::FillRect);
       EmitCs([
         cImage      = std::move(image),
         cSubresource = subresource,
@@ -5755,6 +5771,9 @@ namespace dxvk {
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
         Logger::warn(restores);
+      std::string xfers = m_xferStats.take(t);
+      if (!xfers.empty())
+        Logger::warn(xfers);
     }
   }
 
