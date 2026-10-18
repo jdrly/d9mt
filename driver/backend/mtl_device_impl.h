@@ -63,6 +63,9 @@ namespace dxvk::backend {
     // thread only. Stays Defined on images it doesn't track.
     attopt::AspectState attColor, attDepth, attStencil;
     uint64_t           attSampledEpoch = 0u;  // pass epoch of the last bind for sampling
+    // The context's m_vtxEpoch when a pass that ended with the narrowed
+    // barrier last rendered to it (MtlContextImpl::markVertexHazards).
+    uint64_t           vtxEpoch = 0u;
     ~MtlTextureImpl();
   };
 

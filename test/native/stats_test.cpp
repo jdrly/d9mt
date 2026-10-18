@@ -44,6 +44,10 @@ int main() {
   rs.v[rstats::AttNs]         = 2024000u;   // 2.024 ms in a 1.012 s window: 2 ms per second
   rs.v[rstats::ClearsFolded]  = 60u * 6u;
   rs.v[rstats::ClearPasses]   = 60u * 1u;
+  rs.v[rstats::Splits]        = 60u * 8u;
+  rs.v[rstats::SplitsSubmit]  = 60u * 6u;
+  rs.v[rstats::SplitsClear]   = 60u * 2u;
+  rs.v[rstats::SplitBytes]    = 60ull * (420ull << 20);
   stats::CompileTotals ct;
   ct.shaders = 3u; ct.psos = 2u; ct.waits = 1u; ct.waitsNs = 12500000u;
   stats::Extra extra;
@@ -57,6 +61,7 @@ int main() {
   CHECK(has(line, "| ld=12.0 clr=0.0 ldDc=0.0 st=0.0 stDc=6.0 rsv=0.0 restore=0.0 savedMiB=32.0 "));
   CHECK(has(line, " savedMiB=32.0 attMs=2.00 clrFold=6.0 clrPass=1.0 | sh=3 "));
   CHECK(has(line, "| sh=3 pso=2 wait=1/12.5ms | allocMiB=5000 att=on"));
+  CHECK(has(line, " att=on | split=8.0 splitSubmit=6.0 splitXfer=0.0 splitClear=2.0 splitMiB=420.0"));
 
   // The next window reports deltas only, and a negative saving (restores).
   for (int i = 0; i < 63; i++) {

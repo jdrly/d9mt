@@ -59,6 +59,18 @@ namespace dxvk::backend {
       Logger::warn(str::format("D9MT: attachment load/store optimization off (",
         deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
 
+    const char* clearDiscard = std::getenv("D9MT_CLEAR_DISCARD");
+    m_clearDiscard = m_attOpt && !(clearDiscard && std::strcmp(clearDiscard, "0") == 0);
+    Logger::info(m_clearDiscard
+      ? "D9MT: a clear that ends a pass skips the pass's store of what it clears"
+      : "D9MT: a clear that ends a pass keeps the pass's stores (D9MT_CLEAR_DISCARD=0 or no attachment optimization)");
+
+    const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
+    m_narrowBarrier = m_attOpt && !(passBarrier && std::strcmp(passBarrier, "all") == 0);
+    Logger::info(m_narrowBarrier
+      ? "D9MT: end-of-pass barrier before Fragment|Blit|Dispatch, vertex fences for vertex textures"
+      : "D9MT: end-of-pass barrier before all stages (D9MT_PASS_BARRIER=all or no attachment optimization)");
+
     obj_handle_t dev = m_device->wmtDevice();
 
     WMTArgTableInfo ati = {};
@@ -449,9 +461,27 @@ namespace dxvk::backend {
      * the draws already recorded, either folded into the next load action or
      * as its own pass (never a second encoder while this one is open). */
     if (m_pass.active) {
+      // The clear is the next command on the image: the pass needn't store
+      // the aspects it overwrites. Per aspect: clearing depth alone keeps the
+      // stencil store. Only images the attachment optimization tracks (one
+      // subresource) take it (attopt::decide).
+      if (m_clearDiscard && view != nullptr) {
+        uint8_t mask = 0u;
+        for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
+          if ((clear & MtlAspectColor) && sameAttachment(m_pass.targets.color[i], view))
+            mask |= uint8_t(1u << i);
+        }
+        if (sameAttachment(m_pass.targets.depthStencil, view)) {
+          if (clear & MtlAspectDepth)   mask |= uint8_t(1u << kAttDepth);
+          if (clear & MtlAspectStencil) mask |= uint8_t(1u << kAttStencil);
+        }
+        m_pass.discardMask |= mask;
+      }
       prof::bump(prof::CntPassCloseClear);
       closePass();
     }
+    if (unlikely(prof::g_profEnabled))
+      m_splitClears++;
     if (m_pass.pending) {
       for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
@@ -534,7 +564,13 @@ namespace dxvk::backend {
       m_pass.encodedDraws = 0u;
       m_pass.writtenMask  = 0u;
       m_pass.discardDs    = false;
+      m_pass.discardMask  = 0u;
       m_pass.epoch        = ++m_attEpoch;
+      if (unlikely(prof::g_profEnabled)) {
+        m_pass.openSerial = m_currentSerial;
+        m_pass.openXfers  = m_splitXfers;
+        m_pass.openClears = m_splitClears;
+      }
       m_dirty = DirtyEverything;
       m_argTablesBound = false;
       m_lastEncodedPso = nullptr;
@@ -684,7 +720,15 @@ namespace dxvk::backend {
       const bool encoded = m_pass.encoder != 0 || createPassEncoder(false);
       if (encoded) {
         flushCmdChunk();
-        emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+        if (unlikely(prof::g_profEnabled))
+          splitNoteClosed();
+        if (m_narrowBarrier) {
+          emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment),
+            uint64_t(WMTStageFragment | WMTStageBlit | WMTStageDispatch));
+          markVertexHazards();
+        } else {
+          emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+        }
         MTLCommandEncoder_endEncoding(m_pass.encoder);
         NSObject_release(m_pass.encoder);
       } else {
@@ -700,6 +744,7 @@ namespace dxvk::backend {
       m_pass.clearDepth = m_pass.clearStencil = false;
       for (auto& r : m_pass.resolveTo) r = nullptr;
       m_pass.discardDs = false;
+      m_pass.discardMask = 0u;
       return;
     }
 
@@ -716,6 +761,102 @@ namespace dxvk::backend {
     m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
+  }
+
+
+  void MtlContextImpl::splitNoteClosed() {
+    // Present ends the frame's last pass: not a split a flush rule could avoid.
+    m_split.valid = !m_frameBoundaryFlush;
+    for (uint32_t i = 0u; i < 5u; i++) {
+      const Rc<MtlTextureView>& v = i < kAttDepth ? m_pass.targets.color[i] : m_pass.targets.depthStencil;
+      m_split.img[i] = v != nullptr ? v->image.ptr() : nullptr;
+      m_split.sub[i] = v != nullptr ? (v->key.baseMip << 16u) | v->key.baseLayer : 0u;
+    }
+    m_split.serial = m_currentSerial;
+    m_split.xfers  = m_splitXfers;
+    m_split.clears = m_splitClears;
+  }
+
+
+  void MtlContextImpl::splitCheck(uint64_t loadBytes) {
+    if (!m_split.valid)
+      return;
+    m_split.valid = false;
+    if (!loadBytes)
+      return;
+    for (uint32_t i = 0u; i < 5u; i++) {
+      const Rc<MtlTextureView>& v = i < kAttDepth ? m_pass.targets.color[i] : m_pass.targets.depthStencil;
+      if (m_split.img[i] != (v != nullptr ? v->image.ptr() : nullptr)
+       || m_split.sub[i] != (v != nullptr ? (v->key.baseMip << 16u) | v->key.baseLayer : 0u))
+        return;
+    }
+    m_rs[rstats::Splits]++;
+    m_rs[rstats::SplitBytes] += loadBytes;
+    if (m_split.serial != m_pass.openSerial)
+      m_rs[rstats::SplitsSubmit]++;
+    else if (m_split.xfers != m_pass.openXfers)
+      m_rs[rstats::SplitsXfer]++;
+    else if (m_split.clears != m_pass.openClears)
+      m_rs[rstats::SplitsClear]++;
+  }
+
+
+  void MtlContextImpl::markVertexHazards() {
+    auto mark = [this] (MtlTexture* img) {
+      if (img != nullptr)
+        static_cast<MtlTextureImpl*>(img)->vtxEpoch = m_vtxEpoch;
+    };
+    for (const auto& v : m_pass.targets.color)
+      mark(v != nullptr ? v->image.ptr() : nullptr);
+    if (m_pass.targets.depthStencil != nullptr)
+      mark(m_pass.targets.depthStencil->image.ptr());
+    for (const auto& r : m_pass.resolveTo)
+      mark(r.ptr());
+    m_vtxCheck = true;
+  }
+
+
+  void MtlContextImpl::vertexFence(uint64_t beforeStages) {
+    // Its own (empty) encoder: no render encoder may be open. The barrier
+    // waits for the fragment stage of every earlier encoder on the queue.
+    ensureCommandBuffer();
+    obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment), beforeStages);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+    prof::bump(prof::CntVtxFence);
+  }
+
+
+  void MtlContextImpl::resolveVertexHazard() {
+    m_vtxCheck = false;
+    bool hazard = false;
+    for (const auto& t : m_bindings[0].textures) {
+      if (t != nullptr && t->image != nullptr
+       && static_cast<const MtlTextureImpl*>(t->image.ptr())->vtxEpoch == m_vtxEpoch) {
+        hazard = true;
+        break;
+      }
+    }
+    if (likely(!hazard))
+      return;
+    if (m_pass.encoder) {
+      // The pass already has its encoder (a chunk was encoded early): end
+      // it, fence, and go on in a new one on the same targets. The draws
+      // before this one didn't read the image in their vertex stage.
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        Logger::info("D9MT: vertex texture rendered in an earlier pass, encoder already open: pass split for a vertex fence");
+      }
+      prof::bump(prof::CntPassCloseBarrier);
+      closePass();
+      vertexFence(uint64_t(WMTStageVertex));
+      materializePass();
+    } else {
+      // The pass's encoder is created when it ends, after the fence.
+      vertexFence(uint64_t(WMTStageVertex));
+    }
   }
 
 
@@ -860,7 +1001,7 @@ namespace dxvk::backend {
       a.in.optOn         = optOn;
       a.in.fullKnowledge = full;
       a.in.written       = ((m_pass.writtenMask >> s) & 1u) != 0u;
-      a.in.discardAfter  = s >= kAttDepth && m_pass.discardDs;
+      a.in.discardAfter  = ((m_pass.discardMask >> s) & 1u) != 0u || (s >= kAttDepth && m_pass.discardDs);
       // The bindings scan only matters when a store could be skipped.
       a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
       a.in.readHint = attopt::readRecently(st, m_attFrame);
@@ -957,8 +1098,16 @@ namespace dxvk::backend {
           prof::bump(prof::CntStoreDontCare);
       }
       m_rs[rstats::BytesSaved] += uint64_t(saved);
-      if (skip)
+      if (skip) {
         m_rs[rstats::PassesSkipped]++;
+      } else {
+        uint64_t loadBytes = 0u;
+        for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
+          if (m_pass.att[s].used && m_pass.att[s].d.load == attopt::Load::Load)
+            loadBytes += attBytes(imgs[s < kAttDepth ? s : 4u], s);
+        }
+        splitCheck(loadBytes);
+      }
     }
 
     if (unlikely(dbg & d9mtdbg::AttTrace)) {
@@ -1017,7 +1166,7 @@ namespace dxvk::backend {
       if (img == nullptr || !attImageEligible(img))
         continue;
       a.in.written      = ((m_pass.writtenMask >> s) & 1u) != 0u;
-      a.in.discardAfter = s >= kAttDepth && m_pass.discardDs;
+      a.in.discardAfter = ((m_pass.discardMask >> s) & 1u) != 0u || (s >= kAttDepth && m_pass.discardDs);
       const attopt::After after = attopt::stateAfter(a.in, a.d);
       attopt::AspectState& st = s < kAttDepth ? img->attColor
                               : s == kAttDepth ? img->attDepth : img->attStencil;
@@ -1127,6 +1276,8 @@ namespace dxvk::backend {
       prof::bump(prof::CntPassCloseBlit);
       closePass();
     }
+    if (unlikely(prof::g_profEnabled))
+      m_splitXfers++;
     ensureCommandBuffer();
     t->setTrackingSerial(m_currentSerial);
 
@@ -1395,6 +1546,8 @@ namespace dxvk::backend {
     }
     if (changed) {
       m_dirty |= DirtyResources;
+      if (m_narrowBarrier && (stages & MtlStageVertex) && view != nullptr)
+        m_vtxCheck = true;
       if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
         m_frameSampled.insert(view->image.ptr());
       if (m_attOpt && view != nullptr && view->image != nullptr)
@@ -1542,6 +1695,8 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::PrepareDraw);
     if (unlikely(!m_pass.active))
       materializePass();
+    if (unlikely(m_vtxCheck))
+      resolveVertexHazard();
     const uint32_t dirtyIn = m_dirty;
 
     if (!deferredPassesEnabled()
@@ -1638,6 +1793,8 @@ namespace dxvk::backend {
     }
     else
       flushPendingClears();
+    if (unlikely(prof::g_profEnabled))
+      (passCloseCounter == uint32_t(prof::CntPassCloseClear) ? m_splitClears : m_splitXfers)++;
     ensureCommandBuffer();
   }
 

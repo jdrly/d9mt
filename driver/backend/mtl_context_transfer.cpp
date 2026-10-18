@@ -680,11 +680,15 @@ namespace dxvk::backend {
     }
   }
 
-  void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages) {
+  void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages, uint64_t beforeStages) {
     if (!encoder)
       return;
-    MTL4CommandEncoder_barrier(encoder, afterStages, uint64_t(WMTStageAll),
+    MTL4CommandEncoder_barrier(encoder, afterStages, beforeStages,
                                uint64_t(WMTVisibilityOptionDevice));
+    // At the end of an encoder (every caller): everything rendered so far is
+    // ordered before the vertex stages of later encoders.
+    if ((afterStages & uint64_t(WMTStageFragment)) && (beforeStages & uint64_t(WMTStageVertex)))
+      m_vtxEpoch++;
   }
 
   void MtlContextImpl::emitGraphicsBarrier(MtlStageMask, MtlBarrierScope,
@@ -699,7 +703,12 @@ namespace dxvk::backend {
         return;
       }
       flushCmdChunk();
-      emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+      // In the open encoder: Metal orders only later encoders after it, not
+      // this pass's later draws, so it must not start a new vertex epoch
+      // (emitProducerBarrier would): a later draw here that fetches a vertex
+      // texture an earlier pass rendered still needs its fence.
+      MTL4CommandEncoder_barrier(m_pass.encoder, uint64_t(WMTStageFragment), uint64_t(WMTStageAll),
+                                 uint64_t(WMTVisibilityOptionDevice));
     }
   }
 
@@ -883,6 +892,9 @@ namespace dxvk::backend {
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
+    // MetalFX's own stages are unknown: hold all of them for what the passes rendered.
+    if (m_narrowBarrier)
+      vertexFence(uint64_t(WMTStageAll));
     const obj_handle_t stex = s->texture.tex;
     const obj_handle_t dtex = d->texture.tex;
     encodeDirect([keepD = dst, keepS = src, scaler, stex, dtex]

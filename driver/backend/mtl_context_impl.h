@@ -225,6 +225,9 @@ namespace dxvk::backend {
       uint64_t epoch = 0u;         // m_attEpoch when the pass started
       uint8_t  writtenMask = 0u;   // aspects (AttSlot index bits) a draw may have written
       bool     discardDs = false;  // the depth-stencil is discarded right after the pass
+      uint8_t  discardMask = 0u;   // aspects (AttSlot index bits) a full clear overwrites right after the pass
+      // D9MT_PROFILE: m_currentSerial / m_splitXfers / m_splitClears when the pass started (splitCheck)
+      uint64_t openSerial = 0u, openXfers = 0u, openClears = 0u;
     };
 
     struct FrameEntry {
@@ -390,6 +393,7 @@ namespace dxvk::backend {
     // D9MT_NO_ATTACHMENT_OPT=1 / d9mt.attachmentOpt = False and under
     // D9MT_DEFERRED (deferred passes decide their own load/store actions).
     bool         m_attOpt = false;
+    bool         m_clearDiscard = false;  // a clear that ends a pass discards what it clears (D9MT_CLEAR_DISCARD=0: off)
     uint64_t     m_attEpoch = 0u;
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
     uint32_t     m_attTraceBudget = 0u;
@@ -412,6 +416,25 @@ namespace dxvk::backend {
 
     // D9MT_PROFILE: render-thread totals, published at endFrame (mtl_render_stats.h).
     uint64_t     m_rs[rstats::Count] = { };
+
+    // D9MT_PROFILE: pass splits (rstats::Splits). The attachments of the
+    // last pass that ended with an encoder (not at the frame-end submit),
+    // and what had happened by then; a pass on exactly those attachments
+    // that loads some of them is a split, attributed to what happened
+    // between that end and its start.
+    struct SplitWatch {
+      bool        valid  = false;
+      const void* img[5] = { };   // colour 0-3, depth-stencil
+      uint32_t    sub[5] = { };   // baseMip << 16 | baseLayer
+      uint64_t    serial = 0u;    // m_currentSerial
+      uint64_t    xfers  = 0u;    // m_splitXfers
+      uint64_t    clears = 0u;    // m_splitClears
+    };
+    SplitWatch   m_split;
+    uint64_t     m_splitXfers  = 0u;  // copies, blits, resolves, restores, partial clears so far
+    uint64_t     m_splitClears = 0u;  // full clears so far
+    void         splitNoteClosed();
+    void         splitCheck(uint64_t loadBytes);
 
     void recordPassEntry();
     CmdChunk takeChunk();
@@ -468,8 +491,31 @@ namespace dxvk::backend {
 
     // Metal 4 has no driver hazard tracking: a producer barrier on the
     // outgoing encoder orders its writes ahead of all later queue stages so
-    // a subsequent encoder observes them.
-    void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages);
+    // a subsequent encoder observes them. Metal waits for `afterStages` of
+    // this encoder and of every earlier one on the queue (also in earlier
+    // command buffers), and holds `beforeStages` of every later encoder.
+    void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages,
+                                     uint64_t beforeStages = uint64_t(WMTStageAll));
+
+    // Narrowed end-of-pass barrier (docs/gpu-4k.md, candidate 1): with the
+    // attachment optimization, a draw pass ends with after Fragment before
+    // Fragment|Blit|Dispatch, so the next pass's vertex work can run while
+    // this pass's fragment work does. The one GPU-written input of a vertex
+    // stage is a D3D9 vertex texture (vertex samplers); vertex and index
+    // buffers come from the CPU or from copies, whose barriers hold every
+    // stage. So an image such a pass rendered gets the current m_vtxEpoch
+    // (MtlTextureImpl::vtxEpoch), every barrier after Fragment before Vertex
+    // at the end of an encoder starts a new epoch (not the in-pass feedback
+    // barrier: it orders later encoders only, not the pass's own later
+    // draws), and a draw whose vertex stage has an image of the current
+    // epoch bound gets a fence first (resolveVertexHazard).
+    // D9MT_PASS_BARRIER=all: every pass ends with the barrier before All.
+    bool         m_narrowBarrier = false;
+    bool         m_vtxCheck      = false;  // look at the vertex-stage textures at the next draw
+    uint64_t     m_vtxEpoch      = 1u;
+    void         markVertexHazards();
+    void         vertexFence(uint64_t beforeStages);
+    void         resolveVertexHazard();
 
   };
 

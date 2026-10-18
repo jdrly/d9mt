@@ -43,6 +43,7 @@ namespace dxvk::backend::prof {
     CntPassCloseBlit,
     CntFramePasses,
     CntStoreDontCare,
+    CntVtxFence,
     CounterCount
   };
 
@@ -110,7 +111,8 @@ namespace dxvk::backend::prof {
       " barrier=", double(g_counts[CntPassCloseBarrier]) / kFrames,
       " blit=", double(g_counts[CntPassCloseBlit]) / kFrames,
       " | framePasses=", double(g_counts[CntFramePasses]) / kFrames, "/f",
-      " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f");
+      " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f",
+      " vtxFence=", double(g_counts[CntVtxFence]) / kFrames, "/f");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 
