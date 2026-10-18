@@ -225,6 +225,7 @@ namespace dxvk::backend {
       uint64_t epoch = 0u;         // m_attEpoch when the pass started
       uint8_t  writtenMask = 0u;   // aspects (AttSlot index bits) a draw may have written
       bool     discardDs = false;  // the depth-stencil is discarded right after the pass
+      uint8_t  discardMask = 0u;   // aspects (AttSlot index bits) a full clear overwrites right after the pass
     };
 
     struct FrameEntry {
@@ -390,6 +391,7 @@ namespace dxvk::backend {
     // D9MT_NO_ATTACHMENT_OPT=1 / d9mt.attachmentOpt = False and under
     // D9MT_DEFERRED (deferred passes decide their own load/store actions).
     bool         m_attOpt = false;
+    bool         m_clearDiscard = false;  // a clear that ends a pass discards what it clears (D9MT_CLEAR_DISCARD=0: off)
     uint64_t     m_attEpoch = 0u;
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
     uint32_t     m_attTraceBudget = 0u;

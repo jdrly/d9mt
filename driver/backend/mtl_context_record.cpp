@@ -59,6 +59,12 @@ namespace dxvk::backend {
       Logger::warn(str::format("D9MT: attachment load/store optimization off (",
         deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
 
+    const char* clearDiscard = std::getenv("D9MT_CLEAR_DISCARD");
+    m_clearDiscard = m_attOpt && !(clearDiscard && std::strcmp(clearDiscard, "0") == 0);
+    Logger::info(m_clearDiscard
+      ? "D9MT: a clear that ends a pass skips the pass's store of what it clears"
+      : "D9MT: a clear that ends a pass keeps the pass's stores (D9MT_CLEAR_DISCARD=0 or no attachment optimization)");
+
     const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
     m_narrowBarrier = m_attOpt && !(passBarrier && std::strcmp(passBarrier, "all") == 0);
     Logger::info(m_narrowBarrier
@@ -455,6 +461,22 @@ namespace dxvk::backend {
      * the draws already recorded, either folded into the next load action or
      * as its own pass (never a second encoder while this one is open). */
     if (m_pass.active) {
+      // The clear is the next command on the image: the pass needn't store
+      // the aspects it overwrites. Per aspect: clearing depth alone keeps the
+      // stencil store. Only images the attachment optimization tracks (one
+      // subresource) take it (attopt::decide).
+      if (m_clearDiscard && view != nullptr) {
+        uint8_t mask = 0u;
+        for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
+          if ((clear & MtlAspectColor) && sameAttachment(m_pass.targets.color[i], view))
+            mask |= uint8_t(1u << i);
+        }
+        if (sameAttachment(m_pass.targets.depthStencil, view)) {
+          if (clear & MtlAspectDepth)   mask |= uint8_t(1u << kAttDepth);
+          if (clear & MtlAspectStencil) mask |= uint8_t(1u << kAttStencil);
+        }
+        m_pass.discardMask |= mask;
+      }
       prof::bump(prof::CntPassCloseClear);
       closePass();
     }
@@ -540,6 +562,7 @@ namespace dxvk::backend {
       m_pass.encodedDraws = 0u;
       m_pass.writtenMask  = 0u;
       m_pass.discardDs    = false;
+      m_pass.discardMask  = 0u;
       m_pass.epoch        = ++m_attEpoch;
       m_dirty = DirtyEverything;
       m_argTablesBound = false;
@@ -712,6 +735,7 @@ namespace dxvk::backend {
       m_pass.clearDepth = m_pass.clearStencil = false;
       for (auto& r : m_pass.resolveTo) r = nullptr;
       m_pass.discardDs = false;
+      m_pass.discardMask = 0u;
       return;
     }
 
@@ -931,7 +955,7 @@ namespace dxvk::backend {
       a.in.optOn         = optOn;
       a.in.fullKnowledge = full;
       a.in.written       = ((m_pass.writtenMask >> s) & 1u) != 0u;
-      a.in.discardAfter  = s >= kAttDepth && m_pass.discardDs;
+      a.in.discardAfter  = ((m_pass.discardMask >> s) & 1u) != 0u || (s >= kAttDepth && m_pass.discardDs);
       // The bindings scan only matters when a store could be skipped.
       a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
       a.in.readHint = attopt::readRecently(st, m_attFrame);
@@ -1088,7 +1112,7 @@ namespace dxvk::backend {
       if (img == nullptr || !attImageEligible(img))
         continue;
       a.in.written      = ((m_pass.writtenMask >> s) & 1u) != 0u;
-      a.in.discardAfter = s >= kAttDepth && m_pass.discardDs;
+      a.in.discardAfter = ((m_pass.discardMask >> s) & 1u) != 0u || (s >= kAttDepth && m_pass.discardDs);
       const attopt::After after = attopt::stateAfter(a.in, a.d);
       attopt::AspectState& st = s < kAttDepth ? img->attColor
                               : s == kAttDepth ? img->attDepth : img->attStencil;

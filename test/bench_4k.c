@@ -6,9 +6,11 @@
  * targets (an even number, default 4), and a downscale into a small backbuffer (no 4K window). Vertex-
  * heavy geometry (bench_vs), ~2,200 draws per frame.
  *
- *   bench_4k.exe [frames] [post passes]   (default 300 frames after 60 warm-up
- *                                          frames, 4 post passes; more passes:
- *                                          more attachment bandwidth)
+ *   bench_4k.exe [frames] [post passes] [depth clears]
+ *
+ * Defaults: 300 frames after 60 warm-up frames, 4 post passes (more: more
+ * attachment bandwidth), 1 depth-only Clear (more: the main pass's draws are
+ * split into that many runs, each ended by a depth-only Clear).
  *
  * Presents without vsync and prints the average frame time. When the GPU is
  * the limit (it is at 4K on any Mac) that is GPU time per frame; check with
@@ -35,7 +37,7 @@ static const unsigned char lit_ps_bytecode[] = {
 #define LATE_DRAWS 200
 #define DRAWS (4 * SHADOW_DRAWS + MAIN_DRAWS + LATE_DRAWS)
 
-static int postPasses = 4;
+static int postPasses = 4, depthClears = 1;
 static IDirect3DVertexShader9 *vsBench;
 static IDirect3DPixelShader9 *psPost, *psLit;
 static IDirect3DVertexBuffer9 *vb;
@@ -119,11 +121,14 @@ static void frame(int n) {
   IDirect3DDevice9_SetVertexShader(t_dev, t_vs_pos);
   t_quad(-1.0f, -1.0f, 1.0f, 1.0f, 0.999f);
 
-  /* first-person / UI layer: depth cleared, same targets */
-  IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+  /* first-person / UI layers: depth cleared, same targets */
   IDirect3DDevice9_SetVertexShader(t_dev, vsBench);
   IDirect3DDevice9_SetStreamSource(t_dev, 0, vb, 0, sizeof(struct TVertex));
-  draws(4 * SHADOW_DRAWS + MAIN_DRAWS, LATE_DRAWS);
+  for (int c = 0; c < depthClears; c++) {
+    const UINT first = LATE_DRAWS * c / depthClears, last = LATE_DRAWS * (c + 1) / depthClears;
+    IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    draws(4 * SHADOW_DRAWS + MAIN_DRAWS + first, last - first);
+  }
   IDirect3DDevice9_SetTexture(t_dev, 0, NULL);
   IDirect3DDevice9_SetTexture(t_dev, 1, NULL);
 
@@ -151,6 +156,8 @@ int main(int argc, char **argv) {
   const int frames = argc > 1 ? atoi(argv[1]) : 300, warm = 60;
   if (argc > 2)
     postPasses = (atoi(argv[2]) + 1) & ~1;
+  if (argc > 3 && atoi(argv[3]) > 0)
+    depthClears = atoi(argv[3]);
   t_present_interval = D3DPRESENT_INTERVAL_IMMEDIATE;
   t_init("d9mt_bench_4k", 640, 360);
   T_CHECK(IDirect3DDevice9_CreateVertexShader(t_dev, (const DWORD *)bench_vs_bytecode, &vsBench));
@@ -200,7 +207,8 @@ int main(int argc, char **argv) {
   }
   QueryPerformanceCounter(&t1);
   const double ms = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart / frames;
-  printf("BENCH4K frames=%d post=%d draws=%d ms/frame=%.3f fps=%.1f\n", frames, postPasses, DRAWS + 3 + postPasses, ms, 1000.0 / ms);
+  printf("BENCH4K frames=%d post=%d clears=%d draws=%d ms/frame=%.3f fps=%.1f\n", frames, postPasses, depthClears,
+         DRAWS + 3 + postPasses, ms, 1000.0 / ms);
   fflush(stdout);
   return 0;
 }
