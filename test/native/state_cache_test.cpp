@@ -567,6 +567,8 @@ struct Workload {
       Rc<MtlShaderFunction> p = ps[d.ps]->drawFunction(vs[d.vs].ptr());
       MtlPsoUse use;
       Rc<FakePso> pso = be.renderMiss(d.state, v.ptr(), p.ptr(), use);
+      if (use == MtlPsoUse::Late)
+        sc->boostPrewarm(pso.ptr());
       pso->wait();   // runs it here if nobody has started it
       hits += use == MtlPsoUse::Hit;
       sc->record(d.state, v.ptr(), p.ptr(), pso.ptr(), use);
@@ -1256,6 +1258,48 @@ static void testCrashGuard() {
   }
 }
 
+// A draw that would wait for a prewarm build in progress raises the
+// building thread (counted; the priority call itself is Win32 only).
+static void testBoost() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 1u);
+
+  {
+    Workload w(1u, 1u, 1u, 13u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+  }
+
+  Workload w(1u, 1u, 1u, 13u);
+  std::atomic<bool> gate = { false }, started = { false };
+  FakeBackend be;
+  be.gate = &gate;
+  be.started = &started;
+  Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+  w.announceAll(sc.ptr());
+  waitLoaded(sc.ptr());
+  for (int i = 0; i < 5000 && !started.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(started.load());
+
+  std::thread renderer([&] { w.render(sc.ptr(), be); });   // Late: boosts, then waits
+  for (int i = 0; i < 2000 && !sc->stats().boosts; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  gate = true;
+  renderer.join();
+  sc->shutdown();
+  const auto s = sc->stats();
+  CHECK(s.boosts == 1u && s.late == 1u && s.built == 1u);
+
+  // A boost for a PSO no prewarm thread is building does nothing.
+  sc->boostPrewarm(nullptr);
+  CHECK(sc->stats().boosts == 1u);
+}
+
 // A failed prewarm build is not adopted: the draw builds its own.
 static void testFailedPrewarmNotAdopted() {
   const std::string dir = tempDir();
@@ -1353,6 +1397,7 @@ int main(int argc, char** argv) {
   testKeyValidator();
   testLoadValidation();
   testCrashGuard();
+  testBoost();
   testFailedPrewarmNotAdopted();
 
   if (g_failures) {

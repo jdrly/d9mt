@@ -294,6 +294,24 @@ namespace dxvk {
       return ok;
     }
 
+    void* openCurrentThread() {
+      return ::OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, FALSE, ::GetCurrentThreadId());
+    }
+
+    void setThreadPriorityNormal(void* handle) {
+      if (handle)
+        ::SetThreadPriority(HANDLE(handle), THREAD_PRIORITY_NORMAL);
+    }
+
+    void setCurrentThreadPriorityLowest() {
+      ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    }
+
+    void closeThreadHandle(void* handle) {
+      if (handle)
+        ::CloseHandle(HANDLE(handle));
+    }
+
     void nameThread(const char* name) {
       env::setThreadName(name);
     }
@@ -407,6 +425,12 @@ namespace dxvk {
       return !std::fclose(f) && ok;
     }
 
+    // Thread priorities are Win32 (Wine) only; natively the boost is counted.
+    void* openCurrentThread() { return nullptr; }
+    void setThreadPriorityNormal(void*) { }
+    void setCurrentThreadPriorityLowest() { }
+    void closeThreadHandle(void*) { }
+
     void nameThread(const char*) { }
 
 #endif
@@ -497,6 +521,8 @@ namespace dxvk {
 
   MtlStateCache::MtlStateCache(MtlStateCacheBackend* pBackend, const MtlStateCacheConfig& config)
   : m_backend(pBackend), m_config(config) {
+    m_config.threads = std::min(m_config.threads, MaxPrewarmThreads);
+
     m_writer = dxvk::thread([this] { writerMain(); });
     m_writer.set_priority(ThreadPriority::Lowest);
 
@@ -509,6 +535,27 @@ namespace dxvk {
 
   MtlStateCache::~MtlStateCache() {
     shutdown();
+
+    for (PrewarmSlot& slot : m_slots)
+      closeThreadHandle(std::exchange(slot.handle, nullptr));
+  }
+
+
+  void MtlStateCache::boostPrewarm(MtlCompileTask* pPso) {
+    if (m_stopped.load(std::memory_order_relaxed))
+      return;
+
+    for (uint32_t i = 0u; i < m_config.threads; i++) {
+      PrewarmSlot& slot = m_slots[i];
+
+      if (slot.running.load(std::memory_order_acquire) == pPso && !slot.boosted.exchange(true)) {
+        // The thread resets itself to the lowest priority after the build.
+        // If it finished just now, it runs (at most) its next build at
+        // normal priority before it resets.
+        setThreadPriorityNormal(slot.handle);
+        m_boosts.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
   }
 
 
@@ -665,6 +712,7 @@ namespace dxvk {
     s.writes     = m_writes.load();
     s.entries    = m_entries.load();
     s.invalid    = m_invalid.load();
+    s.boosts     = m_boosts.load();
     s.guardTripped = m_guardTripped.load();
     return s;
   }
@@ -924,13 +972,14 @@ namespace dxvk {
       " hitBuildMs=", uint64_t(m_hitBuildNs.load() / 1000000u),
       " | prewarm built=", s.built, " dup=", s.dup, " failed=", s.failed, " skipped=", s.skipped,
       " buildMs=", uint64_t(m_buildNs.load() / 1000000u),
-      " pausedMs=", uint64_t(m_pausedNs.load() / 1000000u), " ready=", ready,
+      " pausedMs=", uint64_t(m_pausedNs.load() / 1000000u), " boosts=", s.boosts, " ready=", ready,
       " | entries=", s.entries, " invalid=", s.invalid, final ? " (final)" : ""));
   }
 
 
   void MtlStateCache::prewarmMain(uint32_t index) {
     nameThread("d9mt-prewarm");
+    m_slots[index].handle = openCurrentThread();
 
     while (true) {
       Entry e;
@@ -962,7 +1011,7 @@ namespace dxvk {
 
       bool ok = true;
       if (vs.shader && (!e.psOrigin || ps.shader))
-        ok = prewarmOne(e, vs, ps);
+        ok = prewarmOne(index, e, vs, ps);
       else
         m_skipped.fetch_add(1u, std::memory_order_relaxed);
 
@@ -992,7 +1041,7 @@ namespace dxvk {
   }
 
 
-  bool MtlStateCache::prewarmOne(const Entry& e, const ShaderSlot& vs, const ShaderSlot& ps) {
+  bool MtlStateCache::prewarmOne(uint32_t index, const Entry& e, const ShaderSlot& vs, const ShaderSlot& ps) {
     if (!yieldToRenderThread())
       return true;
 
@@ -1029,10 +1078,18 @@ namespace dxvk {
     // descriptor reaches Metal.
     setMarker();
 
+    PrewarmSlot& slot = m_slots[index];
     const uint64_t t0 = compile_stats::nowNs();
 
     // False if a draw claimed it first; it then builds (or waits) there.
-    if (!pso->tryRun())
+    slot.running.store(pso.ptr(), std::memory_order_release);
+    const bool ran = pso->tryRun();
+    slot.running.store(nullptr, std::memory_order_release);
+
+    if (slot.boosted.exchange(false))
+      setCurrentThreadPriorityLowest();
+
+    if (!ran)
       return true;
 
     m_buildNs.fetch_add(compile_stats::nowNs() - t0, std::memory_order_relaxed);

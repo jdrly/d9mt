@@ -133,6 +133,11 @@ namespace dxvk {
             MtlPsoUse           use);
 
     /// Render thread: a PSO miss that can't be recorded (internal shaders).
+    /// Render thread: a draw is about to wait for pPso, which a prewarm
+    /// thread may be building at the lowest priority; that thread is raised
+    /// to normal priority until the build is done.
+    void boostPrewarm(MtlCompileTask* pPso);
+
     void noteUnrecorded() {
       m_unrecorded.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -152,7 +157,7 @@ namespace dxvk {
       uint64_t hits = 0u, late = 0u, misses = 0u, unrecorded = 0u, ringDrops = 0u;
       uint64_t recorded = 0u, built = 0u, dup = 0u, failed = 0u, skipped = 0u;
       uint64_t writes = 0u, entries = 0u;
-      uint64_t invalid = 0u;
+      uint64_t invalid = 0u, boosts = 0u;
       bool     guardTripped = false;
     };
 
@@ -216,7 +221,7 @@ namespace dxvk {
     std::atomic<uint64_t> m_pausedNs = { 0u }, m_buildNs = { 0u }, m_hitBuildNs = { 0u };
     std::atomic<uint64_t> m_writes = { 0u }, m_entries = { 0u };
     std::atomic<uint64_t> m_prewarmLogged = { 0u };
-    std::atomic<uint64_t> m_invalid = { 0u };
+    std::atomic<uint64_t> m_invalid = { 0u }, m_boosts = { 0u };
     std::atomic<bool>     m_guardTripped = { false };
 
     // Crash-loop guard: <file>.prewarm exists while prewarm builds run
@@ -224,6 +229,16 @@ namespace dxvk {
     // shutdown). Found at load: the last session died during the prewarm.
     dxvk::mutex                   m_markerMutex;
     bool                          m_markerOnDisk = false;
+
+    // Per prewarm thread: the PSO it is building, for boostPrewarm().
+    struct PrewarmSlot {
+      std::atomic<MtlCompileTask*> running = { nullptr };
+      std::atomic<bool>            boosted = { false };
+      void*                        handle  = nullptr;   // Win32 thread handle
+    };
+    static constexpr uint32_t MaxPrewarmThreads = 4u;
+    PrewarmSlot                   m_slots[MaxPrewarmThreads];
+
 
     dxvk::thread              m_writer;
     std::vector<dxvk::thread> m_prewarmThreads;
@@ -236,7 +251,7 @@ namespace dxvk {
     void logUse(bool final);
 
     void prewarmMain(uint32_t index);
-    bool prewarmOne(const statecache::Entry& e, const ShaderSlot& vs, const ShaderSlot& ps);
+    bool prewarmOne(uint32_t index, const statecache::Entry& e, const ShaderSlot& vs, const ShaderSlot& ps);
     bool finishFunction(MtlShaderFunction* pFn);
     bool yieldToRenderThread();
     void setMarker();

@@ -132,8 +132,14 @@ namespace dxvk::backend {
 
       if (unlikely(stateCache != nullptr) && m_registry) {
         e = m_registry->adoptOrInsert(key, e);
-        if (e->prewarmed())
+        if (e->prewarmed()) {
           use = e->isDone() ? MtlPsoUse::Hit : MtlPsoUse::Late;
+
+          // A prewarm thread may be building it at the lowest priority
+          // while this draw is about to wait for it: raise that thread.
+          if (use == MtlPsoUse::Late)
+            stateCache->boostPrewarm(e.ptr());
+        }
       }
 
       entry = m_cache.emplace(key, e).first;
