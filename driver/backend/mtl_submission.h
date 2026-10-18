@@ -47,7 +47,26 @@ public:
 
   void drainAndStopPump();
 
+  /// CS thread: `serial` is the submission right after a queue-side
+  /// waitForDrawable (a present). Only read when a wait stalls (d9mt#23).
+  void notePresent(uint64_t serial, obj_handle_t drawable);
+
 private:
+
+  // The last submissions, indexed by serial % size: when they were committed
+  // and whether the queue waited for a drawable just before (d9mt#23: a stall
+  // names what the stuck serial is). Written by the CS thread, read on stalls.
+  struct SubmitRecord {
+    std::atomic<uint64_t> serial   = { 0u };
+    std::atomic<uint64_t> timeNs   = { 0u };
+    std::atomic<uint64_t> drawable = { 0u };   // 0: not a present
+  };
+  static constexpr size_t kSubmitRing = 64u;
+  SubmitRecord m_submits[kSubmitRing];
+  uint64_t     m_stallReported = 0u;   // serial whose stall was described (waitFor callers)
+  std::mutex   m_stallMutex;
+
+  void describeStall(uint64_t waitingFor);
 
   struct Retirement {
     uint64_t serial;

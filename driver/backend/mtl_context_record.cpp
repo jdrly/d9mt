@@ -364,6 +364,8 @@ namespace dxvk::backend {
 
     MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
     submit(false);
+    // The submission the queue holds back until the drawable is usable (d9mt#23).
+    m_device->submissions().notePresent(m_device->submissions().lastSubmittedSerial(), sync.drawable);
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
     if (sync.minDuration > 0.0)

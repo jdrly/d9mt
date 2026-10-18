@@ -1,5 +1,6 @@
 #include "mtl_submission.h"
 
+#include <chrono>
 #include <thread>
 
 #include "../util/log/log.h"
@@ -38,10 +39,60 @@ void SubmissionTracker::drainAndStopPump() {
     r.release();
 }
 
+namespace {
+  uint64_t steadyNs() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+}
+
 uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
   uint64_t serial = m_nextSerial.fetch_add(1u, std::memory_order_acq_rel);
   MTL4CommandQueue_signalEvent(queue, m_event.handle(), serial);
+  SubmitRecord& r = m_submits[serial % kSubmitRing];
+  r.drawable.store(0u, std::memory_order_relaxed);
+  r.timeNs.store(steadyNs(), std::memory_order_relaxed);
+  r.serial.store(serial, std::memory_order_release);
   return serial;
+}
+
+void SubmissionTracker::notePresent(uint64_t serial, obj_handle_t drawable) {
+  SubmitRecord& r = m_submits[serial % kSubmitRing];
+  if (r.serial.load(std::memory_order_acquire) == serial)
+    r.drawable.store(uint64_t(drawable), std::memory_order_relaxed);
+}
+
+void SubmissionTracker::describeStall(uint64_t waitingFor) {
+  // Once per stuck serial: what the GPU queue is blocked on. The first serial
+  // not completed is the one holding the queue up; if it is a present, the
+  // queue is waiting for its drawable (waitForDrawable, d9mt#23), otherwise
+  // it is executing (or faulted in) ordinary work.
+  const uint64_t completed = completedSerial();
+  const uint64_t stuck = completed + 1u;
+  { std::lock_guard<std::mutex> lock(m_stallMutex);
+    if (m_stallReported == stuck)
+      return;
+    m_stallReported = stuck;
+  }
+  const uint64_t now = steadyNs();
+  std::string what = "unknown (older than the submission ring)";
+  const SubmitRecord& r = m_submits[stuck % kSubmitRing];
+  if (r.serial.load(std::memory_order_acquire) == stuck) {
+    const uint64_t drawable = r.drawable.load(std::memory_order_relaxed);
+    const double agoMs = double(now - r.timeNs.load(std::memory_order_relaxed)) * 1e-6;
+    what = drawable
+      ? str::format("a present: the queue waits for drawable 0x", std::hex, drawable, std::dec,
+                    " (waitForDrawable), committed ", agoMs, " ms ago")
+      : str::format("render work (no drawable wait), committed ", agoMs, " ms ago");
+  }
+  uint32_t presentsAfter = 0u;
+  for (uint64_t s = stuck + 1u; s <= lastSubmittedSerial() && s < stuck + kSubmitRing; s++) {
+    const SubmitRecord& q = m_submits[s % kSubmitRing];
+    if (q.serial.load(std::memory_order_acquire) == s && q.drawable.load(std::memory_order_relaxed))
+      presentsAfter++;
+  }
+  Logger::warn(str::format("SubmissionTracker: stall at serial ", stuck, " (waiting for ", waitingFor,
+    ", last submitted ", lastSubmittedSerial(), "): ", what, "; ", presentsAfter, " presents queued behind it"));
 }
 
 uint64_t SubmissionTracker::completedSerial() {
@@ -136,6 +187,8 @@ void SubmissionTracker::waitFor(uint64_t serial) {
       return;
     Logger::warn(str::format("SubmissionTracker: GPU stall waiting serial ",
       serial, " (completed ", completedSerial(), ") — slice ", i + 1));
+    if (i == 0)
+      describeStall(serial);
   }
   Logger::err(str::format("SubmissionTracker: GPU never signalled serial ",
     serial, " (completed ", completedSerial(), ") — abandoning wait"));
