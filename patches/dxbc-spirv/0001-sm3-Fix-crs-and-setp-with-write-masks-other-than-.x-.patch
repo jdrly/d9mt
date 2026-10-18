@@ -1,0 +1,63 @@
+From 588fb3d5738a8b7ad1abb7d8ffd948cfbfaac3ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Drl=C3=BD?= <jd@jandrly.cz>
+Date: Sat, 17 Oct 2026 23:17:44 +0200
+Subject: [PATCH 1/2] sm3: Fix crs and setp with write masks other than
+ .x/.xy/.xyz(w)
+
+handleCrs and handleSetP push one value per written component (packed,
+in write mask order) but passed the list to composite() with an identity
+swizzle, which indexes it by component. Any mask that doesn't start at
+.x without gaps read past the list: small_vector's inline storage is
+uninitialized, so the result picked up a null def (assert in composite),
+a stale def of the wrong type (assert in normalizeTypeForConsume) or,
+silently, some unrelated SSA value.
+
+Build the vector from the packed list directly, as the other handlers
+do. crs has no .w result; a mask with .w is invalid, leave .w unwritten.
+---
+ sm3/sm3_converter.cpp | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/sm3/sm3_converter.cpp b/sm3/sm3_converter.cpp
+index 81a3bf3..fbb53f2 100644
+--- a/sm3/sm3_converter.cpp
++++ b/sm3/sm3_converter.cpp
+@@ -1723,6 +1723,15 @@ bool Converter::handleCrs(ir::Builder& builder, const Instruction& op) {
+   WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+   auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+ 
++  /* There is no .w result. A mask with .w is invalid, leave .w unwritten. */
++  if (writeMask & ComponentBit::eW) {
++    writeMask &= ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ;
++    dst = dst.setWriteMask(writeMask);
++
++    if (writeMask == WriteMask())
++      return true;
++  }
++
+   auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ, scalarType);
+   auto src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ, scalarType);
+ 
+@@ -1749,7 +1758,8 @@ bool Converter::handleCrs(ir::Builder& builder, const Instruction& op) {
+     auto b = builder.add(emitFMul(scalarType, src0y, src1x));
+     components.push_back(builder.add(ir::Op::FSub(scalarType, a, b)));
+   }
+-  auto res = composite(builder, makeVectorType(scalarType, writeMask), components.data(), Swizzle::identity(), writeMask);
++  /* One value per written component, in write mask order, as stores take them. */
++  auto res = buildVector(builder, scalarType, components.size(), components.data());
+   return storeDstModifiedPredicated(builder, op, dst, res);
+ }
+ 
+@@ -1775,7 +1785,8 @@ bool Converter::handleSetP(ir::Builder& builder, const Instruction& op) {
+     components.push_back(comparison);
+   }
+ 
+-  auto result = composite(builder, makeVectorType(ir::ScalarType::eBool, writeMask), components.data(), Swizzle::identity(), writeMask);
++  /* One value per written component, in write mask order, as stores take them. */
++  auto result = buildVector(builder, ir::ScalarType::eBool, components.size(), components.data());
+   return storeDstModifiedPredicated(builder, op, dst, result);
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

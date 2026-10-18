@@ -10,7 +10,10 @@
 #include "../mtl/mtl_device.h"
 #include "../mtl/mtl_context.h"
 
+#include "../mtl/mtl_state_cache.h"
+
 #include "wmt_handle.h"
+#include "mtl_pso_cache.h"
 #include "mtl_residency.h"
 #include "mtl_ring.h"
 #include "mtl_submission.h"
@@ -78,7 +81,7 @@ namespace dxvk::backend {
     uint64_t   gpuResourceId = 0u;
   };
 
-  class MtlDeviceImpl : public MtlDevice {
+  class MtlDeviceImpl : public MtlDevice, public MtlStateCacheBackend {
 
   public:
 
@@ -108,6 +111,20 @@ namespace dxvk::backend {
     void submitCompile(const Rc<MtlCompileTask>& task, bool urgent) override;
 
     size_t pendingCompiles() override;
+
+    // State cache backend (mtl_state_cache.h).
+    MtlStateCacheBackend* stateCacheBackend() override { return this; }
+    uint64_t psoKeySignature() const override { return RenderPsoKey::signature(); }
+
+    Rc<MtlCompileTask> createPrewarmPso(
+      const uint8_t*            pState,
+      const MtlShaderFunction*  pVs,
+      const MtlShaderFunction*  pFs) override;
+
+    bool psoStateValid(const uint8_t* pState, const char** pWhy) override;
+    bool psoSucceeded(MtlCompileTask* pPso) override;
+    uint64_t psoBuildNs(MtlCompileTask* pPso) override;
+    uint32_t urgentCompilesQueued() override;
 
     Rc<MtlContext> createContext() override;
 
@@ -208,6 +225,9 @@ namespace dxvk::backend {
 
     // Stopped first in ~MtlDeviceImpl, while the compiler is still alive.
     std::unique_ptr<MtlCompileWorkers> m_compileWorkers;
+
+    // PSOs shared with the state cache prewarm (only used while it is on).
+    RenderPsoCache::Registry m_psoRegistry;
 
     friend class MtlContextImpl;
 

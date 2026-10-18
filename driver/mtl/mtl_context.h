@@ -37,6 +37,10 @@ namespace dxvk {
     // afterwards); every other field is only valid once task->isDone().
     Rc<MtlCompileTask>  task;
 
+    // State cache identity; set at creation, never changed (not copied
+    // when functions share a library).
+    MtlShaderStateId    stateId;
+
     bool ready() const { return task == nullptr || task->isDone(); }
   };
 

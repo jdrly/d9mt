@@ -33,7 +33,7 @@ namespace dxvk::backend {
 
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
-    m_psoCache(m_device->wmtCompiler(), m_device.ptr()) {
+    m_psoCache(m_device->wmtCompiler(), m_device.ptr(), &m_device->m_psoRegistry) {
     // D9MT_ASYNC_SKIP=1 wins and is the same as a wait budget of 0.
     const int32_t budgetMs = m_device->memoryProfile().pipelineWaitBudgetMs;
     const bool workers = m_device->m_compileWorkers->maxThreads() != 0u;

@@ -17,6 +17,7 @@
 #include "../mtl/mtl_types.h"
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_compile.h"
+#include "../mtl/mtl_state_cache.h"
 
 #include "../util/dxvk_hash.h"
 #include "../util/util_unmap.h"
@@ -123,6 +124,8 @@ namespace dxvk {
 
     MtlShaderStage stage() const { return m_stage; }
 
+    const Sha1Hash& sha() const { return m_sha; }
+
     bool eq(const D3D9ShaderModuleKey& o) const {
       return m_stage == o.m_stage && m_sha == o.m_sha;
     }
@@ -151,7 +154,7 @@ namespace dxvk {
    * PS linked against a compatible VS reuses the standalone compile and its
    * PSOs. All members are immutable after run() except the maps (m_mutex).
    */
-  class D3D9ShaderProgram : public MtlCompileTask {
+  class D3D9ShaderProgram : public MtlCompileTask, public MtlStateCacheShader {
     friend class D3D9ShaderFunctionTask;
   public:
 
@@ -159,6 +162,7 @@ namespace dxvk {
             MtlDevice*                pDevice,
       const std::string&              Name,
             MtlShaderStage            Stage,
+      const Sha1Hash&                 Sha,
       const D3D9ShaderOptions&        Options,
       const D3D9ShaderAnalysis&       Analysis,
       const void*                     pBytecode);
@@ -166,6 +170,15 @@ namespace dxvk {
     /// Function future for this shader linked against pPrev (nullptr =
     /// standalone). Never blocks; the first request queues the compile.
     Rc<MtlShaderFunction> GetFunction(const D3D9ShaderProgram* pPrev);
+
+    /// State cache prewarm: the same function future, but not queued (the
+    /// prewarm thread runs it). pPrev is a D3D9 vertex shader program.
+    Rc<MtlShaderFunction> prewarmFunction(MtlStateCacheShader* pPrev) override;
+
+    /// The state cache identity: the module key's SHA-1.
+    const MtlShaderStateId& StateId() const { return m_stateId; }
+
+    MtlShaderStage Stage() const { return m_stage; }
 
   protected:
 
@@ -176,6 +189,7 @@ namespace dxvk {
     MtlDevice*                  m_device;
     std::string                 m_name;
     MtlShaderStage              m_stage;
+    MtlShaderStateId            m_stateId;
     D3D9ShaderOptions           m_options;
     D3D9ShaderAnalysis          m_analysis;
     std::vector<uint8_t>        m_bytecode;
@@ -222,6 +236,12 @@ namespace dxvk {
 
     const D3D9ShaderProgram* GetProgram() const {
       return m_program.ptr();
+    }
+
+    /// Tells the state cache this shader exists (new modules only).
+    void AnnounceToStateCache(MtlStateCache* pStateCache) const {
+      if (m_program != nullptr)
+        pStateCache->announce(m_program->Stage(), m_program->StateId(), m_program.ptr());
     }
 
     std::string GetName() const {
