@@ -244,9 +244,11 @@ Entry (fixed size, 384 bytes):
 - **Crash-loop guard**: `<file>.prewarm`, a few lines of text:
   `d9mt-prewarm 1`, `trips <n>`, and one identity hash per prewarm job in
   flight (at most one per prewarm thread).
-  - It is rewritten when each job starts, before anything of the job runs
-    (a tiny write, no flush: it only has to outlive the process). It is
-    removed when the queue drains, and on a clean shutdown.
+  - It is rewritten when each job starts, before anything of the job runs.
+    The write is atomic: a temp file renamed over the old marker, so a
+    crash in the middle leaves the previous marker, never a torn or empty
+    one. There is no flush: it only has to outlive the process. The marker
+    is removed when the queue drains, and on a clean shutdown.
   - Found at load, it means the last session ended while prewarm jobs were
     running. That can be a crash, a kill, or simply a game exiting without
     releasing its device. SWTOR quits that way (`ExitProcess`, so
@@ -257,9 +259,19 @@ Entry (fixed size, 384 bytes):
     back the next time a draw misses on it. A descriptor that slips past
     validation and kills the process is one of the suspects, so it costs
     one crash, not a crash loop.
-  - `trips` counts the sessions in a row that ended this way. At 3, one
-    session runs without prewarm, so it can't trip, and the count starts
-    over. The file is never deleted for this.
+  - The trip count lives in `<file>.trips` (also written atomically), and
+    only a prewarm queue that drains resets it. Sessions without a prewarm,
+    which can't trip, leave it alone. So a persistent crash the in-flight
+    list doesn't catch (one on another thread, say) can't repeat forever:
+    - at 3 trips in a row, one session runs without prewarm;
+    - the count carries on through that session;
+    - at 6 the cache file is dropped, and with nothing left to prewarm
+      there is nothing left to trip on (the session records afresh and the
+      count is cleared).
+
+    A player who simply quits during the prewarm a few times in a row loses
+    at most the in-flight entries each time, and a later session whose
+    prewarm drains resets the count.
   - There is no exit-time code. A DllMain or atexit hook would do IO after
     `ExitProcess` has killed the other threads, which may hold Wine's heap
     or fd locks; that would risk hanging the very exit it is meant to keep
@@ -729,6 +741,14 @@ Other Metal layers:
     - three trips in a row skip one prewarm, keep the file, and the next
       session is normal;
     - the trip count carries over in the marker;
+  - a persistent crash the in-flight list doesn't catch: trips 1, 2,
+    3 (no prewarm), 3 kept through that session, 4, 5, then 6 drops the
+    file, and the session after that is normal;
+  - a drained queue resets the count;
+  - a crash in the marker-write window (complete marker plus a torn temp
+    file): the marker's suspect is dropped, nothing else;
+  - a reader polling the marker while two prewarm threads rewrite it never
+    sees a torn or empty one;
     - a second process that removes the marker gets it written again;
   - the late-hit boost;
   - a failed prewarm build is rebuilt by the draw, not adopted, and the
@@ -907,6 +927,26 @@ Other Metal layers:
     noise.
   - Cache on: world max 33.8–34.1 ms vs 386–411 ms.
   - Pixel hash cache off = cache on.
+
+### Crash-loop guard: persistent crashes (fix round 4)
+- Setup: Wine through `exc_guard`, warm caches, a recorded 400-entry file,
+  golden pixel hash `da3a8be4c4d731a7`.
+- **Persistent chain**: every session with a prewarm ends during it
+  (`ExitProcess` at 250 ms).
+  - Sessions 1–3 trip (2 suspects dropped each, `trips` 1, 2, 3).
+  - Session 4 runs without prewarm, so no marker is left.
+  - Session 5 keeps the count at 3 and prewarms (and ends during it).
+  - Sessions 6–7 go to 4 and 5; session 8 reaches 6 and drops the file
+    ("6 sessions in a row … recording afresh"), clearing the count.
+  - The next normal session records 400; the one after prewarms 399, with
+    the golden pixel hash and no trip count left.
+  - Before this round the count restarted after the skip session, so such
+    a crash repeated in 3 of every 4 sessions.
+- **Crash in the marker-write window** (a complete marker naming one entry,
+  plus a torn temp file): exactly that entry is dropped, golden hash.
+- **Exit mid-prewarm ×3**: 2 in-flight entries dropped each time, back to
+  400, golden hash, and the count reset by the drained queue.
+- No crash in any run.
 
 ### PSO archive growth
 - The synthetic pipelines take ≈ 51 KB each in an archive (400 PSOs = 12.6 +
