@@ -431,12 +431,15 @@ struct FakeBackend : public MtlStateCacheBackend {
     return k;
   }
 
-  // What RenderPsoCache::get does on a miss, minus Metal.
+  // What RenderPsoCache::get + Registry::adoptOrInsert do on a miss,
+  // minus Metal: a failed prewarm build is replaced by a fresh one.
   Rc<FakePso> renderMiss(const uint8_t* state, const MtlShaderFunction* vs, const MtlShaderFunction* fs, MtlPsoUse& use) {
     Rc<FakePso> fresh = new FakePso();
     std::lock_guard lock(mutex);
     auto r = registry.emplace(keyOf(state, vs, fs), fresh);
     Rc<FakePso>& e = r.first->second;
+    if (!r.second && e->prewarmed && e->isDone() && !e->ok)
+      e = fresh;
     use = !e->prewarmed ? MtlPsoUse::Miss : (e->isDone() ? MtlPsoUse::Hit : MtlPsoUse::Late);
     return e;
   }
@@ -1253,6 +1256,39 @@ static void testCrashGuard() {
   }
 }
 
+// A failed prewarm build is not adopted: the draw builds its own.
+static void testFailedPrewarmNotAdopted() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 1u);
+  {
+    Workload w(2u, 4u, 20u, 15u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+  }
+
+  Workload w(2u, 4u, 20u, 15u);
+  uint32_t failing = 0u;
+  for (const auto& d : w.draws)
+    failing += d.state[0] == 2u;
+  CHECK(failing > 0u);
+
+  FakeBackend be;
+  be.failKeyByte = 2u;
+  Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+  w.announceAll(sc.ptr());
+  waitLoaded(sc.ptr());
+  CHECK(sc->waitPrewarmIdle(10000u));
+  uint64_t hits = 0u;
+  w.render(sc.ptr(), be, &hits);
+  sc->shutdown();
+  const auto s = sc->stats();
+  CHECK(s.failed == failing && hits == 20u - failing && s.misses == failing);
+}
+
 // Render-thread cost of recording one PSO miss (the only state cache work
 // on the render thread), against the same loop without it. `bench` mode.
 static void benchRecord() {
@@ -1317,6 +1353,7 @@ int main(int argc, char** argv) {
   testKeyValidator();
   testLoadValidation();
   testCrashGuard();
+  testFailedPrewarmNotAdopted();
 
   if (g_failures) {
     std::printf("state_cache_test: %d FAILED\n", g_failures);

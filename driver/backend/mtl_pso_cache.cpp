@@ -80,7 +80,16 @@ namespace dxvk::backend {
   Rc<RenderPsoCache::Entry> RenderPsoCache::Registry::adoptOrInsert(
     const RenderPsoKey& key, const Rc<Entry>& fresh) {
     std::lock_guard lock(m_mutex);
-    return m_map.emplace(key, fresh).first->second;
+    auto r = m_map.emplace(key, fresh);
+
+    // A prewarm build that failed is not adopted: the draw builds its own
+    // (a transient compiler failure shouldn't cost the pipeline for the
+    // whole session; a deterministic one fails again and is cached as today).
+    Rc<Entry>& e = r.first->second;
+    if (!r.second && e->prewarmed() && e->isDone() && !e->handle())
+      e = fresh;
+
+    return e;
   }
 
   bool RenderPsoCache::Registry::insertIfAbsent(const Rc<Entry>& e) {
@@ -262,14 +271,14 @@ namespace dxvk::backend {
           NSObject_release(desc);
         }
         // A recorded pipeline that no longer builds is dropped from the
-        // state cache; not an error of the game's rendering.
+        // state cache; the draw builds its own if it needs it.
         if (quiet)
-          Logger::debug(str::format("RenderPsoCache: prewarm pipeline build failed: ", buf));
+          Logger::warn(str::format("RenderPsoCache: state cache prewarm pipeline build failed (entry dropped): ", buf));
         else
           Logger::err(str::format("RenderPsoCache: pipeline build failed: ", buf));
         NSObject_release(err);
       } else if (quiet) {
-        Logger::debug("RenderPsoCache: prewarm pipeline build failed (no error object)");
+        Logger::warn("RenderPsoCache: state cache prewarm pipeline build failed (entry dropped, no error object)");
       } else {
         Logger::err("RenderPsoCache: pipeline build failed (no error object)");
       }
