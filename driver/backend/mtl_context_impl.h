@@ -518,6 +518,7 @@ namespace dxvk::backend {
     // kMaxFlushDefers deferrals in a row, then the flush goes ahead.
     static constexpr uint32_t kMaxFlushDefers = 8u;
     bool         m_flushDeferOn  = false;
+    bool         m_flushDeferAlways = false;  // D9MT_FLUSH_DEFER=always: even with an idle GPU (tests)
     bool         m_flushDeferred = false;
     uint32_t     m_flushDefers   = 0u;
     bool         m_vtxCheck      = false;  // look at the vertex-stage textures at the next draw

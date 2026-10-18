@@ -4751,6 +4751,8 @@ namespace dxvk {
 
     if (stagingBufferAllocated > MaxMemoryInFlight) {
       const uint64_t target = stagingBufferAllocated - MaxMemoryInFlight;
+      if (m_stagingBufferFence->value() < target)
+        FlushIfDeferred();
       if (unlikely(hitch::g_enabled) && m_stagingBufferFence->value() < target) {
         hitch::Scope hs(m_hitch, hitch::Throttle);
         m_stagingBufferFence->wait(target);
@@ -4790,7 +4792,10 @@ namespace dxvk {
 
     if (m_dxvkDevice->isResourceInUse(Resource)) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
-        ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+        if (m_flushDeferPending.load(std::memory_order_acquire))
+          ExecuteFlush(false);
+        else
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
         return false;
       }
 
@@ -5734,13 +5739,8 @@ namespace dxvk {
     uint64_t chunkId = GetCurrentSequenceNumber();
     uint64_t submissionId = m_submissionFence->value();
 
-    // considerFlush() may raise the type to one it missed earlier; only a
-    // flush that stays a hint may wait for the next pass boundary.
-    const bool deferrable = AllowDefer
-      && m_flushTracker.getPendingType() >= GpuFlushType::ImplicitStrongHint;
-
     if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId, 0u))
-      ExecuteFlush(false, deferrable);
+      ExecuteFlush(false, AllowDefer);
   }
 
 
@@ -6046,6 +6046,7 @@ namespace dxvk {
 
     m_flushSeqNum = m_csSeqNum;
     m_flushTracker.notifyFlush(m_flushSeqNum, submissionId);
+    m_flushDeferPending.store(Deferrable && !Synchronize9On12, std::memory_order_release);
 
     (void) Synchronize9On12;
 

@@ -191,6 +191,11 @@ namespace dxvk {
       synced = true;
     }
 
+    // A deferred heuristic flush may hold the query's end: submit it, also
+    // without FLUSH (before deferral, that flush had already submitted).
+    if (hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN)
+      m_parent->FlushIfDeferred();
+
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();
       m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);

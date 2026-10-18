@@ -1033,6 +1033,15 @@ namespace dxvk {
      * open pass (D9MT_FLUSH_DEFER=0 turns that off). */
     void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);
 
+    /* A deferrable flush was emitted since the last one that always submits:
+     * its command buffer may still be uncommitted (the backend waits for the
+     * next pass boundary). Anything about to wait or poll on GPU progress
+     * submits it first. */
+    void FlushIfDeferred() {
+      if (m_flushDeferPending.load(std::memory_order_acquire))
+        ExecuteFlush(false);
+    }
+
     bool ChangeReportedMemory(int64_t delta) {
       if (IsExtended())
         return true;
@@ -1571,6 +1580,7 @@ namespace dxvk {
     MtlSubmitStatus                 m_submitStatus;
 
     uint64_t                        m_flushSeqNum = 0ull;
+    std::atomic<bool>               m_flushDeferPending = { false };
     GpuFlushTracker                 m_flushTracker;
 
     std::atomic<int64_t>            m_availableMemory = { 0 };

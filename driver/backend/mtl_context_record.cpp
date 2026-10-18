@@ -67,6 +67,8 @@ namespace dxvk::backend {
 
     const char* flushDefer = std::getenv("D9MT_FLUSH_DEFER");
     m_flushDeferOn = !(flushDefer && std::strcmp(flushDefer, "0") == 0);
+    // "always": also while the GPU is idle (tests: every deferrable flush defers)
+    m_flushDeferAlways = m_flushDeferOn && flushDefer && std::strcmp(flushDefer, "always") == 0;
     Logger::info(m_flushDeferOn
       ? "D9MT: heuristic flushes wait for the next render-pass boundary"
       : "D9MT: heuristic flushes submit at once (D9MT_FLUSH_DEFER=0)");
@@ -306,8 +308,13 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable) {
+    // Only while the GPU still has submitted work: an idle GPU gets this
+    // command buffer now, as before (a split costs bandwidth, a starved GPU
+    // costs the frame).
     if (deferrable && m_flushDeferOn && !status && m_pass.active
-     && m_flushDefers < kMaxFlushDefers) {
+     && m_flushDefers < kMaxFlushDefers
+     && (m_flushDeferAlways
+      || m_device->submissions().completedSerial() < m_device->submissions().lastSubmittedSerial())) {
       m_flushDeferred = true;
       m_flushDefers++;
       if (unlikely(prof::g_profEnabled))
@@ -817,12 +824,15 @@ namespace dxvk::backend {
     }
     m_rs[rstats::Splits]++;
     m_rs[rstats::SplitBytes] += loadBytes;
-    if (m_split.serial != m_pass.openSerial)
-      m_rs[rstats::SplitsSubmit]++;
-    else if (m_split.xfers != m_pass.openXfers)
+    // Copies and clears first: a flush deferred to the pass boundary submits
+    // in materializePass, so a split a copy or clear caused also sees a new
+    // serial.
+    if (m_split.xfers != m_pass.openXfers)
       m_rs[rstats::SplitsXfer]++;
     else if (m_split.clears != m_pass.openClears)
       m_rs[rstats::SplitsClear]++;
+    else if (m_split.serial != m_pass.openSerial)
+      m_rs[rstats::SplitsSubmit]++;
   }
 
 
