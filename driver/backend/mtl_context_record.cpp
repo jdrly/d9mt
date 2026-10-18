@@ -480,6 +480,8 @@ namespace dxvk::backend {
       prof::bump(prof::CntPassCloseClear);
       closePass();
     }
+    if (unlikely(prof::g_profEnabled))
+      m_splitClears++;
     if (m_pass.pending) {
       for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
         if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
@@ -564,6 +566,11 @@ namespace dxvk::backend {
       m_pass.discardDs    = false;
       m_pass.discardMask  = 0u;
       m_pass.epoch        = ++m_attEpoch;
+      if (unlikely(prof::g_profEnabled)) {
+        m_pass.openSerial = m_currentSerial;
+        m_pass.openXfers  = m_splitXfers;
+        m_pass.openClears = m_splitClears;
+      }
       m_dirty = DirtyEverything;
       m_argTablesBound = false;
       m_lastEncodedPso = nullptr;
@@ -713,6 +720,8 @@ namespace dxvk::backend {
       const bool encoded = m_pass.encoder != 0 || createPassEncoder(false);
       if (encoded) {
         flushCmdChunk();
+        if (unlikely(prof::g_profEnabled))
+          splitNoteClosed();
         if (m_narrowBarrier) {
           emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment),
             uint64_t(WMTStageFragment | WMTStageBlit | WMTStageDispatch));
@@ -752,6 +761,43 @@ namespace dxvk::backend {
     m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
+  }
+
+
+  void MtlContextImpl::splitNoteClosed() {
+    // Present ends the frame's last pass: not a split a flush rule could avoid.
+    m_split.valid = !m_frameBoundaryFlush;
+    for (uint32_t i = 0u; i < 5u; i++) {
+      const Rc<MtlTextureView>& v = i < kAttDepth ? m_pass.targets.color[i] : m_pass.targets.depthStencil;
+      m_split.img[i] = v != nullptr ? v->image.ptr() : nullptr;
+      m_split.sub[i] = v != nullptr ? (v->key.baseMip << 16u) | v->key.baseLayer : 0u;
+    }
+    m_split.serial = m_currentSerial;
+    m_split.xfers  = m_splitXfers;
+    m_split.clears = m_splitClears;
+  }
+
+
+  void MtlContextImpl::splitCheck(uint64_t loadBytes) {
+    if (!m_split.valid)
+      return;
+    m_split.valid = false;
+    if (!loadBytes)
+      return;
+    for (uint32_t i = 0u; i < 5u; i++) {
+      const Rc<MtlTextureView>& v = i < kAttDepth ? m_pass.targets.color[i] : m_pass.targets.depthStencil;
+      if (m_split.img[i] != (v != nullptr ? v->image.ptr() : nullptr)
+       || m_split.sub[i] != (v != nullptr ? (v->key.baseMip << 16u) | v->key.baseLayer : 0u))
+        return;
+    }
+    m_rs[rstats::Splits]++;
+    m_rs[rstats::SplitBytes] += loadBytes;
+    if (m_split.serial != m_pass.openSerial)
+      m_rs[rstats::SplitsSubmit]++;
+    else if (m_split.xfers != m_pass.openXfers)
+      m_rs[rstats::SplitsXfer]++;
+    else if (m_split.clears != m_pass.openClears)
+      m_rs[rstats::SplitsClear]++;
   }
 
 
@@ -1052,8 +1098,16 @@ namespace dxvk::backend {
           prof::bump(prof::CntStoreDontCare);
       }
       m_rs[rstats::BytesSaved] += uint64_t(saved);
-      if (skip)
+      if (skip) {
         m_rs[rstats::PassesSkipped]++;
+      } else {
+        uint64_t loadBytes = 0u;
+        for (uint32_t s = 0u; s < m_pass.att.size(); s++) {
+          if (m_pass.att[s].used && m_pass.att[s].d.load == attopt::Load::Load)
+            loadBytes += attBytes(imgs[s < kAttDepth ? s : 4u], s);
+        }
+        splitCheck(loadBytes);
+      }
     }
 
     if (unlikely(dbg & d9mtdbg::AttTrace)) {
@@ -1222,6 +1276,8 @@ namespace dxvk::backend {
       prof::bump(prof::CntPassCloseBlit);
       closePass();
     }
+    if (unlikely(prof::g_profEnabled))
+      m_splitXfers++;
     ensureCommandBuffer();
     t->setTrackingSerial(m_currentSerial);
 
@@ -1737,6 +1793,8 @@ namespace dxvk::backend {
     }
     else
       flushPendingClears();
+    if (unlikely(prof::g_profEnabled))
+      (passCloseCounter == uint32_t(prof::CntPassCloseClear) ? m_splitClears : m_splitXfers)++;
     ensureCommandBuffer();
   }
 

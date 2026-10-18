@@ -226,6 +226,8 @@ namespace dxvk::backend {
       uint8_t  writtenMask = 0u;   // aspects (AttSlot index bits) a draw may have written
       bool     discardDs = false;  // the depth-stencil is discarded right after the pass
       uint8_t  discardMask = 0u;   // aspects (AttSlot index bits) a full clear overwrites right after the pass
+      // D9MT_PROFILE: m_currentSerial / m_splitXfers / m_splitClears when the pass started (splitCheck)
+      uint64_t openSerial = 0u, openXfers = 0u, openClears = 0u;
     };
 
     struct FrameEntry {
@@ -414,6 +416,25 @@ namespace dxvk::backend {
 
     // D9MT_PROFILE: render-thread totals, published at endFrame (mtl_render_stats.h).
     uint64_t     m_rs[rstats::Count] = { };
+
+    // D9MT_PROFILE: pass splits (rstats::Splits). The attachments of the
+    // last pass that ended with an encoder (not at the frame-end submit),
+    // and what had happened by then; a pass on exactly those attachments
+    // that loads some of them is a split, attributed to what happened
+    // between that end and its start.
+    struct SplitWatch {
+      bool        valid  = false;
+      const void* img[5] = { };   // colour 0-3, depth-stencil
+      uint32_t    sub[5] = { };   // baseMip << 16 | baseLayer
+      uint64_t    serial = 0u;    // m_currentSerial
+      uint64_t    xfers  = 0u;    // m_splitXfers
+      uint64_t    clears = 0u;    // m_splitClears
+    };
+    SplitWatch   m_split;
+    uint64_t     m_splitXfers  = 0u;  // copies, blits, resolves, restores, partial clears so far
+    uint64_t     m_splitClears = 0u;  // full clears so far
+    void         splitNoteClosed();
+    void         splitCheck(uint64_t loadBytes);
 
     void recordPassEntry();
     CmdChunk takeChunk();
