@@ -230,8 +230,10 @@ Entry (fixed size, 384 bytes):
     - every attribute's buffer has exactly one layout, with a nonzero stride
       and a step function of 1 or 2;
     - color formats from the D3D9 format table (or 0 = no target);
-    - blending only on blendable formats: no integer formats and,
-      conservatively, no 32-bit float formats;
+    - blending only on blendable formats: not on R8/R16/R32Uint, for which
+      Metal terminates the process. It is fine on the 32-bit float formats:
+      the draw path uses them, and Metal accepts them at 1/4/8 samples, as
+      the verification's format matrix shows;
     - blend factors ≤ 18, operations ≤ 4, write mask ≤ 0xf;
     - 1/2/4/8 samples, topology class ≤ 3, alpha-to-coverage 0/1;
     - no depth/stencil format, since that is only used by internal
@@ -239,16 +241,36 @@ Entry (fixed size, 384 bytes):
   - Entries that fail are dropped (`invalid=` and the first reason in the
     `load` line) and never merged back from disk. `createPrewarmPso` checks
     again before anything is built.
-- **Crash-loop guard**: `<file>.prewarm` is written (and flushed) before the
-  first prewarm build reaches Metal, and removed when the prewarm queue
-  drains and on a clean shutdown. If it is found at load, the last session
-  ended while prewarm builds were running (a crash, or a kill), whatever the
-  cause. The cache file is then deleted, nothing is prewarmed in that
-  session (`guard=tripped` in the `load` line, plus a warning), and the
-  session records afresh from its own draws. So a descriptor that slips
-  past validation and kills the process costs one crash, not a crash loop.
-  Two game instances on one cache file can trip the guard falsely (the
-  second sees the first's marker); that costs the cache, not a crash.
+- **Crash-loop guard**: `<file>.prewarm`, a few lines of text:
+  `d9mt-prewarm 1`, `trips <n>`, and one identity hash per prewarm job in
+  flight (at most one per prewarm thread).
+  - It is rewritten when each job starts, before anything of the job runs
+    (a tiny write, no flush: it only has to outlive the process). It is
+    removed when the queue drains, and on a clean shutdown.
+  - Found at load, it means the last session ended while prewarm jobs were
+    running. That can be a crash, a kill, or simply a game exiting without
+    releasing its device. SWTOR quits that way (`ExitProcess`, so
+    `~D3D9DeviceEx` never runs; its sessions have `RESTORE` lines but no
+    `RESTORE-SUMMARY`).
+  - Only the entries the marker names are dropped, and the file and
+    everything else are kept and prewarmed. A suspect that was fine comes
+    back the next time a draw misses on it. A descriptor that slips past
+    validation and kills the process is one of the suspects, so it costs
+    one crash, not a crash loop.
+  - `trips` counts the sessions in a row that ended this way. At 3, one
+    session runs without prewarm, so it can't trip, and the count starts
+    over. The file is never deleted for this.
+  - There is no exit-time code. A DllMain or atexit hook would do IO after
+    `ExitProcess` has killed the other threads, which may hold Wine's heap
+    or fd locks; that would risk hanging the very exit it is meant to keep
+    clean.
+  - Two game instances on one cache file: the second one's load takes the
+    first one's marker as a trip, drops its (at most two) in-flight
+    entries, and removes the marker. The first one writes it again with its
+    next job, so its builds stay guarded.
+- **Games that never release the device** (SWTOR): the final write in
+  `shutdown()` doesn't happen either, so the periodic write (§5) is what
+  saves a session's records.
 - **Atomic writes**:
   - The file is written to `<file>.tmp-<pid>-<n>`, then `FlushFileBuffers`, then
     `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which
@@ -437,6 +459,15 @@ index, ring; plain C++, unit-tested natively).
        it runs at most its next build at normal priority.
      - Done but failed (a prewarm build that didn't compile): not adopted;
        the draw builds its own.
+     - Adopted while running, failed afterwards: `emitPso()`'s failure
+       branch, which only failed entries reach, calls
+       `RenderPsoCache::replaceFailedPrewarm()`. A fresh build of the same
+       key replaces the entry in `m_cache`, the registry, `m_last` and the
+       PSO MRU, so the key's draws come back from the next frame instead of
+       being skipped all session. That fresh build isn't recorded in this
+       session; the next session records it on its first miss.
+     - A prewarm failure never erases an entry a draw built and recorded in
+       the same session (`Database::eraseUnlessUsedIn`).
   2. `MtlStateCache::record` copies the key bytes and both shader identities
      into a preallocated single-producer ring of 1024 records.
      - No allocation, no lock, no IO.
@@ -459,12 +490,18 @@ index, ring; plain C++, unit-tested natively).
   synchronized. It joins the prewarm threads (at most one in-flight build
   each), then the writer (one final write, a few ms), and drops all shader
   and pipeline references.
-- A killed process loses the records since the last write: usually the last
-  20 s, but up to 5 minutes (`WriteMaxInterval`) while new records keep
-  coming without a 20 s pause.
+- A killed process, or a game that exits without releasing its device,
+  loses the records since the last write. That is usually the last 20 s,
+  but up to 5 minutes (`WriteMaxInterval`) while new records keep coming
+  without a 20 s pause.
 - `MtlDeviceImpl::~MtlDeviceImpl` also calls `shutdown()` (idempotent), in
   case the D3D9 device's constructor threw after creating the cache: prewarm
   threads must stop before the compiler goes away.
+- During process exit (`RtlDllShutdownInProgress`) `shutdown()` doesn't
+  join or lock anything: `ExitProcess` has already killed the other
+  threads, possibly while they held a lock. It only marks the cache stopped
+  and detaches its threads. The marker stays, which costs at most the
+  in-flight entries next session.
 
 ### Threading summary
 
@@ -510,16 +547,19 @@ index, ring; plain C++, unit-tested natively).
 - A relative `D9MT_STATE_CACHE` (neither `/…` nor `X:\…` / `\\…`) is
   ignored with a warning, and the default location is used. Values of
   `_THREADS` and `_MAX` that aren't plain numbers leave the default.
-- `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1`: skips content validation. It exists
-  only to test the crash-loop guard with a real Metal crash (§12); never use
-  it otherwise.
+- Test builds only (`STATE_CACHE_TESTING=1 scripts/build-driver.sh`, which
+  defines `D9MT_STATE_CACHE_TESTING`; release builds don't contain these):
+  - `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1` skips content validation, to test
+    the crash-loop guard with a real Metal crash;
+  - `D9MT_STATE_CACHE_TEST_FAIL_PREWARM=1` makes prewarm builds take 150 ms
+    and fail, so draws adopt them while they run.
 - `dxvk.conf`: `d9mt.stateCache = False` turns it off like the env var.
 
 Log lines (info level, so they show with Debug Logging; a few per session):
 
 ```
 STATECACHE load path=<unix path> status=ok entries=40 session=2 prewarmable=40 readyAtLoad=0 corrupt=0 truncated=0 invalid=1 (first: layout stride) capped=0 max=1024 threads=2 ms=3.8
-STATECACHE the last session ended while prewarm builds were running (crash or kill): dropped <path>, no prewarm this session
+STATECACHE the last session ended while prewarm builds were running (crash, kill, or exit without releasing the device; 1 in a row): dropped 2 in-flight entries, kept the rest
 STATECACHE prewarm t=0.83s built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201
 STATECACHE write entries=400 bytes=153664 ms=1.7
 STATECACHE use t=5s hits=399 late=0 misses=1 recorded=0 unrecorded=0 ringDrops=0 hitBuildMs=991 | prewarm built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201 boosts=0 ready=0 | entries=400 invalid=0 (final)
@@ -680,12 +720,21 @@ Other Metal layers:
   - load-time validation: forged entries dropped, not prewarmed, not merged
     back, file rewritten without them;
   - the crash-loop guard:
-    - the marker is on disk during a prewarm build (seen from inside it);
+    - the marker is on disk during a prewarm build and names exactly the
+      running job;
     - it is gone after the drain and after a clean shutdown mid-prewarm;
-    - a marker found at load drops the file and prewarms nothing, and the
-      session after that is normal;
-  - the late-hit boost; a failed prewarm build is rebuilt by the draw, not
-    adopted;
+    - a marker naming two entries drops exactly those: the other 58 are
+      prewarmed, and the two come back when drawn;
+    - an unreadable marker drops nothing;
+    - three trips in a row skip one prewarm, keep the file, and the next
+      session is normal;
+    - the trip count carries over in the marker;
+    - a second process that removes the marker gets it written again;
+  - the late-hit boost;
+  - a failed prewarm build is rebuilt by the draw, not adopted, and the
+    entries the draws built stay in the file (`eraseUnlessUsedIn`);
+  - the validator accepts blending on the 32-bit float formats and rejects
+    it on R8/R16/R32Uint;
   - the cap on the database, and on a file 300 entries above the default
     1024 (loaded capped, rewritten capped, the most recently used kept); a
     configured larger cap keeps them all;
@@ -821,6 +870,43 @@ Other Metal layers:
   2. The next normal run trips the guard: the file is dropped, nothing is
      prewarmed, the run completes, and 40 clean entries are recorded.
   3. The run after that is normal again (39/40 hits).
+
+### Exit during the prewarm, the guard, and late failures (fix round 3)
+- Setup: Wine on the /tmp engine copy, every run through `exc_guard`.
+  `test/code_statecache.c` with `exitAfterMs` (`ExitProcess(0)` without
+  releasing the device, as SWTOR quits) and the readback pixel check (400
+  pipelines, hash of the centre pixels). Golden: a recorded 400-entry file,
+  pixel hash `da3a8be4c4d731a7`.
+- **Exit mid-prewarm, 5 × cold** (fresh AIR and PSO dirs, fastmath, exit at
+  1.5–6 s) **and 5 × warm** (exit at 150–600 ms):
+  - every exit left a marker naming 1–2 in-flight entries (`trips 0`);
+  - every next launch loaded the file (`status=ok`, 398–399 entries),
+    dropped exactly the named entries, prewarmed the rest, ended with all
+    400 recorded again, and had the golden pixel hash;
+  - no crash.
+  - Before this round the same exit deleted the whole file (5/5 in the
+    verification).
+- **Real Metal crash** (test build, validation off, the zero-stride forged
+  entry):
+  - Metal's "has no stride" assertion fired in the prewarm, and
+    `exc_guard` absorbed it (no report, no dialog);
+  - the marker named the forged entry (identity `79e16928ae6c8f4b`) and the
+    other thread's job;
+  - the next launch dropped exactly those 2, kept 398, didn't crash, and
+    had the golden hash;
+  - the launch after that was normal (400 entries, 399 hits).
+- **Prewarm builds failing after a draw adopted them** (test build,
+  `D9MT_STATE_CACHE_TEST_FAIL_PREWARM=1`, world from 300 ms):
+  - 37 late adoptions failed (37 boosts);
+  - every draw was rendered (pixel hash equal to the baseline);
+  - the 37 were recorded again the next session.
+- **Warm A/B, interleaved** `main` / branch with the cache off / branch with
+  the cache on, 3 rounds. The display ran at 30 Hz, so p50 is 33.3 ms in
+  every arm.
+  - Cache off vs `main`: render waits 708/672, 824/752, 867/886 ms, i.e.
+    noise.
+  - Cache on: world max 33.8–34.1 ms vs 386–411 ms.
+  - Pixel hash cache off = cache on.
 
 ### PSO archive growth
 - The synthetic pipelines take ≈ 51 KB each in an archive (400 PSOs = 12.6 +
