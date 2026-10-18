@@ -1058,7 +1058,7 @@ static void testKeyValidator() {
   CHECK(backend::psoStateValid(ok.stateBytes(), &why));
 
   // Also valid: an empty slot inside the count, garbage past the counts,
-  // MSAA, blending on a 16-bit float target, 4 targets.
+  // MSAA, blending on 16- and 32-bit float targets, 4 targets.
   RenderPsoKey v = ok;
   v.colors[1] = { };
   v.colors[1].pixelFormat = 0u;
@@ -1066,10 +1066,16 @@ static void testKeyValidator() {
   v.colors[2].blendEnabled = 1u;
   v.colors[3].pixelFormat = uint32_t(MtlFormat::R32Uint);
   v.colorCount = 4u;
+  v.colors[0].pixelFormat = uint32_t(MtlFormat::RGBA32Float);   // blending on 32-bit float: fine
   v.attrs[10].format = 9999u;
   v.layouts[15].stride = 0u;
   v.sampleCount = 4u;
   CHECK(backend::psoStateValid(v.stateBytes(), &why));
+  for (MtlFormat f : { MtlFormat::R32Float, MtlFormat::RG32Float, MtlFormat::RGBA32Float }) {
+    RenderPsoKey b = ok;
+    b.colors[0].pixelFormat = uint32_t(f);
+    CHECK(backend::psoStateValid(b.stateBytes(), &why));
+  }
 
   struct Case { const char* name; void (*mutate)(RenderPsoKey&); };
   const Case cases[] = {
@@ -1091,7 +1097,8 @@ static void testKeyValidator() {
     { "pixel format BC1",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::BC1_RGBA); } },
     { "pixel format vtx-only", [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::RGB32Float); } },
     { "blend on R32Uint",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::R32Uint); } },
-    { "blend on RGBA32Float",  [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::RGBA32Float); } },
+    { "blend on R8Uint",       [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::R8Uint); } },
+    { "blend on R16Uint",      [] (RenderPsoKey& k) { k.colors[0].pixelFormat = uint32_t(MtlFormat::R16Uint); } },
     { "blend on empty slot",   [] (RenderPsoKey& k) { k.colors[0].pixelFormat = 0u; } },
     { "blendEnabled 2",        [] (RenderPsoKey& k) { k.colors[0].blendEnabled = 2u; } },
     { "write mask 0x1f",       [] (RenderPsoKey& k) { k.colors[0].writeMask = 0x1fu; } },

@@ -143,13 +143,14 @@ namespace dxvk::backend {
     }
   }
 
-  /// Blending is allowed: no integer formats, and (conservatively) no
-  /// 32-bit float formats.
+  /// Blending is allowed on every produced format but the integer ones:
+  /// Metal terminates the process for blending on R8/R16/R32Uint, and
+  /// accepts it on the 32-bit float formats (measured at 1/4/8 samples), on
+  /// which the draw path does blend.
   inline bool psoColorFormatBlendable(uint32_t f) {
     switch (MtlFormat(f)) {
       case MtlFormat::Invalid:
       case MtlFormat::R8Uint: case MtlFormat::R16Uint: case MtlFormat::R32Uint:
-      case MtlFormat::R32Float: case MtlFormat::RG32Float: case MtlFormat::RGBA32Float:
         return false;
       default:
         return psoColorFormatProduced(f);
