@@ -97,7 +97,8 @@ and falls back to Compat where Metal rejects it (MSL 4.1 on macOS 26).
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 
-# 1. Fetch dxbc-spirv, pinned to c5c1a5b9 (-> third_party/dxbc-spirv).
+# 1. Fetch dxbc-spirv, pinned to c5c1a5b9, and apply patches/dxbc-spirv
+#    (-> third_party/dxbc-spirv). build-driver.sh refuses an unpatched copy.
 scripts/fetch-deps.sh
 
 # 2. Build LLVM 15.0.7 as static x86_64 libs (-> toolchains/llvm-x86_64).
@@ -167,6 +168,17 @@ recording; it needs DXVK's native headers like `test-compile-mt.sh`.
 `scripts/run-statecache-bench.sh` runs `test/code_statecache.c`, a synthetic
 SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
 directory.
+
+`scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
+patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
+`ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
+scripts/sm3_hazard_test.py build/driver-x64/d3d9.dll [<dir of .asm/.bin>...]`
+(corpora from `scripts/sm3_corpus.py gen`). `scripts/sm3_ref_test.py` (same
+environment) renders `crs`/`setp` with every write mask, modifier and
+predicate and packed I/O declarations on the GPU and compares the results
+with a scalar model of the D3D9 semantics; `--strict` uses
+`d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
+every corpus `crs` against a `mul`/`mul`/`add` expansion.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`

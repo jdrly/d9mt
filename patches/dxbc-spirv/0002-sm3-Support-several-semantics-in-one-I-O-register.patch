@@ -1,0 +1,428 @@
+From de9029a2a0537d0c34566585423685725fd506d2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Drl=C3=BD?= <jd@jandrly.cz>
+Date: Sat, 17 Oct 2026 23:17:44 +0200
+Subject: [PATCH 2/2] sm3: Support several semantics in one I/O register
+
+SM3 allows declaring one register several times with disjoint write masks
+(dcl_texcoord0 v0.xy + dcl_texcoord1 v0.zw), and the converter asserted
+in dclIoVar on the second declaration. Each semantic now gets its own
+variable with the declaration's component mask, and loads and stores
+(including the relative addressing switch functions) pick the variable
+per component. A component no mask covers belongs to the nearest
+declaration below it, else above it.
+
+A semantic declared again (on another mask of the same register, or on
+another register), a special register declared twice and an undeclared
+register whose implicit semantic is already declared map to the variable
+declared first instead of asserting.
+
+Registers with a single declaration are converted exactly as before.
+---
+ sm3/sm3_io_map.cpp | 179 +++++++++++++++++++++++++++++++++++----------
+ sm3/sm3_io_map.h   |  25 ++++++-
+ 2 files changed, 164 insertions(+), 40 deletions(-)
+
+diff --git a/sm3/sm3_io_map.cpp b/sm3/sm3_io_map.cpp
+index 9201180..8991953 100644
+--- a/sm3/sm3_io_map.cpp
++++ b/sm3/sm3_io_map.cpp
+@@ -169,9 +169,9 @@ bool IoMap::handleDclIoVar(ir::Builder& builder, const Instruction& op) {
+     semantic = semanticOpt.value();
+   }
+ 
+-  dclIoVar(builder, dst.getRegisterType(), dst.getIndex(), semantic,
+-    info.getVersion().first >= 2u && dst.isCentroid());
+-  emitIoVarDefault(builder, m_variables.back());
++  if (dclIoVar(builder, dst.getRegisterType(), dst.getIndex(), semantic,
++      info.getVersion().first >= 2u && dst.isCentroid(), dst.getWriteMask(info)))
++    emitIoVarDefault(builder, m_variables.back());
+   return true;
+ }
+ 
+@@ -236,12 +236,13 @@ std::optional<ir::BuiltIn> IoMap::determineBuiltinForRegister(RegisterType regTy
+ }
+ 
+ 
+-void IoMap::dclIoVar(
++bool IoMap::dclIoVar(
+    ir::Builder& builder,
+    RegisterType registerType,
+    uint32_t     registerIndex,
+    Semantic     semantic,
+-   bool         isCentroid) {
++   bool         isCentroid,
++   WriteMask    componentMask) {
+ 
+   auto shaderType = m_converter.getShaderInfo().getType();
+   bool isInput = registerTypeIsInput(registerType, shaderType);
+@@ -251,23 +252,31 @@ void IoMap::dclIoVar(
+   bool isRegularRegister = registerType == RegisterType::eInput
+     || registerType == RegisterType::eOutput;
+ 
+-  bool foundExisting = false;
+-
++  /* A semantic declared again, on another register or on another part of
++   * the same register, maps to the variable declared first, and so does a
++   * special register declared twice. Different semantics in one register
++   * (packed I/O) each get their own variable; loads and stores then pick
++   * the variable per component (findIoVar with a component). */
+   for (auto& entry : m_variables) {
+-    if (isInput != registerTypeIsInput(entry.registerType, shaderType)) {
++    if (entry.isAlias || isInput != registerTypeIsInput(entry.registerType, shaderType))
+       continue;
+-    }
+ 
+-    if ((isRegularRegister && entry.semantic == semantic)
+-      || (registerType == entry.registerType && registerIndex == entry.registerIndex)) {
+-      foundExisting = true;
+-      break;
++    bool sameRegister = registerType == entry.registerType && registerIndex == entry.registerIndex;
++    bool entryIsRegular = entry.registerType == RegisterType::eInput
++      || entry.registerType == RegisterType::eOutput;
++
++    if ((sameRegister && (!isRegularRegister || entry.semantic == semantic))
++     || (isRegularRegister && entryIsRegular && entry.semantic == semantic)) {
++      IoVarInfo alias = entry;
++      alias.registerType = registerType;
++      alias.registerIndex = registerIndex;
++      alias.componentMask = componentMask;
++      alias.isAlias = true;
++      m_variables.push_back(alias);
++      return false;
+     }
+   }
+ 
+-  if (foundExisting)
+-    dxbc_spv_assert(!foundExisting);
+-
+   auto builtIn = determineBuiltinForRegister(registerType, registerIndex, semantic);
+ 
+   bool isScalar = registerType == RegisterType::eRasterizerOut
+@@ -362,6 +371,7 @@ void IoMap::dclIoVar(
+   mapping.baseType = type;
+   mapping.baseDef = declarationDef;
+   mapping.tempDefs = { };
++  mapping.componentMask = componentMask;
+ 
+   uint32_t tempVectorSize = typeVectorSize;
+ 
+@@ -400,6 +410,7 @@ void IoMap::dclIoVar(
+   }
+ 
+   builder.setCursor(cursor);
++  return true;
+ }
+ 
+ 
+@@ -411,7 +422,8 @@ void IoMap::dclPointCoord(ir::Builder& builder) {
+ 
+ void IoMap::emitIoVarDefaults(ir::Builder& builder) {
+   for (const IoVarInfo& ioVar : m_variables) {
+-    emitIoVarDefault(builder, ioVar);
++    if (!ioVar.isAlias)
++      emitIoVarDefault(builder, ioVar);
+   }
+ }
+ 
+@@ -544,9 +556,9 @@ ir::SsaDef IoMap::emitLoad(
+       if (!semantic.has_value()) {
+         m_converter.logOpError(op, "Failed to process I/O load.");
+       } else {
+-        dclIoVar(builder, operand.getRegisterType(), operand.getIndex(), semantic.value(), false);
++        if (dclIoVar(builder, operand.getRegisterType(), operand.getIndex(), semantic.value(), false))
++          emitIoVarDefault(builder, m_variables.back());
+         ioVar = &m_variables.back();
+-        emitIoVarDefault(builder, *ioVar);
+       }
+     }
+ 
+@@ -558,43 +570,47 @@ ir::SsaDef IoMap::emitLoad(
+         continue;
+       }
+ 
+-      bool isFrontFaceBuiltin = ioVar->registerType == RegisterType::eMiscType && ioVar->registerIndex == uint32_t(MiscTypeIndex::eMiscTypeFace);
++      /* The register's only variable, or the one of this component when
++       * several semantics are packed into the register. */
++      const IoVarInfo* var = findIoVar(operand.getRegisterType(), operand.getIndex(), componentIndex);
++
++      bool isFrontFaceBuiltin = var->registerType == RegisterType::eMiscType && var->registerIndex == uint32_t(MiscTypeIndex::eMiscTypeFace);
+       ir::SsaDef value;
+ 
+       if (!isFrontFaceBuiltin) {
+-        auto baseType = ioVar->baseType.getBaseType(0u);
+-        ir::ScalarType varScalarType = ioVar->baseType.getBaseType(0u).getBaseType();
++        auto baseType = var->baseType.getBaseType(0u);
++        ir::ScalarType varScalarType = var->baseType.getBaseType(0u).getBaseType();
+ 
+-        if (!ioVar->tempDefs[0u]) {
++        if (!var->tempDefs[0u]) {
+           ir::SsaDef addressConstant = ir::SsaDef();
+ 
+           if (!baseType.isScalar())
+             addressConstant = builder.makeConstant(uint32_t(componentIndex));
+ 
+-          value = builder.add(ir::Op::InputLoad(varScalarType, ioVar->baseDef, addressConstant));
++          value = builder.add(ir::Op::InputLoad(varScalarType, var->baseDef, addressConstant));
+           dxbc_spv_assert(varScalarType == ir::ScalarType::eF32);
+ 
+           /* Apply half-pixel offset to pixel coordinate as necessary.
+            * TODO evaluate whether floor() would be more appropriate,
+            *      given that we may run with sample rate shading. */
+           if (m_converter.getShaderInfo().getType() == ShaderType::ePixel
+-           && ioVar->registerType == RegisterType::eMiscType
+-           && ioVar->registerIndex == uint32_t(MiscTypeIndex::eMiscTypePosition)
++           && var->registerType == RegisterType::eMiscType
++           && var->registerIndex == uint32_t(MiscTypeIndex::eMiscTypePosition)
+            && componentIndex < 2u)
+             value = builder.add(ir::Op::FSub(varScalarType, value, builder.makeConstant(0.5f)));
+ 
+-          value = emitTexCoordPointSpriteAdjustment(builder, *ioVar, value, componentIndex);
++          value = emitTexCoordPointSpriteAdjustment(builder, *var, value, componentIndex);
+ 
+         } else {
+           /* The input register is writable. (SM 1 Texture register) */
+-          value = builder.add(ir::Op::TmpLoad(varScalarType, ioVar->tempDefs[uint32_t(componentIndex)]));
++          value = builder.add(ir::Op::TmpLoad(varScalarType, var->tempDefs[uint32_t(componentIndex)]));
+         }
+       } else {
+         /* The front face needs to be transformed from a bool to 1.0/-1.0.
+          * It can only be loaded using a separate register, even on SM3.
+          * So we don't need to handle it in the relative addressing function. */
+-        dxbc_spv_assert(ioVar->baseType.isScalarType());
+-        value = builder.add(ir::Op::InputLoad(ioVar->baseType, ioVar->baseDef, ir::SsaDef()));
++        dxbc_spv_assert(var->baseType.isScalarType());
++        value = builder.add(ir::Op::InputLoad(var->baseType, var->baseDef, ir::SsaDef()));
+         value = emitFrontFaceFloat(builder, value);
+       }
+ 
+@@ -722,9 +738,9 @@ bool IoMap::emitStore(
+         return false;
+       }
+ 
+-      dclIoVar(builder, operand.getRegisterType(), operand.getIndex(), semantic.value(), false);
++      if (dclIoVar(builder, operand.getRegisterType(), operand.getIndex(), semantic.value(), false))
++        emitIoVarDefault(builder, m_variables.back());
+       ioVar = &m_variables.back();
+-      emitIoVarDefault(builder, *ioVar);
+     }
+ 
+     dxbc_spv_assert(!registerTypeIsInput(ioVar->registerType, m_converter.getShaderInfo().getType()));
+@@ -737,6 +753,11 @@ bool IoMap::emitStore(
+     for (auto c : writeMask) {
+       ir::SsaDef valueScalar = value;
+ 
++      /* The register's only variable, or the one of this component when
++       * several semantics are packed into the register. */
++      const IoVarInfo* var = findIoVar(operand.getRegisterType(), operand.getIndex(),
++        uint32_t(util::componentFromBit(c)));
++
+       if (srcType.isVectorType()) {
+         auto componentIndexConst = builder.makeConstant(componentIndex);
+         valueScalar = builder.add(ir::Op::CompositeExtract(srcScalarType, value, componentIndexConst));
+@@ -745,11 +766,11 @@ bool IoMap::emitStore(
+       valueScalar = convertScalar(builder, ioVarScalarType, valueScalar);
+ 
+       if (m_converter.getShaderInfo().getType() == ShaderType::eVertex && m_converter.getShaderInfo().getVersion().first < 3u
+-        && ioVar->semantic.usage == SemanticUsage::eColor && ioVar->semantic.index < 2u) {
++        && var->semantic.usage == SemanticUsage::eColor && var->semantic.index < 2u) {
+         /* The color register cannot be dynamically indexed, so there's no need to do this in the dynamic store function. */
+         valueScalar = builder.add(ir::Op::FClamp(ioVarScalarType, valueScalar,
+           builder.makeConstant(0.0f), builder.makeConstant(1.0f)));
+-      } else if (ioVar->semantic.usage == SemanticUsage::ePointSize) {
++      } else if (var->semantic.usage == SemanticUsage::ePointSize) {
+         /* Clamp value between D3DRS_POINTSIZE_MIN and D3DRS_POINTSIZE_MAX. */
+         auto pointSizeMin = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32, m_pointArgs,
+           builder.makeConstant(uint32_t(ir::LegacyPointArgsLayout::ePointSizeMin))));
+@@ -762,11 +783,11 @@ bool IoMap::emitStore(
+         /* Check if the matching component of the predicate register vector is true first.
+          * Pick the old value if not. */
+         auto condComponent = extractFromVector(builder, predicateVec, componentIndex);
+-        auto oldValue = builder.add(ir::Op::TmpLoad(ioVarScalarType, ioVar->tempDefs[uint32_t(util::componentFromBit(c))]));
++        auto oldValue = builder.add(ir::Op::TmpLoad(ioVarScalarType, var->tempDefs[uint32_t(util::componentFromBit(c))]));
+         valueScalar = builder.add(ir::Op::Select(ioVarScalarType, condComponent, valueScalar, oldValue));
+       }
+ 
+-      builder.add(ir::Op::TmpStore(ioVar->tempDefs[uint32_t(util::componentFromBit(c))], valueScalar));
++      builder.add(ir::Op::TmpStore(var->tempDefs[uint32_t(util::componentFromBit(c))], valueScalar));
+ 
+       componentIndex++;
+     }
+@@ -1004,6 +1025,22 @@ ir::SsaDef IoMap::emitDynamicLoadFunction(ir::Builder& builder) const {
+ 
+     builder.add(ir::Op::ScopedSwitchCase(switchDef, i));
+ 
++    if (isPackedRegister(RegisterType::eInput, i)) {
++      /* Several semantics in one register: each component from its variable. */
++      std::array<ir::SsaDef, 4u> components;
++
++      for (uint32_t j = 0u; j < 4u; j++) {
++        const IoVarInfo* var = findIoVar(RegisterType::eInput, i, j);
++        auto value = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32, var->baseDef, builder.makeConstant(j)));
++        components[j] = emitTexCoordPointSpriteAdjustment(builder, *var, value, j);
++      }
++
++      builder.add(ir::Op::Return(ir::Type(ir::ScalarType::eF32, 4u),
++        buildVector(builder, ir::ScalarType::eF32, components.size(), components.data())));
++      builder.add(ir::Op::ScopedSwitchBreak(switchDef));
++      continue;
++    }
++
+     auto input = builder.add(ir::Op::InputLoad(ioVar->baseType, ioVar->baseDef, ir::SsaDef()));
+     auto baseType = ioVar->baseType.getBaseType(0u);
+     ir::SsaDef vec4 = input;
+@@ -1078,6 +1115,21 @@ ir::SsaDef IoMap::emitDynamicStoreFunction(ir::Builder& builder) const {
+ 
+     auto baseType = ioVar->baseType.getBaseType(0u);
+ 
++    if (isPackedRegister(RegisterType::eOutput, i)) {
++      /* Several semantics in one register: each component to its variable. */
++      for (uint32_t j = 0u; j < 4u; j++) {
++        const IoVarInfo* var = findIoVar(RegisterType::eOutput, i, j);
++
++        if (!var->tempDefs[j])
++          continue;
++
++        builder.add(ir::Op::ScopedSwitchCase(switchDef, i * 4u + j));
++        builder.add(ir::Op::TmpStore(var->tempDefs[j], valueArg));
++        builder.add(ir::Op::ScopedSwitchBreak(switchDef));
++      }
++      continue;
++    }
++
+     for (uint32_t j = 0u; j < baseType.getVectorSize(); j++) {
+       builder.add(ir::Op::ScopedSwitchCase(switchDef, i * 4u + j));
+       builder.add(ir::Op::TmpStore(ioVar->tempDefs[j], valueArg));
+@@ -1102,7 +1154,7 @@ void IoMap::flushOutputs(ir::Builder& builder) {
+   bool needsPointSize = m_converter.getShaderInfo().getType() == ShaderType::eVertex;
+ 
+   for (const auto& variable : m_variables) {
+-    if (!variable.tempDefs[0u])
++    if (!variable.tempDefs[0u] || variable.isAlias)
+       continue;
+ 
+     auto op = builder.getOp(variable.baseDef);
+@@ -1117,8 +1169,15 @@ void IoMap::flushOutputs(ir::Builder& builder) {
+ 
+     auto baseType = variable.baseType.getBaseType(0u);
+ 
++    /* A scalar output (point size) packed into a register with other
++     * semantics is the first component of its declaration's mask. */
++    uint32_t firstTemp = 0u;
++
++    if (baseType.getVectorSize() == 1u && isPackedRegister(variable.registerType, variable.registerIndex))
++      firstTemp = util::tzcnt(uint8_t(variable.componentMask));
++
+     for (uint32_t i = 0u; i < baseType.getVectorSize(); i++) {
+-      auto temp = builder.add(ir::Op::TmpLoad(variable.baseType, variable.tempDefs[i]));
++      auto temp = builder.add(ir::Op::TmpLoad(variable.baseType, variable.tempDefs[firstTemp + i]));
+       builder.add(ir::Op::OutputStore(op.getDef(), baseType.getVectorSize() > 1u ? builder.makeConstant(i) : ir::SsaDef(), temp));
+     }
+   }
+@@ -1162,6 +1221,50 @@ const IoVarInfo* IoMap::findIoVar(RegisterType regType, uint32_t regIndex) const
+ }
+ 
+ 
++const IoVarInfo* IoMap::findIoVar(RegisterType regType, uint32_t regIndex, uint32_t component) const {
++  /* Distance from the component to the entry's mask: 0 if it covers it,
++   * 1-3 for the nearest covered component below, 5-7 above. */
++  const IoVarInfo* result = nullptr;
++  uint32_t resultDistance = ~0u;
++
++  for (auto& e : m_variables) {
++    if (e.registerType != regType || e.registerIndex != regIndex)
++      continue;
++
++    uint32_t mask = uint8_t(e.componentMask);
++    uint32_t below = mask & ((1u << component) - 1u);
++    uint32_t above = mask & ~((2u << component) - 1u);
++    uint32_t distance = 8u;
++
++    if (mask & (1u << component))
++      distance = 0u;
++    else if (below)
++      distance = component - uint32_t(util::findmsb(below));
++    else if (above)
++      distance = 4u + util::tzcnt(above) - component;
++
++    if (distance < resultDistance) {
++      result = &e;
++      resultDistance = distance;
++    }
++  }
++
++  return result;
++}
++
++
++bool IoMap::isPackedRegister(RegisterType regType, uint32_t regIndex) const {
++  uint32_t count = 0u;
++
++  for (auto& e : m_variables) {
++    if (e.registerType == regType && e.registerIndex == regIndex)
++      count++;
++  }
++
++  return count > 1u;
++}
++
++
+ const IoVarInfo* IoMap::findIoVar(Semantic semantic, bool isInput) const {
+   for (auto& e : m_variables) {
+     if (e.semantic == semantic
+diff --git a/sm3/sm3_io_map.h b/sm3/sm3_io_map.h
+index aca8e96..97093d1 100644
+--- a/sm3/sm3_io_map.h
++++ b/sm3/sm3_io_map.h
+@@ -43,6 +43,16 @@ struct IoVarInfo {
+   /* Scalar temp definitions for outputs. Outputs can't be turned into SSA
+    * so work with those until the end of the shader. */
+   std::array<ir::SsaDef, 4u> tempDefs = { };
++
++  /* Components of the register that the declaration covers. Only consulted
++   * when a register has more than one entry: several semantics packed into
++   * one register, each component belongs to the entry covering it. */
++  WriteMask componentMask = WriteMask(ComponentBit::eAll);
++
++  /* The semantic was declared before (on another register or another mask of
++   * this one): the entry maps this register to that declaration, shares its
++   * variable, location and temps, and does not declare or flush anything. */
++  bool isAlias = false;
+ };
+ 
+ /** I/O register map.
+@@ -185,12 +195,16 @@ private:
+ 
+   std::optional<ir::BuiltIn> determineBuiltinForRegister(RegisterType regType, uint32_t regIndex, Semantic semantic);
+ 
+-  void dclIoVar(
++  /** Declares the I/O variable for a register, or maps the register to the
++   *  variable of a semantic that was declared before. Returns \c true if it
++   *  declared a new variable (which then needs its default value). */
++  bool dclIoVar(
+     ir::Builder& builder,
+     RegisterType registerType,
+     uint32_t     registerIndex,
+     Semantic     semantic,
+-    bool         isCentroid);
++    bool         isCentroid,
++    WriteMask    componentMask = WriteMask(ComponentBit::eAll));
+ 
+   void dclPointCoord(ir::Builder& builder);
+ 
+@@ -203,6 +217,13 @@ private:
+   const IoVarInfo* findIoVar(RegisterType regType, uint32_t regIndex) const;
+   /** Looks up matching I/O variable in the given list based on semantic. */
+   const IoVarInfo* findIoVar(Semantic semantic, bool isInput) const;
++  /** Looks up the variable holding one component of a register: the entry
++   *  whose component mask covers it, or the only entry of the register.
++   *  A component no entry covers belongs to the nearest entry below it
++   *  (else above it), so a read past a declared mask still gets data. */
++  const IoVarInfo* findIoVar(RegisterType regType, uint32_t regIndex, uint32_t component) const;
++  /** Checks whether more than one entry maps the register. */
++  bool isPackedRegister(RegisterType regType, uint32_t regIndex) const;
+ 
+   /** Converts input to the given scalar type. */
+   ir::SsaDef convertScalar(ir::Builder& builder, ir::ScalarType dstType, ir::SsaDef value);
+-- 
+2.54.0 (Apple Git-157)
+

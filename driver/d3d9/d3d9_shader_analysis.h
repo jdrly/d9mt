@@ -12,9 +12,28 @@
 
 #include "../mtl/mtl_types.h"
 
+#include <string>
 #include <vector>
 
 namespace dxvk {
+
+/**
+ * \brief Declared shader I/O, as dxbc-spirv's sm3 IoMap registers it
+ *
+ * Scratch state of the converter hazard scan (D3D9ShaderAnalysis::
+ * GetConverterHazards): one entry per dcl and per register the converter
+ * declares implicitly on first use, with the register and semantic
+ * IoMap::dclIoVar sees.
+ */
+struct D3D9IoDclEntry {
+  dxbc_spv::sm3::RegisterType registerType;
+  uint32_t                    registerIndex;
+  dxbc_spv::sm3::Semantic     semantic;
+  uint8_t                     mask;
+  bool                        isInput;
+};
+
+using D3D9IoDclList = small_vector<D3D9IoDclEntry, 16u>;
 
 struct D3D9ImmediateConstantsData {
   small_vector<D3D9ImmediateFloatConstant, 16u> floats;
@@ -87,11 +106,17 @@ public:
     return dxbc_spv::sm3::Semantic(getPacked(index));
   }
 
-  void add(dxbc_spv::sm3::Semantic semantic) {
+  /** Appends a semantic; false if the list is full (SizeIndex entries;
+   *  only packed declarations get there: 16 registers x 4 components). */
+  bool add(dxbc_spv::sm3::Semantic semantic) {
     dxbc_spv_assert(semantic.index < 16u);
 
+    if (m_entries[SizeIndex] >= SizeIndex)
+      return false;
+
     auto index = m_entries[SizeIndex]++;
-    m_entries.at(index) = uint8_t(D3D9PackedSemantic(semantic));
+    m_entries[index] = uint8_t(D3D9PackedSemantic(semantic));
+    return true;
   }
 
   uint32_t find(dxbc_spv::sm3::Semantic semantic) const {
@@ -183,6 +208,23 @@ public:
     return m_flatShadingMask;
   }
 
+  /**
+   * \brief Patterns dxbc-spirv's sm3 converter mishandles
+   *
+   * Space-separated "kind:detail" items, empty for almost every shader:
+   * - crs-partial-mask:<dst>  crs whose write mask isn't .x, .xy or .xyz
+   * - setp-partial-mask:<dst> setp whose write mask isn't .x, .xy, .xyz or .xyzw
+   * - packed-io:<what>        an I/O register or semantic declared twice
+   *   (several semantics or masks in one register, a semantic on two
+   *   registers or an undeclared input whose implicit semantic is taken)
+   * dxbc-spirv's converter aborted on some (asserts are live) and built
+   * wrong code for the rest, until patches/dxbc-spirv (GitHub issue #8).
+   * Still reported, so logs show which games use them.
+   */
+  const std::string& GetConverterHazards() const {
+    return m_converterHazards;
+  }
+
   explicit operator bool() const {
     return m_length != 0u;
   }
@@ -197,7 +239,19 @@ private:
     const dxbc_spv::sm3::Instruction&   op,
           ConstantMask&                 constMaskF,
           ConstantMask&                 constMaskI,
-          D3D9ImmediateConstantsData&   shaderDefs);
+          D3D9ImmediateConstantsData&   shaderDefs,
+          D3D9IoDclList&                ioDcls);
+
+  void ScanConverterHazards(
+    const dxbc_spv::sm3::Instruction&   op,
+          D3D9IoDclList&                ioDcls);
+
+  void AddIoDcl(
+          D3D9IoDclList&                ioDcls,
+          D3D9IoDclEntry                entry,
+          bool                          isImplicit);
+
+  void AddConverterHazard(const std::string& item);
 
   bool HandleDef(
     const dxbc_spv::sm3::Instruction&   op,
@@ -230,6 +284,8 @@ private:
   uint32_t m_flatShadingMask = 0u;
 
   D3D9InputSignature m_inputSignature = {};
+
+  std::string m_converterHazards;
 
   static void setBit(ConstantMask& mask, uint32_t bit);
 

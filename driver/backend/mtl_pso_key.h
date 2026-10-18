@@ -93,7 +93,11 @@ namespace dxvk::backend {
   ///  - the blend factor/op and write mask mapping;
   ///  - kVertexBufferBaseIndex, NullStreamIdx (the null stream's binding),
   ///    and the layout's `pad` byte carrying the Metal buffer index.
-  constexpr uint32_t kPsoKeyMappingVersion = 2u;
+  ///
+  /// 3: #8 (6d625fa) deduplicates repeated semantics in a VS's input
+  ///    signature, which changes BindInputLayout()'s attribute list for
+  ///    vertex shaders with packed input declarations.
+  constexpr uint32_t kPsoKeyMappingVersion = 3u;
 
   /// Metal buffer indices of vertex streams: kVertexBufferBaseIndex (3) +
   /// stream 0..15, and the null stream (NullStreamIdx = 16) at 19.
