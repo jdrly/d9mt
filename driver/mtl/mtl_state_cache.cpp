@@ -294,15 +294,15 @@ namespace dxvk {
       ::DeleteFileW(widen(path).c_str());
     }
 
-    /// A small marker file; contents don't matter, existence does.
-    bool writeMarkerFile(const std::string& path) {
+    /// The guard's small marker file. No flush: it only has to survive the
+    /// process, not the OS (the page cache keeps it).
+    bool writeMarkerFile(const std::string& path, const std::string& text) {
       HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (h == INVALID_HANDLE_VALUE)
         return false;
-      static const char text[] = "d9mt state cache prewarm in progress\n";
       DWORD n = 0u;
-      const bool ok = ::WriteFile(h, text, DWORD(sizeof(text) - 1u), &n, nullptr) && ::FlushFileBuffers(h);
+      const bool ok = ::WriteFile(h, text.data(), DWORD(text.size()), &n, nullptr) && n == text.size();
       ::CloseHandle(h);
       return ok;
     }
@@ -430,11 +430,11 @@ namespace dxvk {
       ::unlink(path.c_str());
     }
 
-    bool writeMarkerFile(const std::string& path) {
+    bool writeMarkerFile(const std::string& path, const std::string& text) {
       FILE* f = std::fopen(path.c_str(), "wb");
       if (!f)
         return false;
-      const bool ok = std::fputs("d9mt state cache prewarm in progress\n", f) >= 0;
+      const bool ok = std::fwrite(text.data(), 1u, text.size(), f) == text.size();
       return !std::fclose(f) && ok;
     }
 
@@ -458,6 +458,29 @@ namespace dxvk {
         case ParseStatus::KeyMismatch:  return "key-changed";
       }
       return "?";
+    }
+
+    /// The guard marker: "d9mt-prewarm 1", "trips <n>", then one identity
+    /// hash (16 hex digits) per job that was in flight. Anything unreadable
+    /// counts as a marker with no suspects.
+    void parseMarker(const std::vector<uint8_t>& data, uint32_t& trips, std::unordered_set<uint64_t>& suspects) {
+      const std::string text(data.begin(), data.end());
+      size_t pos = 0u;
+      while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos)
+          end = text.size();
+        const std::string line = text.substr(pos, end - pos);
+        pos = end + 1u;
+
+        if (!line.compare(0u, 6u, "trips ")) {
+          trips = uint32_t(std::min<unsigned long>(std::strtoul(line.c_str() + 6, nullptr, 10), 1000u));
+        } else if (line.size() == 16u && line.find_first_not_of("0123456789abcdef") == std::string::npos) {
+          const uint64_t h = std::strtoull(line.c_str(), nullptr, 16);
+          if (h)
+            suspects.insert(h);
+        }
+      }
     }
 
   }
@@ -736,6 +759,9 @@ namespace dxvk {
     s.invalid    = m_invalid.load();
     s.boosts     = m_boosts.load();
     s.guardTripped = m_guardTripped.load();
+    s.suspects     = m_suspects.load();
+    s.trips        = m_trips;
+    s.prewarmOff   = m_prewarmOff.load();
     return s;
   }
 
@@ -784,15 +810,19 @@ namespace dxvk {
     removeStaleTemps(file);
 
     // Crash-loop guard: the marker outlived the last session, which ended
-    // (crashed or was killed) while prewarm builds were running. Whatever
-    // it was, the file is not replayed again: this session starts empty,
-    // prewarms nothing and records afresh from its own draws.
+    // while prewarm jobs were running: a crash, a kill, or simply an exit
+    // without releasing the device (SWTOR quits that way). Only the entries
+    // that were in flight are suspects: they are dropped (a draw records
+    // them again if they are fine), everything else is kept.
+    std::unordered_set<uint64_t> suspects;
+
     if (fileExists(markerPath())) {
+      std::vector<uint8_t> marker;
+      readAll(markerPath(), marker);
+      parseMarker(marker, m_trips, suspects);
+      m_trips++;
       m_guardTripped.store(true);
-      removeFile(file);
       removeFile(markerPath());
-      Logger::warn(str::format("STATECACHE the last session ended while prewarm builds were running"
-        " (crash or kill): dropped ", m_config.displayPath, ", no prewarm this session"));
     }
 
     std::vector<uint8_t> data;
@@ -807,6 +837,12 @@ namespace dxvk {
       case ParseStatus::Ok:
         // Only what the draw path could have built is ever replayed.
         for (const Entry& e : entries) {
+          if (!suspects.empty() && suspects.count(identityHash(e))) {
+            m_suspects.fetch_add(1u, std::memory_order_relaxed);
+            m_dropped.insert(identityHash(e));
+            continue;
+          }
+
           const char* why = nullptr;
           if (!m_config.noValidate && !m_backend->psoStateValid(e.key, &why)) {
             if (!invalid++)
@@ -817,7 +853,7 @@ namespace dxvk {
           m_db.merge(e);
         }
         m_invalid.store(invalid);
-        m_dirty = r.corrupt || r.truncated || invalid;
+        m_dirty = r.corrupt || r.truncated || invalid || m_suspects.load();
         break;
 
       case ParseStatus::Empty:
@@ -834,6 +870,17 @@ namespace dxvk {
         break;
     }
 
+    if (m_guardTripped.load()) {
+      // A session without prewarm can't trip the guard: after a few in a
+      // row (a crash the suspects didn't explain, or a player who keeps
+      // quitting during the prewarm), skip it once. The file is kept.
+      m_prewarmOff.store(m_trips >= GuardSkipTrips);
+      Logger::warn(str::format("STATECACHE the last session ended while prewarm builds were running"
+        " (crash, kill, or exit without releasing the device; ", m_trips, " in a row): dropped ",
+        m_suspects.load(), " in-flight entries, kept the rest",
+        m_prewarmOff.load() ? "; no prewarm this session" : ""));
+    }
+
     m_session = r.session + 1u;
     const uint32_t capped = m_db.applyCap(m_config.maxEntries);
     m_dirty |= capped != 0u;
@@ -842,7 +889,7 @@ namespace dxvk {
     size_t indexed = 0u, ready = 0u;
 
     { std::lock_guard lock(m_mutex);
-      m_index.build(m_db.entries(), m_session);
+      m_index.build(m_prewarmOff.load() ? std::vector<Entry>() : m_db.entries(), m_session);
 
       for (const auto& s : m_shaders)
         m_index.announce(s.first);
@@ -1037,11 +1084,17 @@ namespace dxvk {
         m_activeJobs++;
       }
 
+      // The marker names this job before anything of it runs.
+      m_slots[index].inflight.store(identityHash(e), std::memory_order_relaxed);
+      writeMarker();
+
       bool ok = true;
       if (vs.shader && (!e.psOrigin || ps.shader))
         ok = prewarmOne(index, e, vs, ps);
       else
         m_skipped.fetch_add(1u, std::memory_order_relaxed);
+
+      m_slots[index].inflight.store(0u, std::memory_order_relaxed);
 
       bool drained = false;
 
@@ -1102,10 +1155,6 @@ namespace dxvk {
       return true;
     }
 
-    // The crash-loop guard's marker is on disk before any recorded
-    // descriptor reaches Metal.
-    setMarker();
-
     PrewarmSlot& slot = m_slots[index];
     const uint64_t t0 = compile_stats::nowNs();
 
@@ -1132,10 +1181,22 @@ namespace dxvk {
   }
 
 
-  void MtlStateCache::setMarker() {
+  void MtlStateCache::writeMarker() {
+    // Rewritten at every job start (a few hundred tiny writes at startup,
+    // on prewarm threads): it always names the jobs in flight, and comes
+    // back if another process on the same file removed it.
     std::lock_guard lock(m_markerMutex);
-    if (!m_markerOnDisk)
-      m_markerOnDisk = writeMarkerFile(markerPath());
+    std::string text = str::format("d9mt-prewarm 1\ntrips ", m_trips, "\n");
+
+    for (uint32_t i = 0u; i < m_config.threads; i++) {
+      if (const uint64_t h = m_slots[i].inflight.load(std::memory_order_relaxed)) {
+        char hex[20];
+        std::snprintf(hex, sizeof(hex), "%016llx\n", (unsigned long long)h);
+        text += hex;
+      }
+    }
+
+    m_markerOnDisk = writeMarkerFile(markerPath(), text) || m_markerOnDisk;
   }
 
 

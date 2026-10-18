@@ -158,7 +158,10 @@ namespace dxvk {
       uint64_t recorded = 0u, built = 0u, dup = 0u, failed = 0u, skipped = 0u;
       uint64_t writes = 0u, entries = 0u;
       uint64_t invalid = 0u, boosts = 0u;
-      bool     guardTripped = false;
+      bool     guardTripped = false;   // the last session ended during prewarm builds
+      uint64_t suspects = 0u;          // entries dropped for it (in flight then)
+      uint32_t trips = 0u;             // consecutive sessions that ended that way
+      bool     prewarmOff = false;     // GuardSkipTrips reached: no prewarm this session
     };
 
     Stats stats();
@@ -223,15 +226,25 @@ namespace dxvk {
     std::atomic<uint64_t> m_prewarmLogged = { 0u };
     std::atomic<uint64_t> m_invalid = { 0u }, m_boosts = { 0u };
     std::atomic<bool>     m_guardTripped = { false };
+    std::atomic<uint64_t> m_suspects = { 0u };
+    std::atomic<bool>     m_prewarmOff = { false };
 
-    // Crash-loop guard: <file>.prewarm exists while prewarm builds run
-    // (written before the first, removed when the queue drains and at
-    // shutdown). Found at load: the last session died during the prewarm.
+    // Crash-loop guard: <file>.prewarm lists the entries whose prewarm jobs
+    // are in flight (rewritten at every job start, removed when the queue
+    // drains and at a clean shutdown) and how many sessions in a row ended
+    // during the prewarm. Found at load: the last session ended (crash,
+    // kill, or exit without releasing the device) during the prewarm; only
+    // the listed entries are dropped. After GuardSkipTrips such sessions in
+    // a row, one session runs without prewarm (and so can't trip).
+    static constexpr uint32_t     GuardSkipTrips = 3u;
     dxvk::mutex                   m_markerMutex;
     bool                          m_markerOnDisk = false;
+    uint32_t                      m_trips = 0u;   // set by load() before any prewarm job
 
-    // Per prewarm thread: the PSO it is building, for boostPrewarm().
+    // Per prewarm thread: the job in flight (for the marker) and the PSO it
+    // is building (for boostPrewarm()).
     struct PrewarmSlot {
+      std::atomic<uint64_t>        inflight = { 0u };      // identity hash, 0 = none
       std::atomic<MtlCompileTask*> running = { nullptr };
       std::atomic<bool>            boosted = { false };
       void*                        handle  = nullptr;   // Win32 thread handle
@@ -254,7 +267,7 @@ namespace dxvk {
     bool prewarmOne(uint32_t index, const statecache::Entry& e, const ShaderSlot& vs, const ShaderSlot& ps);
     bool finishFunction(MtlShaderFunction* pFn);
     bool yieldToRenderThread();
-    void setMarker();
+    void writeMarker();
     void clearMarkerIfDrained();
     std::string markerPath() const { return m_config.file + ".prewarm"; }
 

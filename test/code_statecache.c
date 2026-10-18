@@ -13,6 +13,13 @@
  * seed, so a seed is a reproducible set of distinct shaders.
  *
  *   code_statecache.exe <seed> [pixelShaders=200] [pipelines=400] [loadMs=3000] [perFrame=4]
+ *                       [exitAfterMs=0] [pixcheck=0]
+ *
+ *  - exitAfterMs > 0: ExitProcess(0) that long after the start, without
+ *    releasing the device (as SWTOR quits), printing EXITEARLY first.
+ *  - pixcheck = 1: after the world phase, draw every pipeline once more and
+ *    read back the centre pixel; prints PIXCHECK with a hash of all of them
+ *    (pixel check from the state cache's verification).
  *
  * Prints one summary line: world-phase frame times (avg/p50/p99/max, frames
  * over 33 and 50 ms, total time above the median) and how many pipelines
@@ -127,6 +134,8 @@ int main(int argc, char **argv) {
   const int numCombos = argc > 3 ? atoi(argv[3]) : 400;
   const int loadMs    = argc > 4 ? atoi(argv[4]) : 3000;
   const int perFrame  = argc > 5 ? atoi(argv[5]) : 4;
+  const int exitAfter = argc > 6 ? atoi(argv[6]) : 0;
+  const int pixcheck  = argc > 7 ? atoi(argv[7]) : 0;
   g_rng = seed * 2654435761u + 0x9e3779b9u;
   if (!g_rng)
     g_rng = 1u;
@@ -252,6 +261,12 @@ int main(int argc, char **argv) {
     if (!world && sinceStart >= loadMs)
       world = 1;
 
+    if (exitAfter > 0 && sinceStart >= exitAfter) {
+      printf("EXITEARLY\n");
+      fflush(stdout);
+      ExitProcess(0);
+    }
+
     IDirect3DDevice9_BeginScene(dev);
 
     if (world && introduced < numCombos)
@@ -314,6 +329,53 @@ done:;
          seed, numPs, NUM_VS, introduced, createMs, frames, worldFrames,
          worldFrames ? sum / worldFrames : 0.0, p50, p99, maxMs, over33, over50, excess);
   fflush(stdout);
+
+  if (pixcheck) {
+    /* Every pipeline once more (same keys: the PSOs the world phase used),
+     * centre pixel read back and hashed. */
+    IDirect3DSurface9 *sys[3] = {NULL, NULL, NULL};
+    for (int r = 0; r < 3; r++) {
+      D3DSURFACE_DESC dsc;
+      IDirect3DSurface9_GetDesc(rtSurf[r], &dsc);
+      IDirect3DDevice9_CreateOffscreenPlainSurface(dev, dsc.Width, dsc.Height, dsc.Format, D3DPOOL_SYSTEMMEM, &sys[r], NULL);
+    }
+    uint64_t h = 1469598103934665603ull;
+    int bad = 0;
+    for (int i = 0; i < introduced; i++) {
+      const struct Combo *c = &combos[i];
+      IDirect3DDevice9_BeginScene(dev);
+      IDirect3DDevice9_SetRenderTarget(dev, 0, rtSurf[c->rt]);
+      IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(16, 16, 32), 1.0f, 0);
+      IDirect3DDevice9_SetVertexShader(dev, vs[c->vs]);
+      IDirect3DDevice9_SetPixelShader(dev, ps[c->ps]);
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, c->blend != 0);
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, c->blend == 1 ? D3DBLEND_SRCALPHA : D3DBLEND_ONE);
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, c->blend == 1 ? D3DBLEND_INVSRCALPHA : D3DBLEND_ONE);
+      IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 1);
+      IDirect3DDevice9_EndScene(dev);
+      D3DSURFACE_DESC dsc;
+      D3DLOCKED_RECT lr;
+      if (!sys[c->rt] || FAILED(IDirect3DDevice9_GetRenderTargetData(dev, rtSurf[c->rt], sys[c->rt]))
+       || FAILED(IDirect3DSurface9_GetDesc(sys[c->rt], &dsc))
+       || FAILED(IDirect3DSurface9_LockRect(sys[c->rt], &lr, NULL, D3DLOCK_READONLY))) {
+        bad++;
+        continue;
+      }
+      const int bpp = dsc.Format == D3DFMT_A16B16G16R16F ? 8 : 4;
+      const unsigned char *px = (const unsigned char *)lr.pBits + (dsc.Height / 2) * lr.Pitch + (dsc.Width / 2) * bpp;
+      unsigned char v[8] = {0};
+      memcpy(v, px, (size_t)bpp);
+      if (dsc.Format == D3DFMT_X8R8G8B8)
+        v[3] = 0;
+      IDirect3DSurface9_UnlockRect(sys[c->rt]);
+      for (int k = 0; k < 8; k++)
+        h = (h ^ v[k]) * 1099511628211ull;
+    }
+    printf("PIXCHECK combos=%d bad=%d hash=%016llx\n", introduced, bad, (unsigned long long)h);
+    fflush(stdout);
+    for (int r = 0; r < 3; r++)
+      if (sys[r]) IDirect3DSurface9_Release(sys[r]);
+  }
 
   for (int i = 0; i < 3; i++)
     if (rtSurf[i]) IDirect3DSurface9_Release(rtSurf[i]);

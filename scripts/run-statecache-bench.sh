@@ -11,7 +11,8 @@
 #     --threads <n>          D9MT_STATE_CACHE_THREADS
 #     --fastmath             D9MT_AIR_FASTMATH=1: different AIR bytes, so Metal's own shader
 #                            cache misses (simulates a bridge update that changes the AIR)
-#     --args "<test args>"   seed [pixelShaders pipelines loadMs perFrame] (default "1")
+#     --args "<test args>"   seed [pixelShaders pipelines loadMs perFrame exitAfterMs pixcheck]
+#                            (default "1"; test/code_statecache.c)
 #     --timeout <s>          (default 180)
 #
 # Nothing outside WORK is read or written (Wine prefix, AIR cache, PSO archives, state cache);
@@ -81,8 +82,13 @@ fi
 wait "$pid"
 "$WINESERVER" -w >/dev/null 2>&1
 
+if grep -q EXITEARLY "$LOG"; then
+  echo "$LABEL: EXITEARLY (exitAfterMs reached: ExitProcess without releasing the device)"
+  exit 0
+fi
 app=$(grep -o 'code_statecache OK.*' "$LOG" | tr -d '\r' | sed 's/^code_statecache OK //')
 [ -n "$app" ] || { echo "$LABEL: FAILED"; tail -5 "$LOG"; exit 1; }
+pix=$(grep -ao 'PIXCHECK.*' "$LOG" | tr -d '\r')
 waits=$(LC_ALL=C awk '/COMPILE frame=/ { for (i = 1; i <= NF; i++) if ($i ~ /^renderWait=/) {
           split(substr($i, 12), a, "/"); n += a[1]; ms += a[2] + 0 } }
         END { printf "renderWait=%d/%.1fms", n, ms }' "$LOG")
@@ -90,4 +96,4 @@ psos=$(LC_ALL=C awk '/COMPILE frame=/ { for (i = 1; i <= NF; i++) if ($i ~ /^pso
           split(substr($i, 6), a, "/"); n += a[1]; ms += a[2] + 0 } }
         END { printf "renderPathPsos=%d/%.1fms", n, ms }' "$LOG")
 sc=$(grep 'STATECACHE use' "$LOG" | tail -1 | sed 's/.*STATECACHE use //')
-echo "$LABEL: $app | $waits $psos | ${sc:-statecache off}"
+echo "$LABEL: $app | $waits $psos | ${sc:-statecache off}${pix:+ | $pix}"
