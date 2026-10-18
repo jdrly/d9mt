@@ -468,8 +468,29 @@ namespace dxvk::backend {
 
     // Metal 4 has no driver hazard tracking: a producer barrier on the
     // outgoing encoder orders its writes ahead of all later queue stages so
-    // a subsequent encoder observes them.
-    void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages);
+    // a subsequent encoder observes them. Metal waits for `afterStages` of
+    // this encoder and of every earlier one on the queue (also in earlier
+    // command buffers), and holds `beforeStages` of every later encoder.
+    void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages,
+                                     uint64_t beforeStages = uint64_t(WMTStageAll));
+
+    // Narrowed end-of-pass barrier (docs/gpu-4k.md, candidate 1): with the
+    // attachment optimization, a draw pass ends with after Fragment before
+    // Fragment|Blit|Dispatch, so the next pass's vertex work can run while
+    // this pass's fragment work does. The one GPU-written input of a vertex
+    // stage is a D3D9 vertex texture (vertex samplers); vertex and index
+    // buffers come from the CPU or from copies, whose barriers hold every
+    // stage. So an image such a pass rendered gets the current m_vtxEpoch
+    // (MtlTextureImpl::vtxEpoch), every barrier after Fragment before Vertex
+    // starts a new epoch, and a draw whose vertex stage has an image of the
+    // current epoch bound gets a fence first (resolveVertexHazard).
+    // D9MT_PASS_BARRIER=all: every pass ends with the barrier before All.
+    bool         m_narrowBarrier = false;
+    bool         m_vtxCheck      = false;  // look at the vertex-stage textures at the next draw
+    uint64_t     m_vtxEpoch      = 1u;
+    void         markVertexHazards();
+    void         vertexFence(uint64_t beforeStages);
+    void         resolveVertexHazard();
 
   };
 

@@ -59,6 +59,12 @@ namespace dxvk::backend {
       Logger::warn(str::format("D9MT: attachment load/store optimization off (",
         deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
 
+    const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
+    m_narrowBarrier = m_attOpt && !(passBarrier && std::strcmp(passBarrier, "all") == 0);
+    Logger::info(m_narrowBarrier
+      ? "D9MT: end-of-pass barrier before Fragment|Blit|Dispatch, vertex fences for vertex textures"
+      : "D9MT: end-of-pass barrier before all stages (D9MT_PASS_BARRIER=all or no attachment optimization)");
+
     obj_handle_t dev = m_device->wmtDevice();
 
     WMTArgTableInfo ati = {};
@@ -684,7 +690,13 @@ namespace dxvk::backend {
       const bool encoded = m_pass.encoder != 0 || createPassEncoder(false);
       if (encoded) {
         flushCmdChunk();
-        emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+        if (m_narrowBarrier) {
+          emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment),
+            uint64_t(WMTStageFragment | WMTStageBlit | WMTStageDispatch));
+          markVertexHazards();
+        } else {
+          emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+        }
         MTLCommandEncoder_endEncoding(m_pass.encoder);
         NSObject_release(m_pass.encoder);
       } else {
@@ -716,6 +728,65 @@ namespace dxvk::backend {
     m_argTablesBound = false;
     for (auto& c : m_pass.clearColor) c = false;
     m_pass.clearDepth = m_pass.clearStencil = false;
+  }
+
+
+  void MtlContextImpl::markVertexHazards() {
+    auto mark = [this] (MtlTexture* img) {
+      if (img != nullptr)
+        static_cast<MtlTextureImpl*>(img)->vtxEpoch = m_vtxEpoch;
+    };
+    for (const auto& v : m_pass.targets.color)
+      mark(v != nullptr ? v->image.ptr() : nullptr);
+    if (m_pass.targets.depthStencil != nullptr)
+      mark(m_pass.targets.depthStencil->image.ptr());
+    for (const auto& r : m_pass.resolveTo)
+      mark(r.ptr());
+    m_vtxCheck = true;
+  }
+
+
+  void MtlContextImpl::vertexFence(uint64_t beforeStages) {
+    // Its own (empty) encoder: no render encoder may be open. The barrier
+    // waits for the fragment stage of every earlier encoder on the queue.
+    ensureCommandBuffer();
+    obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
+    emitProducerBarrier(enc, uint64_t(WMTStageFragment), beforeStages);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+    prof::bump(prof::CntVtxFence);
+  }
+
+
+  void MtlContextImpl::resolveVertexHazard() {
+    m_vtxCheck = false;
+    bool hazard = false;
+    for (const auto& t : m_bindings[0].textures) {
+      if (t != nullptr && t->image != nullptr
+       && static_cast<const MtlTextureImpl*>(t->image.ptr())->vtxEpoch == m_vtxEpoch) {
+        hazard = true;
+        break;
+      }
+    }
+    if (likely(!hazard))
+      return;
+    if (m_pass.encoder) {
+      // The pass already has its encoder (a chunk was encoded early): end
+      // it, fence, and go on in a new one on the same targets. The draws
+      // before this one didn't read the image in their vertex stage.
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        Logger::info("D9MT: vertex texture rendered in an earlier pass, encoder already open: pass split for a vertex fence");
+      }
+      prof::bump(prof::CntPassCloseBarrier);
+      closePass();
+      vertexFence(uint64_t(WMTStageVertex));
+      materializePass();
+    } else {
+      // The pass's encoder is created when it ends, after the fence.
+      vertexFence(uint64_t(WMTStageVertex));
+    }
   }
 
 
@@ -1395,6 +1466,8 @@ namespace dxvk::backend {
     }
     if (changed) {
       m_dirty |= DirtyResources;
+      if (m_narrowBarrier && (stages & MtlStageVertex) && view != nullptr)
+        m_vtxCheck = true;
       if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
         m_frameSampled.insert(view->image.ptr());
       if (m_attOpt && view != nullptr && view->image != nullptr)
@@ -1542,6 +1615,8 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::PrepareDraw);
     if (unlikely(!m_pass.active))
       materializePass();
+    if (unlikely(m_vtxCheck))
+      resolveVertexHazard();
     const uint32_t dirtyIn = m_dirty;
 
     if (!deferredPassesEnabled()
