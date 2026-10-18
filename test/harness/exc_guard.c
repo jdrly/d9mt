@@ -7,10 +7,15 @@
  * The command is spawned with a task exception port for EXC_CORPSE_NOTIFY,
  * which its children (wineserver, the Windows processes) inherit. The kernel
  * offers a crashing process's corpse to the task's port before the host's,
- * where ReportCrash listens; exc_guard takes it, so no report is made. It
- * logs to <log> every thread's backtrace (image+offset, frame pointers) and,
- * for libplatform's `brk #0xb001` crashes (os_unfair_lock corruption), the
- * lock value and whether its owner thread still exists. Only crashes that
+ * where ReportCrash listens; exc_guard takes it, so no report is made, and
+ * logs the crash to <log>. The port uses EXCEPTION_IDENTITY_PROTECTED, which
+ * XNU accepts for every spawned task but which gives no access to the corpse;
+ * EXC_GUARD_DETAIL=1 uses EXCEPTION_DEFAULT instead and logs every thread's
+ * backtrace (image+offset, frame pointers) and, for libplatform's
+ * `brk #0xb001` crashes (os_unfair_lock corruption), the lock value and
+ * whether its owner thread still exists. XNU can reject EXCEPTION_DEFAULT
+ * for a spawned task with an EXC_GUARD that kills exc_guard (seen once in
+ * many runs, a report of exc_guard's own; no dialog). Only crashes that
  * end the process are affected: exceptions and signals a process handles
  * itself (Wine's SIGSEGV/SIGTRAP handlers) never reach this port. Nothing
  * system-wide is changed.
@@ -18,8 +23,8 @@
  * Exit status: the command's, 128+signal if it was killed, 124 on timeout,
  * 125 if a crash was caught in the command or one of its children.
  *
- * Build: mig mach_exc.defs (server side) and clang exc_guard.c mach_excServer.c
- * (scripts/run-hash-tests.sh does this). */
+ * Build: mig -DMACH_EXC_SERVER_TASKIDTOKEN mach_exc.defs (server side) and
+ * clang exc_guard.c mach_excServer.c (scripts/run-hash-tests.sh does this). */
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -131,21 +136,20 @@ static void dump_thread(task_t task, thread_act_t th, int faulting) {
   fprintf(g_log, "\n");
 }
 
-kern_return_t catch_mach_exception_raise(mach_port_t port, mach_port_t thread, mach_port_t task,
-    exception_type_t exc, mach_exception_data_t code, mach_msg_type_number_t ncode) {
+static void log_crash(task_t task, int pid, exception_type_t exc, mach_exception_data_t code,
+                      mach_msg_type_number_t ncode) {
   thread_act_array_t threads;
   mach_msg_type_number_t n = 0;
-  int pid = -1;
   time_t now = time(NULL);
   char when[32];
-  (void)port;
-  (void)thread;
-
-  g_busy = 1;
-  pid_for_task(task, &pid);
   strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", localtime(&now));
   fprintf(g_log, "EXC_GUARD %s pid %d: exception %d, code 0x%llx 0x%llx\n", when, pid, exc,
           ncode > 0 ? (unsigned long long)code[0] : 0ull, ncode > 1 ? (unsigned long long)code[1] : 0ull);
+  if (task == MACH_PORT_NULL) {
+    fprintf(g_log, "  (no read access to the corpse)\n");
+    fflush(g_log);
+    return;
+  }
   load_images(task);
   if (task_threads(task, &threads, &n) == KERN_SUCCESS) {
     for (mach_msg_type_number_t i = 0; i < n; i++) {
@@ -169,9 +173,46 @@ kern_return_t catch_mach_exception_raise(mach_port_t port, mach_port_t thread, m
     vm_deallocate(mach_task_self(), (vm_address_t)threads, n * sizeof(*threads));
   }
   fflush(g_log);
+}
+
+/* The behavior exc_guard registers: the message carries a task identity
+ * token, not the task's control port (XNU rejects EXCEPTION_DEFAULT for some
+ * spawned tasks with an EXC_GUARD on the spawner). */
+kern_return_t catch_mach_exception_raise_identity_protected(mach_port_t port, uint64_t thread_id,
+    mach_port_t token, exception_type_t exc, mach_exception_data_t code, mach_msg_type_number_t ncode) {
+  task_read_t task = MACH_PORT_NULL;
+  task_name_t name = MACH_PORT_NULL;
+  int pid = -1;
+  (void)port;
+  (void)thread_id;
+
+  g_busy = 1;
+  if (task_identity_token_get_task_port(token, TASK_FLAVOR_NAME, &name) == KERN_SUCCESS) {
+    pid_for_task(name, &pid);
+    mach_port_deallocate(mach_task_self(), name);
+  }
+  if (task_identity_token_get_task_port(token, TASK_FLAVOR_READ, &task) != KERN_SUCCESS)
+    task = MACH_PORT_NULL;
+  log_crash(task, pid, exc, code, ncode);
+  if (task != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), task);
   g_caught = 1;
   g_busy = 0;
   return KERN_SUCCESS;  /* handled: the host port (ReportCrash) isn't asked */
+}
+
+/* EXC_GUARD_DETAIL=1: EXCEPTION_DEFAULT, the corpse's control port, the full log. */
+kern_return_t catch_mach_exception_raise(mach_port_t port, mach_port_t thread, mach_port_t task,
+    exception_type_t exc, mach_exception_data_t code, mach_msg_type_number_t ncode) {
+  int pid = -1;
+  (void)port;
+  (void)thread;
+
+  g_busy = 1;
+  pid_for_task(task, &pid);
+  log_crash(task, pid, exc, code, ncode);
+  g_caught = 1;
+  g_busy = 0;
+  return KERN_SUCCESS;
 }
 
 kern_return_t catch_mach_exception_raise_state(mach_port_t p, exception_type_t e, const mach_exception_data_t c,
@@ -213,8 +254,10 @@ int main(int argc, char **argv) {
   }
   pthread_create(&thr, NULL, server, (void *)(uintptr_t)port);
   posix_spawnattr_init(&attr);
+  const char *detail = getenv("EXC_GUARD_DETAIL");
   posix_spawnattr_setexceptionports_np(&attr, EXC_MASK_CORPSE_NOTIFY, port,
-                                       EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES, THREAD_STATE_NONE);
+      (detail && *detail == '1' ? EXCEPTION_DEFAULT : EXCEPTION_IDENTITY_PROTECTED) | MACH_EXCEPTION_CODES,
+      THREAD_STATE_NONE);
   if ((errno = posix_spawnp(&pid, argv[3], NULL, &attr, argv + 3, environ))) {
     perror(argv[3]);
     return 127;

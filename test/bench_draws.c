@@ -1,21 +1,30 @@
 /* Draw-call benchmark for engine/driver comparisons (docs/arm64-runtime.md):
  * many small draws per frame, each with a vertex shader constant update, a
  * pixel shader constant update and a render state change, presented without
- * vsync. Reports, for the draw loop alone (the d3d9 calls, without Present):
- * wall and main-thread CPU time per draw, i.e. what the game thread pays for
- * them; and the frame time with Present (median, p99), which also depends on
- * drawable availability:
+ * vsync. Reports the draw loop's wall time per draw (the d3d9 calls without
+ * Present: what the game thread pays for them, median over the frames); the
+ * whole process's CPU time per draw over all measured frames (every thread:
+ * d9mt's CS and worker threads, Metal's, the emulator's; Wine on macOS only
+ * has process times, from times() in 10 ms ticks, so it is taken once over
+ * the whole run); and the frame time with Present (median, p99), which also
+ * depends on drawable availability:
  *
- *   BENCH draws=1000 frames=600 loop_ns_per_draw=... loop_cpu_ns_per_draw=...
+ *   BENCH draws=1000 frames=600 loop_ns_per_draw=... proc_cpu_ns_per_draw=...
  *         frame_median_ms=... frame_p99_ms=...
  *
- *   bench_draws.exe [draws per frame (1000)] [frames (600)]
+ * With "flush", each frame ends with an event query flushed and waited on
+ * instead of Present: the frame time is then the CPU and GPU work alone,
+ * independent of the compositor (no drawable waits, and no d9mt throttle
+ * when the window isn't visible, e.g. with the display asleep).
+ *
+ *   bench_draws.exe [draws per frame (1000)] [frames (600)] [present|flush]
  */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const unsigned char shadertri_vs_bytecode[] = {
 #include "shadertri_vs_bytecode.inc"
@@ -36,9 +45,9 @@ static int cmp_double(const void *a, const void *b) {
   return x < y ? -1 : x > y;
 }
 
-static ULONGLONG thread_cpu_100ns(void) {
+static ULONGLONG process_cpu_100ns(void) {
   FILETIME c, e, k, u;
-  GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
+  GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
   return (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime)
        + (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
 }
@@ -46,12 +55,13 @@ static ULONGLONG thread_cpu_100ns(void) {
 int main(int argc, char **argv) {
   int draws = argc > 1 ? atoi(argv[1]) : 1000;
   int frames = argc > 2 ? atoi(argv[2]) : 600;
+  int flush = argc > 3 && !strcmp(argv[3], "flush");
   const int warmup = 60;
   WNDCLASSA wc = {0};
   RECT rc = {0, 0, 1280, 720};
   LARGE_INTEGER freq, t0, t1;
   double *ms, *loop;
-  ULONGLONG cpu_loop = 0;
+  ULONGLONG cpu0 = 0, cpu1;
   int f, i;
 
   wc.lpfnWndProc = wnd_proc;
@@ -99,7 +109,9 @@ int main(int argc, char **argv) {
   IDirect3DVertexBuffer9_Lock(vb, 0, sizeof(verts), &p, 0);
   memcpy(p, verts, sizeof(verts));
   IDirect3DVertexBuffer9_Unlock(vb);
-  if (!vs || !ps || !decl || !vb) { printf("FAIL resources\n"); return 1; }
+  IDirect3DQuery9 *query = NULL;
+  IDirect3DDevice9_CreateQuery(dev, D3DQUERYTYPE_EVENT, &query);
+  if (!vs || !ps || !decl || !vb || !query) { printf("FAIL resources\n"); return 1; }
 
   IDirect3DDevice9_SetVertexDeclaration(dev, decl);
   IDirect3DDevice9_SetVertexShader(dev, vs);
@@ -113,9 +125,8 @@ int main(int argc, char **argv) {
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
     LARGE_INTEGER tl;
-    ULONGLONG c0, c1;
+    if (f == warmup) cpu0 = process_cpu_100ns();
     QueryPerformanceCounter(&t0);
-    c0 = thread_cpu_100ns();
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(24, 24, 40), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
     for (i = 0; i < draws; i++) {
@@ -130,20 +141,24 @@ int main(int argc, char **argv) {
       IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 1);
     }
     IDirect3DDevice9_EndScene(dev);
-    c1 = thread_cpu_100ns();
     QueryPerformanceCounter(&tl);
-    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+    if (flush) {
+      IDirect3DQuery9_Issue(query, D3DISSUE_END);
+      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) { }
+    } else {
+      IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+    }
     QueryPerformanceCounter(&t1);
     if (f >= warmup) {
       ms[f - warmup] = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
       loop[f - warmup] = (double)(tl.QuadPart - t0.QuadPart) * 1e9 / (double)freq.QuadPart / draws;
-      cpu_loop += c1 - c0;
     }
   }
+  cpu1 = process_cpu_100ns();
   qsort(ms, frames, sizeof(double), cmp_double);
   qsort(loop, frames, sizeof(double), cmp_double);
-  printf("BENCH draws=%d frames=%d loop_ns_per_draw=%.0f loop_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f\n",
-         draws, frames, loop[frames / 2], (double)cpu_loop * 100.0 / ((double)frames * draws),
+  printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f\n",
+         flush ? "flush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
          ms[frames / 2], ms[frames * 99 / 100]);
   fflush(stdout);
   IDirect3DDevice9_Release(dev);

@@ -23,11 +23,20 @@
 # per test (frames, hash of the last frame, center pixel, wall time) to stdout
 # and $WORK/results.txt; leftover Wine processes of the clone fail the run.
 #
-# BENCH=1 then runs the benchmarks 3 times each into $WORK/bench.txt:
-# test/bench_draws.c (100, 1000 and 3000 draws per frame, no vsync) and
-# test/bench_shaders.c (BENCH_SHADERS=<list of pixel shader .bin files>,
-# compiled one by one: no compile workers, AIR cache or PSO archives). Timing
-# numbers mean something only on an otherwise idle machine.
+# BENCH=1 then runs the benchmarks BENCH_RUNS (3) times each into
+# $WORK/bench.txt: test/bench_draws.c (100, 1000 and 3000 draws per frame,
+# BENCH_FRAMES (1200) frames, no vsync, BENCH_MODE=flush (each frame waits
+# for the GPU, no Present: independent of the compositor) or present) and
+# test/bench_shaders.c
+# (BENCH_SHADERS=<list of pixel shader .bin files>, compiled one by one: no
+# compile workers, AIR cache or PSO archives). BENCH_ONLY=1 skips the tests.
+# Timing numbers mean something only on an otherwise idle machine; the load
+# average is logged with each line.
+#
+# PROBES=1 then runs test/fpenv: the FP environment an x64 caller hands to
+# an x64 and (arm64 Wine) an ARM64EC DLL, the x87 control word and MXCSR
+# around CreateDevice with this run's d3d9.dll, and cosf dumps of each CRT
+# ($WORK/probes/cosf-*.bin, compared with test/fpenv/ulpcmp.c).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_ENGINE="${ENGINE:?set ENGINE to a Wine root}"
@@ -109,7 +118,7 @@ fi
 # a crash report and, for Wine's GUI processes, a "quit unexpectedly" dialog
 # (status CRASH). It must not be a system binary such as /usr/bin/perl: SIP
 # strips DYLD_* from its environment.
-xcrun mig -sheader "$WORK/mach_excServer.h" -server "$WORK/mach_excServer.c" -user /dev/null -header /dev/null \
+xcrun mig -DMACH_EXC_SERVER_TASKIDTOKEN -sheader "$WORK/mach_excServer.h" -server "$WORK/mach_excServer.c" -user /dev/null -header /dev/null \
   "$(xcrun --show-sdk-path)/usr/include/mach/mach_exc.defs"
 clang -O1 -I "$WORK" "$V2/test/harness/exc_guard.c" "$WORK/mach_excServer.c" -o "$WORK/exc_guard"
 WINE="$ENG/bin/wine"
@@ -130,7 +139,8 @@ now() { perl -MTime::HiRes=time -e 'printf "%.0f", time * 1000'; }
 wait_for_game
 out="$(run 60 hello "$WORK/bin/hello.exe" 2> "$WORK/logs/hello.err" | tr -d '\r')"
 printf '%-16s %s\n' hello "${out:-FAIL}" | tee "$WORK/results.txt"
-for t in "${TESTS[@]}"; do
+[ "${BENCH_ONLY:-0}" = 1 ] && TESTS=()
+for t in ${TESTS[@]+"${TESTS[@]}"}; do
   wait_for_game
   t0=$(now)
   rc=0
@@ -158,8 +168,12 @@ done
 
 "$ENG/bin/wineserver" -k 2>/dev/null || true
 "$ENG/bin/wineserver" -w 2>/dev/null || true
-sleep 1
-left="$("$WORK/pidpath" $(ps -axo pid=) | grep -F "$ENG/" || true)"
+# killed processes can take a few seconds to go away on a loaded machine
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  left="$("$WORK/pidpath" $(ps -axo pid=) | grep -F "$ENG/" || true)"
+  [ -z "$left" ] && break
+  sleep 1
+done
 if [ -n "$left" ]; then
   echo "[hash] LEFTOVER processes:" >&2; echo "$left" >&2
   echo "$left" | awk '{print $1}' | xargs kill -9 2>/dev/null || true
@@ -170,11 +184,12 @@ if [ "${BENCH:-0}" = 1 ]; then
     x86_64-w64-mingw32-gcc -O2 -I "$V2/test" "$V2/test/$b.c" -o "$WORK/bin/$b.exe" -ld3d9 -lgdi32 -luser32
   done
   : > "$WORK/bench.txt"
-  for r in 1 2 3; do
+  load() { sysctl -n vm.loadavg | awk '{print "load=" $2}'; }
+  for r in $(seq "${BENCH_RUNS:-3}"); do
     for d in 100 1000 3000; do
       wait_for_game
-      line="$(cd "$WORK/bin" && run 300 bench_draws "$WORK/bin/bench_draws.exe" "$d" 600 2> "$WORK/logs/bench_draws.err" | tr -d '\r' | grep '^BENCH' || echo "BENCH draws=$d FAIL")"
-      echo "run=$r $line" | tee -a "$WORK/bench.txt"
+      line="$(cd "$WORK/bin" && run 300 bench_draws "$WORK/bin/bench_draws.exe" "$d" "${BENCH_FRAMES:-1200}" "${BENCH_MODE:-flush}" 2> "$WORK/logs/bench_draws.err" | tr -d '\r' | grep '^BENCH' || echo "BENCH draws=$d FAIL")"
+      echo "run=$r $(load) $line" | tee -a "$WORK/bench.txt"
     done
     if [ -n "${BENCH_SHADERS:-}" ]; then
       sed 's|^/|Z:/|' "$BENCH_SHADERS" > "$WORK/shaders.txt"
@@ -182,9 +197,40 @@ if [ "${BENCH:-0}" = 1 ]; then
       line="$(cd "$WORK/bin" && D9MT_COMPILE_THREADS=0 D9MT_AIR_CACHE=0 D9MT_PSO_ARCHIVE=0 \
         run 1800 bench_shaders "$WORK/bin/bench_shaders.exe" 'Z:'"$WORK/shaders.txt" 2> "$WORK/logs/bench_shaders.err" \
         | tr -d '\r' | grep '^BENCH' || echo "BENCH shaders FAIL")"
-      echo "run=$r $line" | tee -a "$WORK/bench.txt"
+      echo "run=$r $(load) $line" | tee -a "$WORK/bench.txt"
     fi
   done
+  "$ENG/bin/wineserver" -k 2>/dev/null || true
+  "$ENG/bin/wineserver" -w 2>/dev/null || true
+fi
+if [ "${PROBES:-0}" = 1 ]; then
+  # FP environment and libm across the x64/ARM64EC boundary (test/fpenv): the
+  # x64 caller with an x64 callee DLL (both under the emulator on arm64 Wine)
+  # and, on arm64 Wine, with the ARM64EC callee; cosf dumps of each CRT.
+  . "$V2/scripts/llvm-mingw.sh"
+  llvm_mingw_ensure
+  LMB="$LLVM_MINGW/bin"
+  P="$WORK/probes"
+  callees=(x64); [ "$KIND" = arm64 ] && callees+=(arm64ec)
+  for c in "${callees[@]}"; do
+    mkdir -p "$P/$c"
+    cc="$LMB/x86_64-w64-mingw32-clang"; fl=()
+    [ "$c" = arm64ec ] && { cc="$LMB/arm64ec-w64-mingw32-clang"; fl=(-ffp-contract=off); }
+    "$cc" -O2 ${fl[@]+"${fl[@]}"} -shared "$V2/test/fpenv/fpenv_dll.c" -o "$P/$c/fpenv_dll.dll"
+    "$cc" -O2 ${fl[@]+"${fl[@]}"} -shared "$V2/test/fpenv/cosf_dll.c" -o "$P/$c/cosf_dll.dll"
+    x86_64-w64-mingw32-gcc -O2 "$V2/test/fpenv/fpenv_main.c" -o "$P/$c/fpenv_main.exe" -ld3d9 -lgdi32 -luser32
+    "$LMB/x86_64-w64-mingw32-clang" -O2 "$V2/test/fpenv/cosf_main.c" -o "$P/$c/cosf_main.exe"
+    wait_for_game
+    ( cd "$P/$c" && run 60 "fpenv-$c" "$P/$c/fpenv_main.exe" 2> "$WORK/logs/fpenv-$c.err" ) \
+      | tr -d '\r' > "$WORK/logs/fpenv-$c.txt" || true
+    ( cd "$P/$c" && run 300 "cosf-$c" "$P/$c/cosf_main.exe" cosf_dll.dll 'Z:'"$P/cosf-$c.bin" 2> "$WORK/logs/cosf-$c.err" ) \
+      | tr -d '\r' > "$WORK/logs/cosf-$c.txt" || true
+    sed "s/^/[$c] /" "$WORK/logs/fpenv-$c.txt" "$WORK/logs/cosf-$c.txt"
+  done
+  # the x87 control word and MXCSR around CreateDevice, with this run's d3d9.dll
+  cp "$WORK/bin/d3d9.dll" "$P/x64/d3d9.dll"
+  ( cd "$P/x64" && run 60 fpenv-d3d9 "$P/x64/fpenv_main.exe" d3d9 2> "$WORK/logs/fpenv-d3d9.err" ) \
+    | tr -d '\r' | tee "$WORK/logs/fpenv-d3d9.txt" | sed "s/^/[d3d9 $DRIVER] /" || true
   "$ENG/bin/wineserver" -k 2>/dev/null || true
   "$ENG/bin/wineserver" -w 2>/dev/null || true
 fi
