@@ -843,6 +843,11 @@ namespace dxvk {
         return;
       }
 
+      // The frame's work goes to the GPU now, in its own submission: the
+      // queue-side waitForDrawable (synchronizeWsi) then holds back only the
+      // copy into the drawable, not the frame's rendering (d9mt#23).
+      ctx->flushCommandList("present-split", nullptr);
+
       if (cPresentView != nullptr && cPresentView->image != nullptr && cDrawable.texture != nullptr) {
         const MtlSize src = cPresentView->image->extent;
         const MtlSize dst = cDrawable.texture->extent;
