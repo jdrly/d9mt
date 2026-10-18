@@ -42,10 +42,14 @@ contents:
   non-prefix mask element 3 is read uninitialized.
 
 In a generated corpus of 3000 shaders, 820 use `crs r.yz`: 204 abort, 37
-compile to wrong code that reaches an output, and 579 compile with the
-wrong value in dead code (removed by legalization). With asserts compiled
-out (DXVK release builds), the aborting cases also turn into undefined
-behaviour.
+compile to wrong code that reaches an output, and in 579 the final shader
+comes out the same as with the fix: the wrong value is dead code (removed
+by legalization) or coincidentally equal to the right one (gen00745:
+`crs r5.yz, r5, r5` reads the wrong slot, but both are 0). Which of these a
+shader hits depends on stack contents: built with mingw (d9mt's d3d9.dll),
+all 37 of those compiling to wrong code abort instead. With asserts
+compiled out (DXVK release builds), the aborting cases also turn into
+undefined behaviour.
 
 **Fix (0001):** build the result with `buildVector()` from the packed list,
 as `handleDst`, `handleLit`, `handleSinCos` etc. already do. For the masks
@@ -114,3 +118,21 @@ Note for whoever sends it: the d9mt side (vertex input signature: one
 attribute per semantic) is in `driver/d3d9/d3d9_shader_analysis.cpp`. d9mt's front end is extracted
 from DXVK's d3d9 (3.0), so DXVK most likely needs the same one-line change
 if it adopts 0002: check its D3D9ShaderAnalysis::HandleDcl first.
+
+---
+
+## Merge notes (d9mt)
+
+- `scripts/sm3_corpus.py` is a copy of the arm64ec branch's file as of its
+  `1d2fdc1^`; arm64ec's `1d2fdc1` ("no crs masks that hit the upstream
+  dxbc-spirv bug") changed it since, so merging arm64ec after this branch
+  conflicts there. With the fix in, the generator can emit every crs mask
+  again (`sm3_ref_test.py --corpus` covers them).
+- arm64ec also edits `scripts/build-driver.sh`, which this branch extends
+  with the `scripts/check-deps.sh` call: expect a textual conflict there.
+- Existing `third_party/dxbc-spirv` checkouts need `scripts/fetch-deps.sh`
+  once (it recognizes checkouts patched by its earlier version); plain
+  copies without `.git` (e.g. a copied tree) need the patches applied by
+  hand (`for p in patches/dxbc-spirv/*.patch; do patch -p1 -d
+  third_party/dxbc-spirv < "$p"; done`); `build-driver.sh` refuses them
+  otherwise.

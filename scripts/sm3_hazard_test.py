@@ -54,6 +54,14 @@ def targeted():
         'ps_implicit_collide': ('ps_3_0\ndcl_color1 v0\nadd oC0, v0, v1\n',
                                 ['packed-io:v0=color1+v1(undeclared)=color1']),
         'ps_implicit_ok': ('ps_3_0\ndcl_texcoord0 v0\nadd oC0, v0, v1\n', []),
+        'ps_crs_implicit': ('ps_3_0\ndcl_color1 v0\ncrs r2.xyz, v0, v1\nmov oC0, r2\n',
+                            ['packed-io:v0=color1+v1(undeclared)=color1']),
+        'ps_setp_implicit': ('ps_3_0\ndef c0, 0, 0, 0, 0\ndcl_color1 v0\nsetp_gt p0, v1, v0\n'
+                             '(p0) mov r0, c0\nmov oC0, r0\n',
+                             ['packed-io:v0=color1+v1(undeclared)=color1']),
+        'vs_crs_implicit': ('vs_3_0\ndcl_position v0\ndcl_color3 v1\ndcl_position o0\n'
+                            'crs r0.yz, v1, v3\nmov o0, v0\nmov o0.yz, r0\n',
+                            ['crs-partial-mask:r0.yz', 'packed-io:v1=color3+v3(undeclared)=color3']),
         'ps_vpos_position': ('ps_3_0\ndcl vPos.xy\ndcl_position v0\nadd oC0, v0, vPos.xyyy\n',
                              ['packed-io:vPos.xy=position0+v0=position0']),
         'ps_position_vpos': ('ps_3_0\ndcl_position v0\ndcl vPos.xy\nadd oC0, v0, vPos.xyyy\n', []),
@@ -75,6 +83,12 @@ def targeted():
         'vs_plain': ('vs_3_0\ndcl_position v0\ndcl_normal v1\ndcl_position o0\ndcl_texcoord0 o1.xy\n'
                      'dcl_texcoord1 o2\nmov o0, v0\nmov o1, v1\nmov o2, v1\n', []),
     })
+    # 64 input semantics (16 registers x 4 components): more than the vertex
+    # input signature holds (31); creation must still succeed
+    many = 'vs_3_0\n' + ''.join('dcl_%s%d v%d.%s\n' % (u, r, r, c) for r in range(16)
+                                 for u, c in zip(('texcoord', 'normal', 'tangent', 'binormal'), 'xyzw'))
+    many += 'dcl_position o0\nmov o0, v0\n'
+    cases['vs_many_semantics'] = (many, None)
     return cases
 
 
@@ -167,6 +181,8 @@ def main(argv):
     shaders = []  # (file name, bytecode, expected items)
     for name, (text, hand) in targeted().items():
         got = scan(text)
+        if hand is None:
+            hand = got  # too many items to write out; the scan is the expectation
         if got != hand:
             print('SCANNER MISMATCH %s: hand %s scan %s' % (name, hand, got))
             return 1
@@ -211,6 +227,10 @@ def main(argv):
             k = it.split(':')[0]
             kinds[k] = kinds.get(k, 0) + 1
     print('[hazard] items: %s' % ', '.join('%s %d' % kv for kv in sorted(kinds.items())))
+    full = log.count('vertex input semantics,')
+    print('[hazard] input signature full: %d warnings (expected 33)' % full)
+    if full != 33:
+        rc = 1
     print('[hazard] %s' % ('PASS' if rc == 0 else 'FAIL'))
     return rc
 

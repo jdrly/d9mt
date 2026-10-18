@@ -9,6 +9,10 @@ Environment:
   WORK        scratch dir: the Wine prefix, the d9mt AIR cache and pipeline
               archives live there, nothing outside it is written (default:
               /tmp/d9mt-sm3-work)
+  EXC_GUARD   test/harness/exc_guard binary (arm64ec branch; optional): Wine
+              runs under it, so a crashing driver is logged to WORK/*.exc
+              instead of leaving a crash report and a "quit unexpectedly"
+              dialog on the desktop
 """
 import os
 import shutil
@@ -26,6 +30,8 @@ class WineRunner:
         self.prefix = os.path.join(self.work, 'prefix')
         self.wine = os.path.join(self.engine, 'bin', 'wine')
         self.wineserver = os.path.join(self.engine, 'bin', 'wineserver')
+        self.guard = os.environ.get('EXC_GUARD')
+        self.runs = 0
         self.env = dict(os.environ)
         fw = os.environ.get('FRAMEWORKS')
         self.env.update({
@@ -39,7 +45,7 @@ class WineRunner:
         })
         os.makedirs(self.work, exist_ok=True)
         if not os.path.exists(os.path.join(self.prefix, 'system.reg')):
-            subprocess.run([self.wine, 'wineboot', '-i'], env=self.env,
+            subprocess.run(self.cmd(600, 'wineboot', 'wineboot', '-i'), env=self.env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run([self.wineserver, '-w'], env=self.env)
         self.dir = os.path.join(self.prefix, 'drive_c', 'd9mt-test')
@@ -49,6 +55,12 @@ class WineRunner:
                         os.path.join(self.dir, 'code_sm3_ref.exe'), '-ld3d9', '-lgdi32', '-luser32'],
                        check=True)
         shutil.copy(dll, os.path.join(self.dir, 'd3d9.dll'))
+
+    def cmd(self, timeout, name, *args):
+        """wine <args>, under exc_guard if EXC_GUARD is set."""
+        if self.guard:
+            return [self.guard, str(timeout), os.path.join(self.work, name + '.exc'), self.wine] + list(args)
+        return [self.wine] + list(args)
 
     def reset_dir(self, name):
         d = os.path.join(self.dir, name)
@@ -80,7 +92,9 @@ class WineRunner:
         first = 0
         while first < count:
             try:
-                p = subprocess.run([self.wine, 'code_sm3_ref.exe', 'manifest.txt', str(first)],
+                self.runs += 1
+                p = subprocess.run(self.cmd(timeout, 'run%d' % self.runs,
+                                            'code_sm3_ref.exe', 'manifest.txt', str(first)),
                                    cwd=self.dir, env=env, capture_output=True, text=True,
                                    errors='replace', timeout=timeout)
                 out = p.stdout

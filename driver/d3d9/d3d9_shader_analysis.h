@@ -106,11 +106,17 @@ public:
     return dxbc_spv::sm3::Semantic(getPacked(index));
   }
 
-  void add(dxbc_spv::sm3::Semantic semantic) {
+  /** Appends a semantic; false if the list is full (SizeIndex entries;
+   *  only packed declarations get there: 16 registers x 4 components). */
+  bool add(dxbc_spv::sm3::Semantic semantic) {
     dxbc_spv_assert(semantic.index < 16u);
 
+    if (m_entries[SizeIndex] >= SizeIndex)
+      return false;
+
     auto index = m_entries[SizeIndex]++;
-    m_entries.at(index) = uint8_t(D3D9PackedSemantic(semantic));
+    m_entries[index] = uint8_t(D3D9PackedSemantic(semantic));
+    return true;
   }
 
   uint32_t find(dxbc_spv::sm3::Semantic semantic) const {

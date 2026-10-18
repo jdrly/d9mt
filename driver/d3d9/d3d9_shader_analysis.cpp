@@ -18,6 +18,8 @@ namespace dxvk {
 
   using namespace dxvk::caps;
 
+  static std::string HazardSemantic(Semantic semantic);
+
   D3D9ShaderAnalysis::D3D9ShaderAnalysis(dxbc_spv::util::ByteReader code, bool isSWVP)
     : m_isSWVP(isSWVP) {
     if (!code) {
@@ -312,8 +314,10 @@ namespace dxvk {
       // register or mask) shares the first declaration's attribute.
       Semantic semantic = { dcl.getSemanticUsage(), dcl.getSemanticIndex() };
 
-      if (m_inputSignature.find(semantic) >= m_inputSignature.size())
-        m_inputSignature.add(semantic);
+      if (m_inputSignature.find(semantic) >= m_inputSignature.size()
+       && !m_inputSignature.add(semantic))
+        Logger::warn(str::format("D3D9ShaderAnalysis: more than ", m_inputSignature.size(),
+          " vertex input semantics, ", HazardSemantic(semantic), " gets no vertex element"));
       return true;
     }
 
@@ -411,7 +415,7 @@ namespace dxvk {
          && type != RegisterType::eInput && type != RegisterType::eTexture
          && type != RegisterType::ePixelTexCoord && type != RegisterType::eMiscType
          && type != RegisterType::eColorOut)
-          break;
+          return;
 
         D3D9IoDclEntry entry = { };
         entry.registerType  = type;
@@ -437,30 +441,32 @@ namespace dxvk {
         }
 
         AddIoDcl(ioDcls, entry, false);
-      } break;
+      } return;
 
-      default: {
-        // IoMap::emitLoad/emitStore declare an undeclared v# (any stage) or
-        // SM3 o# on first use, with the semantic determineSemanticForRegister
-        // picks: color<n> for v#, texcoord<n> for o#.
-        for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
-          const auto& src = op.getSrc(i);
+      default:
+        break;
+    }
 
-          if (src.getRegisterType() == RegisterType::eInput && !src.hasRelativeAddressing()) {
-            D3D9IoDclEntry entry = { RegisterType::eInput, src.getIndex(),
-              Semantic { SemanticUsage::eColor, src.getIndex() }, 0xfu, true };
-            AddIoDcl(ioDcls, entry, true);
-          }
-        }
+    // Any other instruction: IoMap::emitLoad/emitStore declare an undeclared
+    // v# (any stage) or SM3 o# on first use, with the semantic
+    // determineSemanticForRegister picks: color<n> for v#, texcoord<n> for o#.
+    // Sources load before the destination is stored, as in the converter.
+    for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
+      const auto& src = op.getSrc(i);
 
-        if (stage == ShaderType::eVertex && major >= 3u && op.hasDst()
-         && op.getDst().getRegisterType() == RegisterType::eOutput
-         && !op.getDst().hasRelativeAddressing()) {
-          D3D9IoDclEntry entry = { RegisterType::eOutput, op.getDst().getIndex(),
-            Semantic { SemanticUsage::eTexCoord, op.getDst().getIndex() }, 0xfu, false };
-          AddIoDcl(ioDcls, entry, true);
-        }
-      } break;
+      if (src.getRegisterType() == RegisterType::eInput && !src.hasRelativeAddressing()) {
+        D3D9IoDclEntry entry = { RegisterType::eInput, src.getIndex(),
+          Semantic { SemanticUsage::eColor, src.getIndex() }, 0xfu, true };
+        AddIoDcl(ioDcls, entry, true);
+      }
+    }
+
+    if (stage == ShaderType::eVertex && major >= 3u && op.hasDst()
+     && op.getDst().getRegisterType() == RegisterType::eOutput
+     && !op.getDst().hasRelativeAddressing()) {
+      D3D9IoDclEntry entry = { RegisterType::eOutput, op.getDst().getIndex(),
+        Semantic { SemanticUsage::eTexCoord, op.getDst().getIndex() }, 0xfu, false };
+      AddIoDcl(ioDcls, entry, true);
     }
   }
 
