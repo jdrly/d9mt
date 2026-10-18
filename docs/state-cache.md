@@ -213,17 +213,54 @@ Entry (fixed size, 384 bytes):
 - **Corruption**:
   - A bad magic or `headerCheck` drops the file, which is then rewritten.
   - A truncated file keeps the complete entries before the cut.
-  - An entry with a bad `check`, an origin out of range or counts above 20/4
-    is skipped and counted. A corrupt file is never fatal.
+  - An entry with a bad `check`, or with origins/link flag out of range
+    (`entryValid`), is skipped and counted. A corrupt file is never fatal.
+- **Content validation** (`backend/mtl_pso_key.h`, `psoStateValid`):
+  - Checksums only catch damage. A forged or semantically broken entry with
+    valid checksums would reach Metal, which terminates the process on an
+    invalid descriptor: zero stride, an invalid pixel or vertex format,
+    blending on a non-blendable format, a buffer index without a layout.
+    That would happen on every launch.
+  - So at load, every entry's key bytes are checked against what
+    `resolvePso()` can produce:
+    - counts ≤ 20 attributes, ≤ 20 layouts, ≤ 4 color targets (and
+      `build()` never indexes past the arrays, whatever the counts say);
+    - vertex formats from `attributeFormat()`'s 19 outputs;
+    - buffer indices 3–19 (streams 0–15, the null stream);
+    - every attribute's buffer has exactly one layout, with a nonzero stride
+      and a step function of 1 or 2;
+    - color formats from the D3D9 format table (or 0 = no target);
+    - blending only on blendable formats: no integer formats and,
+      conservatively, no 32-bit float formats;
+    - blend factors ≤ 18, operations ≤ 4, write mask ≤ 0xf;
+    - 1/2/4/8 samples, topology class ≤ 3, alpha-to-coverage 0/1;
+    - no depth/stencil format, since that is only used by internal
+      pipelines.
+  - Entries that fail are dropped (`invalid=` and the first reason in the
+    `load` line) and never merged back from disk. `createPrewarmPso` checks
+    again before anything is built.
+- **Crash-loop guard**: `<file>.prewarm` is written (and flushed) before the
+  first prewarm build reaches Metal, and removed when the prewarm queue
+  drains and on a clean shutdown. If it is found at load, the last session
+  ended while prewarm builds were running (a crash, or a kill), whatever the
+  cause. The cache file is then deleted, nothing is prewarmed in that
+  session (`guard=tripped` in the `load` line, plus a warning), and the
+  session records afresh from its own draws. So a descriptor that slips
+  past validation and kills the process costs one crash, not a crash loop.
+  Two game instances on one cache file can trip the guard falsely (the
+  second sees the first's marker); that costs the cache, not a crash.
 - **Atomic writes**:
   - The file is written to `<file>.tmp-<pid>-<n>`, then `FlushFileBuffers`, then
     `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which
     Wine turns into `rename(2)`.
   - Leftover `.tmp-*` files older than 10 minutes are deleted on load.
 - **Merge on write**: the writer re-reads the current file and merges it
-  (union by key, max `lastSession`, min `firstUseMs`). Two game processes
-  therefore don't drop each other's entries; whoever writes last wins only
-  the counters.
+  (union by key, max `lastSession`, min `firstUseMs`; entries from disk are
+  validated like at load). Two game processes therefore don't drop each
+  other's entries, with one exception. If both write within the same few
+  milliseconds (read, merge, rename), the later rename replaces the
+  earlier one's file, and the earlier one's entries added since its own
+  last read are lost. They are re-recorded the next time they are used.
 - **Bounded size**:
   - Cap 1024 entries by default ≈ 390 KB; SWTOR uses ~350 per session.
     `D9MT_STATE_CACHE_MAX` sets another cap within 64–16384. The default was
@@ -363,8 +400,9 @@ index, ring; plain C++, unit-tested natively).
        counted as `dup` and skipped.
   4. **Build.** `tryRun()` on the prewarm thread, through the same
      `RenderPsoCache::build` and compiler as a draw.
-     - A pipeline that no longer builds is logged at debug level, not as an
-       error, and dropped from the file.
+     - A pipeline that no longer builds is logged as a warning and dropped
+       from the file. The failed entry is never adopted by a draw:
+       `Registry::adoptOrInsert` replaces it with the draw's own fresh build.
      - Prewarm builds are not counted in the render path's
        `COMPILE psos=` and `PSOBUILD` lines; the `STATECACHE` lines report
        them.
@@ -391,17 +429,28 @@ index, ring; plain C++, unit-tested natively).
      the fresh one.
      - Done: no wait, a **hit**.
      - Not done: submitted urgent as today. If a prewarm thread is already
-       building it, the draw waits for that build: a **late** hit.
+       building it, the draw waits for that build: a **late** hit. Then
+       `boostPrewarm` raises that prewarm thread to normal priority, the
+       way compile workers switch for urgent work: one `SetThreadPriority`
+       on the thread's handle, only in this case. The thread resets itself
+       to the lowest priority after the build. If it finishes in between,
+       it runs at most its next build at normal priority.
+     - Done but failed (a prewarm build that didn't compile): not adopted;
+       the draw builds its own.
   2. `MtlStateCache::record` copies the key bytes and both shader identities
      into a preallocated single-producer ring of 1024 records.
      - No allocation, no lock, no IO.
      - If the ring is full, the record is dropped and counted (`ringDrops`).
-       It is recorded again next session.
+       It is recorded again the next time the pipeline is missed, i.e. in a
+       later session. Under very heavy load (thousands of new pipelines
+       within a quarter second), the verification measured 2.7 % drops. So
+       right after a large intake (≥ 256 records) the writer polls every
+       20 ms instead of every 250 ms.
   3. Internal clear/blit pipelines (`getSync`) carry no shader identity and
      are counted as `unrecorded`.
 
 ### Write (`d9mt-statecache` thread)
-- Every 250 ms: drains the ring. A record is kept only once its pipeline
+- Every 250 ms (20 ms after a large intake): drains the ring. A record is kept only once its pipeline
   has built successfully (`isDone() && handle()`), so a failing descriptor
   is never replayed. Prewarm failures are removed.
 - Writes the file 20 s after the last change, at most every 5 min while
@@ -410,7 +459,12 @@ index, ring; plain C++, unit-tested natively).
   synchronized. It joins the prewarm threads (at most one in-flight build
   each), then the writer (one final write, a few ms), and drops all shader
   and pipeline references.
-- A killed process loses at most the last 20 s of records.
+- A killed process loses the records since the last write: usually the last
+  20 s, but up to 5 minutes (`WriteMaxInterval`) while new records keep
+  coming without a 20 s pause.
+- `MtlDeviceImpl::~MtlDeviceImpl` also calls `shutdown()` (idempotent), in
+  case the D3D9 device's constructor threw after creating the cache: prewarm
+  threads must stop before the compiler goes away.
 
 ### Threading summary
 
@@ -453,21 +507,30 @@ index, ring; plain C++, unit-tested natively).
 - `D9MT_STATE_CACHE_THREADS=<0..4>`: prewarm threads. `0` loads and records
   but never prewarms; this is the A/B switch.
 - `D9MT_STATE_CACHE_MAX=<64..16384>`: the entry cap (default 1024).
+- A relative `D9MT_STATE_CACHE` (neither `/…` nor `X:\…` / `\\…`) is
+  ignored with a warning, and the default location is used. Values of
+  `_THREADS` and `_MAX` that aren't plain numbers leave the default.
+- `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1`: skips content validation. It exists
+  only to test the crash-loop guard with a real Metal crash (§12); never use
+  it otherwise.
 - `dxvk.conf`: `d9mt.stateCache = False` turns it off like the env var.
 
 Log lines (info level, so they show with Debug Logging; a few per session):
 
 ```
-STATECACHE load path=<unix path> status=ok entries=400 session=2 prewarmable=400 readyAtLoad=0 corrupt=0 truncated=0 capped=0 threads=2 ms=3.8
+STATECACHE load path=<unix path> status=ok entries=40 session=2 prewarmable=40 readyAtLoad=0 corrupt=0 truncated=0 invalid=1 (first: layout stride) capped=0 max=1024 threads=2 ms=3.8
+STATECACHE the last session ended while prewarm builds were running (crash or kill): dropped <path>, no prewarm this session
 STATECACHE prewarm t=0.83s built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201
 STATECACHE write entries=400 bytes=153664 ms=1.7
-STATECACHE use t=5s hits=399 late=0 misses=1 recorded=0 unrecorded=0 ringDrops=0 hitBuildMs=991 | prewarm built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201 ready=0 | entries=400 (final)
+STATECACHE use t=5s hits=399 late=0 misses=1 recorded=0 unrecorded=0 ringDrops=0 hitBuildMs=991 | prewarm built=399 dup=1 failed=0 skipped=0 buildMs=991 pausedMs=201 boosts=0 ready=0 | entries=400 invalid=0 (final)
 ```
 
 - `status`: `ok`, `new` (no file), `bad-header`, `older-version`,
   `newer-version` (left alone, never written), `key-changed` (the
   `RenderPsoKey` layout or mapping changed; entries dropped).
 - `prewarmable`: entries used within the last 32 sessions.
+- `invalid`: entries dropped at load by content validation (§3).
+- `boosts`: prewarm threads raised to normal priority for a late hit.
 - `hits`: a draw needed a PSO that was already prewarmed and done.
 - `late`: prewarmed, but still building when the draw needed it.
 - `misses`: not in the cache.
@@ -609,6 +672,20 @@ Other Metal layers:
     out), truncation mid-entry and at a boundary, a damaged header, random
     garbage;
   - older/newer format versions, a key signature change;
+  - the key validator:
+    - a key shaped like `resolvePso()`'s passes (also with an empty slot,
+      garbage past the counts, MSAA, 4 targets);
+    - 31 forged variants, each with one invalid field, are rejected;
+    - 100 000 random keys are never accepted;
+  - load-time validation: forged entries dropped, not prewarmed, not merged
+    back, file rewritten without them;
+  - the crash-loop guard:
+    - the marker is on disk during a prewarm build (seen from inside it);
+    - it is gone after the drain and after a clean shutdown mid-prewarm;
+    - a marker found at load drops the file and prewarms nothing, and the
+      session after that is normal;
+  - the late-hit boost; a failed prewarm build is rebuilt by the draw, not
+    adopted;
   - the cap on the database, and on a file 300 entries above the default
     1024 (loaded capped, rewritten capped, the most recently used kept); a
     configured larger cap keeps them all;
@@ -717,6 +794,33 @@ Other Metal layers:
     carry the caller's QoS.
   - The yield rule, not the priority, is what keeps the prewarm out of the
     game's way (above). A real QoS class is the bridge follow-up (§9).
+
+### Forged entries and the crash-loop guard (fix round after verification)
+- Setup: Wine on the /tmp engine copy, every run through `exc_guard`.
+  `scripts/forge-statecache.py` takes a recorded 40-entry file and writes
+  ten copies, each with one entry forged and every checksum recomputed:
+  - zero stride;
+  - an invalid vertex format;
+  - an invalid pixel format;
+  - a depth format as a color target;
+  - blending on R32Uint;
+  - an attribute buffer without a layout;
+  - color count 9;
+  - attribute count 40;
+  - 3 samples;
+  - a depth format in the key.
+- All ten load with `invalid=1` and the matching reason; none crashes. The
+  other 39 are prewarmed and hit (39/40), and the forged pipeline is built
+  by the draw and recorded correctly.
+- **Guard with a real crash.**
+  1. With `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1`, the zero-stride entry
+     reaches Metal: `failed assertion 'Vertex Descriptor Validation —
+     Attribute at index 0 references a buffer at index 3 that has no
+     stride'`, inside the prewarm. The process dies, `exc_guard` absorbs it
+     (no crash report, no dialog), and `<file>.prewarm` is left behind.
+  2. The next normal run trips the guard: the file is dropped, nothing is
+     prewarmed, the run completes, and 40 clean entries are recorded.
+  3. The run after that is normal again (39/40 hits).
 
 ### PSO archive growth
 - The synthetic pipelines take ≈ 51 KB each in an archive (400 PSOs = 12.6 +
