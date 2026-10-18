@@ -19,7 +19,7 @@ M5 Max, macOS 27.0. Inputs:
 - **A pass split at 4K costs one store and one load** of colour + D32FS8, 149 MB. That's 0.19–0.21 ms measured on the M5 Max and about 1.5 ms worked out for a base M2's 100 GB/s.
   - SWTOR ends an open pass at a submit ~9 times a frame, and with a mid-pass Clear 3–8 times a frame (§1.3).
   - How many of those reopen the same targets isn't logged, so a counter comes first (§6.2).
-  - A Clear that ends a pass makes that pass's store of the cleared aspect useless, and d9mt can tell that exactly, with no look-ahead (candidate 3).
+  - A Clear that ends a pass makes that pass's store of the cleared aspect useless, and d9mt can tell that exactly, with no look-ahead (candidate 3). In practice that is the depth/stencil store: games clear colour where a target's use starts (folded into the load) and depth between draws.
 - **Present:** a 4K compute copy (66 MB) in its own command buffer. Rendering straight into the drawable conflicts with D3D9 backbuffer semantics (§2), and a render-pass copy instead of the compute copy wouldn't save measurably. Present stays as it is for now.
 - **Memoryless:** no SWTOR target qualifies (§3).
 - **None of the GPU-side candidates changes `winemetal.so`.** Only the measurement helper "GPU time per frame from `MTL4CommitFeedback`" (§6.1) does, and it goes into the #11 bridge bundle.
@@ -138,8 +138,8 @@ The vertex work of each pass runs alone between two fragment phases, and GPU bus
 
 **The fix is in d3d9.dll; `winemetal.so` doesn't change.** The stages are arguments of `MTL4CommandEncoder_barrier`.
 - The end-of-pass barrier becomes `before Fragment|Blit|Dispatch`.
-- An encoder that binds a render-written image to a vertex-stage texture slot first gets the consumer barrier `barrierAfterQueueStages:Fragment beforeStages:Vertex`.
-- §7 has the details.
+- A draw whose vertex stage has a render-written image bound first gets a fence. The bridge only has producer barriers, so the fence is an empty compute encoder with `after Fragment → before Vertex` (or, if the pass's encoder is already open, a pass split). A consumer barrier (`barrierAfterQueueStages:beforeStages:`) would do it inside the encoder; it needs a bridge entry (#11 bundle).
+- §7 and §8 have the details.
 
 ## 2. Present path
 
@@ -338,9 +338,9 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
 
 | # | Candidate | Expected GPU saving at 4K | Correctness risk | `winemetal.so` |
 |---|---|---|---|---|
-| 1 | Narrow the end-of-pass barrier, plus a consumer barrier for vertex-stage reads of rendered images | probe −16% (−12% with per-pass sampling); in SWG's trace, up to the vertex share of 28% (3.6 of 12.6 ms) | low–medium: VTF of render targets needs the consumer barrier | no |
+| 1 | Narrow the end-of-pass barrier, plus a fence for vertex-stage reads of rendered images | probe −16% (−12% with per-pass sampling); in SWG's trace, up to the vertex share of 28% (3.6 of 12.6 ms) | low–medium: VTF of render targets needs the fence | no (a consumer barrier later would: #11) |
 | 2 | No `PixelFormatView` on non-block-compressed textures (lossless compression) | probe −20% (bandwidth-bound); SWTOR's content ratio unknown; largest on base chips | low: lossless; a missing usage flag shows up in API validation | no |
-| 3 | A Clear that ends a pass doesn't store the cleared aspects | one 4K store per hit (0.33–0.41 ms at 100 GB/s); SWTOR 3–8 clear pass ends/frame, upper bound ~1–3 ms on a base M2 | low: exact, no look-ahead | no |
+| 3 | A Clear that ends a pass doesn't store the cleared aspects | one 4K depth/stencil store per hit (0.41 ms at 100 GB/s); SWTOR 3–8 clear pass ends/frame, upper bound ~1–3 ms on a base M2 | low: exact, no look-ahead | no |
 | 4 | TBDR-aware implicit flush: implicit hints flush at the next pass boundary, not mid-pass | one split (149 MB, ~1.5 ms at 100 GB/s) per avoided mid-pass submit; count unknown (≤9/frame), measure first | medium: fence/serial bookkeeping, query latency, staging throttle | no |
 | 5 | Present copy as a render pass + `framebufferOnly = true` | 0–0.3 ms (not measurable in the probe) | medium for Direct presentation (check the HUD); pixels exact | no |
 | 6 | Hoist VB/IB uploads by default (`D9MT_XFER_HOIST`) | ~0 for SWTOR (`xfer` = present only); SWG maybe | low–medium | no |
@@ -348,17 +348,25 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
 
 ### 1. Narrow the end-of-pass barrier
 
-**Change:**
-- `closePass` and `attRestore` use `barrierAfterStages:Fragment beforeQueueStages:Fragment|Blit|Dispatch`. The blit, clear and resolve render encoders can follow once tested.
-- Per image, an epoch "rendered since the last vertex-inclusive barrier". When a vertex-stage texture binding (`flushResources`, stage 0) refers to such an image, emit `barrierAfterQueueStages:Fragment beforeStages:Vertex` (Device visibility) in the current encoder before the draw, and reset the epoch.
-- `emitGraphicsBarrier` (feedback loops inside a pass) and the compute encoders' `Blit|Dispatch → All` stay as they are.
+**Change (as implemented, §8):**
+- `closePass` uses `barrierAfterStages:Fragment beforeQueueStages:Fragment|Blit|Dispatch`. The blit, clear, resolve and restore render encoders keep `before All`.
+- Per image, an epoch: "rendered since the last barrier after Fragment before Vertex at the end of an encoder". At a draw whose vertex-stage texture bindings hold such an image, d9mt fences first.
+  - The bridge has only producer barriers (`barrierAfterStages:beforeQueueStages:`). So the fence is an empty compute encoder with `after Fragment → before Vertex`, placed ahead of the pass's encoder (which attachment-opt creates when the pass ends).
+  - If that encoder already exists (4 MiB of commands, or a feedback barrier), the pass is split for the fence.
+- `emitGraphicsBarrier` (feedback loops inside a pass) emits its barrier directly and does **not** start a new epoch. Metal orders only later encoders after it, not the same pass's later draws (verifier finding D1, `code_vtf_fb`).
+- The compute encoders' `Blit|Dispatch → All` barriers stay as they are.
+
+**What the fence relies on (D2).** Apple documents a producer barrier as waiting for its after-stages "in the pass and all previous passes". The fence encoder runs no work of its own, so it depends on that "all previous passes" part to wait for earlier fragment work. Apple's header is less explicit than the article.
+- On the M5 Max the negative controls show it working: `code_vtf_rt` and `code_vtf_alias` fail without the fence and pass with it.
+- **Plan:** add the consumer barrier `barrierAfterQueueStages:Fragment beforeStages:Vertex` to the bridge with the #11 bundle (it changes `winemetal.so`). The fence then becomes a barrier inside the pass's own encoder, which removes both the reliance and the pass split.
 
 **Why it saves:** each pass's vertex/tiling runs during the previous pass's fragment phase instead of after it. The upper bound is the frame's vertex time minus whatever can't overlap (the first pass, and passes whose vertex stage really depends on the previous pass). On base chips at 4K the fragment phases grow relative to vertex, so nearly all of the vertex time can hide.
 
 **Risk:**
 - Any vertex-stage read d9mt doesn't know of. The list in §1.4 is complete for D3D9: vertex textures are the only GPU-produced input to the vertex stage.
 - Barriers across command buffers behave as today, since queue barriers already order them.
-- Tests: `code_vtf_rt`, the hash suite, `MTL_DEBUG_LAYER`.
+- The empty fence encoder (D2 above).
+- Tests: `code_vtf_rt`, `code_vtf_alias`, `code_vtf_fb`, `code_split_load`, the hash suite, `MTL_DEBUG_LAYER`.
 
 **CPU cost:** one epoch compare per vertex texture bind.
 
@@ -384,6 +392,8 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
 - The decision table change is unit-testable in `test/native/attachment_opt_test.cpp`.
 
 **Why it saves:** the store writes data the very next command overwrites.
+
+**In practice** it skips depth/stencil stores. D3D9 games clear colour where a target's use starts (folded into that pass's load, so there's no store to skip) and clear depth between draws. A colour store is skipped only when a colour-only Clear ends a pass after draws to that target. `code_clear_split` does that; games rarely do.
 
 **Risk:** low. Nothing can run between the closing pass and the clear: the clear is the next command in stream order, and every reader in between would itself have closed the pass first.
 
@@ -441,7 +451,7 @@ Branch `perf/gpu-4k`, one commit each. All of them change only `d3d9.dll`. `brid
 
 | Candidate | Change | Switch (restores `main`) |
 |---|---|---|
-| (tests) | `code_vtf_rt`, `code_srgb_view`, `code_depthtex`, `code_clear_split`, `bench_4k` | — |
+| (tests) | `code_vtf_rt`, `code_srgb_view`, `code_depthtex`, `code_clear_split`, `bench_4k`; from the verification: `code_vtf_fb`, `code_vtf_alias`, `code_split_load` | — |
 | 2 | `PixelFormatView` only on block-compressed textures | `D9MT_TEX_PFV=1` |
 | 1 | End-of-pass barrier before Fragment\|Blit\|Dispatch, vertex fences for vertex textures | `D9MT_PASS_BARRIER=all` |
 | 3 | A clear that ends a pass skips the pass's store of what it clears | `D9MT_CLEAR_DISCARD=0` |
@@ -455,6 +465,7 @@ At startup each switch logs one line at info level: "PixelFormatView only on blo
 - run on CX26 Wine in a /tmp prefix on a /tmp copy of the engine, under `exc_guard`, with clean builds;
 - all 21 test programs plus the 4 new ones give the same hash in every frame as `main`'s `d3d9.dll`;
 - the same holds with the Metal API validation layer on (`MTL_DEBUG_LAYER=1`), which reports only `main`'s fixed-function binding warnings.
+- `code_mtlock` (`scripts/run-hang-test.sh`, a multithreading hang test) isn't deterministic even on `main`, so it stays out of the identity comparisons.
 
 **Per candidate:**
 - **Candidate 2 (`PixelFormatView`).** Every view creation was audited (commit message). Views keep the image's format, its sRGB twin, or a swizzle. Only ColorFill's block views of BC data change layout, and BC textures keep the flag.
@@ -462,6 +473,15 @@ At startup each switch logs one line at info level: "PixelFormatView only on blo
   - **Negative control:** without the fence, `code_vtf_rt` shows the previous frame's value in every frame (4 of 4 runs).
   - With the fence its hashes match `main`, also with `d3d9.reproducibleCommandStream=True` (which takes the pass-split path), `D9MT_PASS_BARRIER=all`, `D9MT_NO_ATTACHMENT_OPT=1` and `D9MT_DEFERRED=1`.
   - **Trace of bench_4k:** the next pass's vertex work starts before the previous fragment work ends at 100% of boundaries (0% before).
+- **Candidate 1, verifier tests and finding D1.**
+  - `code_vtf_alias`: vertex texture fetch through another view of what a pass rendered (mip 1; the sRGB view of a target rendered through its linear view). Without the fence, every frame shows the previous frame's values.
+  - `code_split_load`: a submit split right after a heavy pass, a depth-only Clear split, and a heavy pass followed by a same-size StretchRect copy.
+    - An end-of-pass barrier without Fragment changes the hashes of the first two.
+    - One without Blit|Dispatch changes all three.
+  - `code_vtf_fb`: a VTF draw in a pass that has already emitted feedback barriers.
+    - **D1:** `emitGraphicsBarrier` advanced the vertex epoch from inside the open encoder, which let that draw skip its fence.
+    - **Fixed:** with the fix it takes the pass split and fence (logged once). Before, it took neither.
+    - The race itself doesn't show on the M5 Max; the hashes match `main`'s either way.
 - **Candidate 3 (Clear store-skip).** `att_trace` on `code_clear_split`:
   - the pass a depth-only Clear ends stores colour and stencil, not depth;
   - a colour-only Clear keeps the depth and stencil stores.
@@ -477,6 +497,8 @@ Measured on the M5 Max, with the machine otherwise quiet (no other Wine runs).
 |---|---|---|---|
 | bench_4k (4 post passes, 1 depth clear) | 9.54 ms | 7.45 ms (−22%) | 9.54 ms |
 | bench_4k (24 post passes, 8 depth clears) | 15.19 ms | 12.18 ms (−20%) | 15.18 ms |
+
+After the merge of main 1440584 (#8, #10), with another agent's Wine tests running (4 interleaved runs, medians): 9.74 → 8.17 ms (−16%) and 15.62 → 13.07 ms (−16%). The verifier measured −17%/−18% paired, and −11% to −22% under load.
 
 **Per candidate**, each against the commit before it:
 
@@ -522,8 +544,10 @@ This needs a SWTOR on Mac build with this `d3d9.dll`. `winemetal.so` is unchange
 
 **Compare** with `session-report.sh --compare` on the wine.logs (STATS frame times, hitches).
 
-**Tester (M2 Pro 16 GB):** runs 1 and 5, and 6 and 7 if possible, each with a HUD screenshot, plus a trace if they're willing.
+**Tester (M2 Pro 16 GB):**
+- runs 1 and 5, and 6 and 7 if possible, each with a HUD screenshot, plus a trace if they're willing;
+- also `code_vtf_rt` and `code_vtf_alias` with this `d3d9.dll`. Their hashes must match `main`'s: the vertex fence on a GPU with a different schedule than the M5 Max (D2).
 
 ### 8.4 Found on the way
 
-On `main`, StretchRect with a filter between two render-target textures of different sizes (`blitTextureView`) leaves the destination black (`code_srgb_view`, bottom-left pair). This branch doesn't change it; it should get its own issue.
+On `main`, StretchRect with a filter between two render-target textures of different sizes (`blitTextureView`) leaves the destination black (`code_srgb_view`, bottom-left pair). This branch doesn't change it. It is #14, fixed on `fix/blit-views`: texture views were always null.
