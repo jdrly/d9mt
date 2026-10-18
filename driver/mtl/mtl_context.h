@@ -89,7 +89,9 @@ namespace dxvk {
 
     virtual void beginRecording();
     virtual void endFrame();
-    virtual void flushCommandList(const char* reason, MtlSubmitStatus* status);
+    /* deferrable: a heuristic flush nothing waits on. The backend may postpone
+     * it to the next render-pass boundary instead of ending the open pass. */
+    virtual void flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable = false);
     virtual Rc<MtlCommandBuffer> beginExternalRendering();
     virtual void synchronizeWsi(MtlPresenterSync sync);
     virtual void beginLatencyTracking(const Rc<MtlLatencyTracker>&, uint64_t frameId);

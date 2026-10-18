@@ -68,7 +68,7 @@ namespace dxvk::backend {
 
     void beginRecording() override;
     void endFrame() override;
-    void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
+    void flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable = false) override;
     void synchronizeWsi(MtlPresenterSync sync) override;
 
     void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
@@ -511,6 +511,15 @@ namespace dxvk::backend {
     // epoch bound gets a fence first (resolveVertexHazard).
     // D9MT_PASS_BARRIER=all: every pass ends with the barrier before All.
     bool         m_narrowBarrier = false;
+    // Deferred heuristic flushes (D9MT_FLUSH_DEFER, default on): a deferrable
+    // flushCommandList() while a render pass is open only sets m_flushDeferred;
+    // the submit happens before the next pass opens (materializePass) or at
+    // any earlier submit, so the open pass isn't split and reloaded. At most
+    // kMaxFlushDefers deferrals in a row, then the flush goes ahead.
+    static constexpr uint32_t kMaxFlushDefers = 8u;
+    bool         m_flushDeferOn  = false;
+    bool         m_flushDeferred = false;
+    uint32_t     m_flushDefers   = 0u;
     bool         m_vtxCheck      = false;  // look at the vertex-stage textures at the next draw
     uint64_t     m_vtxEpoch      = 1u;
     void         markVertexHazards();

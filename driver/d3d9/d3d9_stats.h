@@ -121,14 +121,15 @@ namespace dxvk::stats {
       auto pf = [&] (uint32_t c) { return double(d[c]) / rf; };
       const double savedMiB = double(int64_t(d[rstats::BytesSaved])) / rf / double(1u << 20);
 
-      char buf[640];
+      char buf[768];
       std::snprintf(buf, sizeof(buf),
         "STATS t=%.0f fps=%.1f ms=%.1f/%.1f/%.1f slow33=%u slow50=%u"
         " | rp=%.1f skip=%.1f cb=%.1f draws=%.0f"
         " | ld=%.1f clr=%.1f ldDc=%.1f st=%.1f stDc=%.1f rsv=%.1f restore=%.1f savedMiB=%.1f"
         " attMs=%.2f clrFold=%.1f clrPass=%.1f"
         " | sh=%llu pso=%llu wait=%llu/%.1fms | allocMiB=%llu att=%s"
-        " | split=%.1f splitSubmit=%.1f splitXfer=%.1f splitClear=%.1f splitMiB=%.1f",
+        " | split=%.1f splitSubmit=%.1f splitXfer=%.1f splitClear=%.1f splitMiB=%.1f"
+        " flushDefer=%.1f flushForced=%.1f",
         double(nowNs - m_startNs) * 1e-9, winS > 0.0 ? double(n) / winS : 0.0,
         n ? sum / double(n) : 0.0, p99, mx, slow33, slow50,
         pf(rstats::RenderPasses), pf(rstats::PassesSkipped), pf(rstats::CmdBufs), pf(rstats::Draws),
@@ -141,7 +142,8 @@ namespace dxvk::stats {
         (unsigned long long)(ct.waits - m_ct.waits), double(ct.waitsNs - m_ct.waitsNs) * 1e-6,
         (unsigned long long)(extra.allocBytes >> 20), extra.att,
         pf(rstats::Splits), pf(rstats::SplitsSubmit), pf(rstats::SplitsXfer), pf(rstats::SplitsClear),
-        double(d[rstats::SplitBytes]) / rf / double(1u << 20));
+        double(d[rstats::SplitBytes]) / rf / double(1u << 20),
+        pf(rstats::FlushesDeferred), pf(rstats::FlushesForced));
 
       m_rs = rs;
       m_ct = ct;

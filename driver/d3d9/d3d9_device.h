@@ -1027,7 +1027,11 @@ namespace dxvk {
     void SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits);
     void SetPixelBoolBitfield (uint32_t idx, uint32_t mask, uint32_t bits);
 
-    void ConsiderFlush(GpuFlushType FlushType);
+    /* AllowDefer: a pure heuristic flush (CS chunk full, render target / depth
+     * change, EndScene) that nothing waits on. The backend may then postpone
+     * the submit to the next render-pass boundary instead of splitting the
+     * open pass (D9MT_FLUSH_DEFER=0 turns that off). */
+    void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);
 
     bool ChangeReportedMemory(int64_t delta) {
       if (IsExtended())
@@ -1147,7 +1151,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
         m_csChunk->push(command);
       }
@@ -1163,7 +1167,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
         m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
       }
@@ -1184,7 +1188,7 @@ namespace dxvk {
       return m_resetCtr;
     }
 
-    void ExecuteFlush(bool Synchronize9On12);
+    void ExecuteFlush(bool Synchronize9On12, bool Deferrable = false);
 
     void        DebugInitPath();
     void        DebugPoll();

@@ -1704,7 +1704,7 @@ namespace dxvk {
 
     ConsiderFlush(RenderTargetIndex == 0
       ? GpuFlushType::ImplicitStrongHint
-      : GpuFlushType::ImplicitWeakHint);
+      : GpuFlushType::ImplicitWeakHint, true);
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
@@ -1783,7 +1783,7 @@ namespace dxvk {
     if (m_state.depthStencil == ds)
       return D3D_OK;
 
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
     // Metal's depthBias is in units of r like Vulkan's (measured on Apple GPUs:
@@ -1843,7 +1843,7 @@ namespace dxvk {
     if (unlikely(!m_inScene))
       return D3DERR_INVALIDCALL;
 
-    ConsiderFlush(GpuFlushType::ImplicitStrongHint);
+    ConsiderFlush(GpuFlushType::ImplicitStrongHint, true);
 
     m_inScene = false;
 
@@ -5730,12 +5730,17 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType) {
+  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType, bool AllowDefer) {
     uint64_t chunkId = GetCurrentSequenceNumber();
     uint64_t submissionId = m_submissionFence->value();
 
+    // considerFlush() may raise the type to one it missed earlier; only a
+    // flush that stays a hint may wait for the next pass boundary.
+    const bool deferrable = AllowDefer
+      && m_flushTracker.getPendingType() >= GpuFlushType::ImplicitStrongHint;
+
     if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId, 0u))
-      ExecuteFlush(false);
+      ExecuteFlush(false, deferrable);
   }
 
 
@@ -6016,7 +6021,7 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ExecuteFlush(bool Synchronize9On12) {
+  void D3D9DeviceEx::ExecuteFlush(bool Synchronize9On12, bool Deferrable) {
     D3D9DeviceLock lock = LockDevice();
 
 
@@ -6029,11 +6034,12 @@ namespace dxvk {
       cSubmissionId     = submissionId,
       cSubmissionStatus = Synchronize9On12 ? &m_submitStatus : nullptr,
       cStagingBufferFence = m_stagingBufferFence,
-      cStagingBufferAllocated = m_stagingMemorySignaled
+      cStagingBufferAllocated = m_stagingMemorySignaled,
+      cDeferrable = Deferrable && !Synchronize9On12
     ] (MtlContext* ctx) {
       ctx->signal(cSubmissionFence, cSubmissionId);
       ctx->signal(cStagingBufferFence, cStagingBufferAllocated);
-      ctx->flushCommandList(nullptr, cSubmissionStatus);
+      ctx->flushCommandList(nullptr, cSubmissionStatus, cDeferrable);
     });
 
     FlushCsChunk();

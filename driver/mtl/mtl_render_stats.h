@@ -34,6 +34,8 @@ namespace dxvk::rstats {
     SplitsXfer,      //   ... else with a copy/blit/resolve encoder in between
     SplitsClear,     //   ... else with a clear in between (the rest: a view change or a vertex fence)
     SplitBytes,      // attachment bytes those passes load
+    FlushesDeferred, // heuristic flushes postponed to the next pass boundary (D9MT_FLUSH_DEFER)
+    FlushesForced,   // ... that went ahead mid-pass after kMaxFlushDefers deferrals
     Count
   };
 

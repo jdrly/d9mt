@@ -65,6 +65,12 @@ namespace dxvk::backend {
       ? "D9MT: a clear that ends a pass skips the pass's store of what it clears"
       : "D9MT: a clear that ends a pass keeps the pass's stores (D9MT_CLEAR_DISCARD=0 or no attachment optimization)");
 
+    const char* flushDefer = std::getenv("D9MT_FLUSH_DEFER");
+    m_flushDeferOn = !(flushDefer && std::strcmp(flushDefer, "0") == 0);
+    Logger::info(m_flushDeferOn
+      ? "D9MT: heuristic flushes wait for the next render-pass boundary"
+      : "D9MT: heuristic flushes submit at once (D9MT_FLUSH_DEFER=0)");
+
     const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
     m_narrowBarrier = m_attOpt && !(passBarrier && std::strcmp(passBarrier, "all") == 0);
     Logger::info(m_narrowBarrier
@@ -215,6 +221,8 @@ namespace dxvk::backend {
 
   void MtlContextImpl::submit(bool waitCompleted) {
     prof::Scope profScope(prof::Submit);
+    m_flushDeferred = false;
+    m_flushDefers   = 0u;
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -297,7 +305,17 @@ namespace dxvk::backend {
     m_device->uploadRing().onComplete(completed);
   }
 
-  void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
+  void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable) {
+    if (deferrable && m_flushDeferOn && !status && m_pass.active
+     && m_flushDefers < kMaxFlushDefers) {
+      m_flushDeferred = true;
+      m_flushDefers++;
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::FlushesDeferred]++;
+      return;
+    }
+    if (unlikely(prof::g_profEnabled) && deferrable && m_flushDeferred && m_pass.active)
+      m_rs[rstats::FlushesForced]++;
     submit(false);
     beginRecording();
     if (status) {
@@ -539,6 +557,13 @@ namespace dxvk::backend {
   void MtlContextImpl::materializePass() {
     if (m_pass.active)
       return;
+
+    // A heuristic flush postponed while the previous pass was open: submit
+    // now, between passes, where it costs no extra load/store.
+    if (m_flushDeferred) {
+      submit(false);
+      beginRecording();
+    }
 
     ensureCommandBuffer();
     ensureVisBuffer();
