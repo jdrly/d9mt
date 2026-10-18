@@ -436,6 +436,7 @@ namespace dxvk::backend {
     void         splitNoteClosed();
     void         splitCheck(uint64_t loadBytes);
 
+    void keepPassTargets();
     void recordPassEntry();
     CmdChunk takeChunk();
     void prepareDirectEncode(uint32_t passCloseCounter);

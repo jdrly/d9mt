@@ -628,6 +628,7 @@ namespace dxvk::backend {
     }
 
     m_pass.encoder = newRenderEncoder(m_cmdbuf.handle(), &info);
+    keepPassTargets();
     m_pass.active = true;
     m_pass.pending = false;
     m_dirty = DirtyEverything;
@@ -1146,11 +1147,24 @@ namespace dxvk::backend {
       return false;
 
     m_pass.encoder = newRenderEncoder(m_cmdbuf.handle(), &info);
+    keepPassTargets();
+    return true;
+  }
+
+
+  void MtlContextImpl::keepPassTargets() {
+    // The pass's attachment views stay alive until its command buffer completes
+    // (a rebind may drop their last reference while the GPU still renders to them).
+    for (const auto& v : m_pass.targets.color) {
+      if (v != nullptr)
+        m_keepAlive.push_back(v);
+    }
+    if (m_pass.targets.depthStencil != nullptr)
+      m_keepAlive.push_back(m_pass.targets.depthStencil);
     for (const auto& r : m_pass.resolveTo) {
       if (r != nullptr)
         m_keepAlive.push_back(r);
     }
-    return true;
   }
 
 
@@ -1539,6 +1553,11 @@ namespace dxvk::backend {
       if (stages & (1u << s)) {
         if (m_bindings[s].textures[slot] == view)
           continue;
+        // Metal 4 command buffers don't retain what they use: the view replaced here may
+        // be in this command buffer's argument tables, or in those of an earlier one still
+        // on the GPU, and the last reference going now would free its resource ID under it.
+        if (m_bindings[s].textures[slot] != nullptr)
+          m_keepAlive.push_back(std::move(m_bindings[s].textures[slot]));
         m_bindings[s].textures[slot] = view;
         m_bindings[s].dirtyTextures |= 1u << slot;
         changed = true;
