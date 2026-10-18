@@ -208,7 +208,65 @@ namespace dxvk::backend {
     return m_compileWorkers->pending();
   }
 
+  Rc<MtlCompileTask> MtlDeviceImpl::createPrewarmPso(
+    const uint8_t* pState, const MtlShaderFunction* pVs, const MtlShaderFunction* pFs) {
+    // Never hand Metal a descriptor the draw path couldn't have built: it
+    // terminates the process on invalid ones. (Load already dropped these.)
+#ifdef D9MT_STATE_CACHE_TESTING
+    // Test builds only: D9MT_STATE_CACHE_TEST_NO_VALIDATE=1 lets a forged
+    // entry through, to test the state cache's crash-loop guard.
+    static const bool s_testNoValidate = env::getEnvVar("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
+#else
+    constexpr bool s_testNoValidate = false;
+#endif
+    if (!s_testNoValidate && !backend::psoStateValid(pState))
+      return nullptr;
+
+    // The key resolvePso() builds for these functions: the recorded bytes
+    // plus this session's library handles and entry names.
+    RenderPsoKey key = {};
+    std::memcpy(reinterpret_cast<uint8_t*>(&key) + RenderPsoKey::StateOffset, pState, statecache::KeyBytes);
+    key.vsCookie = uint64_t(pVs->library);
+    key.fsCookie = pFs != nullptr ? uint64_t(pFs->library) : 0u;
+
+    const char* vsEntry = pVs->entryName ? pVs->entryName : "main";
+    const char* fsEntry = (pFs != nullptr && pFs->entryName) ? pFs->entryName : "main";
+
+    Rc<RenderPsoCache::Entry> e = RenderPsoCache::createPrewarmEntry(m_compiler.handle(), key,
+      pVs->library, pFs != nullptr ? obj_handle_t(pFs->library) : 0u, vsEntry, fsEntry);
+
+    if (!m_psoRegistry.insertIfAbsent(e))
+      return nullptr;
+    return e;
+  }
+
+  bool MtlDeviceImpl::psoStateValid(const uint8_t* pState, const char** pWhy) {
+    return backend::psoStateValid(pState, pWhy);
+  }
+
+  bool MtlDeviceImpl::psoSucceeded(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() && e->handle();
+  }
+
+  uint64_t MtlDeviceImpl::psoBuildNs(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() ? e->buildNs() : 0u;
+  }
+
+  uint32_t MtlDeviceImpl::urgentCompilesQueued() {
+    return m_compileWorkers->urgentQueued();
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
+    // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
+    // never got that far (e.g. its constructor threw after creating the
+    // cache). Idempotent: prewarm threads must stop before the compiler goes.
+    // At process exit (isInModuleDetachment) shutdown() only detaches its
+    // threads: no join or lock on threads ExitProcess already killed.
+    if (MtlStateCache* stateCache = this->stateCache())
+      stateCache->shutdown();
+
     m_compileWorkers = nullptr;
 
     /* Retirement callbacks reach into the residency tracker, which is

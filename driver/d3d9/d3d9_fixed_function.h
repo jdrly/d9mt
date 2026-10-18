@@ -52,10 +52,24 @@ namespace dxvk {
       return Stage == D3D9ShaderType::VertexShader ? m_vs : m_fs;
     }
 
+    /// Tells the state cache the fixed-function shaders exist. The cache
+    /// keeps pointers to members: shut it down before this set goes away.
+    void AnnounceToStateCache(MtlStateCache* pStateCache);
+
   private:
+
+    /// The ubershaders have no variants: every request gets the one function.
+    class PrewarmShader final : public MtlStateCacheShader {
+    public:
+      Rc<MtlShaderFunction> fn;
+      Rc<MtlShaderFunction> prewarmFunction(MtlStateCacheShader*) override { return fn; }
+    };
 
     Rc<MtlShaderFunction> m_vs;
     Rc<MtlShaderFunction> m_fs;
+
+    PrewarmShader m_vsPrewarm;
+    PrewarmShader m_fsPrewarm;
 
   };
 

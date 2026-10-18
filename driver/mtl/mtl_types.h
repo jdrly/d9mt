@@ -14,6 +14,19 @@ namespace dxvk {
     Fragment = 1,
   };
 
+  /**
+   * \brief Where a shader function comes from, for the state cache
+   *
+   * Set once when the function is created. origin 0 (None): not recorded
+   * (internal blit/clear shaders, software VP emulation). See
+   * mtl_state_cache.h and statecache::Origin.
+   */
+  struct MtlShaderStateId {
+    uint8_t origin  = 0u;
+    uint8_t linked  = 0u;   // PS linked against the bound D3D9 VS
+    uint8_t sha[20] = { };
+  };
+
   using MtlStageMask = uint32_t;
   constexpr MtlStageMask MtlStageVertex   = 1u << 0;
   constexpr MtlStageMask MtlStageFragment = 1u << 1;
