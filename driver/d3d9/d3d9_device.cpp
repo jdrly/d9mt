@@ -148,9 +148,11 @@ namespace dxvk {
 
     // D9MT_PROFILE: the session's restores (a game that exits without
     // releasing the device has only its RESTORE lines).
-    if (unlikely(hitch::g_enabled))
+    if (unlikely(hitch::g_enabled)) {
       Logger::warn(rstore::summary(m_dxvkDevice->renderStats().snapshot().v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot()));
+      Logger::warn(m_xferStats.summary());
+    }
 
     if (m_annotation)
       delete m_annotation;
@@ -1250,6 +1252,10 @@ namespace dxvk {
       if (unlikely(!srcIsDS || !dstIsDS))
         return D3DERR_INVALIDCALL;
 
+      // Depth-stencil copies keep the format (D3D9 converts no depth formats).
+      if (unlikely(srcFormat != dstFormat))
+        return D3DERR_INVALIDCALL;
+
       if (unlikely(srcTextureInfo->Desc()->Discard || dstTextureInfo->Desc()->Discard))
         return D3DERR_INVALIDCALL;
 
@@ -1295,6 +1301,7 @@ namespace dxvk {
     }
 
     if (fastPath) {
+      ProfXfer(needsResolve ? xfer::StretchResolve : xfer::StretchCopy);
       if (needsResolve) {
         static bool s_dsResolveLogged = false;
         if (unlikely(srcIsDS && !s_dsResolveLogged)) {
@@ -1335,6 +1342,49 @@ namespace dxvk {
       }
     }
     else {
+      // The blit renders into the destination.
+      if (unlikely(!(dstImage->info().usage & MtlTextureUsageRenderTarget))) {
+        ProfXfer(xfer::StretchSkip);
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          Logger::warn(str::format("D3D9DeviceEx::StretchRect: ", dstFormat,
+            " destination without render-target usage, not drawn"));
+        }
+        return D3D_OK;
+      }
+      ProfXfer(xfer::StretchBlit);
+      if (stretch)
+        ProfXfer(xfer::BlitScaled);
+      if (stretch && DecodeFilter(Filter) == MtlSamplerFilter::Linear)
+        ProfXfer(xfer::BlitLinear);
+      if (!similar)
+        ProfXfer(xfer::BlitConvert);
+
+      // A multisampled source can't be sampled: resolve it into the
+      // texture's single-sampled resolve image first (as DXVK does).
+      if (srcImage->info().sampleCount > 1u) {
+        ProfXfer(xfer::BlitMsaa);
+        Rc<MtlTexture> resolved = srcTextureInfo->GetResolveImage();
+        if (resolved == nullptr)
+          return D3DERR_INVALIDCALL;
+        MtlResolveRegion region;
+        region.srcSubresource = blitInfo.srcSubresource;
+        region.srcOffset      = MtlOrigin{ 0, 0, 0 };
+        region.dstSubresource = blitInfo.srcSubresource;
+        region.dstOffset      = MtlOrigin{ 0, 0, 0 };
+        region.extent         = srcExtent;
+        EmitCs([
+          cDstImage = resolved,
+          cSrcImage = srcImage,
+          cRegion   = region
+        ] (MtlContext* ctx) {
+          ctx->resolveTexture(cDstImage, cSrcImage, cRegion, cSrcImage->info().format,
+            MtlResolveMode::Average, MtlResolveMode::SampleZero);
+        });
+        srcImage = std::move(resolved);
+      }
+
       MtlImageViewKey dstViewInfo;
       dstViewInfo.viewType = MtlTextureViewType::e2DArray;
       dstViewInfo.usage = MtlTextureUsageRenderTarget;
@@ -1344,7 +1394,6 @@ namespace dxvk {
       dstViewInfo.mipCount = 1;
       dstViewInfo.baseLayer = blitInfo.dstSubresource.baseLayer;
       dstViewInfo.layerCount = blitInfo.dstSubresource.layerCount;
-      dstViewInfo.packedSwizzle = MtlImageViewKey::packSwizzle(dstTextureInfo->GetMapping().Swizzle);
 
       MtlImageViewKey srcViewInfo;
       srcViewInfo.viewType = blitInfo.srcSubresource.layerCount > 1u
@@ -1356,7 +1405,12 @@ namespace dxvk {
       srcViewInfo.mipCount = 1;
       srcViewInfo.baseLayer = blitInfo.srcSubresource.baseLayer;
       srcViewInfo.layerCount = blitInfo.srcSubresource.layerCount;
-      srcViewInfo.packedSwizzle = MtlImageViewKey::packSwizzle(srcTextureInfo->GetMapping().Swizzle);
+      // The source format's component mapping, as when sampling it (X8:
+      // alpha 1; L8 / A8 / R16F...: their channels), folded with the inverse
+      // of the destination's, so that sampling the destination gives what
+      // sampling the source did (A8: alpha lands in the stored red channel).
+      srcViewInfo.swizzle = ResolveBlitSrcMapping(
+        dstTextureInfo->GetMapping().Swizzle, srcTextureInfo->GetMapping().Swizzle);
 
       EmitCs([
         cDstView  = dstImage->createView(dstViewInfo),
@@ -1400,6 +1454,12 @@ namespace dxvk {
     if (unlikely(dstTextureInfo->Desc()->Pool != D3DPOOL_DEFAULT))
       return D3DERR_INVALIDCALL;
 
+    // D3D9 fills render targets and off-screen plain surfaces only: a
+    // texture's surface needs D3DUSAGE_RENDERTARGET (as on Windows).
+    if (unlikely(dstTextureInfo->GetType() != D3DRTYPE_SURFACE
+              && !(dstTextureInfo->Desc()->Usage & D3DUSAGE_RENDERTARGET)))
+      return D3DERR_INVALIDCALL;
+
     if (unlikely(m_dbg.dumping))
       DebugEvent(str::format("COLORFILL ", DebugSurfaceDesc(dstTextureInfo),
         pRect ? " rect" : " full", " color=0x", std::hex, Color, std::dec));
@@ -1409,11 +1469,18 @@ namespace dxvk {
     MtlOrigin offset = MtlOrigin{ 0u, 0u, 0u };
     MtlSize extent = mipExtent;
 
-    if (pRect != nullptr)
+    if (pRect != nullptr) {
+      // Empty, inverted or outside the surface: invalid, nothing filled.
+      if (unlikely(pRect->left < 0 || pRect->top < 0
+                || pRect->right <= pRect->left || pRect->bottom <= pRect->top
+                || uint32_t(pRect->right) > mipExtent.width || uint32_t(pRect->bottom) > mipExtent.height))
+        return D3DERR_INVALIDCALL;
       ConvertRect(*pRect, offset, extent);
+    }
 
     MtlClearValue clearValue = { };
     DecodeD3DCOLOR(Color, clearValue.color.float32);
+    MapClearColor(dstTextureInfo->GetMapping().Swizzle, clearValue.color.float32);
 
     Rc<MtlTexture> image = dstTextureInfo->GetImage();
 
@@ -1433,45 +1500,77 @@ namespace dxvk {
     }
 
     if (image->formatInfo()->flags & MtlFormatFlagCompressed) {
+      // Whole blocks of the solid colour, uploaded like texture data: Metal
+      // has no view that reinterprets block-compressed data. The rect covers
+      // every block it touches.
+      uint8_t block[16];
+      const uint32_t blockBytes = util::encodeSolidBlock(image->info().format, Color, block);
+      if (!blockBytes) {
+        ProfXfer(xfer::FillSkip);
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          Logger::warn(str::format("D3D9DeviceEx::ColorFill: ", dstTextureInfo->Desc()->Format,
+            " not filled (BC4/BC5)"));
+        }
+        return D3D_OK;
+      }
+      const MtlExtent3D blockSize = util::formatBlockSize(image->formatInfo());
+      // Whole blocks only: a rect edge inside a block is invalid, except
+      // where it is the mip's edge (as wined3d checks box dimensions).
+      if (unlikely(uint32_t(offset.x) % blockSize.width || uint32_t(offset.y) % blockSize.height
+                || ((uint32_t(offset.x) + extent.width) % blockSize.width
+                 && uint32_t(offset.x) + extent.width != mipExtent.width)
+                || ((uint32_t(offset.y) + extent.height) % blockSize.height
+                 && uint32_t(offset.y) + extent.height != mipExtent.height)))
+        return D3DERR_INVALIDCALL;
+      ProfXfer(xfer::FillBc);
+
+      const uint32_t x1 = std::min(uint32_t(offset.x) + extent.width,  mipExtent.width);
+      const uint32_t y1 = std::min(uint32_t(offset.y) + extent.height, mipExtent.height);
+      if (uint32_t(offset.x) >= x1 || uint32_t(offset.y) >= y1)
+        return D3D_OK;
+      const uint32_t bx0 = uint32_t(offset.x) / blockSize.width, by0 = uint32_t(offset.y) / blockSize.height;
+      const uint32_t bx1 = (x1 + blockSize.width - 1u) / blockSize.width;
+      const uint32_t by1 = (y1 + blockSize.height - 1u) / blockSize.height;
+      const uint32_t blocks = (bx1 - bx0) * (by1 - by0);
+
+      ThrottleAllocation();
+      D3D9BufferSlice slice = AllocStagingBuffer(MtlDeviceSize(blocks) * blockBytes);
+      for (uint32_t i = 0u; i < blocks; i++)
+        std::memcpy(static_cast<uint8_t*>(slice.mapPtr) + size_t(i) * blockBytes, block, blockBytes);
+
+      // In texels, ending at the mip's edge where its last block is partial.
+      const MtlOrigin copyOffset = MtlOrigin{ int32_t(bx0 * blockSize.width), int32_t(by0 * blockSize.height), 0 };
+      const MtlExtent3D copyExtent = {
+        std::min(bx1 * blockSize.width,  mipExtent.width)  - uint32_t(copyOffset.x),
+        std::min(by1 * blockSize.height, mipExtent.height) - uint32_t(copyOffset.y), 1u };
+
       EmitCs([
-        cImage      = std::move(image),
+        cImage       = std::move(image),
         cSubresource = subresource,
-        cOffset     = offset,
-        cExtent     = extent,
-        cClearValue = clearValue
+        cSlice       = std::move(slice.slice),
+        cOffset      = copyOffset,
+        cExtent      = copyExtent
       ] (MtlContext* ctx) {
-        auto formatInfo = cImage->formatInfo();
-
-        MtlFormat blockFormat = formatInfo->elementSize == 16u
-          ? MtlFormat::RGBA32Float
-          : MtlFormat::RG32Uint;
-
-        MtlTextureUsage usage = MtlTextureUsageShaderWrite | MtlTextureUsagePixelView;
-
-        ctx->ensureTextureUsage(cImage, usage);
-
-        MtlImageViewKey viewKey = { };
-        viewKey.viewType = MtlTextureViewType::e2DArray;
-        viewKey.format = blockFormat;
-        viewKey.usage = MtlTextureUsageShaderWrite;
-        viewKey.aspects = cSubresource.aspects;
-        viewKey.baseMip = cSubresource.mipLevel;
-        viewKey.mipCount = 1u;
-        viewKey.baseLayer = cSubresource.baseLayer;
-        viewKey.layerCount = cSubresource.layerCount;
-
-        Rc<MtlTextureView> view = cImage->createView(viewKey);
-
-        MtlClearValue clearBlock = { };
-        clearBlock.color = util::encodeClearBlockValue(cImage->info().format, cClearValue.color);
-
-        MtlOrigin offset = util::computeBlockOffset(cOffset, util::formatBlockSize(formatInfo));
-        MtlExtent3D extent = util::computeBlockExtent(cExtent, util::formatBlockSize(formatInfo));
-
-        ctx->clearImageView(view, offset, extent,
-          MtlAspectColor, clearBlock);
+        ctx->copyBufferToTexture(cImage, cSubresource, cOffset, cExtent,
+          cSlice.buffer(), cSlice.offset(), 0, 0, MtlFormat::Invalid);
       });
     } else {
+      // Filled by rendering. Render targets and off-screen plain surfaces
+      // (render-target usage where the format renders) are all that get
+      // here; anything else is left alone rather than rendered into.
+      if (unlikely(!(image->info().usage & MtlTextureUsageRenderTarget))) {
+        ProfXfer(xfer::FillSkip);
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          Logger::warn(str::format("D3D9DeviceEx::ColorFill: ", dstTextureInfo->Desc()->Format,
+            " surface without render-target usage not filled"));
+        }
+        return D3D_OK;
+      }
+      ProfXfer(offset == MtlOrigin() && extent == mipExtent ? xfer::FillRt : xfer::FillRect);
       EmitCs([
         cImage      = std::move(image),
         cSubresource = subresource,
@@ -1908,9 +2007,13 @@ namespace dxvk {
           const auto& rtv = rts->GetRenderTargetView(srgb);
 
           if (likely(rtv != nullptr)) {
-            ClearImageView(alignment, offset, extent, rtv, MtlAspectColor, clearValueColor);
-
             D3D9CommonTexture* dstTexture = rts->GetCommonTexture();
+
+            // Formats with a component mapping (A8, A8L8, A4R4G4B4) store
+            // the colour in other channels (util MapClearColor).
+            MtlClearValue rtClear = clearValueColor;
+            MapClearColor(dstTexture->GetMapping().Swizzle, rtClear.color.float32);
+            ClearImageView(alignment, offset, extent, rtv, MtlAspectColor, rtClear);
 
             if (dstTexture->IsAutomaticMip())
               MarkTextureMipsDirty(dstTexture);
@@ -5707,6 +5810,9 @@ namespace dxvk {
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
         Logger::warn(restores);
+      std::string xfers = m_xferStats.take(t);
+      if (!xfers.empty())
+        Logger::warn(xfers);
     }
   }
 

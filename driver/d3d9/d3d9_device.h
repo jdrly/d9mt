@@ -1002,6 +1002,12 @@ namespace dxvk {
       });
     }
 
+    // D9MT_PROFILE: counts a StretchRect / ColorFill path (d3d9_xfer_stats.h).
+    void ProfXfer(xfer::Counter c) {
+      if (unlikely(hitch::g_enabled))
+        m_xferStats.add(c);
+    }
+
     // Present with D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: the auto depth-stencil's
     // contents are undefined afterwards (as wined3d does), so the pass still
     // rendering into it needn't store them.
@@ -1495,6 +1501,7 @@ namespace dxvk {
     stats::Window                   m_statsWindow;
     pace::Window                    m_paceWindow;
     rstore::Window                  m_restoreWindow;
+    xfer::Stats                     m_xferStats;       // D9MT_PROFILE: StretchRect / ColorFill paths
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 
