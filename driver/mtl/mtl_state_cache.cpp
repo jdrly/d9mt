@@ -581,8 +581,10 @@ namespace dxvk {
   MtlStateCache::~MtlStateCache() {
     shutdown();
 
-    for (PrewarmSlot& slot : m_slots)
-      closeThreadHandle(std::exchange(slot.handle, nullptr));
+    if (!this_thread::isInModuleDetachment()) {
+      for (PrewarmSlot& slot : m_slots)
+        closeThreadHandle(std::exchange(slot.handle, nullptr));
+    }
   }
 
 
@@ -684,6 +686,19 @@ namespace dxvk {
   void MtlStateCache::shutdown() {
     if (m_stopped.exchange(true))
       return;
+
+    // Process exit (ExitProcess has already killed every other thread, which
+    // may have died holding m_mutex or the writer's lock): no join, no lock,
+    // no IO. The threads are detached so their objects can go; the marker
+    // stays, which costs at most the in-flight entries next session.
+    if (unlikely(this_thread::isInModuleDetachment())) {
+      m_stop.store(true);
+      for (auto& t : m_prewarmThreads)
+        t.detach();
+      if (m_writer.joinable())
+        m_writer.detach();
+      return;
+    }
 
     // Prewarm first, so the writer sees every failure; then the writer,
     // which drains the ring and writes the file once more.

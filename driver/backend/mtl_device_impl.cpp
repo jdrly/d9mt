@@ -258,6 +258,8 @@ namespace dxvk::backend {
     // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
     // never got that far (e.g. its constructor threw after creating the
     // cache). Idempotent: prewarm threads must stop before the compiler goes.
+    // At process exit (isInModuleDetachment) shutdown() only detaches its
+    // threads: no join or lock on threads ExitProcess already killed.
     if (MtlStateCache* stateCache = this->stateCache())
       stateCache->shutdown();
 
