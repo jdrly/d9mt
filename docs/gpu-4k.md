@@ -439,9 +439,9 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
 
 Branch `perf/gpu-4k`, one commit each. All of them change only `d3d9.dll`. `bridge/` is unchanged, and `winemetal.so` built from the branch is byte-identical to the shipped one (LC_UUID 2BBB585C-5076-3157-9A6A-BAE494B00ACC), so the users' AIR caches stay valid.
 
-| Commit | Change | Switch (restores `main`) |
+| Candidate | Change | Switch (restores `main`) |
 |---|---|---|
-| test | `code_vtf_rt`, `code_srgb_view`, `code_depthtex`, `code_clear_split`, `bench_4k` | — |
+| (tests) | `code_vtf_rt`, `code_srgb_view`, `code_depthtex`, `code_clear_split`, `bench_4k` | — |
 | 2 | `PixelFormatView` only on block-compressed textures | `D9MT_TEX_PFV=1` |
 | 1 | End-of-pass barrier before Fragment\|Blit\|Dispatch, vertex fences for vertex textures | `D9MT_PASS_BARRIER=all` |
 | 3 | A clear that ends a pass skips the pass's store of what it clears | `D9MT_CLEAR_DISCARD=0` |
