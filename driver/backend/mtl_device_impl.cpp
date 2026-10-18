@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "mtl_context_impl.h"
@@ -58,7 +59,16 @@ namespace dxvk::backend {
       }
     }
 
-    uint32_t textureUsage(MtlUsage usage) {
+    // D9MT_TEX_PFV=1: PixelFormatView on every texture, as before (A/B).
+    bool pixelFormatViewOnAll() {
+      static const bool on = [] {
+        const char* v = std::getenv("D9MT_TEX_PFV");
+        return v != nullptr && v[0] == '1';
+      }();
+      return on;
+    }
+
+    uint32_t textureUsage(MtlUsage usage, MtlFormat format) {
       uint32_t result = 0u;
 
       if (usage & MtlUsage::Sampled)
@@ -68,7 +78,14 @@ namespace dxvk::backend {
       if (usage & MtlUsage::DepthStencil)
         result |= WMTTextureUsageRenderTarget;
 
-      result |= WMTTextureUsagePixelFormatView;
+      // PixelFormatView turns off lossless compression on Apple GPUs. d9mt's
+      // views keep the image's format or switch it between linear and sRGB,
+      // with or without a swizzle, none of which needs the option
+      // (MTLTextureUsage.pixelFormatView). Only ColorFill views block-
+      // compressed data as RG32Uint / RGBA32Float, and block-compressed
+      // formats are never losslessly compressed anyway.
+      if (pixelFormatViewOnAll() || (lookupFormatInfo(format)->flags & MtlFormatFlagCompressed))
+        result |= WMTTextureUsagePixelFormatView;
       return result;
     }
 
@@ -146,6 +163,9 @@ namespace dxvk::backend {
       profile.legacy ? ", legacy pools" : "",
       profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
       profile.labels ? ", labels" : ""));
+    Logger::info(pixelFormatViewOnAll()
+      ? "D9MT: PixelFormatView on every texture (D9MT_TEX_PFV=1): no lossless compression"
+      : "D9MT: PixelFormatView only on block-compressed textures (lossless compression on)");
   }
 
   void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
@@ -310,7 +330,7 @@ namespace dxvk::backend {
     texInfo.array_length = arrayLength;
     texInfo.mipmap_level_count = info.mipLevels;
     texInfo.sample_count = info.sampleCount;
-    texInfo.usage = WMTTextureUsage(textureUsage(info.usage));
+    texInfo.usage = WMTTextureUsage(textureUsage(info.usage, info.format));
     texInfo.options = storageOptions(MtlCpuAccess::None);
 
     obj_handle_t handle = MTLDevice_newTexture(m_device.handle(), &texInfo);
@@ -334,7 +354,7 @@ namespace dxvk::backend {
     texture->m_info.mipLevels   = info.mipLevels ? info.mipLevels : 1u;
     texture->m_info.numLayers   = info.arrayLayers ? info.arrayLayers : 1u;
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
-    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
+    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage, info.format));
     texture->residencyDevice = this;
     texture->bytes = textureBytes(info);
     memAdd(info.category, texture->bytes);
