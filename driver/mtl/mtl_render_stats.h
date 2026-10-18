@@ -29,6 +29,11 @@ namespace dxvk::rstats {
     AttNs,           // render-thread CPU time in the attachment optimization (pass decisions, state, restores), ns
     ClearsFolded,    // clears folded into the load action of the pass that renders to the target next
     ClearPasses,     // clears that needed a pass of their own (no pass of that target pending)
+    Splits,          // passes that reopen exactly the attachments the previous pass closed and load them
+    SplitsSubmit,    //   ... with a command buffer submit in between
+    SplitsXfer,      //   ... else with a copy/blit/resolve encoder in between
+    SplitsClear,     //   ... else with a clear in between (the rest: a view change or a vertex fence)
+    SplitBytes,      // attachment bytes those passes load
     Count
   };
 
