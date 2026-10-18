@@ -294,16 +294,22 @@ namespace dxvk {
       ::DeleteFileW(widen(path).c_str());
     }
 
-    /// The guard's small marker file. No flush: it only has to survive the
-    /// process, not the OS (the page cache keeps it).
-    bool writeMarkerFile(const std::string& path, const std::string& text) {
-      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE,
-        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    /// The guard's small files (marker, trip count), replaced atomically:
+    /// written to a temp file, then renamed over the old one, so a crash
+    /// mid-write leaves the old file, never a torn one. No flush: they only
+    /// have to survive the process, not the OS (the page cache keeps them).
+    bool writeSmallFileAtomic(const std::string& path, const std::string& text) {
+      const std::string tmp = path + ".tmp-" + std::to_string(::GetCurrentProcessId()) + "-" + std::to_string(++g_tmpSeq);
+      const std::wstring wtmp = widen(tmp);
+      HANDLE h = ::CreateFileW(wtmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (h == INVALID_HANDLE_VALUE)
         return false;
       DWORD n = 0u;
-      const bool ok = ::WriteFile(h, text.data(), DWORD(text.size()), &n, nullptr) && n == text.size();
+      bool ok = ::WriteFile(h, text.data(), DWORD(text.size()), &n, nullptr) && n == text.size();
       ::CloseHandle(h);
+      ok = ok && ::MoveFileExW(wtmp.c_str(), widen(path).c_str(), MOVEFILE_REPLACE_EXISTING);
+      if (!ok)
+        ::DeleteFileW(wtmp.c_str());
       return ok;
     }
 
@@ -430,12 +436,17 @@ namespace dxvk {
       ::unlink(path.c_str());
     }
 
-    bool writeMarkerFile(const std::string& path, const std::string& text) {
-      FILE* f = std::fopen(path.c_str(), "wb");
+    bool writeSmallFileAtomic(const std::string& path, const std::string& text) {
+      const std::string tmp = path + ".tmp-" + std::to_string(::getpid()) + "-" + std::to_string(++g_tmpSeq);
+      FILE* f = std::fopen(tmp.c_str(), "wb");
       if (!f)
         return false;
-      const bool ok = std::fwrite(text.data(), 1u, text.size(), f) == text.size();
-      return !std::fclose(f) && ok;
+      bool ok = std::fwrite(text.data(), 1u, text.size(), f) == text.size();
+      ok = !std::fclose(f) && ok;
+      ok = ok && !::rename(tmp.c_str(), path.c_str());
+      if (!ok)
+        ::unlink(tmp.c_str());
+      return ok;
     }
 
     // Thread priorities are Win32 (Wine) only; natively the boost is counted.
@@ -778,7 +789,8 @@ namespace dxvk {
     s.boosts     = m_boosts.load();
     s.guardTripped = m_guardTripped.load();
     s.suspects     = m_suspects.load();
-    s.trips        = m_trips;
+    s.trips        = m_loadTrips.load();
+    s.fileDropped  = m_fileDropped.load();
     s.prewarmOff   = m_prewarmOff.load();
     return s;
   }
@@ -826,6 +838,8 @@ namespace dxvk {
 
     makeDirs(parentOf(file));
     removeStaleTemps(file);
+    removeStaleTemps(markerPath());
+    removeStaleTemps(tripsPath());
 
     // Crash-loop guard: the marker outlived the last session, which ended
     // while prewarm jobs were running: a crash, a kill, or simply an exit
@@ -834,14 +848,36 @@ namespace dxvk {
     // them again if they are fine), everything else is kept.
     std::unordered_set<uint64_t> suspects;
 
+    // The trip count survives sessions without prewarm (they can't trip):
+    // only a drained prewarm queue resets it.
+    { std::vector<uint8_t> trips;
+      std::unordered_set<uint64_t> none;
+      if (readAll(tripsPath(), trips))
+        parseMarker(trips, m_trips, none);
+    }
+
     if (fileExists(markerPath())) {
       std::vector<uint8_t> marker;
+      uint32_t markerTrips = 0u;
       readAll(markerPath(), marker);
-      parseMarker(marker, m_trips, suspects);
-      m_trips++;
+      parseMarker(marker, markerTrips, suspects);
+      m_trips = std::max(m_trips, markerTrips) + 1u;
       m_guardTripped.store(true);
+      writeSmallFileAtomic(tripsPath(), str::format("trips ", m_trips, "\n"));
       removeFile(markerPath());
+
+      // Persistent trips the suspects don't explain (a crash on another
+      // thread, a torn marker): give up on this file. Nothing left to
+      // prewarm means nothing left to trip on; this session records afresh.
+      if (m_trips >= GuardDropTrips) {
+        m_fileDropped.store(true);
+        suspects.clear();
+        removeFile(file);
+        removeFile(tripsPath());
+      }
     }
+
+    m_loadTrips.store(m_trips);
 
     std::vector<uint8_t> data;
     readAll(file, data);
@@ -889,15 +925,24 @@ namespace dxvk {
     }
 
     if (m_guardTripped.load()) {
-      // A session without prewarm can't trip the guard: after a few in a
-      // row (a crash the suspects didn't explain, or a player who keeps
-      // quitting during the prewarm), skip it once. The file is kept.
-      m_prewarmOff.store(m_trips >= GuardSkipTrips);
-      Logger::warn(str::format("STATECACHE the last session ended while prewarm builds were running"
-        " (crash, kill, or exit without releasing the device; ", m_trips, " in a row): dropped ",
-        m_suspects.load(), " in-flight entries, kept the rest",
-        m_prewarmOff.load() ? "; no prewarm this session" : ""));
+      // A session without prewarm can't trip the guard: at GuardSkipTrips
+      // in a row (a crash the suspects didn't explain, or a player who keeps
+      // quitting during the prewarm), skip it once; the count carries on,
+      // and at GuardDropTrips the file was dropped above.
+      m_prewarmOff.store(m_trips == GuardSkipTrips);
+      if (m_fileDropped.load()) {
+        Logger::warn(str::format("STATECACHE ", m_trips, " sessions in a row ended while prewarm"
+          " builds were running: dropped ", m_config.displayPath, "; recording afresh"));
+      } else {
+        Logger::warn(str::format("STATECACHE the last session ended while prewarm builds were running"
+          " (crash, kill, or exit without releasing the device; ", m_trips, " in a row): dropped ",
+          m_suspects.load(), " in-flight entries, kept the rest",
+          m_prewarmOff.load() ? "; no prewarm this session" : ""));
+      }
     }
+
+    if (m_fileDropped.load())
+      m_trips = 0u;
 
     m_session = r.session + 1u;
     const uint32_t capped = m_db.applyCap(m_config.maxEntries);
@@ -1216,7 +1261,7 @@ namespace dxvk {
       }
     }
 
-    m_markerOnDisk = writeMarkerFile(markerPath(), text) || m_markerOnDisk;
+    m_markerOnDisk = writeSmallFileAtomic(markerPath(), text) || m_markerOnDisk;
   }
 
 
@@ -1234,6 +1279,12 @@ namespace dxvk {
 
     removeFile(markerPath());
     m_markerOnDisk = false;
+
+    // A prewarm queue drained without the process dying: the trips are over.
+    if (m_trips) {
+      removeFile(tripsPath());
+      m_trips = 0u;
+    }
   }
 
 

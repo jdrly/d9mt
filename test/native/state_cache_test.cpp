@@ -1344,8 +1344,9 @@ static void testCrashGuard() {
   }
 
   // Three sessions in a row ended during the prewarm: this one runs
-  // without prewarm (so it can't trip), keeps the file, and the next
-  // session (no marker left) prewarms normally again.
+  // without prewarm (so it can't trip) and keeps the file; the next one
+  // (no marker left) prewarms again with the count still at 3, and its
+  // drained queue resets the count.
   {
     writeFile(marker, markerText(2u, { }));
     Workload w(4u, 20u, 60u, 11u);
@@ -1370,7 +1371,8 @@ static void testCrashGuard() {
     CHECK(sc->waitPrewarmIdle(10000u));
     sc->shutdown();
     const auto s = sc->stats();
-    CHECK(!s.guardTripped && s.trips == 0u && s.built == 60u);
+    CHECK(!s.guardTripped && s.trips == 3u && s.built == 60u);
+    CHECK(!exists(cfg.file + ".trips"));
   }
 
   // A trip counter carries over while sessions keep ending mid-prewarm:
@@ -1419,6 +1421,165 @@ static void testCrashGuard() {
     CHECK(beA.lastPrewarm != nullptr && beA.lastPrewarm->sawFile.load());
     a->shutdown();
     b->shutdown();
+  }
+}
+
+// A crash the in-flight list doesn't catch (another thread, a torn marker)
+// that happens in every session with a prewarm: the trip count survives
+// the session without prewarm, and at 6 the file is dropped; after that
+// things are normal again. Also: a drain resets the count, and a crash in
+// the marker-write window leaves the old marker intact.
+static void testCrashChain() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 1u);
+  const std::string marker = cfg.file + ".prewarm", trips = cfg.file + ".trips";
+  const auto noSuspects = [] (uint32_t t) {
+    const std::string s = "d9mt-prewarm 1\ntrips " + std::to_string(t) + "\n";
+    return std::vector<uint8_t>(s.begin(), s.end());
+  };
+
+  { Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+  }
+
+  // One session: its prewarm "crashes" (blocked, then the process goes
+  // without a drain: a clean shutdown here, then the marker it would have
+  // left is planted). Returns the stats as loaded.
+  auto crashingSession = [&] (bool expectPrewarm) {
+    Workload w(4u, 20u, 60u, 21u);
+    std::atomic<bool> gate = { false }, started = { false };
+    FakeBackend be;
+    be.gate = &gate;
+    be.started = &started;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    if (expectPrewarm) {
+      for (int i = 0; i < 5000 && !started.load(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      CHECK(started.load());
+    }
+    const auto s = sc->stats();
+    std::thread releaser([&gate] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      gate = true;
+    });
+    sc->shutdown();
+    releaser.join();
+    if (expectPrewarm)
+      writeFile(marker, noSuspects(0u));   // the crash left its marker
+    return s;
+  };
+
+  writeFile(marker, noSuspects(0u));       // session 0 crashed during its prewarm
+  auto s = crashingSession(true);           // 1
+  CHECK(s.guardTripped && s.trips == 1u && !s.prewarmOff && s.entries == 60u);
+  s = crashingSession(true);                // 2
+  CHECK(s.trips == 2u && !s.prewarmOff);
+  s = crashingSession(false);               // 3: no prewarm, so no crash, no marker left
+  CHECK(s.trips == 3u && s.prewarmOff && s.entries == 60u && !exists(marker) && exists(trips));
+  s = crashingSession(true);                // count kept across the skip session
+  CHECK(!s.guardTripped && s.trips == 3u && !s.prewarmOff && s.entries == 60u);
+  s = crashingSession(true);                // 4
+  CHECK(s.trips == 4u && !s.prewarmOff && !s.fileDropped);
+  s = crashingSession(true);                // 5
+  CHECK(s.trips == 5u && !s.fileDropped);
+
+  { // 6: the file is dropped; nothing to prewarm, so nothing to trip on.
+    Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(5000u));
+    s = sc->stats();
+    CHECK(s.guardTripped && s.trips == 6u && s.fileDropped && s.entries == 0u && s.built == 0u);
+    CHECK(!exists(trips) && !exists(marker));
+    w.render(sc.ptr(), be);                 // records afresh
+    sc->shutdown();
+    CHECK(sc->stats().entries == 60u);
+  }
+
+  { // Normal again: prewarm, drain, no trips.
+    Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    sc->shutdown();
+    s = sc->stats();
+    CHECK(!s.guardTripped && s.trips == 0u && s.built == 60u);
+  }
+
+  { // A drained queue resets a count left by earlier sessions.
+    writeFile(trips, noSuspects(4u));
+    Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    for (int i = 0; i < 1000 && exists(trips); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().trips == 4u && !exists(trips));
+    sc->shutdown();
+  }
+
+  { // A crash while the marker was being rewritten: the temp file is torn,
+    // the marker itself is the previous, complete one.
+    std::vector<Entry> onDisk;
+    auto d = readFile(cfg.file);
+    parse(d.data(), d.size(), Sig, onDisk);
+    std::string m = "d9mt-prewarm 1\ntrips 0\n";
+    char hex[20];
+    std::snprintf(hex, sizeof(hex), "%016llx\n", (unsigned long long)identityHash(onDisk[5]));
+    m += hex;
+    writeFile(marker, std::vector<uint8_t>(m.begin(), m.end()));
+    writeFile(marker + ".tmp-999-1", std::vector<uint8_t>(m.begin(), m.begin() + 9));
+
+    Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    sc->shutdown();
+    s = sc->stats();
+    CHECK(s.guardTripped && s.suspects == 1u && s.trips == 1u && s.built == 59u);
+    unlink((marker + ".tmp-999-1").c_str());
+  }
+
+  { // The marker is replaced atomically: at no point is it empty or torn
+    // while prewarm jobs keep rewriting it.
+    Workload w(4u, 20u, 60u, 21u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, configFor(dir, 2u));
+    std::atomic<bool> stop = { false };
+    std::atomic<uint32_t> torn = { 0u }, seen = { 0u };
+    std::thread reader([&] {
+      while (!stop.load()) {
+        auto d = readFile(marker);
+        if (!d.empty()) {
+          seen++;
+          const std::string t(d.begin(), d.end());
+          if (t.compare(0u, 15u, "d9mt-prewarm 1\n") || t.find("trips ") == std::string::npos || t.back() != '\n')
+            torn++;
+        }
+      }
+    });
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    stop = true;
+    reader.join();
+    sc->shutdown();
+    CHECK(torn.load() == 0u);
   }
 }
 
@@ -1562,6 +1723,7 @@ int main(int argc, char** argv) {
   testKeyValidator();
   testLoadValidation();
   testCrashGuard();
+  testCrashChain();
   testBoost();
   testFailedPrewarmNotAdopted();
 

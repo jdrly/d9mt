@@ -160,8 +160,9 @@ namespace dxvk {
       uint64_t invalid = 0u, boosts = 0u;
       bool     guardTripped = false;   // the last session ended during prewarm builds
       uint64_t suspects = 0u;          // entries dropped for it (in flight then)
-      uint32_t trips = 0u;             // consecutive sessions that ended that way
+      uint32_t trips = 0u;             // consecutive sessions that ended that way (at load)
       bool     prewarmOff = false;     // GuardSkipTrips reached: no prewarm this session
+      bool     fileDropped = false;    // GuardDropTrips reached: the file was dropped
     };
 
     Stats stats();
@@ -228,18 +229,23 @@ namespace dxvk {
     std::atomic<bool>     m_guardTripped = { false };
     std::atomic<uint64_t> m_suspects = { 0u };
     std::atomic<bool>     m_prewarmOff = { false };
+    std::atomic<bool>     m_fileDropped = { false };
+    std::atomic<uint32_t> m_loadTrips = { 0u };
 
     // Crash-loop guard: <file>.prewarm lists the entries whose prewarm jobs
-    // are in flight (rewritten at every job start, removed when the queue
-    // drains and at a clean shutdown) and how many sessions in a row ended
-    // during the prewarm. Found at load: the last session ended (crash,
-    // kill, or exit without releasing the device) during the prewarm; only
-    // the listed entries are dropped. After GuardSkipTrips such sessions in
-    // a row, one session runs without prewarm (and so can't trip).
+    // are in flight (rewritten atomically at every job start, removed when
+    // the queue drains and at a clean shutdown). Found at load: the last
+    // session ended (crash, kill, or exit without releasing the device)
+    // during the prewarm; only the listed entries are dropped, and the trip
+    // count in <file>.trips goes up. Only a prewarm queue that drains resets
+    // that count (sessions without prewarm leave it alone), so a crash the
+    // list doesn't catch can't repeat forever: at GuardSkipTrips one session
+    // runs without prewarm, at GuardDropTrips the file is dropped.
     static constexpr uint32_t     GuardSkipTrips = 3u;
+    static constexpr uint32_t     GuardDropTrips = 6u;
     dxvk::mutex                   m_markerMutex;
     bool                          m_markerOnDisk = false;
-    uint32_t                      m_trips = 0u;   // set by load() before any prewarm job
+    uint32_t                      m_trips = 0u;   // m_markerMutex; set by load() before any prewarm job
 
     // Per prewarm thread: the job in flight (for the marker) and the PSO it
     // is building (for boostPrewarm()).
@@ -270,6 +276,7 @@ namespace dxvk {
     void writeMarker();
     void clearMarkerIfDrained();
     std::string markerPath() const { return m_config.file + ".prewarm"; }
+    std::string tripsPath() const { return m_config.file + ".trips"; }
 
     double seconds() const {
       return std::chrono::duration<double>(Clock::now() - m_t0).count();
