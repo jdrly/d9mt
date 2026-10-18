@@ -48,15 +48,30 @@ namespace dxvk::backend {
   static_assert(WMTPrimitiveTopologyClassTriangle == 3, "psoStateValid() topology range");
 
   uint64_t RenderPsoKey::signature() {
+    // Every field and sub-field offset: a field moving inside the key, or
+    // inside an attribute/layout/color record, changes the signature.
     const uint64_t layout[] = {
       sizeof(RenderPsoKey),
+      offsetof(RenderPsoKey, vsCookie),    offsetof(RenderPsoKey, fsCookie),
       offsetof(RenderPsoKey, attrs),       offsetof(RenderPsoKey, layouts),
       offsetof(RenderPsoKey, attrCount),   offsetof(RenderPsoKey, layoutCount),
       offsetof(RenderPsoKey, colors),      offsetof(RenderPsoKey, colorCount),
       offsetof(RenderPsoKey, sampleCount), offsetof(RenderPsoKey, topologyClass),
       offsetof(RenderPsoKey, alphaToCoverage),
       offsetof(RenderPsoKey, depthFormat), offsetof(RenderPsoKey, stencilFormat),
-      sizeof(PsoVertexAttr), sizeof(PsoVertexLayout), sizeof(PsoColorAttachment),
+      std::size(RenderPsoKey{}.attrs), std::size(RenderPsoKey{}.layouts), std::size(RenderPsoKey{}.colors),
+      sizeof(PsoVertexAttr),
+      offsetof(PsoVertexAttr, format),        offsetof(PsoVertexAttr, offset),
+      offsetof(PsoVertexAttr, bufferIndex),   offsetof(PsoVertexAttr, pad),
+      sizeof(PsoVertexLayout),
+      offsetof(PsoVertexLayout, stride),      offsetof(PsoVertexLayout, stepFunction),
+      offsetof(PsoVertexLayout, pad),
+      sizeof(PsoColorAttachment),
+      offsetof(PsoColorAttachment, pixelFormat),    offsetof(PsoColorAttachment, blendEnabled),
+      offsetof(PsoColorAttachment, writeMask),      offsetof(PsoColorAttachment, rgbSrcFactor),
+      offsetof(PsoColorAttachment, rgbDstFactor),   offsetof(PsoColorAttachment, rgbBlendOp),
+      offsetof(PsoColorAttachment, alphaSrcFactor), offsetof(PsoColorAttachment, alphaDstFactor),
+      offsetof(PsoColorAttachment, alphaBlendOp),
       kPsoKeyMappingVersion,
     };
     return statecache::fnv1a(layout, sizeof(layout));

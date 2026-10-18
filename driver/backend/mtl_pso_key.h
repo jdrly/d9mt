@@ -78,16 +78,22 @@ namespace dxvk::backend {
     }
 
     /// Layout and mapping signature for the state cache file: changes
-    /// whenever a field moves or kPsoKeyMappingVersion is bumped. Defined in
-    /// mtl_pso_cache.cpp.
+    /// whenever a field (or a sub-field) moves or kPsoKeyMappingVersion is
+    /// bumped. Defined in mtl_pso_cache.cpp.
     static uint64_t signature();
   };
 
   /// Bump in the same commit as any change to what the key's derived bytes
-  /// mean: attributeFormat(), the D3DFORMAT -> Metal format table, the blend
-  /// factor/op mapping, kVertexBufferBaseIndex. Stale state cache entries are
-  /// dropped instead of being prewarmed for nothing.
-  constexpr uint32_t kPsoKeyMappingVersion = 1u;
+  /// mean, so stale state cache entries are dropped instead of prewarmed:
+  ///  - attributeFormat() (MtlFormat -> Metal vertex format) and
+  ///    DecodeDecltype() (D3DDECLTYPE -> MtlFormat);
+  ///  - the attribute order: one attribute per VS input register, in the
+  ///    order BindInputLayout() builds them from the shader's inputs;
+  ///  - the D3DFORMAT -> MtlFormat table (render target pixel formats);
+  ///  - the blend factor/op and write mask mapping;
+  ///  - kVertexBufferBaseIndex, NullStreamIdx (the null stream's binding),
+  ///    and the layout's `pad` byte carrying the Metal buffer index.
+  constexpr uint32_t kPsoKeyMappingVersion = 2u;
 
   /// Metal buffer indices of vertex streams: kVertexBufferBaseIndex (3) +
   /// stream 0..15, and the null stream (NullStreamIdx = 16) at 19.
