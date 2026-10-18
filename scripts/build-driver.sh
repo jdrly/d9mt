@@ -212,6 +212,8 @@ INSTRUMENT_EXCLUDE="std::,dxvk::Rc,_ZNSt,_ZNKSt,definedEv,MtlBufferSlice"
 # populated DXVK-3.0-uptsream/subprojects/dxbc-spirv submodule.
 DXBC="$V2/third_party/dxbc-spirv"
 FLAGS+=(-I"$DXBC")
+# d3d9.dll compiles the sm3 converter: never without patches/dxbc-spirv.
+bash "$V2/scripts/check-deps.sh"
 # airlib/ holds the pure-C AIR compile ABI header (d9mtair.h) that the real
 # shader module (d3d9_shader_compiler.cpp) marshals into. Header-only include;
 # the D9MTAir* thunk symbols resolve through the winemetal import lib below.
