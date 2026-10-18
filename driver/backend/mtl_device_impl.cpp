@@ -255,6 +255,12 @@ namespace dxvk::backend {
   }
 
   MtlDeviceImpl::~MtlDeviceImpl() {
+    // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
+    // never got that far (e.g. its constructor threw after creating the
+    // cache). Idempotent: prewarm threads must stop before the compiler goes.
+    if (MtlStateCache* stateCache = this->stateCache())
+      stateCache->shutdown();
+
     m_compileWorkers = nullptr;
 
     /* Retirement callbacks reach into the residency tracker, which is
