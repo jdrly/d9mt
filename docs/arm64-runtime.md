@@ -182,4 +182,129 @@ every thread still runs (device destruction, and a few seconds after the last
 new PSO on a worker thread, next to the existing every-256 flush); sweep
 stale `.tmp`/`.metallib` files from the PSO directory at startup.
 
-Timings: pending, measured on an idle machine.
+### Floating point, libm and buffer pages (`PROBES=1`, `code_vbsizes`)
+
+`scripts/run-hash-tests.sh` with `PROBES=1` runs `test/fpenv/` on each
+engine: an x64 caller sets MXCSR and calls a DLL built for x64 and, on arm64
+Wine, for ARM64EC; and the x87 control word and MXCSR around `CreateDevice`.
+
+- **MXCSR → FPCR at the x64 → ARM64EC call: exact.** For round to nearest,
+  down, up, toward zero, FTZ, DAZ and FTZ+DAZ, the ARM64EC callee sees FPCR
+  with the matching RMode, FZ (bit 24) and, for DAZ, FIZ (bit 0, FEAT_AFP),
+  and its results (1/3 and -1/3 bits, `lrintf(±2.5)`, a denormal input, a
+  denormal result) are bit-identical to the x64 callee's under Rosetta (CX26)
+  and under FEX.
+- **Back the other way:** a rounding-mode change made by the ARM64EC callee
+  does not reach the caller's MXCSR (an x64 callee's does, on both engines).
+  MXCSR's control bits are nonvolatile in the Windows x64 ABI, so a callee
+  must not leave them changed anyway; d9mt sets no FP mode.
+- **x87 control word: a real difference.** `CreateDevice` without
+  `D3DCREATE_FPU_PRESERVE` sets the caller's x87 FPU to 24-bit precision
+  (`D3D9DeviceEx::SetupFPU`, as Windows' d3d9 does): `037f` → `007f` with the
+  x64 d3d9 on CX26 and under FEX. The ARM64EC d3d9 can't execute `fldcw`
+  (the x87 state belongs to the emulator; the code is `#if`'d out on
+  `main` too, from DXVK), so it stays `037f`: the game's x87 code, if any,
+  computes with 64-bit mantissas instead of 24. x64 code normally uses SSE
+  for float math (the MXCSR side matches), so this only matters for an x64
+  game that still uses x87 and depends on single precision; SWTOR's x87 use
+  is unknown. A fix would need an x64 helper the ARM64EC d3d9 calls through
+  the emulator (or FEX's x87 state) — not done.
+- **MXCSR exception flags:** after `CreateDevice` CX26 shows the precision
+  flag set (`1fa0`), FEX doesn't (`1f80`); sticky flags only, no effect on
+  results.
+- **`cosf` (light cone angles, `d3d9_state.h`):** both d3d9 builds import it
+  from ucrtbase. Every 64th float in [0, 2π] (16,983,104 values) gives
+  bit-identical results from CX26's x64 ucrtbase (Rosetta), Wine 11.19's x64
+  ucrtbase under FEX and its ARM64EC ucrtbase: 0 differences
+  (`test/fpenv/cosf_*.c`, `ulpcmp.c`). Per call: 2.7 ns Rosetta, 5.4 ns FEX,
+  2.3 ns ARM64EC.
+- **`newBufferWithBytesNoCopy` on 16K pages:** CPU-visible buffers are
+  VirtualAlloc'd memory (64K-aligned) handed to Metal at their exact size,
+  so their lengths are arbitrary. `test/code_vbsizes.c` draws the last
+  triangle of vertex buffers of 60 B to 1 MiB + 4116 B (around 4K, 16K and
+  64K boundaries) through the default write-only, default read-write,
+  dynamic and managed paths: 52 of 52 correct on CX26 and on arm64 Wine with
+  either d3d9, same final hash.
+
+### Timings
+
+`scripts/run-hash-tests.sh` `BENCH=1` (`test/bench_draws.c`,
+`test/bench_shaders.c`), M5 Max, macOS 27.0.1, 2026-10-18 between 05:00
+and 08:00: five configurations interleaved round by round, 4 rounds each,
+median (min-max). A run was repeated when the 1-minute load reached 6 or a
+compiler ran during it (sampled every 5 s); load during the kept runs 1.1
+to 4.7. Other agents' Wine processes were running during part of the time
+(not avoidable; the ranges stay tight). The display was asleep: frame times
+are CPU + GPU per frame (each frame waits for an event query, no Present),
+not presented frames. Configurations: CX26 under Rosetta (the shipping
+setup, x64 d3d9); arm64 Wine + FEX with the ARM64EC d3d9; with the x64 d3d9
+under FEX, FEX's default ("fast") TSO, TSO off (`FEX_TSOENABLED=0`, an
+upper bound, unsafe for real use) and neutron's strict mode (vector and
+memcpy TSO, no half-barriers). The test programs themselves are x64 (under
+Rosetta or FEX) in every configuration, like a game.
+
+Draw loop: what the game thread pays per draw (one VS constant update, one
+PS constant update, one render state change, one draw), ns:
+
+| draws/frame | CX26 | ARM64EC | x64 FEX | x64 FEX TSO off | x64 FEX strict |
+|---|---|---|---|---|---|
+| 100 | 98 (95-104) | 97 (94-101) | 139 (138-145) | 116 (110-118) | 162 (156-173) |
+| 1000 | 81 (80-85) | 86 (81-91) | 115 (112-120) | 96 (90-101) | 140 (132-144) |
+| 3000 | 77 (76-78) | 79 (78-81) | 110 (108-112) | 86 (86-87) | 131 (130-131) |
+
+Whole process CPU per draw (every thread: d9mt's CS thread, Metal,
+the emulator), and frame time at 3000 draws:
+
+| 3000 draws/frame | CX26 | ARM64EC | x64 FEX | x64 FEX TSO off | x64 FEX strict |
+|---|---|---|---|---|---|
+| CPU ns/draw | 776 (661-842) | 489 (483-497) | 613 (572-697) | 516 (511-531) | 766 (636-797) |
+| frame median ms | 1.25 (0.97-1.49) | 0.80 (0.79-0.80) | 0.84 (0.84-1.46) | 0.81 (0.80-0.81) | 1.47 (0.95-1.49) |
+| frame p99 ms | 1.52 (1.10-1.57) | 0.82 (0.81-0.82) | 1.51 (1.02-1.52) | 0.83 (0.83-0.89) | 1.53 (1.48-1.53) |
+
+Shader compile, 313 generated SM3 pixel shaders, each compiled
+synchronously (no workers, AIR cache or PSO archives) and drawn once,
+ms per shader:
+
+| | CX26 | ARM64EC | x64 FEX | x64 FEX TSO off | x64 FEX strict |
+|---|---|---|---|---|---|
+| median | 2.59 (2.47-2.64) | 1.15 (1.11-1.19) | 1.49 (1.41-1.55) | 1.33 (1.27-1.35) | 2.23 (2.17-2.27) |
+| p90 | 3.37 (3.32-3.40) | 1.74 (1.57-1.95) | 2.57 (2.49-2.65) | 2.28 (2.23-2.33) | 2.98 (2.93-3.16) |
+| total | 886 | 390 | 609 | 543 | 777 |
+
+- **The ARM64EC d3d9 is the fastest configuration**, not just faster than
+  the x64 d3d9 under FEX: draw-loop cost equal to Rosetta's (within 2-4
+  ns), 37% less process CPU per draw than Rosetta, frames at 3000 draws 36%
+  shorter, shader compiles 56% faster than Rosetta, 23% faster than the x64
+  d3d9 under FEX.
+- **The x64 d3d9 under FEX** (the "drop in the unmodified DLL" route) works
+  but costs 40-45% more on the game thread per draw than Rosetta.
+- **TSO**: on the x64 d3d9 under FEX, FEX's default TSO costs 18-28% of
+  the draw loop against no TSO and 12% of the shader compile; strict mode
+  another 19-22% and 49%. With the ARM64EC d3d9 none of that applies to the
+  driver: only the game's own code pays TSO (software TSO, no entitlement for
+  the hardware one).
+- These are microbenchmarks of the driver path. A game's own CPU work
+  (all x64, all under FEX's TSO) is a separate cost: the `PE=1` integer
+  loops ran 39 s under FEX, 36.7 s under Rosetta, 27 s as ARM64EC.
+- Still pending: presented frame times (needs the display awake), and SWTOR
+  itself (its own code under FEX).
+
+Methodology problems found on the way (all fixed in the programs/runner):
+- zsh runs background jobs at nice 5 (`BG_NICE`): launch with
+  `setopt no_bg_nice`.
+- With the display asleep, d9mt sees the window hidden and throttles
+  Present to 30 fps, and nextDrawable can block: `bench_shaders` no longer
+  presents, `bench_draws` waits for an event query instead.
+- Wine on macOS has only process CPU times (from `times()`, 10 ms ticks):
+  CPU is taken once over the whole run.
+- **A hot `GetData(D3DGETDATA_FLUSH)` spin** — a pattern games use — showed
+  a d9mt problem: with the ARM64EC d3d9 (native d3d9, emulated polling, so
+  many more polls per second) d9mt's CS thread used 2.3 s of CPU per 3 s
+  against 0.45 s with the x64 d3d9, process CPU per draw at 100 draws/frame
+  was 4x higher and the p99 frame ~9 ms against 0.3-3 ms; in the shader
+  benchmark it gave bimodal runs (1.1 or 2.4-7.9 ms median, p90 at a
+  constant ~10.5 ms) that an extra environment variable switched on and
+  off. Not the flush tracker (it doesn't submit without new chunks) and not
+  `sched_yield` (one call per run); not found yet. `bench_draws ...
+  spinflush` reproduces it. Both benchmarks now poll every 20 us. Worth a
+  look on `main`: the same code runs on x86, only the polling rate differs.
