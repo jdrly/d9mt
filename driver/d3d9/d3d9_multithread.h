@@ -4,6 +4,7 @@
 #include "d3d9_hitch.h"
 #include "d3d9_stats.h"
 #include "d3d9_pace.h"
+#include "d3d9_xfer_stats.h"
 
 namespace dxvk {
 

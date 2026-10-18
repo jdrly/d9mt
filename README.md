@@ -55,7 +55,11 @@ winemetal.so  ← THIS PROJECT (x86_64 Mach-O, Wine's unix side):
   embedded metallib.
 - **Caches**: compiled shaders go to a persistent AIR cache and pipelines to
   Metal 4 pipeline archives, so a second visit to an area is much smoother
-  than the first. Shaders and pipelines compile on worker threads.
+  than the first. Shaders and pipelines compile on worker threads. A
+  pipeline state cache records which pipelines the game used and rebuilds
+  them in the background in later sessions, as soon as the game has created
+  their shaders, including after a d9mt or macOS update that invalidates the
+  other caches ([docs/state-cache.md](docs/state-cache.md)).
 - **Memory profiles** pick pool sizes and reported video memory from the
   Mac's RAM (8/16/24 GB Macs get smaller pools).
 - This is research-grade software for one platform (Apple Silicon + a
@@ -93,7 +97,8 @@ and falls back to Compat where Metal rejects it (MSL 4.1 on macOS 26).
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 
-# 1. Fetch dxbc-spirv, pinned to c5c1a5b9 (-> third_party/dxbc-spirv).
+# 1. Fetch dxbc-spirv, pinned to c5c1a5b9, and apply patches/dxbc-spirv
+#    (-> third_party/dxbc-spirv). build-driver.sh refuses an unpatched copy.
 scripts/fetch-deps.sh
 
 # 2. Build LLVM 15.0.7 as static x86_64 libs (-> toolchains/llvm-x86_64).
@@ -155,6 +160,25 @@ clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp
 clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 clang++ -std=c++17 -I driver/d3d9 test/native/pace_test.cpp -o /tmp/pt && /tmp/pt
 ```
+
+`scripts/test-state-cache.sh` runs the pipeline state cache tests (file
+format, corruption, versions, cap, record → load → prewarm with a fake
+backend), plain and under ThreadSanitizer, plus the render-thread cost of
+recording; it needs DXVK's native headers like `test-compile-mt.sh`.
+`scripts/run-statecache-bench.sh` runs `test/code_statecache.c`, a synthetic
+SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
+directory.
+
+`scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
+patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
+`ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
+scripts/sm3_hazard_test.py build/driver-x64/d3d9.dll [<dir of .asm/.bin>...]`
+(corpora from `scripts/sm3_corpus.py gen`). `scripts/sm3_ref_test.py` (same
+environment) renders `crs`/`setp` with every write mask, modifier and
+predicate and packed I/O declarations on the GPU and compares the results
+with a scalar model of the D3D9 semantics; `--strict` uses
+`d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
+every corpus `crs` against a `mul`/`mul`/`add` expansion.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
@@ -247,6 +271,7 @@ The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
 | `d9mt.resourceLabels` | `False` | label Metal resources for Xcode's GPU tools; env `D9MT_LABELS` |
 | `d9mt.pipelineWaitBudgetMs` | `-1` (off: wait as long as it takes) | most the render thread waits per frame for shaders/pipelines still compiling before it skips the draws that need them (see below); `0` = never wait (= `D9MT_ASYNC_SKIP=1`); max `10000`; env `D9MT_PSO_WAIT_MS` |
 | `d9mt.attachmentOpt` | `True` | attachment load/store optimization (see below); `D9MT_NO_ATTACHMENT_OPT=1` turns it off |
+| `d9mt.stateCache` | `True` | pipeline state cache: record the pipelines the game uses, rebuild them in the background in later sessions ([docs/state-cache.md](docs/state-cache.md)); `D9MT_STATE_CACHE=0` turns it off too |
 
 **Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
 to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
@@ -324,6 +349,9 @@ passes have their own load/store rules).
 |---|---|---|
 | `D9MT_AIR_CACHE` | on | persistent compiled-shader cache (`<user cache dir>/d9mt/air-cache.sqlite3`); `0` turns it off, a path relocates it |
 | `D9MT_PSO_ARCHIVE` / `D9MT_PSO_ARCHIVE_DIR` | on | Metal 4 pipeline archives in `<user cache dir>/d9mt/pso/` (last 8 sessions); `0` turns them off, `_DIR` relocates them |
+| `D9MT_STATE_CACHE` | `~/Library/Caches/d9mt/state/<exe>.d9mtstate` | pipeline state cache file; `0` turns the cache off, a Unix directory or `.d9mtstate` file path relocates it. Launchers should set it to `"$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"`, next to the AIR cache and PSO archives. Without it, d9mt uses that dir if Wine passes `TMPDIR` (CrossOver's doesn't), else `~/Library/Caches/d9mt/state` (home from `WINEHOMEDIR`), else the cache stays off (logged) |
+| `D9MT_STATE_CACHE_MAX` | `1024` | most pipelines kept per game (least recently used dropped first), `64`–`16384`; every session's PSO archive holds every prewarmed pipeline, ≈ 45 KB each |
+| `D9MT_STATE_CACHE_THREADS` | `2` | background prewarm threads (lowest priority, the second one only for long queues), `0`–`4`; `0` records and loads but never prewarms |
 | `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
 | `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
@@ -349,6 +377,8 @@ passes have their own load/store rules).
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |
 | `D9MT_GPUCAPTURE=<n>\|trigger`, `D9MT_GPUCAPTURE_COMMITS` | Xcode GPU trace to `/tmp/d9mt.gputrace` |
 | `D9MT_PSO_FLUSH_EVERY` | pipelines between archive flushes (default 256) |
+| `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1`, `D9MT_STATE_CACHE_TEST_FAIL_PREWARM=1` | test builds only (`STATE_CACHE_TESTING=1 scripts/build-driver.sh`): skip the state cache's content validation to test its crash-loop guard with a real Metal crash (`scripts/forge-statecache.py`); make prewarm builds fail after 150 ms |
+| `STATECACHE` log lines (info) | `load` (file, entries, how many can be prewarmed, `invalid=` entries dropped by content validation, a warning if the last session ended during prewarm builds (crash, kill, or exit without releasing the device): only the entries in flight then are dropped), `prewarm` (each time the background queue drains: built, already built by a draw, failed, time paused for the render thread), `use` (every 60 s and at the end: PSO misses served by a finished prewarm `hits`, by a still-building one `late`, not prewarmed `misses`, new records, the build time the hits saved, `boosts`: prewarm threads raised to normal priority for a late hit), `write` |
 | `D9MT_DEFERRED`, `D9MT_XFER_HOIST` | experimental: deferred render passes; hoisting vertex/index uploads into an earlier command buffer |
 | `D9MT_NO_SAMEVIEW_SKIP`, `D9MT_NO_PSOMRU`, `D9MT_NOPSOCACHE`, `D9MT_NO_PASSMERGE`, `D9MT_NO_RULE_{B,C,E,F}`, `D9MT_NOCOLORCLEAR`, `D9MT_NO_AB`, `D9MT_RTSKIP`, `D9MT_STALL_PACE=0` | A/B escape hatches that turn individual optimizations off |
 | `PROFILE_INSTRUMENT=1` (build) + `D9MT_PROFILE_INSTRUMENT=1` | per-function CPU profiler build |
@@ -371,7 +401,8 @@ passes have their own load/store rules).
   smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in;
   `d9mt.pipelineWaitBudgetMs` caps the stutter and only skips what takes
   longer.
-- **The disk caches have no size cap.** The AIR cache is one sqlite file
+- **The disk caches have no size cap**, except the state cache (1024
+  pipelines per game, ≈ 390 KB). The AIR cache is one sqlite file
   shared by all games (entries from other driver builds are dropped); the
   pipeline archives keep the last 8 sessions.
 - **macOS 26 is barely tested.** Before the Compat metallibs (see Build),
@@ -405,6 +436,10 @@ passes have their own load/store rules).
   (`bridge/UPSTREAM`): vertex-descriptor pipelines, per-slot samplers and
   vertex textures, the AIR compile calls and the full Metal 4 command
   surface, plus persistent pipeline archives.
+- The pipeline state cache (`driver/mtl/mtl_state_cache*`) lives entirely in
+  `d3d9.dll`: it records D3D9-side shader identities plus the derived
+  pipeline key, and rebuilds through the same compile path as a draw
+  ([docs/state-cache.md](docs/state-cache.md)).
 - `docs/dev-notes/` has neo773's design notes and research from v2's
   development (historical, not maintained).
 

@@ -156,12 +156,16 @@ namespace dxvk {
           MtlDevice*                pDevice,
     const std::string&              Name,
           MtlShaderStage            Stage,
+    const Sha1Hash&                 Sha,
     const D3D9ShaderOptions&        Options,
     const D3D9ShaderAnalysis&       Analysis,
     const void*                     pBytecode)
   : m_device(pDevice), m_name(Name), m_stage(Stage), m_options(Options), m_analysis(Analysis)
   , m_bytecode(reinterpret_cast<const uint8_t*>(pBytecode),
                reinterpret_cast<const uint8_t*>(pBytecode) + Analysis.GetLength()) {
+    m_stateId.origin = uint8_t(statecache::Origin::D3D9);
+    std::memcpy(m_stateId.sha, Sha.digest(), sizeof(m_stateId.sha));
+
     // D9MT_PS_PREFETCH=0: compile pixel shaders only once a draw needs them
     // (default: right after Phase A, like vertex shaders, since a PS linked
     // against a compatible VS reuses the standalone library).
@@ -192,10 +196,26 @@ namespace dxvk {
   }
 
 
+  Rc<MtlShaderFunction> D3D9ShaderProgram::prewarmFunction(MtlStateCacheShader* pPrev) {
+    // The state cache only links against D3D9 vertex shader programs.
+    const D3D9ShaderProgram* prev = static_cast<D3D9ShaderProgram*>(pPrev);
+
+    std::lock_guard lock(m_mutex);
+    auto& slot = m_functions[prev];
+
+    if (slot == nullptr)
+      slot = CreateFunction(prev);
+
+    return slot;
+  }
+
+
   Rc<MtlShaderFunction> D3D9ShaderProgram::CreateFunction(const D3D9ShaderProgram* pPrev) {
     Rc<MtlShaderFunction> fn = new MtlShaderFunction();
-    fn->stage = m_stage;
-    fn->task  = new D3D9ShaderFunctionTask(this, pPrev, fn.ptr());
+    fn->stage   = m_stage;
+    fn->task    = new D3D9ShaderFunctionTask(this, pPrev, fn.ptr());
+    fn->stateId = m_stateId;
+    fn->stateId.linked = pPrev != nullptr ? 1u : 0u;
     return fn;
   }
 
@@ -233,10 +253,18 @@ namespace dxvk {
 
     m_name = str::format(stage == MtlShaderStage::Vertex ? "vs_" : "ps_", ShaderKey.hash());
 
+    // Once per distinct shader: patterns dxbc-spirv's sm3 converter aborted on
+    // or miscompiled before patches/dxbc-spirv (issue #8), so logs show
+    // whether a game uses them.
+    if (unlikely(!m_analysis.GetConverterHazards().empty())) {
+      Logger::warn(str::format("D3D9 SM3 hazard: ", m_name, " ",
+        stage == MtlShaderStage::Vertex ? "VS" : "PS", " ", m_analysis.GetConverterHazards()));
+    }
+
     // The game may free the bytecode once Create*Shader returns; the
     // program keeps its own copy until Phase A has run.
     m_program = new D3D9ShaderProgram(pDevice->GetDXVKDevice().ptr(),
-      m_name, stage, ModuleInfo.shaderOptions, m_analysis, pShaderBytecode);
+      m_name, stage, ShaderKey.sha(), ModuleInfo.shaderOptions, m_analysis, pShaderBytecode);
 
     pDevice->GetDXVKDevice()->submitCompile(m_program, false);
   }
@@ -263,6 +291,9 @@ namespace dxvk {
     auto result = m_modules.emplace(ShaderKey, std::move(module));
     if (pShader)
       *pShader = result.first->second;
+
+    if (MtlStateCache* stateCache = pDevice->GetDXVKDevice()->stateCache())
+      result.first->second.AnnounceToStateCache(stateCache);
 
     return D3D_OK;
   }

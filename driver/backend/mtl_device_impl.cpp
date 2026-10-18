@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "mtl_context_impl.h"
@@ -58,7 +59,16 @@ namespace dxvk::backend {
       }
     }
 
-    uint32_t textureUsage(MtlUsage usage) {
+    // D9MT_TEX_PFV=1: PixelFormatView on every texture, as before (A/B).
+    bool pixelFormatViewOnAll() {
+      static const bool on = [] {
+        const char* v = std::getenv("D9MT_TEX_PFV");
+        return v != nullptr && v[0] == '1';
+      }();
+      return on;
+    }
+
+    uint32_t textureUsage(MtlUsage usage, MtlFormat format) {
       uint32_t result = 0u;
 
       if (usage & MtlUsage::Sampled)
@@ -68,7 +78,14 @@ namespace dxvk::backend {
       if (usage & MtlUsage::DepthStencil)
         result |= WMTTextureUsageRenderTarget;
 
-      result |= WMTTextureUsagePixelFormatView;
+      // PixelFormatView turns off lossless compression on Apple GPUs. d9mt's
+      // views keep the image's format or switch it between linear and sRGB,
+      // with or without a swizzle, none of which needs the option
+      // (MTLTextureUsage.pixelFormatView). Block-compressed formats keep it:
+      // they are never losslessly compressed anyway (ColorFill no longer
+      // views them, #14).
+      if (pixelFormatViewOnAll() || (lookupFormatInfo(format)->flags & MtlFormatFlagCompressed))
+        result |= WMTTextureUsagePixelFormatView;
       return result;
     }
 
@@ -146,6 +163,9 @@ namespace dxvk::backend {
       profile.legacy ? ", legacy pools" : "",
       profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
       profile.labels ? ", labels" : ""));
+    Logger::info(pixelFormatViewOnAll()
+      ? "D9MT: PixelFormatView on every texture (D9MT_TEX_PFV=1): no lossless compression"
+      : "D9MT: PixelFormatView only on block-compressed textures (lossless compression on)");
   }
 
   void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
@@ -208,7 +228,65 @@ namespace dxvk::backend {
     return m_compileWorkers->pending();
   }
 
+  Rc<MtlCompileTask> MtlDeviceImpl::createPrewarmPso(
+    const uint8_t* pState, const MtlShaderFunction* pVs, const MtlShaderFunction* pFs) {
+    // Never hand Metal a descriptor the draw path couldn't have built: it
+    // terminates the process on invalid ones. (Load already dropped these.)
+#ifdef D9MT_STATE_CACHE_TESTING
+    // Test builds only: D9MT_STATE_CACHE_TEST_NO_VALIDATE=1 lets a forged
+    // entry through, to test the state cache's crash-loop guard.
+    static const bool s_testNoValidate = env::getEnvVar("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
+#else
+    constexpr bool s_testNoValidate = false;
+#endif
+    if (!s_testNoValidate && !backend::psoStateValid(pState))
+      return nullptr;
+
+    // The key resolvePso() builds for these functions: the recorded bytes
+    // plus this session's library handles and entry names.
+    RenderPsoKey key = {};
+    std::memcpy(reinterpret_cast<uint8_t*>(&key) + RenderPsoKey::StateOffset, pState, statecache::KeyBytes);
+    key.vsCookie = uint64_t(pVs->library);
+    key.fsCookie = pFs != nullptr ? uint64_t(pFs->library) : 0u;
+
+    const char* vsEntry = pVs->entryName ? pVs->entryName : "main";
+    const char* fsEntry = (pFs != nullptr && pFs->entryName) ? pFs->entryName : "main";
+
+    Rc<RenderPsoCache::Entry> e = RenderPsoCache::createPrewarmEntry(m_compiler.handle(), key,
+      pVs->library, pFs != nullptr ? obj_handle_t(pFs->library) : 0u, vsEntry, fsEntry);
+
+    if (!m_psoRegistry.insertIfAbsent(e))
+      return nullptr;
+    return e;
+  }
+
+  bool MtlDeviceImpl::psoStateValid(const uint8_t* pState, const char** pWhy) {
+    return backend::psoStateValid(pState, pWhy);
+  }
+
+  bool MtlDeviceImpl::psoSucceeded(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() && e->handle();
+  }
+
+  uint64_t MtlDeviceImpl::psoBuildNs(MtlCompileTask* pPso) {
+    auto* e = static_cast<RenderPsoCache::Entry*>(pPso);
+    return e->isDone() ? e->buildNs() : 0u;
+  }
+
+  uint32_t MtlDeviceImpl::urgentCompilesQueued() {
+    return m_compileWorkers->urgentQueued();
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
+    // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
+    // never got that far (e.g. its constructor threw after creating the
+    // cache). Idempotent: prewarm threads must stop before the compiler goes.
+    // At process exit (isInModuleDetachment) shutdown() only detaches its
+    // threads: no join or lock on threads ExitProcess already killed.
+    if (MtlStateCache* stateCache = this->stateCache())
+      stateCache->shutdown();
+
     m_compileWorkers = nullptr;
 
     /* Retirement callbacks reach into the residency tracker, which is
@@ -310,7 +388,7 @@ namespace dxvk::backend {
     texInfo.array_length = arrayLength;
     texInfo.mipmap_level_count = info.mipLevels;
     texInfo.sample_count = info.sampleCount;
-    texInfo.usage = WMTTextureUsage(textureUsage(info.usage));
+    texInfo.usage = WMTTextureUsage(textureUsage(info.usage, info.format));
     texInfo.options = storageOptions(MtlCpuAccess::None);
 
     obj_handle_t handle = MTLDevice_newTexture(m_device.handle(), &texInfo);
@@ -334,8 +412,9 @@ namespace dxvk::backend {
     texture->m_info.mipLevels   = info.mipLevels ? info.mipLevels : 1u;
     texture->m_info.numLayers   = info.arrayLayers ? info.arrayLayers : 1u;
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
-    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage));
+    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage, info.format));
     texture->residencyDevice = this;
+    texture->m_device = this;  // MtlTexture::createView (StretchRect, ColorFill)
     texture->bytes = textureBytes(info);
     memAdd(info.category, texture->bytes);
     m_residency->allocCreated(handle, texture->bytes);

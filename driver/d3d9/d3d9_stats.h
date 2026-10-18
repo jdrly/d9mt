@@ -6,7 +6,7 @@
 //   STATS t=63 fps=59.9 ms=16.7/18.0/21.4 slow33=0 slow50=0 | rp=31.4 skip=2.1
 //     cb=13.0 draws=1520 | ld=12.1 clr=9.0 ldDc=4.0 st=15.2 stDc=6.0 rsv=0.0
 //     restore=0.0 savedMiB=231.4 attMs=1.3 clrFold=6.0 clrPass=1.0 | sh=0 pso=0 wait=0/0.0ms
-//     | allocMiB=5210 att=on
+//     | allocMiB=5210 att=on | split=8.0 splitSubmit=6.0 splitXfer=0.0 splitClear=2.0 splitMiB=420.1
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -31,6 +31,14 @@
 //   wait        render-thread waits for compiles: count / total ms
 //   allocMiB    Metal's currentAllocatedSize
 //   att         attachment optimization: on, off (startup) or live-off (no_attach_opt)
+//   split       per frame, passes that reopen exactly the attachments the
+//               previous pass closed and load them: the store and the load a
+//               single pass wouldn't have needed (docs/gpu-4k.md). Not
+//               counted across Present. splitSubmit / splitXfer / splitClear:
+//               of those, with a command buffer submit (DXVK's flush rule,
+//               queries, waits), else a copy/blit/resolve, else a clear in
+//               between; the rest ended on a view change (read-only depth,
+//               sRGB) or a vertex fence. splitMiB: the bytes they load.
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -119,7 +127,8 @@ namespace dxvk::stats {
         " | rp=%.1f skip=%.1f cb=%.1f draws=%.0f"
         " | ld=%.1f clr=%.1f ldDc=%.1f st=%.1f stDc=%.1f rsv=%.1f restore=%.1f savedMiB=%.1f"
         " attMs=%.2f clrFold=%.1f clrPass=%.1f"
-        " | sh=%llu pso=%llu wait=%llu/%.1fms | allocMiB=%llu att=%s",
+        " | sh=%llu pso=%llu wait=%llu/%.1fms | allocMiB=%llu att=%s"
+        " | split=%.1f splitSubmit=%.1f splitXfer=%.1f splitClear=%.1f splitMiB=%.1f",
         double(nowNs - m_startNs) * 1e-9, winS > 0.0 ? double(n) / winS : 0.0,
         n ? sum / double(n) : 0.0, p99, mx, slow33, slow50,
         pf(rstats::RenderPasses), pf(rstats::PassesSkipped), pf(rstats::CmdBufs), pf(rstats::Draws),
@@ -130,7 +139,9 @@ namespace dxvk::stats {
         pf(rstats::ClearsFolded), pf(rstats::ClearPasses),
         (unsigned long long)(ct.shaders - m_ct.shaders), (unsigned long long)(ct.psos - m_ct.psos),
         (unsigned long long)(ct.waits - m_ct.waits), double(ct.waitsNs - m_ct.waitsNs) * 1e-6,
-        (unsigned long long)(extra.allocBytes >> 20), extra.att);
+        (unsigned long long)(extra.allocBytes >> 20), extra.att,
+        pf(rstats::Splits), pf(rstats::SplitsSubmit), pf(rstats::SplitsXfer), pf(rstats::SplitsClear),
+        double(d[rstats::SplitBytes]) / rf / double(1u << 20));
 
       m_rs = rs;
       m_ct = ct;

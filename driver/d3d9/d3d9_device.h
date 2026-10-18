@@ -173,6 +173,8 @@ namespace dxvk {
     constexpr static uint32_t IncFlushIntervalUs = 250;
     constexpr static uint32_t MaxPendingSubmits = 6;
 
+    // The state cache's key validator (backend/mtl_pso_key.h,
+    // kPsoLastVertexBuffer) assumes the null stream is binding MaxStreams.
     constexpr static uint32_t NullStreamIdx = caps::MaxStreams;
 
     constexpr static MtlDeviceSize StagingBufferSize = 4ull << 20;
@@ -1000,6 +1002,12 @@ namespace dxvk {
       });
     }
 
+    // D9MT_PROFILE: counts a StretchRect / ColorFill path (d3d9_xfer_stats.h).
+    void ProfXfer(xfer::Counter c) {
+      if (unlikely(hitch::g_enabled))
+        m_xferStats.add(c);
+    }
+
     // Present with D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: the auto depth-stencil's
     // contents are undefined afterwards (as wined3d does), so the pass still
     // rendering into it needn't store them.
@@ -1427,6 +1435,8 @@ namespace dxvk {
 
     void InitShaderOptions();
 
+    void InitStateCache();
+
     static uint32_t GetTextureStageArgMask(
             D3DTEXTUREOP          Op);
 
@@ -1491,6 +1501,7 @@ namespace dxvk {
     stats::Window                   m_statsWindow;
     pace::Window                    m_paceWindow;
     rstore::Window                  m_restoreWindow;
+    xfer::Stats                     m_xferStats;       // D9MT_PROFILE: StretchRect / ColorFill paths
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 
@@ -1581,6 +1592,10 @@ namespace dxvk {
 
     D3D9ON12_ARGS                   m_d3d9On12Args = { };
     DxvkD3D8Bridge                  m_d3d8Bridge;
+
+    // Pipeline state cache (nullptr: off). Shut down in the destructor,
+    // before the shader module sets it points into.
+    Rc<MtlStateCache>               m_stateCache;
 
     constexpr static uint32_t       SamplerCountBits = 12u;
     constexpr static uint64_t       SamplerCountMask = (1u << SamplerCountBits) - 1u;

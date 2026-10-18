@@ -12,6 +12,8 @@
 
 #include "mtl_blit_metallib.h"
 
+#include "../d3d9/d3d9_caps.h"
+
 namespace dxvk::backend {
 
   namespace {
@@ -89,6 +91,13 @@ namespace dxvk::backend {
   }
 
   bool MtlContextImpl::resolvePso() {
+    // The state cache's validator (mtl_pso_key.h) checks recorded buffer
+    // indices against these: streams at kVertexBufferBaseIndex + 0..15, the
+    // null stream (D3D9DeviceEx::NullStreamIdx = caps::MaxStreams) after.
+    static_assert(kVertexBufferBaseIndex == kPsoFirstVertexBuffer
+               && kPsoLastVertexBuffer == kVertexBufferBaseIndex + caps::MaxStreams,
+      "update kPsoFirst/LastVertexBuffer (and kPsoKeyMappingVersion)");
+
     prof::Scope profScope(prof::ResolvePso);
     if (m_vs == nullptr)
       return false;
@@ -225,7 +234,8 @@ namespace dxvk::backend {
 
     const char* vsEntry = m_vs->entryName ? m_vs->entryName : "main";
     const char* fsEntry = (m_fs != nullptr && m_fs->entryName) ? m_fs->entryName : "main";
-    RenderPsoCache::Entry* pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry);
+    RenderPsoCache::Entry* pso = m_psoCache.get(key, vsLibrary, fsLibrary, vsEntry, fsEntry,
+      m_vs.ptr(), m_fs.ptr());
 
     m_psoMruKey[m_psoMruCursor] = snap;
     m_psoMruPso[m_psoMruCursor] = pso;
@@ -249,8 +259,20 @@ namespace dxvk::backend {
   bool MtlContextImpl::emitPso(RenderPsoCache::Entry* pso) {
     const bool done = pso->isDone();
 
-    if (done && !pso->handle())
+    if (done && !pso->handle()) {
+      // A state cache prewarm build this key adopted, which then failed:
+      // build the draw's own instead of skipping its draws all session.
+      if (unlikely(pso->prewarmed())) {
+        if (RenderPsoCache::Entry* fresh = m_psoCache.replaceFailedPrewarm(pso); fresh && fresh != pso) {
+          for (auto& mru : m_psoMruPso) {
+            if (mru.ptr() == pso)
+              mru = fresh;
+          }
+          return emitPso(fresh);
+        }
+      }
       return false;
+    }
 
     if (!done && m_asyncSkip) {
       if (compile_stats::g_enabled)
@@ -658,11 +680,15 @@ namespace dxvk::backend {
     }
   }
 
-  void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages) {
+  void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages, uint64_t beforeStages) {
     if (!encoder)
       return;
-    MTL4CommandEncoder_barrier(encoder, afterStages, uint64_t(WMTStageAll),
+    MTL4CommandEncoder_barrier(encoder, afterStages, beforeStages,
                                uint64_t(WMTVisibilityOptionDevice));
+    // At the end of an encoder (every caller): everything rendered so far is
+    // ordered before the vertex stages of later encoders.
+    if ((afterStages & uint64_t(WMTStageFragment)) && (beforeStages & uint64_t(WMTStageVertex)))
+      m_vtxEpoch++;
   }
 
   void MtlContextImpl::emitGraphicsBarrier(MtlStageMask, MtlBarrierScope,
@@ -677,7 +703,12 @@ namespace dxvk::backend {
         return;
       }
       flushCmdChunk();
-      emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+      // In the open encoder: Metal orders only later encoders after it, not
+      // this pass's later draws, so it must not start a new vertex epoch
+      // (emitProducerBarrier would): a later draw here that fetches a vertex
+      // texture an earlier pass rendered still needs its fence.
+      MTL4CommandEncoder_barrier(m_pass.encoder, uint64_t(WMTStageFragment), uint64_t(WMTStageAll),
+                                 uint64_t(WMTVisibilityOptionDevice));
     }
   }
 
@@ -861,6 +892,9 @@ namespace dxvk::backend {
     d->setTrackingSerial(m_currentSerial);
     s->setTrackingSerial(m_currentSerial);
     noteTransferRead(s);
+    // MetalFX's own stages are unknown: hold all of them for what the passes rendered.
+    if (m_narrowBarrier)
+      vertexFence(uint64_t(WMTStageAll));
     const obj_handle_t stex = s->texture.tex;
     const obj_handle_t dtex = d->texture.tex;
     encodeDirect([keepD = dst, keepS = src, scaler, stex, dtex]

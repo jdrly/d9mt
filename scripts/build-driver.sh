@@ -187,6 +187,9 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
 # -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
 FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+# STATE_CACHE_TESTING=1: a test build of the pipeline state cache (fault injection and
+# D9MT_STATE_CACHE_TEST_* switches, docs/state-cache.md); never for release.
+[ "${STATE_CACHE_TESTING:-0}" = 1 ] && FLAGS+=(-DD9MT_STATE_CACHE_TESTING) && echo "=== [driver] STATE_CACHE_TESTING=1: test build ==="
 
 # --- PROFILE_INSTRUMENT=1 — per-function CPU profiler build mode -------------
 # Compiles ONLY the backend hot-path TUs (the CS-thread draw loop) with GCC
@@ -212,6 +215,8 @@ INSTRUMENT_EXCLUDE="std::,dxvk::Rc,_ZNSt,_ZNKSt,definedEv,MtlBufferSlice"
 # populated DXVK-3.0-uptsream/subprojects/dxbc-spirv submodule.
 DXBC="$V2/third_party/dxbc-spirv"
 FLAGS+=(-I"$DXBC")
+# d3d9.dll compiles the sm3 converter: never without patches/dxbc-spirv.
+bash "$V2/scripts/check-deps.sh"
 # airlib/ holds the pure-C AIR compile ABI header (d9mtair.h) that the real
 # shader module (d3d9_shader_compiler.cpp) marshals into. Header-only include;
 # the D9MTAir* thunk symbols resolve through the winemetal import lib below.
@@ -241,6 +246,8 @@ CORE+=("$DRV"/dxvk/dxvk_allocator.cpp)
 CORE+=("$DRV"/mtl/mtl_context_stub.cpp "$DRV"/mtl/mtl_format.cpp \
        "$DRV"/mtl/mtl_presenter_stub.cpp "$DRV"/mtl/mtl_device_stub.cpp \
        "$DRV"/mtl/mtl_memory_profile.cpp)
+# Pipeline state cache (docs/state-cache.md): file format/index core + threads.
+CORE+=("$DRV"/mtl/mtl_state_cache_core.cpp "$DRV"/mtl/mtl_state_cache.cpp)
 # backend/ — the real winemetal-backed Metal 3 backend (MtlContextImpl +
 # device/ring/submission/pso-cache/presenter). These override the seam-base
 # stub methods; the stubs still supply the MtlContext/MtlDevice base vtable
