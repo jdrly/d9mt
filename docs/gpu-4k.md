@@ -1,5 +1,7 @@
 # d9mt's GPU cost at 4K (issue #7): analysis and measurement plan
 
+Phase 2 (candidates 1–3 implemented, the split counter for 4) is in §8, with the in-game A/B steps.
+
 Phase 1 of #7: no code changes, no in-game run. Base: `main` 4b7ab26. Machine:
 M5 Max, macOS 27.0. Inputs:
 - the d9mt source;
@@ -317,11 +319,11 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
 
 ### 6.3 A/B of the phase-2 build
 
-**Toggles:** each candidate gets an env toggle, so one build A/Bs all of them in one session:
+**Toggles:** each candidate has an env toggle, so one build A/Bs all of them in one session (implemented, §8):
 - `D9MT_PASS_BARRIER=all` restores today's barrier;
 - `D9MT_TEX_PFV=1` restores the flag;
 - `D9MT_CLEAR_DISCARD=0`;
-- `D9MT_FLUSH_AT_PASS_END=0`.
+- candidate 4 has no toggle yet: only its counter exists (`split=` in STATS).
 
 **Procedure:**
 - Same spot, same runs A/C/E, each with all candidates on, then with one switched off at a time.
@@ -432,3 +434,96 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
   3. Jan's A/B;
   4. candidate 3, then 4 if `rpResume` shows enough splits;
   5. candidate 5 only with a Direct check.
+
+## 8. Phase 2: candidates 1–3 and the split counter (2026-10-18)
+
+Branch `perf/gpu-4k`, one commit each. All of them change only `d3d9.dll`. `bridge/` is unchanged, and `winemetal.so` built from the branch is byte-identical to the shipped one (LC_UUID 2BBB585C-5076-3157-9A6A-BAE494B00ACC), so the users' AIR caches stay valid.
+
+| Commit | Change | Switch (restores `main`) |
+|---|---|---|
+| test | `code_vtf_rt`, `code_srgb_view`, `code_depthtex`, `code_clear_split`, `bench_4k` | — |
+| 2 | `PixelFormatView` only on block-compressed textures | `D9MT_TEX_PFV=1` |
+| 1 | End-of-pass barrier before Fragment\|Blit\|Dispatch, vertex fences for vertex textures | `D9MT_PASS_BARRIER=all` |
+| 3 | A clear that ends a pass skips the pass's store of what it clears | `D9MT_CLEAR_DISCARD=0` |
+| 4 (counter) | `split= splitSubmit= splitXfer= splitClear= splitMiB=` in STATS (`D9MT_PROFILE`) | — |
+
+At startup each switch logs one line at info level: "PixelFormatView only on block-compressed textures", "end-of-pass barrier before Fragment|Blit|Dispatch", "a clear that ends a pass skips the pass's store". All three are read once, so restart the game between runs.
+
+### 8.1 How each was checked
+
+**Every commit:**
+- run on CX26 Wine in a /tmp prefix on a /tmp copy of the engine, under `exc_guard`, with clean builds;
+- all 21 test programs plus the 4 new ones give the same hash in every frame as `main`'s `d3d9.dll`;
+- the same holds with the Metal API validation layer on (`MTL_DEBUG_LAYER=1`), which reports only `main`'s fixed-function binding warnings.
+
+**Per candidate:**
+- **Candidate 2 (`PixelFormatView`).** Every view creation was audited (commit message). Views keep the image's format, its sRGB twin, or a swizzle. Only ColorFill's block views of BC data change layout, and BC textures keep the flag.
+- **Candidate 1 (barrier).**
+  - **Negative control:** without the fence, `code_vtf_rt` shows the previous frame's value in every frame (4 of 4 runs).
+  - With the fence its hashes match `main`, also with `d3d9.reproducibleCommandStream=True` (which takes the pass-split path), `D9MT_PASS_BARRIER=all`, `D9MT_NO_ATTACHMENT_OPT=1` and `D9MT_DEFERRED=1`.
+  - **Trace of bench_4k:** the next pass's vertex work starts before the previous fragment work ends at 100% of boundaries (0% before).
+- **Candidate 3 (Clear store-skip).** `att_trace` on `code_clear_split`:
+  - the pass a depth-only Clear ends stores colour and stencil, not depth;
+  - a colour-only Clear keeps the depth and stencil stores.
+- **Counter.** On bench_4k with 8 depth clears it reports `split=9 splitClear=8 splitSubmit=1`. With implicit flushes off, `splitSubmit` drops to 0.
+
+### 8.2 GPU time
+
+Measured on the M5 Max, with the machine otherwise quiet (no other Wine runs).
+- bench_4k ran without vsync, with the display asleep: presents skipped, `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`. It is GPU-bound: 91–99% GPU busy at the maximum performance state.
+- Numbers are medians of interleaved runs.
+
+| | `main` | Final build | Switches off |
+|---|---|---|---|
+| bench_4k (4 post passes, 1 depth clear) | 9.54 ms | 7.45 ms (−22%) | 9.54 ms |
+| bench_4k (24 post passes, 8 depth clears) | 15.19 ms | 12.18 ms (−20%) | 15.18 ms |
+
+**Per candidate**, each against the commit before it:
+
+| Candidate | bench_4k | gpu4k_probe |
+|---|---|---|
+| 2 (`PixelFormatView`) | −2.4%; with 24 post passes −8.3% (−21% per bandwidth-bound pass) | −19% |
+| 1 (barrier) | −15% to −20%; with 24 post passes −7% to −9% | −13%, or −11% with per-pass sampling |
+| 3 (Clear store-skip) | 8 clears: 253 MiB/frame fewer stores (STATS); GPU time −1% with compression on (within noise), −4.4% (0.49 ms) with `D9MT_TEX_PFV=1` | — |
+
+**Reading the numbers:**
+- **Candidates 2 and 3 save bandwidth.** On the M5 Max that buys little. At a base chip's 100 GB/s the same bytes are 5–6× the time.
+- **Candidate 3's bytes:** one 4K depth store is 31.6 MiB, i.e. 0.33 ms at 100 GB/s, and SWTOR ends 3–8 passes a frame with a clear.
+- **Candidate 1 hides vertex time** behind fragment work, so its share stays about the same on any chip.
+
+### 8.3 In-game A/B for Jan
+
+This needs a SWTOR on Mac build with this `d3d9.dll`. `winemetal.so` is unchanged, so the shader cache stays warm.
+
+**Setup:**
+- One fixed spot on the Fleet, camera still, 30 s settle per run, 3840×2160 and the usual settings. If possible, repeat in an operation or warzone.
+- Environment for every run: `D9MT_PROFILE=1 MTL_HUD_ENABLED=1`. Add the run's switches below.
+- Restart the game between runs.
+- Note the HUD's GPU ms, fps, and "Direct" vs "Composited" for each run. Presentation must stay Direct: nothing in these changes touches the present path.
+
+| Run | Switches | Answers |
+|---|---|---|
+| 1 | none (all on) | the build |
+| 2 | `D9MT_TEX_PFV=1` | what lossless compression gives |
+| 3 | `D9MT_PASS_BARRIER=all` | what the barrier gives |
+| 4 | `D9MT_CLEAR_DISCARD=0` | what the Clear store-skip gives |
+| 5 | `D9MT_TEX_PFV=1 D9MT_PASS_BARRIER=all D9MT_CLEAR_DISCARD=0` | `main`'s behaviour |
+| 6 | run 1 + `DXVK_CONFIG="d3d9.presentInterval=0"` | GPU-bound fps: vsync keeps the M5 Max at minimum clocks (#7) |
+| 7 | run 5 + `DXVK_CONFIG="d3d9.presentInterval=0"` | the same for `main`'s behaviour |
+| 8 | run 1 + `DXVK_CONFIG="d3d9.reproducibleCommandStream=True"` | splits without implicit flushes (STATS `split=` / `splitSubmit=`): is candidate 4 worth doing |
+
+**One 20 s trace per run** (§6.2 command, `--time-limit 20s`, at most 60 s). Read it with `python3 -I test/perf/mst_overlap.py <trace>`:
+- runs 1, 2, 4 and 6 should show vertex/fragment overlap at most pass boundaries;
+- runs 3, 5 and 7 should show 0%.
+
+**What the logs should show:**
+- PROF `vtxFence` near 0, and no "pass split for a vertex fence" line, unless SWTOR uses vertex textures. If it does, those lines show where.
+- STATS `split=` / `splitSubmit=` / `splitMiB=` in run 1 against run 8 price SWTOR's mid-pass submits. That decides candidate 4.
+
+**Compare** with `session-report.sh --compare` on the wine.logs (STATS frame times, hitches).
+
+**Tester (M2 Pro 16 GB):** runs 1 and 5, and 6 and 7 if possible, each with a HUD screenshot, plus a trace if they're willing.
+
+### 8.4 Found on the way
+
+On `main`, StretchRect with a filter between two render-target textures of different sizes (`blitTextureView`) leaves the destination black (`code_srgb_view`, bottom-left pair). This branch doesn't change it; it should get its own issue.
