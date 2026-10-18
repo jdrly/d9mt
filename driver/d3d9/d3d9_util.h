@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+
 #define D3D11_NO_HELPERS
 
 #include "d3d9_include.h"
@@ -225,6 +227,49 @@ namespace dxvk {
            offsets[0].y < 0 ||
            uint32_t(offsets[1].x) > extent.width ||
            uint32_t(offsets[1].y) > extent.height;
+  }
+
+  // Writing through a render target view of a format with a component
+  // mapping (sampling reads stored channel M[i] for channel i): which value
+  // each stored channel takes so that sampling gives back what was meant,
+  // as an index into r, g, b, a. A stored channel the mapping reads takes the
+  // first channel that reads it (A8: stored r <- a; A8L8: g <- a; A4R4G4B4:
+  // r <- a, g <- r, b <- g, a <- b); one it doesn't read keeps its own
+  // channel (X8R8G8B8's alpha, R16F's g/b/a), as before.
+  inline std::array<uint32_t, 4> StoredChannelSources(MtlSwizzleChannels mapping) {
+    const MtlSwizzle m[4] = { mapping.r, mapping.g, mapping.b, mapping.a };
+    std::array<uint32_t, 4> src = { 0u, 1u, 2u, 3u };
+    for (uint32_t j = 0u; j < 4u; j++) {
+      for (uint32_t i = 0u; i < 4u; i++) {
+        if (uint32_t(m[i]) == uint32_t(MtlSwizzle::Red) + j) {
+          src[j] = i;
+          break;
+        }
+      }
+    }
+    return src;
+  }
+
+  // A clear colour for a target with this mapping (ColorFill, Clear).
+  inline void MapClearColor(MtlSwizzleChannels mapping, float (&color)[4]) {
+    const std::array<uint32_t, 4> src = StoredChannelSources(mapping);
+    const float in[4] = { color[0], color[1], color[2], color[3] };
+    for (uint32_t j = 0u; j < 4u; j++)
+      color[j] = in[src[j]];
+  }
+
+  // The view mapping for sampling a source (mapping `srcMapping`) so that
+  // a blit into a destination with `dstMapping` stores what sampling the
+  // destination should give (StretchRect; DXVK's resolveSrcComponentMapping).
+  inline MtlSwizzleChannels ResolveBlitSrcMapping(MtlSwizzleChannels dstMapping, MtlSwizzleChannels srcMapping) {
+    const std::array<uint32_t, 4> src = StoredChannelSources(dstMapping);
+    const MtlSwizzle s[4] = { srcMapping.r, srcMapping.g, srcMapping.b, srcMapping.a };
+    MtlSwizzleChannels out;
+    out.r = s[src[0]];
+    out.g = s[src[1]];
+    out.b = s[src[2]];
+    out.a = s[src[3]];
+    return out;
   }
 
   enum D3D9TextureStageStateTypes : uint32_t

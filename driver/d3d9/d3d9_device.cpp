@@ -1405,9 +1405,12 @@ namespace dxvk {
       srcViewInfo.mipCount = 1;
       srcViewInfo.baseLayer = blitInfo.srcSubresource.baseLayer;
       srcViewInfo.layerCount = blitInfo.srcSubresource.layerCount;
-      // The format's component mapping, as when sampling it (X8: alpha 1,
-      // L8 / A8 / R16F...: their channels): what D3D9 reads from the source.
-      srcViewInfo.swizzle = srcTextureInfo->GetMapping().Swizzle;
+      // The source format's component mapping, as when sampling it (X8:
+      // alpha 1; L8 / A8 / R16F...: their channels), folded with the inverse
+      // of the destination's, so that sampling the destination gives what
+      // sampling the source did (A8: alpha lands in the stored red channel).
+      srcViewInfo.swizzle = ResolveBlitSrcMapping(
+        dstTextureInfo->GetMapping().Swizzle, srcTextureInfo->GetMapping().Swizzle);
 
       EmitCs([
         cDstView  = dstImage->createView(dstViewInfo),
@@ -1477,6 +1480,7 @@ namespace dxvk {
 
     MtlClearValue clearValue = { };
     DecodeD3DCOLOR(Color, clearValue.color.float32);
+    MapClearColor(dstTextureInfo->GetMapping().Swizzle, clearValue.color.float32);
 
     Rc<MtlTexture> image = dstTextureInfo->GetImage();
 
@@ -2003,9 +2007,13 @@ namespace dxvk {
           const auto& rtv = rts->GetRenderTargetView(srgb);
 
           if (likely(rtv != nullptr)) {
-            ClearImageView(alignment, offset, extent, rtv, MtlAspectColor, clearValueColor);
-
             D3D9CommonTexture* dstTexture = rts->GetCommonTexture();
+
+            // Formats with a component mapping (A8, A8L8, A4R4G4B4) store
+            // the colour in other channels (util MapClearColor).
+            MtlClearValue rtClear = clearValueColor;
+            MapClearColor(dstTexture->GetMapping().Swizzle, rtClear.color.float32);
+            ClearImageView(alignment, offset, extent, rtv, MtlAspectColor, rtClear);
 
             if (dstTexture->IsAutomaticMip())
               MarkTextureMipsDirty(dstTexture);
