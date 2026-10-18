@@ -334,3 +334,53 @@ Methodology problems found on the way (all fixed in the programs/runner):
   `sched_yield` (one call per run); not found yet. `bench_draws ...
   spinflush` reproduces it. Both benchmarks now poll every 20 us. Worth a
   look on `main`: the same code runs on x86, only the polling rate differs.
+
+## Open risks
+
+- **x87 precision (`SetupFPU`)**: `CreateDevice` without
+  `D3DCREATE_FPU_PRESERVE` sets the caller's x87 FPU to 24-bit precision
+  with the x64 d3d9 (control word `037f` → `007f`, as Windows' d3d9 does);
+  the ARM64EC d3d9 can't (the x87 state belongs to the emulator) and leaves
+  `037f`. Matters only for x64 game code that uses x87 and relies on
+  single precision; SSE math (MXCSR) is exact. Later: an x64 helper the
+  ARM64EC d3d9 calls through the emulator to set it.
+- **Hot `GetData(D3DGETDATA_FLUSH)` polling** (d9mt#22): CS-thread CPU and
+  ~9-10 ms stalls, most visible with the ARM64EC d3d9 (Timings above). To be
+  profiled and fixed on `main`; it probably also costs CPU under Rosetta.
+- **Exit crash** (an `atexit` PSO flush after Wine killed the threads):
+  fix recorded in d9mt#11 for `main`; latent on x86, frequent on arm64 Wine.
+- **x18 variant**: Apple's frameworks treat its Wine processes as linked
+  against the macOS 12 SDK; tested only with d9mt's programs.
+- **No i386** on this Wine (neutron has no WoW64): 32-bit programs, among
+  them possibly launchers, don't run.
+- **Software TSO only**: the game's own x64 code pays FEX's TSO cost (no
+  entitlement for hardware TSO); games with threading bugs may need the
+  slower strict mode.
+- **Broadsword's launcher** is Intel-only; it can stay on Rosetta.
+
+## Next steps for an in-game prototype (needs Jan)
+
+Not started: SWTOR itself on arm64 Wine + FEX, and presented frame times.
+Both need Jan, who decides when.
+
+Requirements:
+- **Game files in an arm64 prefix.** Jan's installs stay untouched; a copy
+  he makes or approves (an APFS clone `cp -c` of the game directory costs no
+  disk space and leaves the original unchanged) or a fresh download.
+- **Launcher and login**, under his account-safety rules. SWTOR's client is
+  started by its launcher with a session; options:
+  1. launcher and login on Rosetta (CX26, as today), then hand the started
+     client over to the arm64 prefix — needs working out how the launcher
+     starts the client and whether that can point at another Wine;
+  2. the launcher on arm64 Wine + FEX too, if it is x64 (if it is 32-bit,
+     this Wine can't run it: no i386);
+  3. whatever route Jan prefers for his account; no login automation.
+- **The display awake** and Jan at the machine (presented frame times;
+  d9mt throttles hidden windows), the game running nowhere else.
+- d9mt's caches for the test pointed outside Jan's caches, as for the tests.
+
+Then, per configuration (CX26/Rosetta; arm64 Wine + FEX with the ARM64EC
+d3d9; with the x64 d3d9; TSO fast and strict): a repeatable scene
+(character select, a fixed spot on the fleet), presented frame-time median
+and p99, CPU per frame, loading and shader-compile stalls, correctness by
+eye, and a crash check at exit.
