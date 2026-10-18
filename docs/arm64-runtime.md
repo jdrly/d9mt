@@ -113,6 +113,7 @@ FEX registered under `HKLM\Software\Microsoft\Wow64\amd64`):
 | CrossOver 26.3 (x86_64, Rosetta) | x64 | x64 dll + x86_64 .so | 20/20, the reference hashes |
 | arm64 Wine 11.19 + FEX (neutron patches, TSD) | **x64, unmodified, under FEX** | ARM64EC dll + arm64 .so | **20/20, all hashes identical** |
 | ″ | **ARM64EC** | ARM64EC dll + arm64 .so | **20/20, all hashes identical** |
+| arm64 Wine 11.19 + FEX, x18 variant (stock ABI, loader SDK 12.0) | x64 under FEX, and ARM64EC | ARM64EC dll + arm64 .so | 20/20 identical (below) |
 
 - `+loaddll`: `libarm64ecfex.dll` and our builtin `winemetal.dll` load,
   `d3d9.dll` from the test directory is the ARM64EC one (machine 0xA641).
@@ -127,6 +128,31 @@ FEX registered under `HKLM\Software\Microsoft\Wow64\amd64`):
 - `wineboot` reports "Wine cannot find the FreeType font library": the
   engine needs Homebrew's or a bundled FreeType for fonts (neutron bundles
   it); the tests don't draw text.
+
+### The x18 variant (stock Windows ABI)
+
+`VARIANT=x18` of the same script, same pinned sources: neutron's Wine and
+FEX patches without `WINE_TEB_IN_TSD`/`NEUTRON_TEB_IN_TSD`, stock llvm-mingw
+20260908 (no CRT rebuild), the loader `lib/wine/aarch64-unix/wine` marked
+`sdk 12.0` (minos 15.0) with vtool and re-signed ad hoc, so macOS keeps x18
+for every Wine process. No entitlement, no system change.
+
+- 20 hash tests + `code_vbsizes`, ARM64EC and x64 d3d9: 20/20 identical to
+  CX26, vbsizes 52/52; `PROBES=1` identical to the TSD build (FPCR values
+  included, cosf 0 differences); no crash reports.
+- SIGSEGVs during `bench_shaders` (a counting `sigaction` interposer):
+  none, against 2 with the TSD build — d9mt's ARM64EC code reaches neutron's
+  x18 repair about twice per process (CRT startup), so the TSD ABI costs it
+  nothing measurable.
+- Interleaved against the TSD build, 3 rounds: equal within noise (draw loop
+  77 vs 79 ns at 3000 draws, process CPU 492 vs 492 ns/draw, shader median
+  1.17 vs 1.13 ms; x64 d3d9 under FEX likewise).
+
+So both ABIs work for d9mt. The x18 one runs any stock ARM64EC binary
+(ours and third-party) without signal repairs and keeps the ABI CrossOver
+and upstream Wine use; its open risk is unchanged and untested beyond these
+programs: Apple's frameworks treat the Wine processes as linked against the
+macOS 12 SDK.
 
 ### Crashes at process exit (a d9mt bug, both architectures)
 
