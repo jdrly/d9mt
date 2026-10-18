@@ -87,7 +87,7 @@ namespace dxvk {
     uint64_t    keySignature = 0u;
     uint32_t    threads      = 2u; // prewarm threads; 0 = record and load only
     uint32_t    maxEntries   = statecache::DefaultMaxEntries;
-    bool        noValidate   = false; // D9MT_STATE_CACHE_TEST_NO_VALIDATE=1: tests of the crash guard only
+    bool        noValidate   = false; // tests of the crash guard only (test builds: D9MT_STATE_CACHE_TEST_NO_VALIDATE=1)
   };
 
   /**
@@ -132,12 +132,12 @@ namespace dxvk {
             MtlCompileTask*     pPso,
             MtlPsoUse           use);
 
-    /// Render thread: a PSO miss that can't be recorded (internal shaders).
     /// Render thread: a draw is about to wait for pPso, which a prewarm
     /// thread may be building at the lowest priority; that thread is raised
     /// to normal priority until the build is done.
     void boostPrewarm(MtlCompileTask* pPso);
 
+    /// Render thread: a PSO miss that can't be recorded (internal shaders).
     void noteUnrecorded() {
       m_unrecorded.fetch_add(1u, std::memory_order_relaxed);
     }

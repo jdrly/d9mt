@@ -12,6 +12,8 @@
 
 #include "mtl_blit_metallib.h"
 
+#include "../d3d9/d3d9_caps.h"
+
 namespace dxvk::backend {
 
   namespace {
@@ -89,6 +91,13 @@ namespace dxvk::backend {
   }
 
   bool MtlContextImpl::resolvePso() {
+    // The state cache's validator (mtl_pso_key.h) checks recorded buffer
+    // indices against these: streams at kVertexBufferBaseIndex + 0..15, the
+    // null stream (D3D9DeviceEx::NullStreamIdx = caps::MaxStreams) after.
+    static_assert(kVertexBufferBaseIndex == kPsoFirstVertexBuffer
+               && kPsoLastVertexBuffer == kVertexBufferBaseIndex + caps::MaxStreams,
+      "update kPsoFirst/LastVertexBuffer (and kPsoKeyMappingVersion)");
+
     prof::Scope profScope(prof::ResolvePso);
     if (m_vs == nullptr)
       return false;

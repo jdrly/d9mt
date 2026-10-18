@@ -503,7 +503,10 @@ namespace dxvk {
     if (parseNumber(getEnv("D9MT_STATE_CACHE_MAX"), n) && n)
       config.maxEntries = uint32_t(std::clamp<unsigned long>(n, MinMaxEntries, MaxMaxEntries));
 
+#ifdef D9MT_STATE_CACHE_TESTING
+    // Test builds only (STATE_CACHE_TESTING=1 scripts/build-driver.sh).
     config.noValidate = getEnv("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
+#endif
 
     const std::string fileName = sanitizeName(exeName()) + ".d9mtstate";
     std::string unixPath;

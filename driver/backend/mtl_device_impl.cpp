@@ -212,9 +212,13 @@ namespace dxvk::backend {
     const uint8_t* pState, const MtlShaderFunction* pVs, const MtlShaderFunction* pFs) {
     // Never hand Metal a descriptor the draw path couldn't have built: it
     // terminates the process on invalid ones. (Load already dropped these.)
-    // D9MT_STATE_CACHE_TEST_NO_VALIDATE=1 exists only to test the state
-    // cache's crash-loop guard with a real crash.
+#ifdef D9MT_STATE_CACHE_TESTING
+    // Test builds only: D9MT_STATE_CACHE_TEST_NO_VALIDATE=1 lets a forged
+    // entry through, to test the state cache's crash-loop guard.
     static const bool s_testNoValidate = env::getEnvVar("D9MT_STATE_CACHE_TEST_NO_VALIDATE") == "1";
+#else
+    constexpr bool s_testNoValidate = false;
+#endif
     if (!s_testNoValidate && !backend::psoStateValid(pState))
       return nullptr;
 

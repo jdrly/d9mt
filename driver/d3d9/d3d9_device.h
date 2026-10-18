@@ -173,6 +173,8 @@ namespace dxvk {
     constexpr static uint32_t IncFlushIntervalUs = 250;
     constexpr static uint32_t MaxPendingSubmits = 6;
 
+    // The state cache's key validator (backend/mtl_pso_key.h,
+    // kPsoLastVertexBuffer) assumes the null stream is binding MaxStreams.
     constexpr static uint32_t NullStreamIdx = caps::MaxStreams;
 
     constexpr static MtlDeviceSize StagingBufferSize = 4ull << 20;
