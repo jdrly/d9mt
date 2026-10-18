@@ -685,7 +685,8 @@ namespace dxvk::backend {
       return;
     MTL4CommandEncoder_barrier(encoder, afterStages, beforeStages,
                                uint64_t(WMTVisibilityOptionDevice));
-    // Everything rendered so far is ordered before later vertex stages.
+    // At the end of an encoder (every caller): everything rendered so far is
+    // ordered before the vertex stages of later encoders.
     if ((afterStages & uint64_t(WMTStageFragment)) && (beforeStages & uint64_t(WMTStageVertex)))
       m_vtxEpoch++;
   }
@@ -702,7 +703,12 @@ namespace dxvk::backend {
         return;
       }
       flushCmdChunk();
-      emitProducerBarrier(m_pass.encoder, uint64_t(WMTStageFragment));
+      // In the open encoder: Metal orders only later encoders after it, not
+      // this pass's later draws, so it must not start a new vertex epoch
+      // (emitProducerBarrier would): a later draw here that fetches a vertex
+      // texture an earlier pass rendered still needs its fence.
+      MTL4CommandEncoder_barrier(m_pass.encoder, uint64_t(WMTStageFragment), uint64_t(WMTStageAll),
+                                 uint64_t(WMTVisibilityOptionDevice));
     }
   }
 

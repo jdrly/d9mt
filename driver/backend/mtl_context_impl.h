@@ -505,8 +505,10 @@ namespace dxvk::backend {
     // buffers come from the CPU or from copies, whose barriers hold every
     // stage. So an image such a pass rendered gets the current m_vtxEpoch
     // (MtlTextureImpl::vtxEpoch), every barrier after Fragment before Vertex
-    // starts a new epoch, and a draw whose vertex stage has an image of the
-    // current epoch bound gets a fence first (resolveVertexHazard).
+    // at the end of an encoder starts a new epoch (not the in-pass feedback
+    // barrier: it orders later encoders only, not the pass's own later
+    // draws), and a draw whose vertex stage has an image of the current
+    // epoch bound gets a fence first (resolveVertexHazard).
     // D9MT_PASS_BARRIER=all: every pass ends with the barrier before All.
     bool         m_narrowBarrier = false;
     bool         m_vtxCheck      = false;  // look at the vertex-stage textures at the next draw
