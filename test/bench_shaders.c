@@ -4,7 +4,10 @@
  * shader from CreatePixelShader to the end of its draw. Run with
  * D9MT_COMPILE_THREADS=0 D9MT_AIR_CACHE=0 D9MT_PSO_ARCHIVE=0 so every shader is
  * one synchronous compile: the front end in d3d9.dll, IR -> AIR on the unix
- * side and Metal's pipeline build. Prints
+ * side and Metal's pipeline build. It never presents: a Present (and the
+ * drawable it needs) queues on d9mt's CS thread ahead of the next shader's
+ * draw and would be timed with it, and with the window hidden (display
+ * asleep) that is a 30 fps throttle or a blocked nextDrawable. Prints
  *
  *   BENCH shaders=N total_ms=... median_ms=... p90_ms=... failed=K
  *
@@ -122,15 +125,18 @@ int main(int argc, char **argv) {
     IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLELIST, 0, 1);
     IDirect3DDevice9_EndScene(dev);
     IDirect3DQuery9_Issue(query, D3DISSUE_END);
-    while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) { }
+    /* paced FLUSH polls, as bench_draws.c: a hot FLUSH spin times the polling too */
+    while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+      LARGE_INTEGER p0, p1;
+      QueryPerformanceCounter(&p0);
+      do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < freq.QuadPart);
+    }
     QueryPerformanceCounter(&t1);
     if (n == cap) { cap = cap ? 2 * cap : 256; ms = realloc(ms, cap * sizeof(double)); }
     ms[n++] = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
     IDirect3DDevice9_SetPixelShader(dev, NULL);
     IDirect3DPixelShader9_Release(ps);
     free(code);
-    if ((n & 31) == 0)
-      IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
   }
   fclose(list);
   if (n) {

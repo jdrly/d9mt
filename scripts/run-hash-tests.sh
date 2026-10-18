@@ -26,7 +26,8 @@
 # BENCH=1 then runs the benchmarks BENCH_RUNS (3) times each into
 # $WORK/bench.txt: test/bench_draws.c (100, 1000 and 3000 draws per frame,
 # BENCH_FRAMES (1200) frames, no vsync, BENCH_MODE=flush (each frame waits
-# for the GPU, no Present: independent of the compositor) or present) and
+# for the GPU, no Present: independent of the compositor), spinflush or
+# present; see the program) and
 # test/bench_shaders.c
 # (BENCH_SHADERS=<list of pixel shader .bin files>, compiled one by one: no
 # compile workers, AIR cache or PSO archives). BENCH_ONLY=1 skips the tests.
@@ -168,8 +169,9 @@ done
 
 "$ENG/bin/wineserver" -k 2>/dev/null || true
 "$ENG/bin/wineserver" -w 2>/dev/null || true
-# killed processes can take a few seconds to go away on a loaded machine
-for i in 1 2 3 4 5 6 7 8 9 10; do
+# killed processes can take a while to go away on a loaded machine (seen:
+# CX26's helper processes over 10 s)
+for i in $(seq 30); do
   left="$("$WORK/pidpath" $(ps -axo pid=) | grep -F "$ENG/" || true)"
   [ -z "$left" ] && break
   sleep 1
@@ -184,6 +186,9 @@ if [ "${BENCH:-0}" = 1 ]; then
     x86_64-w64-mingw32-gcc -O2 -I "$V2/test" "$V2/test/$b.c" -o "$WORK/bin/$b.exe" -ld3d9 -lgdi32 -luser32
   done
   : > "$WORK/bench.txt"
+  # no Present throttle for a window d9mt thinks hidden (e.g. the display
+  # asleep): it would land in the timed waits through the CS queue
+  export D9MT_BG_FPS=0 D9MT_STALL_PACE=0
   load() { sysctl -n vm.loadavg | awk '{print "load=" $2}'; }
   for r in $(seq "${BENCH_RUNS:-3}"); do
     for d in 100 1000 3000; do

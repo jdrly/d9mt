@@ -12,12 +12,17 @@
  *   BENCH draws=1000 frames=600 loop_ns_per_draw=... proc_cpu_ns_per_draw=...
  *         frame_median_ms=... frame_p99_ms=...
  *
- * With "flush", each frame ends with an event query flushed and waited on
- * instead of Present: the frame time is then the CPU and GPU work alone,
- * independent of the compositor (no drawable waits, and no d9mt throttle
- * when the window isn't visible, e.g. with the display asleep).
+ * With "flush", each frame ends with an event query instead of Present,
+ * polled with D3DGETDATA_FLUSH every 20 us (a QPC busy-wait in between, so
+ * every engine and d3d9 build polls at the same rate) until the GPU is
+ * done; without FLUSH a poll loop may never end (d9mt, like Windows, can
+ * decline the flush). The frame time is then the CPU and GPU work alone, independent of
+ * the compositor (no drawable waits, and no d9mt throttle when the window
+ * isn't visible, e.g. with the display asleep). "spinflush" polls with
+ * D3DGETDATA_FLUSH every time, as some games do: each such call costs d9mt
+ * work on the CS thread, so it measures the polling as much as the draws.
  *
- *   bench_draws.exe [draws per frame (1000)] [frames (600)] [present|flush]
+ *   bench_draws.exe [draws per frame (1000)] [frames (600)] [present|flush|spinflush]
  */
 #define COBJMACROS
 #include <windows.h>
@@ -56,6 +61,7 @@ int main(int argc, char **argv) {
   int draws = argc > 1 ? atoi(argv[1]) : 1000;
   int frames = argc > 2 ? atoi(argv[2]) : 600;
   int flush = argc > 3 && !strcmp(argv[3], "flush");
+  int spinflush = argc > 3 && !strcmp(argv[3], "spinflush");
   const int warmup = 60;
   WNDCLASSA wc = {0};
   RECT rc = {0, 0, 1280, 720};
@@ -142,9 +148,15 @@ int main(int argc, char **argv) {
     }
     IDirect3DDevice9_EndScene(dev);
     QueryPerformanceCounter(&tl);
-    if (flush) {
+    if (flush || spinflush) {
       IDirect3DQuery9_Issue(query, D3DISSUE_END);
-      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) { }
+      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+        if (!spinflush) {  /* pace the polls: 20 us */
+          LARGE_INTEGER p0, p1;
+          QueryPerformanceCounter(&p0);
+          do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < freq.QuadPart);
+        }
+      }
     } else {
       IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
     }
@@ -158,7 +170,7 @@ int main(int argc, char **argv) {
   qsort(ms, frames, sizeof(double), cmp_double);
   qsort(loop, frames, sizeof(double), cmp_double);
   printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f\n",
-         flush ? "flush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
+         flush ? "flush" : spinflush ? "spinflush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
          ms[frames / 2], ms[frames * 99 / 100]);
   fflush(stdout);
   IDirect3DDevice9_Release(dev);
