@@ -52,7 +52,7 @@ namespace dxvk::backend {
   MtlResidencyTracker::~MtlResidencyTracker() { }
   void MtlResidencyTracker::allocCreated(obj_handle_t, uint64_t) { }
 
-  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t, uint64_t) {
+  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t, uint64_t, bool) {
     CHECK(g_alive.erase(alloc) == 1u);
     if (!g_teardown) {
       auto it = g_lastUse.find(alloc);
