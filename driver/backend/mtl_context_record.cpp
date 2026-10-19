@@ -1534,24 +1534,30 @@ namespace dxvk::backend {
       if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped texture bind beyond stage table (DMAP?)"); }
       return;
     }
+    // The view moves into the last stage's slot (D3D9 binds one stage per slot): a slot
+    // holds a reference from then on, so `bound` stays valid.
+    MtlTextureView* bound = view.ptr();
     bool changed = false;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
-        if (m_bindings[s].textures[slot] == view)
+        if (m_bindings[s].textures[slot].ptr() == bound)
           continue;
-        m_bindings[s].textures[slot] = view;
+        if (stages & (2u << s))
+          m_bindings[s].textures[slot] = view;
+        else
+          m_bindings[s].textures[slot] = std::move(view);
         m_bindings[s].dirtyTextures |= 1u << slot;
         changed = true;
       }
     }
     if (changed) {
       m_dirty |= DirtyResources;
-      if (m_narrowBarrier && (stages & MtlStageVertex) && view != nullptr)
+      if (m_narrowBarrier && (stages & MtlStageVertex) && bound != nullptr)
         m_vtxCheck = true;
-      if (deferredPassesEnabled() && view != nullptr && view->image != nullptr)
-        m_frameSampled.insert(view->image.ptr());
-      if (m_attOpt && view != nullptr && view->image != nullptr)
-        attBindSampled(view.ptr());
+      if (deferredPassesEnabled() && bound != nullptr && bound->image != nullptr)
+        m_frameSampled.insert(bound->image.ptr());
+      if (m_attOpt && bound != nullptr && bound->image != nullptr)
+        attBindSampled(bound);
     }
   }
 
@@ -1561,12 +1567,16 @@ namespace dxvk::backend {
       if (!warned) { warned = true; Logger::warn("MtlContextImpl: dropped sampler bind beyond stage table (DMAP?)"); }
       return;
     }
+    MtlSamplerState* bound = sampler.ptr();
     bool changed = false;
     for (uint32_t s = 0; s < 2; s++) {
       if (stages & (1u << s)) {
-        if (m_bindings[s].samplers[slot] == sampler)
+        if (m_bindings[s].samplers[slot].ptr() == bound)
           continue;
-        m_bindings[s].samplers[slot] = sampler;
+        if (stages & (2u << s))
+          m_bindings[s].samplers[slot] = sampler;
+        else
+          m_bindings[s].samplers[slot] = std::move(sampler);
         m_bindings[s].dirtySamplers |= 1u << slot;
         changed = true;
       }
