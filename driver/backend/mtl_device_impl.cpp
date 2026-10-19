@@ -475,10 +475,8 @@ namespace dxvk::backend {
   }
 
   Rc<MtlSamplerState> MtlDeviceImpl::createSampler(const MtlSamplerKey& key) {
-    size_t hash = key.hash();
-
     { std::lock_guard<std::mutex> lock(m_samplerMutex);
-      auto entry = m_samplerCache.find(hash);
+      auto entry = m_samplerCache.find(key);
       if (entry != m_samplerCache.end())
         return entry->second;
     }
@@ -513,7 +511,7 @@ namespace dxvk::backend {
     sampler->gpuResourceId = samplerInfo.gpu_resource_id;
 
     std::lock_guard<std::mutex> lock(m_samplerMutex);
-    return m_samplerCache.emplace(hash, sampler).first->second;
+    return m_samplerCache.emplace(key, sampler).first->second;
   }
 
   Rc<MtlAllocation> MtlDeviceImpl::renameBuffer(MtlBuffer* buffer) {
@@ -608,17 +606,17 @@ namespace dxvk::backend {
     return new MtlBackendEvent();
   }
 
-  obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {
-    size_t hash;
-    { const uint8_t* p = reinterpret_cast<const uint8_t*>(&ds);
-      uint64_t h = 0xcbf29ce484222325ull;
-      for (size_t i = 0u; i < sizeof(ds); i++)
-        h = (h ^ p[i]) * 0x100000001b3ull;
-      hash = size_t(h ^ (h >> 32));
-    }
+  size_t MtlDeviceImpl::DssHash::operator () (const MtlDepthStencilState& ds) const {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&ds);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0u; i < sizeof(ds); i++)
+      h = (h ^ p[i]) * 0x100000001b3ull;
+    return size_t(h ^ (h >> 32));
+  }
 
+  obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {
     { std::lock_guard<std::mutex> lock(m_dssoMutex);
-      auto entry = m_dssoCache.find(hash);
+      auto entry = m_dssoCache.find(ds);
       if (entry != m_dssoCache.end())
         return entry->second.handle();
     }
@@ -652,7 +650,7 @@ namespace dxvk::backend {
     obj_handle_t handle = MTLDevice_newDepthStencilState(m_device.handle(), &info);
 
     std::lock_guard<std::mutex> lock(m_dssoMutex);
-    return m_dssoCache.emplace(hash, WmtDepthStencil::adopt(handle)).first->second.handle();
+    return m_dssoCache.emplace(ds, WmtDepthStencil::adopt(handle)).first->second.handle();
   }
 
   uint64_t MtlDeviceImpl::getCompletedSerial() {

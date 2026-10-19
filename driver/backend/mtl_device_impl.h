@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -221,11 +222,18 @@ namespace dxvk::backend {
     std::unique_ptr<MtlResidencyTracker> m_residency;
     std::unique_ptr<UploadRing>          m_ring;
 
+    // Keyed by the whole state: two states with the same hash must not share an object.
+    struct SamplerKeyHash { size_t operator () (const MtlSamplerKey& k) const { return k.hash(); } };
+    struct SamplerKeyEq   { bool operator () (const MtlSamplerKey& a, const MtlSamplerKey& b) const { return a.eq(b); } };
+    struct DssHash { size_t operator () (const MtlDepthStencilState& ds) const; };
+    struct DssEq   { bool operator () (const MtlDepthStencilState& a, const MtlDepthStencilState& b) const {
+      return !std::memcmp(&a, &b, sizeof(a)); } };
+
     std::mutex m_samplerMutex;
-    std::unordered_map<size_t, Rc<MtlSamplerState>> m_samplerCache;
+    std::unordered_map<MtlSamplerKey, Rc<MtlSamplerState>, SamplerKeyHash, SamplerKeyEq> m_samplerCache;
 
     std::mutex m_dssoMutex;
-    std::unordered_map<size_t, WmtDepthStencil> m_dssoCache;
+    std::unordered_map<MtlDepthStencilState, WmtDepthStencil, DssHash, DssEq> m_dssoCache;
 
     // Stopped first in ~MtlDeviceImpl, while the compiler is still alive.
     std::unique_ptr<MtlCompileWorkers> m_compileWorkers;
