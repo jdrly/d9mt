@@ -21,11 +21,11 @@
 //   vsync off: the timer.
 //
 // The sleep (Sleeper) is the system's (NtDelayExecution), in halves down to a last piece of at
-// most 2 ms, then a spin. macOS coalesces timers: a sleep wakes late by a share of its length
-// (seen: about a fifth for a background process while the display sleeps, so 6 ms of a 29 ms
-// sleep), so the long first sleeps get their lateness made up by the later, shorter ones. The
-// spin covers what the last piece recently overslept, at least D9MT_FPS_CAP_SPIN_US (default
-// 200 us), at most 4 ms. DXVK's Sleep always
+// most 1 ms, then a spin. macOS coalesces timers: under Wine a sleep wakes late by a share of
+// its length (seen on an M5 Max with the display asleep and the machine busy: about half, up
+// to 4-10 ms: 0.5 ms of 1 ms, 2.5 of 5, 4.2 of 25), so the long first sleeps get their
+// lateness made up by the later, shorter ones. The spin covers what the last piece recently
+// overslept, at least D9MT_FPS_CAP_SPIN_US (default 200 us), at most 4 ms. DXVK's Sleep always
 // spins 4 timer periods plus a sixth of the sleep, under Wine 4 ms + 1/6: at 30 fps a CPU core
 // busy 15-20% of the time, the heat this cap is meant to save. The background throttle
 // (D9MT_BG_FPS) sleeps the same way.
@@ -212,7 +212,7 @@ namespace dxvk::framecap {
   public:
 
     static constexpr uint64_t MaxSpinNs  = 4000000u;
-    static constexpr uint64_t LastNs     = 2000000u;  // the last piece is at most this long
+    static constexpr uint64_t LastNs     = 1000000u;  // the last piece is at most this long
 
     explicit Sleeper(uint64_t floorNs = 200000u)
     : m_floorNs(floorNs < MaxSpinNs ? floorNs : MaxSpinNs) { }
