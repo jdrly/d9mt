@@ -439,7 +439,17 @@ namespace dxvk::backend {
     void recordPassEntry();
     CmdChunk takeChunk();
     void prepareDirectEncode(uint32_t passCloseCounter);
-    void encodeDirect(std::function<void(obj_handle_t)>&& fn);
+    // Runs a transfer's encoding now; only D9MT_DEFERRED stores it (as a std::function), so
+    // the default path doesn't heap-allocate the capture per transfer.
+    template <typename Fn>
+    void encodeDirect(Fn&& fn) {
+      if (!deferredPassesEnabled()) {
+        fn(m_cmdbuf.handle());
+        return;
+      }
+      encodeDirectDeferred(std::function<void(obj_handle_t)>(std::forward<Fn>(fn)));
+    }
+    void encodeDirectDeferred(std::function<void(obj_handle_t)>&& fn);
     void noteTransferRead(const MtlTexture* tex);
     void flushFramePasses();
 

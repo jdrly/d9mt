@@ -1808,11 +1808,7 @@ namespace dxvk::backend {
     ensureCommandBuffer();
   }
 
-  void MtlContextImpl::encodeDirect(std::function<void(obj_handle_t)>&& fn) {
-    if (!deferredPassesEnabled()) {
-      fn(m_cmdbuf.handle());
-      return;
-    }
+  void MtlContextImpl::encodeDirectDeferred(std::function<void(obj_handle_t)>&& fn) {
     FrameEntry e;
     e.kind   = FrameEntry::Kind::Direct;
     e.encode = std::move(fn);
