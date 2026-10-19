@@ -1392,15 +1392,11 @@ namespace dxvk::backend {
       info.depth.texture      = tv->owned.handle();
       info.depth.load_action  = WMTLoadActionLoad;
       info.depth.store_action = WMTStoreActionStore;
-      info.depth.level        = view->key.baseMip;
-      info.depth.slice        = view->key.baseLayer;
     }
     if (hasStencil) {
       info.stencil.texture      = tv->owned.handle();
       info.stencil.load_action  = WMTLoadActionLoad;
       info.stencil.store_action = WMTStoreActionStore;
-      info.stencil.level        = view->key.baseMip;
-      info.stencil.slice        = view->key.baseLayer;
     }
     info.render_target_width  = mipExtent.width;
     info.render_target_height = mipExtent.height;
