@@ -33,12 +33,16 @@ void SubmissionTracker::drainAndStopPump() {
   waitFor(lastSubmittedSerial());
 
   std::vector<Retirement> remaining;
+  std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>> batches;
   { std::lock_guard<std::mutex> lock(m_retireMutex);
     remaining = std::move(m_retirements);
+    batches = std::move(m_batches);
     m_drained = true;
   }
   for (Retirement& r : remaining)
     r.release();
+  for (auto& b : batches)
+    b.second->run();
 }
 
 uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
@@ -65,6 +69,7 @@ void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> relea
     return;
   }
 
+  bool wake;
   { std::unique_lock<std::mutex> lock(m_retireMutex);
     // After drainAndStopPump nothing runs the list any more (no pump, no CS thread), and
     // the GPU is idle: release now, or e.g. a texture view destroyed in device teardown leaks.
@@ -73,19 +78,50 @@ void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> relea
       release();
       return;
     }
+    wake = m_retirements.empty() && m_batches.empty();
     m_retirements.push_back({ serial, std::move(release) });
   }
-  m_retireCond.notify_one();
+  // The pump only sleeps on the condition while both lists are empty; otherwise it is
+  // waiting on the event for an earlier serial and rescans the lists after it.
+  if (wake)
+    m_retireCond.notify_one();
 }
 
-void SubmissionTracker::processRetirements() {
+std::unique_ptr<RetireBatch> SubmissionTracker::retireBatch(uint64_t serial, std::unique_ptr<RetireBatch>&& batch) {
+  if (batch == nullptr || batch->empty())
+    return batch != nullptr ? std::move(batch) : std::make_unique<RetireBatch>();
+
+  std::unique_ptr<RetireBatch> next;
+  bool wake = false;
+  bool stopped;
+  { std::lock_guard<std::mutex> lock(m_retireMutex);
+    if (!m_freeBatches.empty()) {
+      next = std::move(m_freeBatches.back());
+      m_freeBatches.pop_back();
+    }
+    // Stopped: drainAndStopPump has waited for the GPU and won't look at the list again.
+    stopped = m_stop;
+    if (!stopped) {
+      wake = m_retirements.empty() && m_batches.empty();
+      m_batches.emplace_back(serial, std::move(batch));
+    }
+  }
+  if (stopped)
+    batch->run();
+  if (wake)
+    m_retireCond.notify_one();
+  return next != nullptr ? std::move(next) : std::make_unique<RetireBatch>();
+}
+
+void SubmissionTracker::processRetirements(uint64_t completed) {
   std::vector<std::function<void()>> ready;
+  RetireBatch* due[8];
+  uint32_t     dueCount = 0u;
   {
     std::lock_guard<std::mutex> lock(m_retireMutex);
-    if (m_retirements.empty())
+    if (m_retirements.empty() && m_batches.empty())
       return;
 
-    uint64_t completed = completedSerial();
     size_t write = 0u;
 
     for (size_t i = 0u; i < m_retirements.size(); i++) {
@@ -99,10 +135,32 @@ void SubmissionTracker::processRetirements() {
     }
 
     m_retirements.resize(write);
+
+    while (dueCount < 8u && !m_batches.empty() && m_batches.front().first <= completed) {
+      due[dueCount++] = m_batches.front().second.release();
+      m_batches.pop_front();
+    }
   }
 
   for (auto& release : ready)
     release();
+
+  if (!dueCount)
+    return;
+  for (uint32_t i = 0u; i < dueCount; i++)
+    due[i]->run();
+  bool more;
+  { std::lock_guard<std::mutex> lock(m_retireMutex);
+    for (uint32_t i = 0u; i < dueCount; i++) {
+      if (m_freeBatches.size() < 8u)
+        m_freeBatches.emplace_back(due[i]);
+      else
+        delete due[i];
+    }
+    more = !m_batches.empty() && m_batches.front().first <= completed;
+  }
+  if (more)
+    processRetirements(completed);
 }
 
 void SubmissionTracker::pumpThread() {
@@ -112,13 +170,13 @@ void SubmissionTracker::pumpThread() {
 
   while (true) {
     m_retireCond.wait(lock, [this] {
-      return m_stop || !m_retirements.empty();
+      return m_stop || !m_retirements.empty() || !m_batches.empty();
     });
 
     if (m_stop)
       return;
 
-    uint64_t target = ~0ull;
+    uint64_t target = m_batches.empty() ? ~0ull : m_batches.front().first;
     for (const Retirement& r : m_retirements)
       target = r.serial < target ? r.serial : target;
 

@@ -659,6 +659,28 @@ namespace dxvk::backend {
     return m_tracker ? m_tracker->completedSerial() : 0u;
   }
 
+  // Here, not in mtl_submission.cpp: renamed storage goes back through MtlBufferImpl.
+  void RetireBatch::run() {
+    for (auto& r : recycles) {
+      static_cast<MtlBufferImpl*>(r.first.ptr())->recycleStorage(std::move(r.second));
+      r.first = nullptr;
+    }
+    recycles.clear();
+    for (obj_handle_t o : objects)
+      NSObject_release(o);
+    objects.clear();
+    for (auto& s : signals)
+      s.first->signal(s.second);
+    signals.clear();
+    initCmdbuf.reset();
+    cmdbuf.reset();
+    keepAlive.clear();
+  }
+
+  bool MtlDeviceImpl::isSerialComplete(uint64_t serial) {
+    return m_tracker ? m_tracker->isComplete(serial) : serial == 0u;
+  }
+
   uint64_t MtlDeviceImpl::getNextSerial() {
     return m_tracker ? m_tracker->nextSerial() : 1u;
   }

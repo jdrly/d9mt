@@ -343,6 +343,14 @@ namespace dxvk::backend {
 
     std::vector<Rc<MtlResource>> m_keepAlive;
 
+    // Releases recorded for the open command buffer; handed to the tracker at submit.
+    std::unique_ptr<RetireBatch> m_retire;
+    RetireBatch& retireBatch() {
+      if (unlikely(m_retire == nullptr))
+        m_retire = std::make_unique<RetireBatch>();
+      return *m_retire;
+    }
+
     uint64_t m_currentSerial = 0;
 
     static constexpr uint32_t kVisSlots = 65536u;

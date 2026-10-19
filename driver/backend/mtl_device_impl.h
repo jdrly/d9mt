@@ -133,6 +133,7 @@ namespace dxvk::backend {
     Rc<MtlContext> createContext() override;
 
     uint64_t getCompletedSerial() override;
+    bool     isSerialComplete(uint64_t serial) override;
     uint64_t getNextSerial() override;
     void     waitForIdle() override;
 

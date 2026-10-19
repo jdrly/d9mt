@@ -93,6 +93,10 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     if (m_pass.active)
       closePass();
+    // Recorded for a command buffer that is never submitted: the tracker runs it at the
+    // latest when the device drains.
+    if (m_retire != nullptr && !m_retire->empty())
+      m_device->submissions().retireBatch(m_device->submissions().nextSerial(), std::move(m_retire));
     for (auto& kv : m_fxScalers)
       NSObject_release(kv.second.scaler);
     if (m_visBuffer) {
@@ -115,14 +119,19 @@ namespace dxvk::backend {
     /* Reset requires the slot's prior command buffers to have COMPLETED
      * (MTL4CommandAllocator contract). Prefer any retired slot, grow the
      * pool when none is free, and only block once the pool is capped. */
-    const uint64_t completed = m_device->submissions().completedSerial();
     const uint32_t n = uint32_t(m_allocators.size());
     uint32_t slot = ~0u;
-    for (uint32_t i = 0u; i < n && slot == ~0u; i++) {
-      uint32_t s = (m_allocatorCursor + i) % n;
-      if (s != m_allocatorSlot && m_allocatorSerial[s] <= completed)
-        slot = s;
-    }
+    auto pickSlot = [&](uint64_t completed) {
+      for (uint32_t i = 0u; i < n && slot == ~0u; i++) {
+        uint32_t s = (m_allocatorCursor + i) % n;
+        if (s != m_allocatorSlot && m_allocatorSerial[s] <= completed)
+          slot = s;
+      }
+    };
+    // submit() has just read the event: try that value before reading it again.
+    pickSlot(m_device->submissions().completedSerialCached());
+    if (slot == ~0u)
+      pickSlot(m_device->submissions().completedSerial());
     bool fresh = false;
     if (slot == ~0u && n < std::clamp(m_device->memoryProfile().allocatorCap, 2u, kMaxAllocators)) {
       m_allocators.push_back(WmtAllocator::adopt(
@@ -252,28 +261,21 @@ namespace dxvk::backend {
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
 
-    if (m_initCmdbuf) {
-      auto doneInit = std::make_shared<WmtCommandBuffer>(std::move(m_initCmdbuf));
-      m_initCmdbuf.reset();
-      m_device->submissions().retireAfter(serial,
-        [doneInit]() mutable { doneInit->reset(); });
-    }
+    RetireBatch& retire = retireBatch();
+    if (m_initCmdbuf)
+      retire.initCmdbuf = std::move(m_initCmdbuf);
 
     m_device->uploadRing().onSubmit(serial);
 
     if (!m_keepAlive.empty()) {
-      auto keepAlive = std::make_shared<std::vector<Rc<MtlResource>>>(
-        std::move(m_keepAlive));
-      for (auto& res : *keepAlive)
+      for (auto& res : m_keepAlive)
         res->setTrackingSerial(serial);
-      m_device->submissions().retireAfter(serial,
-        [keepAlive]() mutable { keepAlive->clear(); });
-      m_keepAlive.clear();
+      // The batch's vector is empty with the capacity of an earlier command buffer's.
+      std::swap(retire.keepAlive, m_keepAlive);
     }
 
-    auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
-    m_device->submissions().retireAfter(serial,
-      [doneCmd]() mutable { doneCmd->reset(); });
+    retire.cmdbuf = std::move(m_cmdbuf);
+    m_retire = m_device->submissions().retireBatch(serial, std::move(m_retire));
 
     if (waitCompleted)
       m_device->submissions().waitFor(serial);
@@ -292,7 +294,7 @@ namespace dxvk::backend {
     }
 
     const uint64_t completed = m_device->submissions().completedSerial();
-    m_device->submissions().processRetirements();
+    m_device->submissions().processRetirements(completed);
     m_device->residency().serialRetired(completed);
     m_device->uploadRing().onComplete(completed);
   }
@@ -313,7 +315,7 @@ namespace dxvk::backend {
     uint64_t completed = m_device->submissions().completedSerial();
     {
       prof::Scope profScope(prof::EndFrame);
-      m_device->submissions().processRetirements();
+      m_device->submissions().processRetirements(completed);
       m_device->residency().serialRetired(completed);
       m_device->uploadRing().onComplete(completed);
       m_device->uploadRing().onFrame();
@@ -659,16 +661,22 @@ namespace dxvk::backend {
      * per-slot serials so the round-robin never lands on a retired slot and
      * the pool grows unbounded. */
     prof::bump(prof::CntArgRotate);
-    const uint64_t completed = m_device->submissions().completedSerial();
-    const size_t   n         = m_argTables.size();
+    const size_t n = m_argTables.size();
 
-    for (size_t scan = 0u; scan < n; ++scan) {
-      const size_t idx = (m_argTableCursor + scan) % n;
-      if (m_argTables[idx].serial <= completed) {
-        m_currentArgTable       = idx;
-        m_argTableCursor        = idx + 1u;
-        m_argTables[idx].serial = m_currentSerial;
-        return;
+    /* The cached completed serial first (the pump and every submit refresh
+     * it); read the event only when no pair is free by that value. */
+    for (int fresh = 0; fresh < 2; fresh++) {
+      const uint64_t completed = fresh
+        ? m_device->submissions().completedSerial()
+        : m_device->submissions().completedSerialCached();
+      for (size_t scan = 0u; scan < n; ++scan) {
+        const size_t idx = (m_argTableCursor + scan) % n;
+        if (m_argTables[idx].serial <= completed) {
+          m_currentArgTable       = idx;
+          m_argTableCursor        = idx + 1u;
+          m_argTables[idx].serial = m_currentSerial;
+          return;
+        }
       }
     }
 

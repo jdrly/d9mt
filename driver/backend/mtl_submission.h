@@ -7,15 +7,41 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "wmt_handle.h"
 
+#include "../mtl/mtl_resource.h"
+#include "../util/sync/sync_signal.h"
 #include "../util/thread.h"
 
 namespace dxvk::backend {
+
+// What one command buffer releases once the GPU is past it, handed to the tracker once per
+// submit: no std::function, no allocation per entry, one lock and at most one pump wake per
+// command buffer. The tracker recycles batches with their capacity.
+struct RetireBatch {
+  std::vector<std::pair<Rc<MtlBuffer>, Rc<MtlAllocation>>> recycles;  // renamed-away storage
+  std::vector<obj_handle_t>                                 objects;   // NSObject_release
+  std::vector<std::pair<Rc<sync::Signal>, uint64_t>>        signals;
+  std::vector<Rc<MtlResource>>                              keepAlive;
+  WmtCommandBuffer initCmdbuf;
+  WmtCommandBuffer cmdbuf;
+
+  bool empty() const {
+    return recycles.empty() && objects.empty() && signals.empty() && keepAlive.empty()
+        && !initCmdbuf && !cmdbuf;
+  }
+
+  // In recording order: recycles and object releases, the fence signals, then the command
+  // buffers and their keep-alives. Keeps the vectors' capacity.
+  void run();
+};
 
 class SubmissionTracker {
 
@@ -29,19 +55,37 @@ public:
 
   uint64_t lastSubmittedSerial() const { return nextSerial() - 1u; }
 
-  size_t retirementCount() { std::lock_guard<std::mutex> l(m_retireMutex); return m_retirements.size(); }
+  size_t retirementCount() { std::lock_guard<std::mutex> l(m_retireMutex); return m_retirements.size() + m_batches.size(); }
 
   uint64_t onSubmit(obj_handle_t queue);
 
+  // Reads the shared event (a unix call) and refreshes the cache.
   uint64_t completedSerial();
 
+  // The last value any completedSerial() saw: never ahead of the GPU, so a serial at or below
+  // it is complete. Callers that can do with a stale answer try this first.
+  uint64_t completedSerialCached() const { return m_completedCache.load(std::memory_order_acquire); }
+
   bool isComplete(uint64_t serial) {
+    if (serial <= completedSerialCached())
+      return true;
+    // Only onSubmit signals the event, with a serial it has already taken: one that isn't
+    // submitted yet (the recording command buffer's) can't be complete.
+    if (serial >= nextSerial())
+      return false;
     return serial <= completedSerial();
   }
 
   void retireAfter(uint64_t serial, std::function<void()> release);
 
-  void processRetirements();
+  // Queues the batch of the command buffer just submitted as `serial` and returns an empty
+  // one (recycled when possible) for the next command buffer.
+  std::unique_ptr<RetireBatch> retireBatch(uint64_t serial, std::unique_ptr<RetireBatch>&& batch);
+
+  void processRetirements() { processRetirements(completedSerial()); }
+
+  // `completed` from a completedSerial() the caller just made.
+  void processRetirements(uint64_t completed);
 
   void waitFor(uint64_t serial);
 
@@ -61,6 +105,8 @@ private:
   std::mutex m_retireMutex;
   std::condition_variable m_retireCond;
   std::vector<Retirement> m_retirements;
+  std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>> m_batches;  // serial order
+  std::vector<std::unique_ptr<RetireBatch>> m_freeBatches;
   bool m_stop = false;
   bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
 
