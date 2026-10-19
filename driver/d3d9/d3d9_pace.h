@@ -19,7 +19,7 @@
 //            outermost D3D9 calls, Present included): min / avg / max ms
 //   wait     per frame, average: the part of that spent blocked (frame latency
 //            wait, waiting for the CS thread or the GPU, staging throttle, the
-//            background sleep while the window is hidden), ms
+//            background sleep while the window is hidden, the D9MT_FPS_CAP sleep), ms
 //   game     per frame: the rest of the frame, outside d9mt (the game's own
 //            work and waits): min / avg / max ms
 //   cpu      the Present thread's CPU time (user + kernel, GetThreadTimes) in

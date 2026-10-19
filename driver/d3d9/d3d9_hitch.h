@@ -33,7 +33,7 @@ namespace dxvk::hitch {
   // Categories nest (bufLock contains its csSync/gpuWait, present contains
   // latencyWait): read a nested one as a breakdown, not as additive.
   enum Cat : uint32_t {
-    Present = 0,  // whole Present call (incl. frame latency wait, background throttle sleep)
+    Present = 0,  // whole Present call (incl. frame latency wait, background throttle and cap sleeps)
     Latency,      // waiting for the CS thread / GPU to present frame N - maxLatency
     TexCreate,    // CreateTexture/VolumeTexture/CubeTexture + surfaces; bytes = mip chain size
     TexLock,      // texture LockRect/LockBox + UnlockRect/UnlockBox (incl. upload on unlock)
@@ -46,13 +46,14 @@ namespace dxvk::hitch {
     Throttle,     // staging memory throttle waiting for the GPU
     Query,        // IDirect3DQuery9::GetData
     BgSleep,      // Present's sleep while the window is in the background (inside present)
+    CapSleep,     // Present's sleep to the D9MT_FPS_CAP cadence (inside present)
     Count
   };
 
   inline const char* catName(uint32_t c) {
     static constexpr const char* kNames[Count] = {
       "present", "latencyWait", "texCreate", "texLock", "texUpload", "bufCreate",
-      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query", "bgSleep"
+      "bufLock", "shaderCreate", "csSync", "gpuWait", "throttle", "query", "bgSleep", "capSleep"
     };
     return c < Count ? kNames[c] : "?";
   }
