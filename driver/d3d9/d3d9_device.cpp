@@ -4797,12 +4797,20 @@ namespace dxvk {
       ExecuteFlush(false);
       SynchronizeCsThread(SequenceNumber);
 
+      const auto t0 = unlikely(m_memStats) ? high_resolution_clock::now() : high_resolution_clock::time_point();
       { hitch::Scope hs(m_hitch, hitch::GpuWait);
         m_dxvkDevice->waitForResource(Resource);
       }
 
-      if (unlikely(m_memStats))
-        m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
+      if (unlikely(m_memStats)) {
+        auto& stats = m_dxvkDevice->frontendStats();
+        stats.resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
+        if (MapFlags & D3DLOCK_READONLY) {
+          stats.readOnlyGpuWaits.fetch_add(1u, std::memory_order_relaxed);
+          stats.readOnlyGpuWaitUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            high_resolution_clock::now() - t0).count()), std::memory_order_relaxed);
+        }
+      }
     }
 
     return true;

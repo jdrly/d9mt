@@ -201,6 +201,8 @@ namespace dxvk::backend {
         m_frontendStats.bufferLockWaitUs.load() / 1000u, "ms",
       " bufLockFree=", m_frontendStats.bufferLockFree.load(),
       " gpuWaits=", m_frontendStats.resourceGpuWaits.load(),
+      " roWaits=", m_frontendStats.readOnlyGpuWaits.load(), "/",
+        m_frontendStats.readOnlyGpuWaitUs.load() / 1000u, "ms",
       " woDemoted=", m_frontendStats.writeOnlyDemoted.load(),
       " stagingNew=", m_frontendStats.stagingNew.load(),
       " stagingReused=", m_frontendStats.stagingReused.load());
