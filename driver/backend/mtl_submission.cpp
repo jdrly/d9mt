@@ -2,6 +2,8 @@
 
 #include <thread>
 
+#include "mtl_profiler.h"
+
 #include "../util/log/log.h"
 #include "../util/util_env.h"
 #include "../util/util_string.h"
@@ -46,6 +48,7 @@ uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
 }
 
 uint64_t SubmissionTracker::completedSerial() {
+  prof::countEventRead();
   uint64_t value = MTLSharedEvent_signaledValue(m_event.handle());
 
   uint64_t cached = m_completedCache.load(std::memory_order_acquire);

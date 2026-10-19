@@ -4,6 +4,7 @@
 // breakdown of its parent, not as additive across the whole frame.
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -52,6 +53,15 @@ namespace dxvk::backend::prof {
   inline uint64_t g_ns[BucketCount]     = {};
   inline uint64_t g_counts[CounterCount] = {};
   inline uint64_t g_frames = 0u;
+
+  // MTLSharedEvent_signaledValue reads (SubmissionTracker::completedSerial): any thread, so
+  // atomic, and outside g_counts.
+  inline std::atomic<uint64_t> g_eventReads = { 0u };
+
+  inline void countEventRead() {
+    if (!g_profEnabled) return;
+    g_eventReads.fetch_add(1u, std::memory_order_relaxed);
+  }
 
   struct Scope {
     std::chrono::steady_clock::time_point t0;
@@ -113,6 +123,8 @@ namespace dxvk::backend::prof {
       " | framePasses=", double(g_counts[CntFramePasses]) / kFrames, "/f",
       " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f",
       " vtxFence=", double(g_counts[CntVtxFence]) / kFrames, "/f");
+    const uint64_t eventReads = g_eventReads.exchange(0u, std::memory_order_relaxed);
+    line += str::format(" evRead=", eventReads, "(", double(eventReads) / kFrames, "/f)");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 
