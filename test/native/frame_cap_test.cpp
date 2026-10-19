@@ -164,17 +164,16 @@ int main() {
     framecap::Sleeper s(200000u);
     CHECK(s.spinNs() == 200000u);                      // nothing overslept yet: the floor
 
-    // a precise system sleep: 20 ms in halves (10, 5, 2.5, 1.25 ... the last <= 2 ms), on time,
-    // spinning the floor
+    // a precise system sleep: 20 ms in halves (9.9, 4.95, 2.5, 1.2, 0.6: the last <= 1 ms), on
+    // time, spinning the floor
     int64_t miss = sleep(s, 20u * ms);
     CHECK(miss >= 0 && miss <= 1000);
     CHECK(spun >= 190000u && spun <= 210000u);
-    CHECK(sleeps >= 4u && sleeps <= 6u);
+    CHECK(sleeps >= 4u && sleeps <= 7u);
     CHECK(s.lateNs() < 2000u);
 
-    // late by a fifth of every sleep (a background process, display asleep): the halves make it
-    // up; the last piece is at most 2 ms, so at most 0.4 ms late: the first deadline is missed
-    // by at most 0.2 ms (the floor's spin), the later ones met
+    // late by a fifth of every sleep: the halves make it up; the last piece is at most 1 ms, so
+    // at most 0.2 ms late: met at once
     share = 5u;
     miss = sleep(s, 29u * ms);
     CHECK(miss >= 0 && miss <= 250000);
@@ -185,6 +184,17 @@ int main() {
       CHECK(miss >= 0 && miss <= 1000);
     }
     CHECK(spun <= 1000000u);
+
+    // late by half of every sleep (seen under Wine on a busy Mac with the display asleep): the
+    // first deadline may be missed by up to 0.5 ms, then the spin (~0.7 ms) covers it
+    share = 2u;
+    for (int i = 0; i < 50; i++)
+      sleep(s, 25u * ms);
+    miss = sleep(s, 25u * ms);
+    CHECK(miss >= 0 && miss <= 1000);
+    CHECK(spun <= 1000000u);
+    std::printf("sleeper, 50%% late: sleeps %llu, spun %.2f ms, spin %.2f ms\n",
+      (unsigned long long)sleeps, double(spun) * 1e-6, double(s.spinNs()) * 1e-6);
     share = 0u;
 
     // a fixed 3 ms of oversleep: the first deadline is missed, then the spin covers it
