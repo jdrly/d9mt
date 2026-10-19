@@ -33,13 +33,13 @@ namespace dxvk {
       this->incRef();
     }
 
-    Rc(Rc&& other)
+    Rc(Rc&& other) noexcept
     : m_object(other.m_object) {
       other.m_object = nullptr;
     }
 
     template<typename Tx>
-    Rc(Rc<Tx>&& other)
+    Rc(Rc<Tx>&& other) noexcept
     : m_object(other.m_object) {
       other.m_object = nullptr;
     }
@@ -65,7 +65,7 @@ namespace dxvk {
       return *this;
     }
 
-    Rc& operator = (Rc&& other) {
+    Rc& operator = (Rc&& other) noexcept {
       this->decRef();
       this->m_object = other.m_object;
       other.m_object = nullptr;
@@ -73,7 +73,7 @@ namespace dxvk {
     }
 
     template<typename Tx>
-    Rc& operator = (Rc<Tx>&& other) {
+    Rc& operator = (Rc<Tx>&& other) noexcept {
       this->decRef();
       this->m_object = other.m_object;
       other.m_object = nullptr;
