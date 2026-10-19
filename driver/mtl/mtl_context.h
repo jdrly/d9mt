@@ -92,6 +92,8 @@ namespace dxvk {
     virtual void flushCommandList(const char* reason, MtlSubmitStatus* status);
     virtual Rc<MtlCommandBuffer> beginExternalRendering();
     virtual void synchronizeWsi(MtlPresenterSync sync);
+    // D9MT_LATENCY_LOG: a frame that was not presented (hidden window, no drawable); after its flush.
+    virtual void frameNotPresented(const MtlPresenterSync& sync);
     virtual void beginLatencyTracking(const Rc<MtlLatencyTracker>&, uint64_t frameId);
     virtual void endLatencyTracking(const Rc<MtlLatencyTracker>&);
 

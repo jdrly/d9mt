@@ -70,6 +70,7 @@ namespace dxvk::backend {
     void endFrame() override;
     void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
     void synchronizeWsi(MtlPresenterSync sync) override;
+    void frameNotPresented(const MtlPresenterSync& sync) override;
 
     void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
     void setVertexLayout(uint32_t nAttr, const MtlVertexAttr* attrs,
@@ -348,6 +349,8 @@ namespace dxvk::backend {
     // D9MT_LATENCY_LOG: the frame's first commit and its command buffers so far.
     uint64_t m_latSubmit0Ns = 0u;
     uint32_t m_latCmdbufs   = 0u;
+    void pushFrameLatency(const MtlPresenterSync& sync, uint64_t serial,
+      uint64_t acquireNs, uint64_t submitNs, uint64_t presentNs);
 
     static constexpr uint32_t kVisSlots = 65536u;
     WmtBuffer m_visBuffer;

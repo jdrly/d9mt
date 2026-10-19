@@ -382,23 +382,34 @@ namespace dxvk::backend {
       MetalDrawable_present(sync.drawable);
     NSObject_release(sync.drawable);
 
+    if (unlikely(sync.appNs))
+      pushFrameLatency(sync, serial, acquireNs, submitNs, latency::nowNs());
+  }
+
+  void MtlContextImpl::frameNotPresented(const MtlPresenterSync& sync) {
     if (unlikely(sync.appNs)) {
-      if (FrameLatencyLog* log = m_device->latencyLog()) {
-        FrameLatencyRecord r;
-        r.frameId   = sync.frameId;
-        r.serial    = serial;
-        r.appNs     = sync.appNs;
-        r.csNs      = sync.csNs;
-        r.acquireNs = acquireNs;
-        r.submit0Ns = m_latSubmit0Ns;
-        r.submitNs  = submitNs;
-        r.presentNs = latency::nowNs();
-        r.cmdbufs   = m_latCmdbufs;
-        log->push(r);
-      }
-      m_latSubmit0Ns = 0u;
-      m_latCmdbufs   = 0u;
+      const uint64_t now = latency::nowNs();
+      pushFrameLatency(sync, m_device->submissions().lastSubmittedSerial(), now, now, 0u);
     }
+  }
+
+  void MtlContextImpl::pushFrameLatency(const MtlPresenterSync& sync, uint64_t serial,
+      uint64_t acquireNs, uint64_t submitNs, uint64_t presentNs) {
+    if (FrameLatencyLog* log = m_device->latencyLog()) {
+      FrameLatencyRecord r;
+      r.frameId   = sync.frameId;
+      r.serial    = serial;
+      r.appNs     = sync.appNs;
+      r.csNs      = sync.csNs;
+      r.acquireNs = acquireNs;
+      r.submit0Ns = m_latSubmit0Ns;
+      r.submitNs  = submitNs;
+      r.presentNs = presentNs;
+      r.cmdbufs   = m_latCmdbufs;
+      log->push(r);
+    }
+    m_latSubmit0Ns = 0u;
+    m_latCmdbufs   = 0u;
   }
 
 

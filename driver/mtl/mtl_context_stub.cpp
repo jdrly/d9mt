@@ -30,6 +30,7 @@ namespace dxvk {
   }
   Rc<MtlCommandBuffer> MtlContext::beginExternalRendering()    { MTL_STUB("beginExternalRendering"); return nullptr; }
   void MtlContext::synchronizeWsi(MtlPresenterSync)            { MTL_STUB("synchronizeWsi"); }
+  void MtlContext::frameNotPresented(const MtlPresenterSync&)  { }
   void MtlContext::beginLatencyTracking(const Rc<MtlLatencyTracker>&, uint64_t) { MTL_STUB("beginLatencyTracking"); }
   void MtlContext::endLatencyTracking(const Rc<MtlLatencyTracker>&) { MTL_STUB("endLatencyTracking"); }
 

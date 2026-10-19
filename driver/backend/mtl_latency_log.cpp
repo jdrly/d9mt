@@ -89,10 +89,15 @@ namespace dxvk::backend {
     if (!m_t0)
       m_t0 = r.appNs;
     const uint64_t a = r.appNs;
-    std::fprintf(m_file, "f=%llu t=%.3f cs=%.3f acq=%.3f sub0=%.3f sub=%.3f pres=%.3f gpu%s%.3f cb=%u\n",
+    char pres[32];
+    if (r.presentNs)
+      std::snprintf(pres, sizeof(pres), "%.3f", ms(a, r.presentNs));
+    else
+      std::snprintf(pres, sizeof(pres), "skip");   // not presented: hidden window or no drawable
+    std::fprintf(m_file, "f=%llu t=%.3f cs=%.3f acq=%.3f sub0=%.3f sub=%.3f pres=%s gpu%s%.3f cb=%u\n",
       (unsigned long long)r.frameId, double(a - m_t0) * 1e-9,
       ms(a, r.csNs), ms(a, r.acquireNs), ms(a, r.submit0Ns ? r.submit0Ns : r.submitNs),
-      ms(a, r.submitNs), ms(a, r.presentNs), late ? "<=" : "=", ms(a, gpuNs), r.cmdbufs);
+      ms(a, r.submitNs), pres, late ? "<=" : "=", ms(a, gpuNs), r.cmdbufs);
     if (++m_unflushed >= 64u) {
       std::fflush(m_file);
       m_unflushed = 0u;

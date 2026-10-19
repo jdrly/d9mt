@@ -1,6 +1,6 @@
 #pragma once
 
-// D9MT_LATENCY_LOG=1 (or =<file>): one line per presented frame, from the app's Present call
+// D9MT_LATENCY_LOG=1 (or =<file>): one line per frame, from the app's Present call
 // to the GPU finishing the frame's last command buffer:
 //   f=<frame> t=<s since the first frame> cs=+ acq=+ sub0=+ sub=+ pres=+ gpu=+ (ms after Present) cb=<n>
 //     cs    the CS thread starts the present (its backlog)
@@ -8,7 +8,8 @@
 //     sub0  the frame's first command buffer is committed (the GPU can start)
 //     sub   the last one (with the present copy) is committed
 //     pres  the present is scheduled (MetalDrawable_present returned; not on-glass time,
-//           which needs the drawable's presented handler in the bridge)
+//           which needs the drawable's presented handler in the bridge); "skip" for a frame
+//           not presented (hidden/occluded window, no drawable: acq=sub= the skip's flush)
 //     gpu   the GPU has finished the last command buffer (the shared event reached its
 //           serial, seen by the log's own thread); "gpu<=" when the thread was late, an upper bound
 // Every 256 frames a LATENCY summary (p50/p99) goes to the regular log. The file defaults to

@@ -832,6 +832,11 @@ namespace dxvk {
 
       if (!cPresenter->isVisible()) {
         ctx->flushCommandList("present-skipped-not-visible", nullptr);
+        if (unlikely(cAppNs)) {
+          MtlPresenterSync skipped;
+          skipped.frameId = cFrameId; skipped.appNs = cAppNs; skipped.csNs = csNs;
+          ctx->frameNotPresented(skipped);
+        }
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
           cSignal->signal(cFrameId);
@@ -841,6 +846,10 @@ namespace dxvk {
       MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
       if (!cDrawable.valid) {
         ctx->flushCommandList("present-skipped-no-drawable", nullptr);
+        if (unlikely(cAppNs)) {
+          cDrawable.sync.appNs = cAppNs; cDrawable.sync.csNs = csNs;
+          ctx->frameNotPresented(cDrawable.sync);
+        }
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
           cSignal->signal(cFrameId);
