@@ -123,15 +123,17 @@ namespace dxvk::backend {
     m_memProfile = profile;
 
     obj_handle_t devices = WMTCopyAllDevices();
+    // objectAtIndex: is +0 and the array holds the device: retain it before the array goes
+    // (adopting it released one reference too many at teardown).
     obj_handle_t device = NSArray_object(devices, 0u);
+    if (device)
+      m_device = WmtDevice::retain(device);
     NSObject_release(devices);
 
     if (!device) {
       Logger::err("MtlDeviceImpl: no Metal device");
       return;
     }
-
-    m_device = WmtDevice::adopt(device);
     m_queue = WmtQueue::adopt(MTLDevice_newMTL4CommandQueue(m_device.handle()));
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
