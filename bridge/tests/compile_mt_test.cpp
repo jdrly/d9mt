@@ -2,7 +2,7 @@
 // driver's compile workers do through winemetal.so (no Wine): many threads
 // at once run the AIR thunk (sqlite cache), MTLDevice newLibrary and
 // MTL4Compiler render PSO builds (pipeline archive serializer attached,
-// flushed every few PSOs while other threads compile).
+// flushed every few PSOs, by the bridge's flush thread once builds pause).
 //
 //   compile_mt_test <winemetal.so> <workdir> <sm3 .bin>...
 //
@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fstream>
 #include <functional>
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "../winemetal.h"
@@ -352,6 +354,35 @@ int main(int argc, char** argv) {
   const double ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
+
+  // The bridge flushes the archive on its own thread once builds pause (2 s);
+  // this process must still run then. Wait for this session's archive.
+  const auto tw = std::chrono::steady_clock::now();
+  const std::string session = "-" + std::to_string(getpid()) + "-";
+  bool flushed = false;
+  while (!flushed && std::chrono::steady_clock::now() - tw < std::chrono::seconds(15)) {
+    if (DIR* base = opendir((work + "/pso").c_str())) {
+      while (dirent* d = readdir(base)) {
+        if (strncmp(d->d_name, "os-", 3)) continue;
+        if (DIR* sub = opendir((work + "/pso/" + d->d_name).c_str())) {
+          while (dirent* f = readdir(sub)) {
+            const std::string n = f->d_name;
+            if (n.find(session) != std::string::npos && n.size() > 4 && n.compare(n.size() - 4, 4, ".sum") == 0)
+              flushed = true;
+          }
+          closedir(sub);
+        }
+      }
+      closedir(base);
+    }
+    if (!flushed)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (flushed)
+    printf("archive flushed %.0f ms after the last build\n", std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - tw).count());
+  else
+    FAIL("no PSO archive of this session within 15 s of the last build");
 
   // Compare with the first run on this workdir: metallibs must be
   // byte-identical (AIR cache hits included) and no PSO that built before
