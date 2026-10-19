@@ -72,7 +72,9 @@ namespace dxvk::backend {
     }
 
     void recreate(const MtlPresenterDesc& desc) override {
-      m_desc = desc;
+      { std::lock_guard<std::mutex> lock(m_descMutex);
+        m_desc = desc;
+      }
       // A parked drawable has the old size/format.
       dropParkedDrawable();
       applyProps("recreate");
@@ -82,7 +84,9 @@ namespace dxvk::backend {
       bool vsync = syncInterval != 0u;
 
       if (m_desc.vsync != vsync) {
-        m_desc.vsync = vsync;
+        { std::lock_guard<std::mutex> lock(m_descMutex);
+          m_desc.vsync = vsync;
+        }
         applyProps(vsync ? "vsync on" : "vsync off");
       }
     }
@@ -135,9 +139,14 @@ namespace dxvk::backend {
     }
 
     MtlAcquiredDrawable acquireNextImage(uint64_t frameId) override {
+      // CS thread; m_desc is written on the app thread (recreate, setSyncInterval).
+      MtlPresenterDesc desc;
+      { std::lock_guard<std::mutex> lock(m_descMutex);
+        desc = m_desc;
+      }
       MtlAcquiredDrawable image = {};
       image.sync.frameId = frameId;
-      image.imageIndex   = uint32_t(frameId % (m_desc.imageCount ? m_desc.imageCount : 1u));
+      image.imageIndex   = uint32_t(frameId % (desc.imageCount ? desc.imageCount : 1u));
 
       if (!m_layer)
         return image;
@@ -154,13 +163,13 @@ namespace dxvk::backend {
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
       obj_handle_t drawableTex = MetalDrawable_texture(drawable);
       tex->texture.tex = drawableTex;
-      tex->format      = m_desc.imageFormat;
+      tex->format      = desc.imageFormat;
       uint32_t dw = uint32_t(MTLTexture_width(drawableTex));
       uint32_t dh = uint32_t(MTLTexture_height(drawableTex));
-      tex->extent      = { dw ? dw : m_desc.imageExtent.width,
-                           dh ? dh : m_desc.imageExtent.height, 1u };
+      tex->extent      = { dw ? dw : desc.imageExtent.width,
+                           dh ? dh : desc.imageExtent.height, 1u };
       tex->m_info.type        = MtlImageType::e2D;
-      tex->m_info.format      = m_desc.imageFormat;
+      tex->m_info.format      = desc.imageFormat;
       tex->m_info.extent      = { tex->extent.width, tex->extent.height, 1u };
       tex->m_info.mipLevels   = 1u;
       tex->m_info.numLayers   = 1u;
@@ -171,7 +180,7 @@ namespace dxvk::backend {
       view->owned      = WmtTexture::retain(drawableTex);
       view->view.tex   = drawableTex;
       view->image      = tex.ptr();
-      view->key.format = m_desc.imageFormat;
+      view->key.format = desc.imageFormat;
 
       image.texture    = tex;
       image.view       = view;
@@ -241,7 +250,8 @@ namespace dxvk::backend {
   private:
 
     Rc<MtlDevice>    m_device;
-    MtlPresenterDesc m_desc;
+    MtlPresenterDesc m_desc;      // written on the app thread only; m_descMutex for the CS reader
+    std::mutex       m_descMutex;
     MtlDeviceImpl*   m_backend   = nullptr;
     obj_handle_t     m_wmtDevice = 0u;
     obj_handle_t     m_view      = 0u;
