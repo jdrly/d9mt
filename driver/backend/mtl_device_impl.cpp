@@ -470,6 +470,7 @@ namespace dxvk::backend {
     view->key = key;
     view->image = image;
     view->gpuResourceId = gpuResourceId;
+    view->residencyDevice = this;
     return view;
   }
 
