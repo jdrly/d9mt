@@ -16,6 +16,39 @@
 
 namespace dxvk {
 
+  namespace {
+
+    // D9MT_FPS_CAP, D9MT_FPS_CAP_ALIGN, D9MT_FPS_CAP_SPIN_US (d3d9_frame_cap.h), read once
+    struct FrameCapEnv {
+      uint32_t    fps;
+      bool        align;
+      uint64_t    spinNs;
+      std::string raw;
+    };
+
+    const FrameCapEnv& frameCapEnv() {
+      static const FrameCapEnv s_env = [] {
+        FrameCapEnv e;
+        e.raw    = env::getEnvVar("D9MT_FPS_CAP");
+        e.fps    = framecap::capFromEnv(e.raw.c_str());
+        e.align  = env::getEnvVar("D9MT_FPS_CAP_ALIGN") != "0";
+        e.spinNs = framecap::spinNsFromEnv(env::getEnvVar("D9MT_FPS_CAP_SPIN_US").c_str());
+        return e;
+      } ();
+      return s_env;
+    }
+
+    uint64_t clockNs() {
+      return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        high_resolution_clock::now().time_since_epoch()).count());
+    }
+
+    uint64_t clockNs(high_resolution_clock::time_point t) {
+      return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+    }
+
+  }
+
   static void DumpBackbufferIfRequested(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
@@ -185,6 +218,7 @@ namespace dxvk {
     PresentThrottle throttle = { };
     HRESULT hr;
     high_resolution_clock::time_point until = { };
+    uint64_t capUntilNs = 0u;
 
     if (unlikely(hitch::g_enabled))
       m_parent->PaceEntry();
@@ -194,12 +228,17 @@ namespace dxvk {
       { D3D9DeviceLock lock = m_parent->LockDevice();
         hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);
         until = UpdateBackgroundThrottle(throttle);
+        capUntilNs = std::exchange(m_capUntilNs, 0u);
       }
 
-      // Sleep without the device lock; the CS thread never needs it.
-      if (until != high_resolution_clock::time_point()) {
-        hitch::Scope bs(m_parent->Hitch(), hitch::BgSleep);
-        Sleep::sleepUntil(high_resolution_clock::now(), until);
+      // Sleep without the device lock; the CS thread never needs it. (framecap's Sleeper, not
+      // DXVK's Sleep: that one spins for 4 ms and more of every sleep.)
+      if (until != high_resolution_clock::time_point() || capUntilNs) {
+        if (!std::exchange(m_sleeperReady, true))
+          m_sleeper = framecap::Sleeper(frameCapEnv().spinNs);
+        const bool bg = until != high_resolution_clock::time_point();
+        hitch::Scope ss(m_parent->Hitch(), bg ? hitch::BgSleep : hitch::CapSleep);
+        m_sleeper.sleepUntil(clockNs(), bg ? clockNs(until) : capUntilNs, [] { return clockNs(); });
       }
     }
 
@@ -369,11 +408,24 @@ namespace dxvk {
 
     try {
       UpdateWindowedRefreshRate();
-      if (m_wctx->presenter != nullptr)
-        m_wctx->presenter->setRefreshRate(m_displayRefreshRate);
+      // D9MT_FPS_CAP: not while Present is throttled (window hidden, no drawable); then
+      // DXVK's limiter as without the cap
+      const bool capped = !Throttle.fps && UpdateFrameCap(presentInterval);
+      if (!capped)
+        m_capCadence.reset();
+      if (m_wctx->presenter != nullptr) {
+        // A capped frame may wait for a drawable that stays on screen for N refreshes: the
+        // presenter's drawable timeout follows the capped rate.
+        const double hz = capped && m_capPlan.refreshes
+          ? m_displayRefreshRate / double(m_capPlan.refreshes) : m_displayRefreshRate;
+        m_wctx->presenter->setRefreshRate(hz);
+      }
       UpdateTargetFrameRate(presentInterval);
-      PresentImage(presentInterval);
-      m_fpsLimiter.delay();
+      PresentImage(presentInterval, capped ? m_capPlan.minDurationS : 0.0);
+      if (capped)
+        m_capUntilNs = m_capCadence.next(clockNs(), m_capPlan.intervalNs);
+      else
+        m_fpsLimiter.delay();
       return D3D_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
@@ -778,7 +830,7 @@ namespace dxvk {
   }
 
 
-  void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
+  void D3D9SwapChainEx::PresentImage(UINT SyncInterval, double MinDuration) {
     // Before the flush below ends the pass that may still render into it.
     m_parent->DiscardAutoDepthStencilAtPresent();
     m_parent->EndFrame(m_latencyTracker);
@@ -811,7 +863,8 @@ namespace dxvk {
       cFrameId      = m_wctx->frameId,
       cParamsW      = uint32_t(m_presentParams.BackBufferWidth),
       cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
-      cSignal       = m_wctx->frameLatencySignal
+      cSignal       = m_wctx->frameLatencySignal,
+      cMinDuration  = MinDuration
     ] (MtlContext* ctx) {
       if (cResolveImage != nullptr && cSrcImage != nullptr) {
         MtlResolveRegion region = { };
@@ -874,6 +927,10 @@ namespace dxvk {
       }
       // No pre-commit waitForDrawable: waiting on a drawable the display
       // never releases would block the queue timeline forever.
+      // D9MT_FPS_CAP at refresh / N: presentAfterMinimumDuration, so the frame is latched at
+      // the N-th vsync after the previous one (visible windows only: presents are skipped
+      // above while hidden, where a held drawable would never retire).
+      cDrawable.sync.minDuration = cMinDuration;
       ctx->synchronizeWsi(cDrawable.sync);
       cPresenter->present(cDrawable);
       Logger::debug("D3D9: frame presented");
@@ -1071,6 +1128,34 @@ namespace dxvk {
       m_targetFrameRate = double(m_parent->GetOptions()->maxFrameRate);
 
     m_fpsLimiter.setTargetFrameRate(m_targetFrameRate, GetActualFrameLatency());
+  }
+
+
+  bool D3D9SwapChainEx::UpdateFrameCap(uint32_t SyncInterval) {
+    const FrameCapEnv& e = frameCapEnv();
+
+    if (!e.fps) {
+      static bool s_warned = false;
+      if (!e.raw.empty() && !std::exchange(s_warned, true))
+        Logger::warn(str::format("D9MT: D9MT_FPS_CAP=", e.raw, " ignored (0 for none, or 20 to 1000)"));
+      return false;
+    }
+
+    const bool vsync = SyncInterval != 0u;
+    const framecap::Plan plan = framecap::plan(e.fps, m_displayRefreshRate, vsync, e.align);
+
+    if (!m_capPlanned || plan != m_capPlan) {
+      uint32_t dropped = 0u;
+      if (m_capLog.allow(&dropped)) {
+        Logger::warn(str::format("D9MT: ", wallClockStamp(), " ",
+          framecap::describe(plan, m_displayRefreshRate, vsync),
+          dropped ? str::format(" [", dropped, " earlier lines suppressed]") : std::string()));
+      }
+      m_capPlan    = plan;
+      m_capPlanned = true;
+    }
+
+    return plan.mode != framecap::Mode::Off;
   }
 
 
