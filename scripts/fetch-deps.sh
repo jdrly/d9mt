@@ -27,7 +27,7 @@
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 URL="${DXBC_SPIRV_URL:-https://github.com/doitsujin/dxbc-spirv.git}"
-REV="${DXBC_SPIRV_REV:-c5c1a5b9b61773d59592f628faa39be9add26282}"
+REV="${DXBC_SPIRV_REV:-64f078d685725b6bd5e1a045615705f47b6aa9de}"
 DST="$V2/third_party/dxbc-spirv"
 PATCHES=("$V2"/patches/dxbc-spirv/*.patch)
 STAMP="$DST/.git/d9mt-patches"

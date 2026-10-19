@@ -97,7 +97,7 @@ and falls back to Compat where Metal rejects it (MSL 4.1 on macOS 26).
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 
-# 1. Fetch dxbc-spirv, pinned to c5c1a5b9, and apply patches/dxbc-spirv
+# 1. Fetch dxbc-spirv, pinned to 64f078d6, and apply patches/dxbc-spirv
 #    (-> third_party/dxbc-spirv). build-driver.sh refuses an unpatched copy.
 scripts/fetch-deps.sh
 

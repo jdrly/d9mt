@@ -186,6 +186,9 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # -fno-strict-aliasing: the PE<->unix boundary structs and wmtcmd stream do
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
 # -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
+# No -DNDEBUG, deliberately: dxbc-spirv's IR asserts stay on, so a converter bug aborts
+# with the assert in the log. Compiled out, the same input can loop forever instead (an
+# unreachable SM3 loop before pin 64f078d6 did), which hangs the game with no trace.
 FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
 # STATE_CACHE_TESTING=1: a test build of the pipeline state cache (fault injection and
 # D9MT_STATE_CACHE_TEST_* switches, docs/state-cache.md); never for release.
