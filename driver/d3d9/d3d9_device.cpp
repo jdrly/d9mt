@@ -4940,11 +4940,14 @@ namespace dxvk {
       MtlBufferSlice mappedBufferSlice = pResource->GetBufferSlice(Subresource);
       const Rc<MtlBuffer> mappedBuffer = pResource->GetBuffer();
 
-      if (unlikely(pResource->GetFormatMapping().ConversionFormatInfo.FormatType != D3D9ConversionFormat_None)) {
+      // The image holds the converted format (up to 8 bytes per texel), the mapping buffer is
+      // sized for the D3D9 format: copying it back wrote past the buffer on the GPU (#19).
+      const bool converted = pResource->GetFormatMapping().ConversionFormatInfo.FormatType != D3D9ConversionFormat_None;
+      if (unlikely(converted)) {
         Logger::err(str::format("Reading back format", pResource->Desc()->Format, " is not supported. It is uploaded using the fomrat converter."));
       }
 
-      if (pResource->GetImage() != nullptr) {
+      if (pResource->GetImage() != nullptr && likely(!converted)) {
         ProfApi(rstore::Api::LockRect);
         Rc<MtlTexture> resourceImage = pResource->GetImage();
 
