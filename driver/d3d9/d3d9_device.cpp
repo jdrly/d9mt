@@ -4742,11 +4742,10 @@ namespace dxvk {
     MtlDeviceSize stagingBufferAllocated = stats.allocated;
 
     if (stagingBufferAllocated > m_stagingMemorySignaled + MaxMemoryPerSubmission) {
-      GpuFlushType flushType = stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight
-        ? GpuFlushType::ImplicitSynchronization
-        : GpuFlushType::ExplicitFlush;
-
-      ConsiderFlush(flushType);
+      if (stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight)
+        ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+      else
+        ExecuteFlush(false);
     }
 
     if (stagingBufferAllocated > MaxMemoryInFlight) {
