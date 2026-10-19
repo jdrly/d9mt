@@ -327,7 +327,18 @@ echo "=== [driver] CORE compile (${#CORE[@]} TUs) ==="
 OBJS=(); PIDS=(); RC=0
 compile_one() {
   local src="$1" obj="$2"; shift 2
-  "$MINGW" "${FLAGS[@]}" "$@" -c "$src" -o "$obj"
+  "$MINGW" "${FLAGS[@]}" "$@" -MMD -MP -MF "$obj.d" -c "$src" -o "$obj"
+}
+# stale <obj> <src>: rebuild when the object is missing or older than its source or than
+# any header its dependency file (-MMD, <obj>.d) lists; an object without one is rebuilt.
+stale() {
+  local obj="$1" src="$2" f
+  [ -f "$obj" ] && [ -f "$obj.d" ] && [ ! "$src" -nt "$obj" ] || return 0
+  for f in $(sed -e 's/\\$//' -e '1s/^[^:]*://' "$obj.d"); do
+    case "$f" in *:) continue ;; esac
+    [ "$f" -nt "$obj" ] && return 0
+  done
+  return 1
 }
 for src in "${CORE[@]}"; do
   psuffix=""; pflag=""
@@ -338,7 +349,7 @@ for src in "${CORE[@]}"; do
   fi
   obj="$OBJ/$(echo "${src#$DRV/}" | tr '/' '_')$psuffix.o"
   OBJS+=("$obj")
-  if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+  if stale "$obj" "$src"; then
     echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
     compile_one "$src" "$obj" $pflag & PIDS+=($!)
     if [ "${#PIDS[@]}" -ge 12 ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
@@ -432,8 +443,8 @@ SM3_OBJS=(); SM3_PIDS=(); SM3_RC=0
 while IFS= read -r f; do
   o="$DXBCSM3_OBJ/$(echo "${f#$DXBC/}" | tr '/' '_').o"
   SM3_OBJS+=("$o")
-  if [ ! -f "$o" ] || [ "$f" -nt "$o" ]; then
-    "$MINGW" "${FLAGS[@]}" -c "$f" -o "$o" & SM3_PIDS+=($!)
+  if stale "$o" "$f"; then
+    "$MINGW" "${FLAGS[@]}" -MMD -MP -MF "$o.d" -c "$f" -o "$o" & SM3_PIDS+=($!)
     if [ "${#SM3_PIDS[@]}" -ge 12 ]; then wait "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
   fi
 done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
@@ -452,7 +463,9 @@ WMIMP="$BUILD/libwinemetal.a"
 # d3d9.def: DXVK's export list (zlib, committed; undecorated, fits x86 and x64).
 D3D9DEF="${D3D9DEF:-$DRV/d3d9/d3d9.def}"
 if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
-  "$MINGW_PREFIX-dlltool" -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+  # From inside $BUILD with relative names: dlltool names the import library's symbols after
+  # its -l path, which would put the build directory into the DLL.
+  (cd "$BUILD" && "$MINGW_PREFIX-dlltool" -d "${WMDEF##*/}" -l "${WMIMP##*/}" --dllname winemetal.dll) 2>/dev/null \
     && echo "  winemetal import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
