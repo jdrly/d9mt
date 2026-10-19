@@ -384,3 +384,64 @@ d3d9; with the x64 d3d9; TSO fast and strict): a repeatable scene
 (character select, a fixed spot on the fleet), presented frame-time median
 and p99, CPU per frame, loading and shader-compile stalls, correctness by
 eye, and a crash check at exit.
+
+## On athei's arm64 Wine (arm64-11.19-2), 2026-10-20
+
+The direction from here (Jan, 2026-10-20): no arm64 Wine/FEX build of our
+own; d9mt runs on other people's builds (athei's arm64 Wine with CrossOver's
+msync, CrossOver arm64, neutron/FEX-darwin). The prototype build above stays
+an experiment.
+
+athei/wine-build release `arm64-11.19-2` (athei/wine `arm64-patched`
+d57b522eea5, which contains msync 12927acab0; SHA-256 of
+`wine-arm64-11.19-2-macos-arm64.tar.xz` `922d023c…1607`, matching GitHub's
+digest), unpacked under `~/Development/personal/swtor-mac-proper/arm-engines/`:
+- The loader is `lib/wine/aarch64-unix/wine.app`, signed Developer ID by its
+  author's team with a `ProvisionsAllDevices` profile (App ID
+  `app.mach9.loader`): it runs on any Mac as shipped. Entitlements:
+  cross-architecture support, x18 toggle, allow-jit,
+  disable-executable-page-protection, **disable-library-validation** (so our
+  ad hoc-signed `winemetal.so` loads), audio-input.
+- Its `winemac.so` exports `macdrv_functions` with the bridge's layout, slot
+  for slot (checked from the binary's fixups: init_display_devices,
+  get_win_data, release_win_data, get_cocoa_window — athei's DXMT shims —
+  then the five metal functions and `on_main_thread`, which neutron leaves
+  NULL).
+- d9mt rebased onto ac70a8c (fix/view-lifetime-dtor): x86 builds identical
+  to ac70a8c's (LC_UUID unchanged), native port tests pass.
+- `run-hash-tests.sh VD=1` (all windows on tools/vd's virtual display, one
+  `with-vd.sh` per batch): 20/20 hashes identical to the CX26 table with the
+  ARM64EC d3d9 and with the x64 d3d9 under FEX; `code_vbsizes` 52/52;
+  `PROBES=1` as on neutron (FPCR exact, cosf identical, x87 `037f` with the
+  ARM64EC d3d9); no crash.
+- **Re-signed for Jan** (`arm-engines/signing/resign-loader.sh`): bundle ID
+  `cz.jandrly.swtoronmac.game`, Jan's Developer ID profile embedded, athei's
+  entitlements with Jan's team IDs, Developer ID + hardened runtime + secure
+  timestamp. Runs; the same 20/20 + vbsizes pass with the ARM64EC d3d9 and
+  with the x64 d3d9 under FEX with **`FEX_HARDWARE_TSO=1`** (functional only;
+  not timed). Hardware TSO itself is proven separately
+  (`swtor-mac-proper/arm-tso/README.md`).
+
+### What a first SWTOR start on it needs (Jan)
+
+1. **Install d9mt into the bundle**: `winemetal.dll` (ARM64EC) →
+   `lib/wine/aarch64-windows/`, `winemetal.so` (arm64) →
+   `lib/wine/aarch64-unix/`, `d9mtair.so` (arm64) where the bridge looks for it,
+   and the ARM64EC `d3d9.dll` next to `swtor.exe` (or replacing mtld3d's
+   `d3d9.dll` in `lib/wine/aarch64-windows/`) with `d3d9=n,b`. Files outside
+   `wine.app` don't affect its signature.
+2. **The loader signed for Jan** (`resign-loader.sh`, done above) and later
+   notarized with the app; the game process must be `wine.app`'s main
+   executable (only it gets the entitlement; arm-tso/README.md).
+3. **Our winemac patches** (`swtor-on-mac/patches/winemac-*.patch`, mouse and
+   keyboard) ported to athei/wine `arm64-patched`: that means building that
+   Wine (athei's `wine-build`), not done.
+4. **Game files** in an arm64 prefix without touching Jan's installs (an APFS
+   clone he makes or approves, or a fresh download).
+5. **Launcher and login** under Jan's account-safety rules: Broadsword's
+   launcher is Intel-only (stays on Rosetta); how the started client gets
+   into the arm64 prefix, or a launcher under FEX if it is x64 (athei's Wine
+   has WoW64 for 32-bit too).
+6. Then, per configuration and with the display awake: presented frame
+   times, `FEX_HARDWARE_TSO=1` vs software TSO, correctness by eye, exit
+   behaviour (the #11 exit-flush fix is not in ac70a8c).

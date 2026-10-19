@@ -299,10 +299,13 @@ varies by up to 3 ns per call.
   `normalizeTypeForConsume`, `ir_utils.cpp:346` `composite` for .y), which
   ends the game; the independent check also found 616 corpus shaders that
   compile without asserting but wrongly. All 201 aborts of the corpus are
-  this `crs` bug, the same on both architectures. Unknown whether real game
-  shaders use such a `crs`. (A duplicate register declaration asserts in
-  `sm3_io_map.cpp:269`; that input is invalid, the generator no longer emits
-  it.)
+  this `crs` bug, the same on both architectures. (A duplicate register
+  declaration asserts in `sm3_io_map.cpp:269`; that input is invalid, the
+  generator no longer emits it.) **Fixed on `main` by #13**
+  (`patches/dxbc-spirv/`, applied by `scripts/fetch-deps.sh`): after the
+  rebase onto it, `main`'s generator (every `crs` mask) gives 3055 shaders,
+  53455 identical manifest lines and 0 front-end aborts on both
+  architectures.
 - **Build directory in the PE binaries**: ld's automatic image base depends
   on the output path, so release DLLs differ by where they were built.
 - R2 and R6 above.

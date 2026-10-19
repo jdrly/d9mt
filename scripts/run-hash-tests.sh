@@ -40,6 +40,19 @@
 # ($WORK/probes/cosf-*.bin, compared with test/fpenv/ulpcmp.c).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
+# VD=1: every window on a temporary virtual display, none on the monitor
+# (~/Development/personal/swtor-mac-proper/tools/vd, VD_DIR to override): the
+# run re-executes itself under with-vd.sh, the test programs force-include
+# vdwin.h (d9h-vd.h for the hash harness), and the prefix is created with the
+# Mac driver off (wineboot opens no window).
+VD_DIR="${VD_DIR:-$HOME/Development/personal/swtor-mac-proper/tools/vd}"
+if [ "${VD:-0}" = 1 ] && [ "${VD_ACTIVE:-0}" != 1 ]; then
+  exec "$VD_DIR/with-vd.sh" "${VD_SECONDS:-7200}" env VD_ACTIVE=1 bash "$0" "$@"
+fi
+HARNESS=(-include "$V2/test/harness/d9h.h"); WINDOWS=()
+if [ "${VD:-0}" = 1 ]; then
+  HARNESS=(-include "$VD_DIR/d9h-vd.h" -I "$V2/test/harness"); WINDOWS=(-include "$VD_DIR/vdwin.h")
+fi
 SRC_ENGINE="${ENGINE:?set ENGINE to a Wine root}"
 DRIVER="${DRIVER:-x64}"
 if [ -d "$SRC_ENGINE/lib/wine/aarch64-unix" ]; then KIND=arm64
@@ -83,7 +96,7 @@ cp "$BR_DLL" "$ENG/lib/wine/$PE_DIR/winemetal.dll"
 cp "$BR_SO" "$ENG/lib/wine/$UNIX_DIR/winemetal.so"
 
 for t in "${TESTS[@]}"; do
-  x86_64-w64-mingw32-gcc -O1 -include "$V2/test/harness/d9h.h" -I "$V2/test" "$V2/test/$t.c" \
+  x86_64-w64-mingw32-gcc -O1 "${HARNESS[@]}" -I "$V2/test" "$V2/test/$t.c" \
     -o "$WORK/bin/$t.exe" -ld3d9 -lgdi32 -luser32 2> "$WORK/logs/$t.build.log" \
     || { echo "FATAL: $t does not build, see $WORK/logs/$t.build.log" >&2; exit 1; }
 done
@@ -130,11 +143,13 @@ run() { # <timeout s> <log name> <args...>: wine with a timeout, crashes logged
 
 wait_for_game
 echo "[hash] new prefix" >&2
-run 300 wineboot wineboot -i > "$WORK/logs/wineboot.log" 2>&1
+WINEDLLOVERRIDES="$WINEDLLOVERRIDES;winemac.drv=d" run 300 wineboot wineboot -i > "$WORK/logs/wineboot.log" 2>&1
 if [ "$KIND" = arm64 ]; then
   run 120 reg reg add 'HKLM\Software\Microsoft\Wow64\amd64' /ve /d libarm64ecfex.dll /f > "$WORK/logs/reg.log" 2>&1
-  "$ENG/bin/wineserver" -w
 fi
+# wineboot's processes ran without the Mac driver: end them, the tests start fresh
+"$ENG/bin/wineserver" -k 2>/dev/null || true
+"$ENG/bin/wineserver" -w 2>/dev/null || true
 now() { perl -MTime::HiRes=time -e 'printf "%.0f", time * 1000'; }
 
 wait_for_game
@@ -183,7 +198,7 @@ if [ -n "$left" ]; then
 fi
 if [ "${BENCH:-0}" = 1 ]; then
   for b in bench_draws bench_shaders; do
-    x86_64-w64-mingw32-gcc -O2 -I "$V2/test" "$V2/test/$b.c" -o "$WORK/bin/$b.exe" -ld3d9 -lgdi32 -luser32
+    x86_64-w64-mingw32-gcc -O2 ${WINDOWS[@]+"${WINDOWS[@]}"} -I "$V2/test" "$V2/test/$b.c" -o "$WORK/bin/$b.exe" -ld3d9 -lgdi32 -luser32
   done
   : > "$WORK/bench.txt"
   # no Present throttle for a window d9mt thinks hidden (e.g. the display
@@ -223,7 +238,7 @@ if [ "${PROBES:-0}" = 1 ]; then
     [ "$c" = arm64ec ] && { cc="$LMB/arm64ec-w64-mingw32-clang"; fl=(-ffp-contract=off); }
     "$cc" -O2 ${fl[@]+"${fl[@]}"} -shared "$V2/test/fpenv/fpenv_dll.c" -o "$P/$c/fpenv_dll.dll"
     "$cc" -O2 ${fl[@]+"${fl[@]}"} -shared "$V2/test/fpenv/cosf_dll.c" -o "$P/$c/cosf_dll.dll"
-    x86_64-w64-mingw32-gcc -O2 "$V2/test/fpenv/fpenv_main.c" -o "$P/$c/fpenv_main.exe" -ld3d9 -lgdi32 -luser32
+    x86_64-w64-mingw32-gcc -O2 ${WINDOWS[@]+"${WINDOWS[@]}"} "$V2/test/fpenv/fpenv_main.c" -o "$P/$c/fpenv_main.exe" -ld3d9 -lgdi32 -luser32
     "$LMB/x86_64-w64-mingw32-clang" -O2 "$V2/test/fpenv/cosf_main.c" -o "$P/$c/cosf_main.exe"
     wait_for_game
     ( cd "$P/$c" && run 60 "fpenv-$c" "$P/$c/fpenv_main.exe" 2> "$WORK/logs/fpenv-$c.err" ) \
