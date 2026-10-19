@@ -30,7 +30,10 @@ namespace dxvk::backend {
 
     void allocCreated(obj_handle_t alloc, uint64_t bytes = 0u);
 
-    void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u);
+    // resident = false: an object that was never in the set (a texture view): only its
+    // release waits for lastUseSerial.
+    void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u,
+                        bool resident = true);
 
     // Commits pending adds/removes: once per submit, and only if the set changed.
     void beforeSubmit();
@@ -62,6 +65,7 @@ namespace dxvk::backend {
       void*        hostMem = nullptr;
       uint64_t     serial  = 0u;
       uint64_t     bytes   = 0u;
+      bool         resident = true;
     };
 
     bool retireLocked(uint64_t completedSerial);
