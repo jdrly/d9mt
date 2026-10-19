@@ -1,5 +1,6 @@
 #include "mtl_submission.h"
 
+#include <algorithm>
 #include <thread>
 
 #include "mtl_profiler.h"
@@ -39,6 +40,7 @@ void SubmissionTracker::drainAndStopPump() {
     batches = std::move(m_batches);
     m_drained = true;
   }
+  std::lock_guard<std::mutex> run(m_runMutex);
   for (Retirement& r : remaining)
     r.release();
   for (auto& b : batches)
@@ -99,21 +101,36 @@ std::unique_ptr<RetireBatch> SubmissionTracker::retireBatch(uint64_t serial, std
       next = std::move(m_freeBatches.back());
       m_freeBatches.pop_back();
     }
-    // Stopped: drainAndStopPump has waited for the GPU and won't look at the list again.
+    // Stopped: drainAndStopPump won't look at the list again; run it below, once the
+    // GPU is past everything submitted (an unsubmitted command buffer never runs).
     stopped = m_stop;
     if (!stopped) {
       wake = m_retirements.empty() && m_batches.empty();
       m_batches.emplace_back(serial, std::move(batch));
     }
   }
-  if (stopped)
+  if (stopped) {
+    waitFor(std::min(serial, lastSubmittedSerial()));
+    std::lock_guard<std::mutex> run(m_runMutex);
     batch->run();
+  }
   if (wake)
     m_retireCond.notify_one();
   return next != nullptr ? std::move(next) : std::make_unique<RetireBatch>();
 }
 
+void SubmissionTracker::processRetirements() {
+  std::lock_guard<std::mutex> run(m_runMutex);
+  runDue(completedSerial());
+}
+
 void SubmissionTracker::processRetirements(uint64_t completed) {
+  std::unique_lock<std::mutex> run(m_runMutex, std::try_to_lock);
+  if (run.owns_lock())
+    runDue(completed);
+}
+
+void SubmissionTracker::runDue(uint64_t completed) {
   std::vector<std::function<void()>> ready;
   RetireBatch* due[8];
   uint32_t     dueCount = 0u;
@@ -160,7 +177,7 @@ void SubmissionTracker::processRetirements(uint64_t completed) {
     more = !m_batches.empty() && m_batches.front().first <= completed;
   }
   if (more)
-    processRetirements(completed);
+    runDue(completed);
 }
 
 void SubmissionTracker::pumpThread() {

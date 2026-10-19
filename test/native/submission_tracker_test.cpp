@@ -8,7 +8,9 @@
 //    the fence would otherwise deadlock), also when the pump was asleep;
 //  - processRetirements(completed) runs only what is due, also more than 8 batches at once;
 //  - drainAndStopPump runs what is left, also a batch of a command buffer never submitted;
-//  - random submit/complete/process from three threads: nothing runs early, everything runs.
+//  - random submit/complete/process from three threads: nothing runs early, everything runs,
+//    and a fence every batch signals never goes backwards (the pump and the CS thread both run
+//    retirements; sync::Fence stores whatever value it is given).
 // The tracker uses dxvk::thread and the driver's util, so this is a mingw exe run under Wine
 // (no window). RetireBatch::run is the driver's minus the buffer recycling, which needs the device.
 //   x86_64-w64-mingw32-g++ -std=c++17 -O1 -DWINEMETAL_API='extern "C"' -I driver/backend \
@@ -98,6 +100,20 @@ namespace dxvk::backend {
     keepAlive.clear();
   }
 }
+
+// Counts signals with a value below the previous one.
+class OrderCheck final : public sync::Signal {
+public:
+  uint64_t value() const { return m_last.load(); }
+  void signal(uint64_t v) {
+    if (v < m_last.load())
+      m_backwards++;
+    m_last.store(v);
+  }
+  void wait(uint64_t) { }
+  std::atomic<uint64_t> m_last = { 0u };
+  std::atomic<int>      m_backwards = { 0 };
+};
 
 // A batch whose object handle encodes its serial: a release before that serial completes is a bug.
 static constexpr obj_handle_t kTag = 0x100000u;
@@ -272,11 +288,13 @@ static void stress() {
   });
 
   constexpr int N = 3000;
+  Rc<OrderCheck> order = new OrderCheck();
   std::unique_ptr<RetireBatch> next = std::make_unique<RetireBatch>();
   for (int i = 0; i < N; i++) {
     uint64_t s = t.onSubmit(0x2u);
     lastSubmitted = s;
     next->objects.push_back(kStress + s);
+    next->signals.emplace_back(order, s);
     next = t.retireBatch(s, std::move(next));
     CHECK(next != nullptr && next->empty());
     if (i % 3 == 0)
@@ -288,6 +306,8 @@ static void stress() {
   t.drainAndStopPump();
   CHECK(early == 0);
   CHECK(g_early == 0);
+  CHECK(order->m_backwards == 0);
+  CHECK(order->m_last == uint64_t(N));
 
   // Every batch ran exactly once, and never before its serial completed: releases are
   // recorded in run order, which must be serial order per thread; check the set and the count.

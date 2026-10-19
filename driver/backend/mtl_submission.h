@@ -82,9 +82,11 @@ public:
   // one (recycled when possible) for the next command buffer.
   std::unique_ptr<RetireBatch> retireBatch(uint64_t serial, std::unique_ptr<RetireBatch>&& batch);
 
-  void processRetirements() { processRetirements(completedSerial()); }
+  // Runs what is due. Blocks while another thread runs retirements (pump, host-alloc retry).
+  void processRetirements();
 
-  // `completed` from a completedSerial() the caller just made.
+  // CS thread, `completed` from a completedSerial() it just made. Skipped while the pump runs
+  // retirements: it runs them in serial order, so fence values only go up.
   void processRetirements(uint64_t completed);
 
   void waitFor(uint64_t serial);
@@ -103,6 +105,10 @@ private:
   std::atomic<uint64_t> m_completedCache = { 0u };
 
   std::mutex m_retireMutex;
+  // Held while retirements run, so they run in serial order on one thread at a time: a
+  // later fence value signalled before an earlier one would go backwards (sync::Fence stores
+  // what it is given), and a waiter for a value in between would sleep until the next flush.
+  std::mutex m_runMutex;
   std::condition_variable m_retireCond;
   std::vector<Retirement> m_retirements;
   std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>> m_batches;  // serial order
@@ -113,6 +119,8 @@ private:
   dxvk::thread m_pump;
 
   void pumpThread();
+
+  void runDue(uint64_t completed);  // m_runMutex held
 
 };
 
