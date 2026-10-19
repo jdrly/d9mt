@@ -6083,8 +6083,14 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    goes to its own file (<unix-time>-<pid>-<seq>.mtl4archive);
  *  - flushing while another thread compiles through the same compiler
  *    crashes, so compiles hold g_pso_lock shared and flushes hold it
- *    exclusively; flushes run on the compiling (render) thread every
- *    D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if uncontended);
+ *    exclusively. A flush of 256 PSOs takes 0.5-0.7 s, and on the thread of
+ *    the build that made it due it stalled the render thread waiting for that
+ *    PSO (#11). Flushes run on their own thread instead, at a quiet moment:
+ *    D9MT_PSO_FLUSH_EVERY PSOs are pending and no build ran for 2 s, or
+ *    anything is pending and no build ran for 10 s (the end of a session:
+ *    there is no flush at exit, which crashed or hung there when exiting
+ *    threads held Metal's or libc's locks). A flush due for 60 s without a
+ *    quiet moment goes in between two builds;
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum (size + SHA-256) written
  *    after it and is only loaded when that matches; anything else is deleted.
@@ -6106,6 +6112,14 @@ static NSString                         *g_pso_session;
 static unsigned                          g_pso_seq;
 static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
 static _Atomic unsigned                  g_pso_pending;
+static _Atomic uint64_t                  g_pso_last_build;   /* CLOCK_UPTIME_RAW ns */
+static pthread_mutex_t                   g_pso_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t                    g_pso_flush_cond = PTHREAD_COND_INITIALIZER;
+
+#define D9MT_PSO_QUIET_NS (2000000000ull)
+#define D9MT_PSO_IDLE_NS  (10000000000ull)
+#define D9MT_PSO_FORCE_NS (60000000000ull)
+#define D9MT_PSO_RETRY_NS (50000000ull)
 
 static NSString *
 pso_sum_text(NSString *path) {
@@ -6165,16 +6179,54 @@ pso_flush_locked(void) {
   }
 }
 
-static void
-pso_flush_atexit(void) {
-  /* Another thread may still be compiling (or died holding the lock while
-   * the process tears down): never block exit on it. */
-  if (pthread_rwlock_trywrlock(&g_pso_lock))
-    return;
-  @autoreleasepool {
-    pso_flush_locked();
+static void *
+pso_flush_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-flush");
+  uint64_t due_since = 0u;
+  pthread_mutex_lock(&g_pso_flush_mutex);
+  for (;;) {
+    const unsigned pending = atomic_load(&g_pso_pending);
+    if (!pending) {
+      due_since = 0u;
+      pthread_cond_wait(&g_pso_flush_cond, &g_pso_flush_mutex);
+      continue;
+    }
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    const uint64_t last = atomic_load(&g_pso_last_build);
+    const uint64_t quiet = now > last ? now - last : 0u;
+    const bool due = pending >= g_pso_flush_every;
+    if (due && !due_since)
+      due_since = now;
+    uint64_t wait;
+    if ((due && (quiet >= D9MT_PSO_QUIET_NS || now - due_since >= D9MT_PSO_FORCE_NS))
+     || quiet >= D9MT_PSO_IDLE_NS) {
+      pthread_mutex_unlock(&g_pso_flush_mutex);
+      const bool locked = !pthread_rwlock_trywrlock(&g_pso_lock);
+      if (locked) {
+        @autoreleasepool {
+          pso_flush_locked();
+        }
+        pthread_rwlock_unlock(&g_pso_lock);
+      }
+      pthread_mutex_lock(&g_pso_flush_mutex);
+      if (locked) {
+        due_since = 0u;
+        continue;
+      }
+      /* a build holds the lock shared: try again shortly */
+      wait = D9MT_PSO_RETRY_NS;
+    } else if (due) {
+      wait = D9MT_PSO_QUIET_NS - quiet;
+      if (D9MT_PSO_FORCE_NS - (now - due_since) < wait)
+        wait = D9MT_PSO_FORCE_NS - (now - due_since);
+    } else {
+      wait = D9MT_PSO_IDLE_NS - quiet;
+    }
+    const struct timespec ts = { (time_t)(wait / 1000000000ull), (long)(wait % 1000000000ull) };
+    pthread_cond_timedwait_relative_np(&g_pso_flush_cond, &g_pso_flush_mutex, &ts);
   }
-  pthread_rwlock_unlock(&g_pso_lock);
+  return NULL;
 }
 
 static NSString *
@@ -6288,7 +6340,11 @@ pso_archive_init(id<MTLDevice> device) {
   if (g_pso_serializer) {
     g_pso_dir = [dir retain];
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
-    atexit(pso_flush_atexit);
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, pso_flush_thread, NULL))
+      pthread_detach(thread);
+    else
+      fprintf(stderr, "d9mt: PSO archive flush thread not started: archives are not written\n");
   }
   fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
           (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
@@ -6311,15 +6367,19 @@ pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
     desc.pipelineDataSetSerializer = g_pso_serializer;
 }
 
+/* After each build: counts it and wakes the flush thread when the first PSO
+ * becomes pending (it then waits for an idle period) and when a flush is due. */
 static void
 pso_note_compiled(void) {
   if (!g_pso_serializer)
     return;
-  if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
-    return;
-  pthread_rwlock_wrlock(&g_pso_lock);
-  pso_flush_locked();
-  pthread_rwlock_unlock(&g_pso_lock);
+  atomic_store(&g_pso_last_build, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+  const unsigned n = atomic_fetch_add(&g_pso_pending, 1u) + 1u;
+  if (n == 1u || n == g_pso_flush_every) {
+    pthread_mutex_lock(&g_pso_flush_mutex);
+    pthread_cond_signal(&g_pso_flush_cond);
+    pthread_mutex_unlock(&g_pso_flush_mutex);
+  }
 }
 
 static NTSTATUS
