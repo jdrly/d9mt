@@ -1,5 +1,7 @@
 #include "mtl_device_impl.h"
 
+#include "../mtl/mtl_latency.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -136,6 +138,8 @@ namespace dxvk::backend {
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
+    if (unlikely(latency::g_enabled))
+      m_latencyLog = std::make_unique<FrameLatencyLog>(m_tracker->eventHandle(), std::getenv("D9MT_LATENCY_LOG"));
     m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle(), !profile.legacy);
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get(),
                                          profile.ringKeep, profile.legacy);

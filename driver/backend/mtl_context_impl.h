@@ -345,6 +345,10 @@ namespace dxvk::backend {
 
     uint64_t m_currentSerial = 0;
 
+    // D9MT_LATENCY_LOG: the frame's first commit and its command buffers so far.
+    uint64_t m_latSubmit0Ns = 0u;
+    uint32_t m_latCmdbufs   = 0u;
+
     static constexpr uint32_t kVisSlots = 65536u;
     WmtBuffer m_visBuffer;
     void*     m_visCpu   = nullptr;

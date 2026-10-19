@@ -18,6 +18,7 @@
 #include "mtl_ring.h"
 #include "mtl_submission.h"
 #include "mtl_attachment_opt.h"
+#include "mtl_latency_log.h"
 
 namespace dxvk::backend {
 
@@ -160,6 +161,9 @@ namespace dxvk::backend {
 
     MtlResidencyTracker& residency() { return *m_residency; }
 
+    // D9MT_LATENCY_LOG only, null otherwise.
+    FrameLatencyLog* latencyLog() { return m_latencyLog.get(); }
+
     obj_handle_t getDepthStencilState(const MtlDepthStencilState& ds);
 
     bool valid() const { return bool(m_device); }
@@ -218,6 +222,7 @@ namespace dxvk::backend {
     // ring hands its chunks to the tracker before the tracker detaches, and
     // the tracker still has a live queue underneath it.
     std::unique_ptr<SubmissionTracker>   m_tracker;
+    std::unique_ptr<FrameLatencyLog>     m_latencyLog;  // waits on m_tracker's event: destroyed first
     std::unique_ptr<MtlResidencyTracker> m_residency;
     std::unique_ptr<UploadRing>          m_ring;
 

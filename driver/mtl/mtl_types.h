@@ -466,6 +466,10 @@ namespace dxvk {
     MtlObjectHandle drawable = MtlNullHandle;
     uint64_t        frameId = 0;
     double          minDuration = 0.0;
+    // D9MT_LATENCY_LOG only (0 otherwise): when the app called Present and when the CS
+    // thread started the present (mtl_latency.h clock).
+    uint64_t        appNs = 0;
+    uint64_t        csNs  = 0;
   };
 
   struct MtlSubmitStatus {

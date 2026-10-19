@@ -29,6 +29,8 @@ public:
 
   uint64_t lastSubmittedSerial() const { return nextSerial() - 1u; }
 
+  obj_handle_t eventHandle() const { return m_event.handle(); }
+
   size_t retirementCount() { std::lock_guard<std::mutex> l(m_retireMutex); return m_retirements.size(); }
 
   uint64_t onSubmit(obj_handle_t queue);

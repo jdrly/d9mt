@@ -1,5 +1,7 @@
 #include "mtl_context_impl.h"
 
+#include "../mtl/mtl_latency.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -248,6 +250,11 @@ namespace dxvk::backend {
     gpuCaptureAfterCommit();
     if (unlikely(prof::g_profEnabled))
       m_rs[rstats::CmdBufs] += cbCount;
+    if (unlikely(latency::g_enabled)) {
+      if (!m_latSubmit0Ns)
+        m_latSubmit0Ns = latency::nowNs();
+      m_latCmdbufs += cbCount;
+    }
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
@@ -362,8 +369,11 @@ namespace dxvk::backend {
     }
     ensureCommandBuffer();
 
+    const uint64_t acquireNs = unlikely(sync.appNs) ? latency::nowNs() : 0u;
+    const uint64_t serial    = m_currentSerial;
     MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
     submit(false);
+    const uint64_t submitNs  = unlikely(sync.appNs) ? latency::nowNs() : 0u;
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
     if (sync.minDuration > 0.0)
@@ -371,6 +381,24 @@ namespace dxvk::backend {
     else
       MetalDrawable_present(sync.drawable);
     NSObject_release(sync.drawable);
+
+    if (unlikely(sync.appNs)) {
+      if (FrameLatencyLog* log = m_device->latencyLog()) {
+        FrameLatencyRecord r;
+        r.frameId   = sync.frameId;
+        r.serial    = serial;
+        r.appNs     = sync.appNs;
+        r.csNs      = sync.csNs;
+        r.acquireNs = acquireNs;
+        r.submit0Ns = m_latSubmit0Ns;
+        r.submitNs  = submitNs;
+        r.presentNs = latency::nowNs();
+        r.cmdbufs   = m_latCmdbufs;
+        log->push(r);
+      }
+      m_latSubmit0Ns = 0u;
+      m_latCmdbufs   = 0u;
+    }
   }
 
 

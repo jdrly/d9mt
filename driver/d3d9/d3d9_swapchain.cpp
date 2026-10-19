@@ -1,6 +1,7 @@
 #include "d3d9_swapchain.h"
 #include "d3d9_surface.h"
 #include "d3d9_monitor.h"
+#include "../mtl/mtl_latency.h"
 
 #include "d3d9_window.h"
 
@@ -779,6 +780,7 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
+    const uint64_t appNs = unlikely(latency::g_enabled) ? latency::nowNs() : 0u;
     // Before the flush below ends the pass that may still render into it.
     m_parent->DiscardAutoDepthStencilAtPresent();
     m_parent->EndFrame(m_latencyTracker);
@@ -811,8 +813,10 @@ namespace dxvk {
       cFrameId      = m_wctx->frameId,
       cParamsW      = uint32_t(m_presentParams.BackBufferWidth),
       cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
-      cSignal       = m_wctx->frameLatencySignal
+      cSignal       = m_wctx->frameLatencySignal,
+      cAppNs        = appNs
     ] (MtlContext* ctx) {
+      const uint64_t csNs = unlikely(cAppNs) ? latency::nowNs() : 0u;
       if (cResolveImage != nullptr && cSrcImage != nullptr) {
         MtlResolveRegion region = { };
         region.dstSubresource = { MtlAspectColor, 0u, 0u, 1u };
@@ -874,6 +878,8 @@ namespace dxvk {
       }
       // No pre-commit waitForDrawable: waiting on a drawable the display
       // never releases would block the queue timeline forever.
+      cDrawable.sync.appNs = cAppNs;
+      cDrawable.sync.csNs  = csNs;
       ctx->synchronizeWsi(cDrawable.sync);
       cPresenter->present(cDrawable);
       Logger::debug("D3D9: frame presented");
