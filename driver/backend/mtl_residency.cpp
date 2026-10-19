@@ -46,8 +46,7 @@ namespace dxvk::backend {
     m_residentBytes += bytes;
   }
 
-  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes,
-                                           bool resident) {
+  void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes) {
     if (!alloc) {
       if (hostMem)
         VirtualFree(hostMem, 0, MEM_RELEASE);
@@ -55,7 +54,7 @@ namespace dxvk::backend {
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_pending.push_back({ alloc, hostMem, lastUseSerial, bytes, resident });
+    m_pending.push_back({ alloc, hostMem, lastUseSerial, bytes });
     m_pendingCount = m_pending.size();
     m_pendingBytes += bytes;
   }
@@ -111,11 +110,7 @@ namespace dxvk::backend {
     size_t write = 0u, due = 0u;
     for (size_t i = 0u; i < m_pending.size(); i++) {
       const PendingRemoval& p = m_pending[i];
-      if (p.serial <= completedSerial && !p.resident) {
-        // Not in the set: released by the next releaseCommitted(), no commit needed.
-        m_pendingBytes -= p.bytes;
-        m_committed.push_back(p);
-      } else if (p.serial <= completedSerial) {
+      if (p.serial <= completedSerial) {
         MTLResidencySet_removeAllocation(m_set.handle(), p.alloc);
         m_pendingBytes -= p.bytes;
         m_residentBytes -= p.bytes;

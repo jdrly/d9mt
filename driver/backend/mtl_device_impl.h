@@ -250,12 +250,12 @@ namespace dxvk::backend {
 
   // Metal 4 command buffers don't retain what they use: a draw's argument table holds the
   // view's resource ID and a pass its handle, so the view outlives the last Rc until the
-  // GPU is past the command buffer being recorded (views are not in the residency set).
+  // GPU is past the command buffer being recorded (released on the retire thread).
   inline MtlTextureViewImpl::~MtlTextureViewImpl() {
     if (residencyDevice && owned) {
-      residencyDevice->residency().allocDestroyed(
-        owned.detach(), nullptr,
-        residencyDevice->submissions().nextSerial(), 0u, false);
+      const obj_handle_t h = owned.detach();
+      SubmissionTracker& st = residencyDevice->submissions();
+      st.retireAfter(st.nextSerial(), [h] () { NSObject_release(h); });
     }
   }
 

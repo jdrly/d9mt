@@ -33,6 +33,7 @@ void SubmissionTracker::drainAndStopPump() {
   std::vector<Retirement> remaining;
   { std::lock_guard<std::mutex> lock(m_retireMutex);
     remaining = std::move(m_retirements);
+    m_drained = true;
   }
   for (Retirement& r : remaining)
     r.release();
@@ -61,7 +62,14 @@ void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> relea
     return;
   }
 
-  { std::lock_guard<std::mutex> lock(m_retireMutex);
+  { std::unique_lock<std::mutex> lock(m_retireMutex);
+    // After drainAndStopPump nothing runs the list any more (no pump, no CS thread), and
+    // the GPU is idle: release now, or e.g. a texture view destroyed in device teardown leaks.
+    if (m_drained) {
+      lock.unlock();
+      release();
+      return;
+    }
     m_retirements.push_back({ serial, std::move(release) });
   }
   m_retireCond.notify_one();
