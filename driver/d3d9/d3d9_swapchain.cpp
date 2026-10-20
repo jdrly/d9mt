@@ -231,14 +231,16 @@ namespace dxvk {
         capUntilNs = std::exchange(m_capUntilNs, 0u);
       }
 
-      // Sleep without the device lock; the CS thread never needs it. (framecap's Sleeper, not
-      // DXVK's Sleep: that one spins for 4 ms and more of every sleep.)
-      if (until != high_resolution_clock::time_point() || capUntilNs) {
+      // DIAG (diag/fps-bgsleep-dxvk, never shipped): the background throttle sleeps with DXVK's
+      // Sleep again, as in 2a1bc00; only the cap's sleep uses framecap's Sleeper.
+      if (until != high_resolution_clock::time_point()) {
+        hitch::Scope bs(m_parent->Hitch(), hitch::BgSleep);
+        Sleep::sleepUntil(high_resolution_clock::now(), until);
+      } else if (capUntilNs) {
         if (!std::exchange(m_sleeperReady, true))
           m_sleeper = framecap::Sleeper(frameCapEnv().spinNs);
-        const bool bg = until != high_resolution_clock::time_point();
-        hitch::Scope ss(m_parent->Hitch(), bg ? hitch::BgSleep : hitch::CapSleep);
-        m_sleeper.sleepUntil(clockNs(), bg ? clockNs(until) : capUntilNs, [] { return clockNs(); });
+        hitch::Scope ss(m_parent->Hitch(), hitch::CapSleep);
+        m_sleeper.sleepUntil(clockNs(), capUntilNs, [] { return clockNs(); });
       }
     }
 
