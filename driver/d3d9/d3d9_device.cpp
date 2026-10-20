@@ -1704,7 +1704,7 @@ namespace dxvk {
 
     ConsiderFlush(RenderTargetIndex == 0
       ? GpuFlushType::ImplicitStrongHint
-      : GpuFlushType::ImplicitWeakHint, true);
+      : GpuFlushType::ImplicitWeakHint);
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
@@ -1783,7 +1783,7 @@ namespace dxvk {
     if (m_state.depthStencil == ds)
       return D3D_OK;
 
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
     // Metal's depthBias is in units of r like Vulkan's (measured on Apple GPUs:
@@ -4752,7 +4752,7 @@ namespace dxvk {
     if (stagingBufferAllocated > MaxMemoryInFlight) {
       const uint64_t target = stagingBufferAllocated - MaxMemoryInFlight;
       if (m_stagingBufferFence->value() < target)
-        FlushIfDeferred();
+        FlushIfCarried();
       if (unlikely(hitch::g_enabled) && m_stagingBufferFence->value() < target) {
         hitch::Scope hs(m_hitch, hitch::Throttle);
         m_stagingBufferFence->wait(target);
@@ -4792,9 +4792,10 @@ namespace dxvk {
 
     if (m_dxvkDevice->isResourceInUse(Resource)) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
-        // A poll: the GPU must be able to finish, so a pass kept open by a deferrable flush
-        // is completed here; otherwise a hint, as before.
-        if (m_flushDeferPending.load(std::memory_order_acquire))
+        // A poll on a resource the open, carried submission uses: complete the carry, or the
+        // poll could wait for a submit that only the end of the pass brings. Otherwise a hint,
+        // as before (docs/g1-early-commit.md §4.5).
+        if (m_dxvkDevice->carryOpen() && Resource.trackingSerial() >= m_dxvkDevice->getNextSerial())
           ExecuteFlush(false);
         else
           ConsiderFlush(GpuFlushType::ImplicitWeakHint);

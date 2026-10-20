@@ -72,7 +72,7 @@ namespace dxvk::backend {
       m_earlyCommitMinBytes = uint64_t(std::strtoull(mib, nullptr, 10)) << 20;
     Logger::info(m_earlyCommit
       ? str::format("D9MT: a heuristic flush inside a pass commits the work before it and keeps the pass open",
-          m_earlyCommitAlways ? " (always)" : "", ", targets >= ", m_earlyCommitMinBytes >> 20, " MiB")
+          m_earlyCommitAlways ? " (always: no backlog gate)" : " while the GPU is on an earlier frame", ", targets >= ", m_earlyCommitMinBytes >> 20, " MiB")
       : std::string("D9MT: heuristic flushes end the open pass (D9MT_EARLY_COMMIT=0 or no attachment optimization)"));
 
     const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
@@ -103,7 +103,7 @@ namespace dxvk::backend {
   MtlContextImpl::~MtlContextImpl() {
     // A prefix committed under the open serial may still run: complete the serial, so the
     // tracker's drain (which waits for submitted serials only) waits for it too.
-    if (m_serialPrefixCommitted)
+    if (m_serialPrefixCommitted || m_completePending)
       submit(true);
     if (m_pass.active)
       closePass();
@@ -289,6 +289,8 @@ namespace dxvk::backend {
 
   void MtlContextImpl::submit(bool waitCompleted) {
     prof::Scope profScope(prof::Submit);
+    // This submit completes a carried flush, if any (closePass below mustn't do it again).
+    m_completePending = false;
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -305,6 +307,13 @@ namespace dxvk::backend {
     m_allocatorSerial[m_allocatorSlot] = serial;
     m_carries = 0u;
     m_serialPrefixCommitted = false;
+    m_device->setCarryOpen(false);
+    if (m_frameEnding) {
+      // The first submit after endFrame: the Present's flush, with the frame's work (also
+      // when the present itself is skipped, e.g. an occluded window).
+      m_frameLastSerial = serial;
+      m_frameEnding = false;
+    }
 
     RetireBatch& retire = retireBatch();
     if (m_initCmdbuf)
@@ -362,6 +371,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::endFrame() {
     m_frameBoundaryFlush = true;
+    m_frameEnding = true;
     m_attFrame++;
 
     uint64_t completed = m_device->submissions().completedSerial();
@@ -620,7 +630,6 @@ namespace dxvk::backend {
       m_pass.discardDs    = false;
       m_pass.discardMask  = 0u;
       m_pass.epoch        = ++m_attEpoch;
-      m_carries           = 0u;
       if (unlikely(prof::g_profEnabled)) {
         m_pass.openSerial = m_currentSerial;
         m_pass.openXfers  = m_splitXfers;
@@ -807,6 +816,8 @@ namespace dxvk::backend {
       for (auto& r : m_pass.resolveTo) r = nullptr;
       m_pass.discardDs = false;
       m_pass.discardMask = 0u;
+      if (unlikely(m_completePending))
+        completeCarry();
       return;
     }
 
@@ -1013,17 +1024,13 @@ namespace dxvk::backend {
 
 
   bool MtlContextImpl::carryOpenPass() {
-    /* G1, docs/g1-early-commit.md: a heuristic flush in the middle of a pass commits what
-     * is recorded before the pass and leaves the pass open under the same serial, instead
-     * of ending it (a store now and a load of every attachment when it resumes). */
+    /* G1, docs/g1-early-commit.md: a deferrable flush in the middle of a pass commits what is
+     * recorded before the pass and leaves the pass open under the same serial, instead of
+     * ending it (a store now and a load of every attachment when it resumes). The flush
+     * itself completes when the pass closes (closePass -> completeCarry). */
     if (!m_earlyCommit || !m_attOpt || deferredPassesEnabled()
      || !m_pass.active || m_pass.encoder || !m_cmdbuf)
       return false;
-    if (m_carries >= kMaxCarries) {
-      if (unlikely(prof::g_profEnabled))
-        m_rs[rstats::CarryCapped]++;
-      return false;
-    }
 
     uint64_t bytes = 0u;
     for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
@@ -1035,20 +1042,40 @@ namespace dxvk::backend {
     if (bytes < m_earlyCommitMinBytes)
       return false;
 
-    // Nothing to commit and an idle GPU: carrying would leave it idle until the pass ends.
-    const bool prefix = m_prefixWork || m_initCmdbuf;
-    if (!prefix && !m_earlyCommitAlways) {
-      SubmissionTracker& st = m_device->submissions();
-      if (st.completedSerial() >= st.lastSubmittedSerial())
-        return false;
+    if (m_carries >= kMaxCarriesPerSerial) {
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::CarryCapped]++;
+      return false;
     }
 
-    if (prefix)
+    /* Backlog gate: only while the GPU is still on an earlier frame. Then the pass's draws
+     * would queue behind that work anyway; once it has caught up, holding them back would
+     * leave it idle (what made perf/pass-splits slower), so the flush goes ahead as before.
+     * Re-checked at every carry. */
+    if (!m_earlyCommitAlways && m_device->submissions().completedSerial() >= m_frameLastSerial) {
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::CarryRefused]++;
+      return false;
+    }
+
+    if (m_prefixWork || m_initCmdbuf)
       commitPrefix();
     m_carries++;
+    m_completePending = true;
+    m_device->setCarryOpen(true);
     if (unlikely(prof::g_profEnabled))
       m_rs[rstats::FlushesCarried]++;
     return true;
+  }
+
+
+  void MtlContextImpl::completeCarry() {
+    /* The carried pass has just ended: the flush it postponed happens now, before the
+     * command that ended the pass records, stamps or allocates anything of its own (every
+     * such command closes the open pass first), so all of that belongs to the next serial. */
+    m_completePending = false;
+    submit(false);
+    beginRecording();
   }
 
 

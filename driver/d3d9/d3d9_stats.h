@@ -39,9 +39,11 @@
 //               queries, waits), else a copy/blit/resolve, else a clear in
 //               between; the rest ended on a view change (read-only depth,
 //               sRGB) or a vertex fence. splitMiB: the bytes they load.
-//   carried     per frame, heuristic flushes that committed the work before the open
-//               pass and kept the pass open (G1, docs/g1-early-commit.md); carryCap:
-//               ... that ended it anyway after 8 carries in a row.
+//   carried     per frame, deferrable flushes that kept the open pass (G1,
+//               docs/g1-early-commit.md; the work before it is committed, if any);
+//               carryRefused: ... that the backlog gate refused (the GPU had caught up);
+//               carryCap: ... that ended it after the per-serial cap. cb= includes the
+//               prefix commits of carried flushes.
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -131,7 +133,7 @@ namespace dxvk::stats {
         " | ld=%.1f clr=%.1f ldDc=%.1f st=%.1f stDc=%.1f rsv=%.1f restore=%.1f savedMiB=%.1f"
         " attMs=%.2f clrFold=%.1f clrPass=%.1f"
         " | sh=%llu pso=%llu wait=%llu/%.1fms | allocMiB=%llu att=%s"
-        " | split=%.1f splitSubmit=%.1f splitXfer=%.1f splitClear=%.1f splitMiB=%.1f carried=%.1f carryCap=%.1f",
+        " | split=%.1f splitSubmit=%.1f splitXfer=%.1f splitClear=%.1f splitMiB=%.1f carried=%.1f carryRefused=%.1f carryCap=%.1f",
         double(nowNs - m_startNs) * 1e-9, winS > 0.0 ? double(n) / winS : 0.0,
         n ? sum / double(n) : 0.0, p99, mx, slow33, slow50,
         pf(rstats::RenderPasses), pf(rstats::PassesSkipped), pf(rstats::CmdBufs), pf(rstats::Draws),
@@ -145,7 +147,7 @@ namespace dxvk::stats {
         (unsigned long long)(extra.allocBytes >> 20), extra.att,
         pf(rstats::Splits), pf(rstats::SplitsSubmit), pf(rstats::SplitsXfer), pf(rstats::SplitsClear),
         double(d[rstats::SplitBytes]) / rf / double(1u << 20),
-        pf(rstats::FlushesCarried), pf(rstats::CarryCapped));
+        pf(rstats::FlushesCarried), pf(rstats::CarryRefused), pf(rstats::CarryCapped));
 
       m_rs = rs;
       m_ct = ct;

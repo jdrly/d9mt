@@ -123,6 +123,11 @@ namespace dxvk {
 
     virtual uint64_t getNextSerial();
 
+    // G1: a deferrable flush kept a pass open and its submission isn't complete-able until
+    // the backend's next real submit (docs/g1-early-commit.md §4.5). Any thread.
+    bool carryOpen() const { return m_carryOpen.load(std::memory_order_acquire); }
+    void setCarryOpen(bool open) { m_carryOpen.store(open, std::memory_order_release); }
+
     virtual void waitForIdle();
 
     virtual bool supportsFormat(
@@ -202,6 +207,7 @@ namespace dxvk {
 
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };
+    std::atomic<bool> m_carryOpen = { false };
 
   };
 

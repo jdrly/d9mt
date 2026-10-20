@@ -1033,13 +1033,17 @@ namespace dxvk {
      * turns that off); the next flush that isn't deferrable completes it. */
     void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);
 
-    /* A deferrable flush was the last one: its submission may not be complete-able yet (the
-     * backend kept a pass open under it). Anything about to wait or poll on GPU progress
-     * submits it first. */
-    void FlushIfDeferred() {
-      if (m_flushDeferPending.load(std::memory_order_acquire))
+    /* Before a blocking wait on GPU progress (the staging throttle): the last flush was
+     * deferrable and the CS thread either hasn't run it yet or carried it (the backend kept a
+     * pass open under its submission), so submit for real first (docs/g1-early-commit.md §4.5). */
+    void FlushIfCarried() {
+      if (m_flushDeferPending.load(std::memory_order_acquire)
+       && (m_csThread.lastSequenceNumber() < m_flushSeqNum || m_dxvkDevice->carryOpen()))
         ExecuteFlush(false);
     }
+
+    /* The backend keeps a pass open under a carried flush (G1). */
+    bool CarryOpen() const { return m_dxvkDevice->carryOpen(); }
 
     bool ChangeReportedMemory(int64_t delta) {
       if (IsExtended())

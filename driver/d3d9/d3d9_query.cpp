@@ -191,10 +191,11 @@ namespace dxvk {
       synced = true;
     }
 
-    // A pass kept open by a deferrable flush may hold the query's end: complete it, also
-    // without FLUSH (a deferrable flush used to submit the query's command buffer at once).
-    if (hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN)
-      m_parent->FlushIfDeferred();
+    // The query's end is in a submission a carried flush keeps open (G1): complete it, also
+    // without FLUSH, since that flush would have submitted it at once. A query from an
+    // earlier, submitted serial never flushes here (docs/g1-early-commit.md §4.5).
+    if (hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN && m_parent->CarryOpen() && Unsubmitted())
+      m_parent->Flush();
 
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();

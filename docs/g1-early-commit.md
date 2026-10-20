@@ -99,14 +99,24 @@ A deferrable flush (§4.4) is carried only if all of these hold:
 1. the attachment optimization is on, `D9MT_DEFERRED` is off, a pass is open, and its encoder
    isn't created yet;
 2. **the GPU is still working on an earlier frame**:
-   `completedSerial() < m_frameLastSerial`, where `m_frameLastSerial` is the last serial
-   submitted before this frame (recorded at the Present submit, in `synchronizeWsi`). It is
-   re-checked at every carry.
+   `completedSerial() < m_frameLastSerial`, re-checked at every carry.
+   - `m_frameLastSerial` is the serial of the Present's own flush: the first submit after
+     `endFrame()`, which is the `Flush()` at the top of PresentImage. It carries all of the
+     frame's work.
+   - Not `synchronizeWsi`'s submit: a skipped present (occluded or hidden window, no drawable)
+     has none, and the gate must not depend on visibility.
    - This answers "will the GPU be busy until this pass ends" with the one signal that holds
      for a whole frame: a backlog of finished frames. While it lasts, the open pass's draws
      would queue behind that work anyway, so holding them back costs no GPU time.
    - **With wait-every-frame the GPU finishes the previous frame before the next one starts,
      so G1 never carries: base behaviour by construction.**
+   - **It can go stale mid-frame (0a2ecf2d, Q1): bounded.** After a carry the GPU can
+     finish the backlog and then idle on the held-back draws. The next deferrable flush
+     re-checks the gate, fails it (`carryRefused`) and submits normally, so from then on the
+     behaviour is base's. The cap submits on the third carry anyway, and the end of the pass
+     completes N. Worst case per crossing: one GpuFlushTracker interval of GPU idle, the same
+     granularity the base has. "At most one pass beyond the flush" bounds the *serial*; the
+     re-check bounds the *time*.
    - Consequence: at a vsync cap with GPU headroom (SWTOR at 60 fps on the M5 Max) the GPU
      finishes each frame early, there is rarely a backlog, and G1 rarely carries. The gain is
      where the GPU is the limit (base chips at 4K, uncapped). That is the price of the hard
@@ -127,13 +137,34 @@ What a carry does:
 - publish the backend's `carryOpen` (atomic, §4.5).
 
 ### 4.3 Completion
-- `materializePass()` (the next pass opens), with `m_completePending`: `submit(false);
-  beginRecording()` first, i.e. the deferred flush. The serial N then covers exactly the work
-  up to the end of the carried pass.
-- Transfers and clears between the carried pass's end and the next pass
-  (`prepareDirectEncode`) also complete it first. They must not extend N either.
-- Any real submit (a non-deferrable flush, Present, a wait's flush, `submit(true)`) completes
-  it as well and clears `m_completePending` and `carryOpen`.
+- **When the carried pass closes** (`closePass()`, attachment-optimization path, right after
+  its encoder ended): `completeCarry()` = `submit(false); beginRecording()`. That is the
+  deferred flush. Serial N then covers exactly the work up to the end of the carried pass.
+- **The ordering requirement (0a2ecf2d, condition 2):** the completing submit must come
+  *before* the command that ended the pass records, stamps or allocates anything of its own:
+  ring slices, arg tables, `setTrackingSerial`, keep-alives, `m_dirty`. Otherwise a slice
+  meant for N+1 is stamped N and recycled too early.
+  - Completing inside `closePass()` gives that, because every command that ends a pass
+    closes it first. Audit, on f784908 + the gate:
+    - `bindRenderTargets`: the target compare, then `closePass`;
+    - `clearRenderTarget`: only `m_pass.discardMask` of the closing pass is set first, and
+      the temporary clear pass is swapped in *after* `closePass`;
+    - `clearImageView` / `clearDepthStencilRect`: `closePass` first, then the swap;
+    - every transfer: `prepareDirectEncode` is the first call, and it closes the pass;
+    - `initImage`, `attRestore`, the vertex-hazard fence: `closePass` first;
+    - `synchronizeWsi`: `closePass`, then its own submit.
+  - Two things happen before `closePass` and are correct:
+    - the MSAA resolve folded into the carried pass's store (`resolveTo`, the stamps at
+      `mtl_context_transfer.cpp` ~1052) belongs to the carried pass itself, so N is right;
+    - a MetalFX scaler evicted in `presentUpscale` goes into the open batch: it is released
+      after N, which is later than needed, never earlier.
+  - Hoisted uploads (`tryHoistBufferCopy`) don't end the pass. They go into N's init command
+    buffer only if N doesn't use the destination, so they may run ahead of the continuation.
+  - The test is §5's hash suite with G1 forced (`=always`, `D9MT_EARLY_COMMIT_MIN_MIB=0`) on
+    tests that clear and transfer mid-pass, plus `MTL_DEBUG_LAYER`.
+- `submit()` clears `m_completePending` first (its own `closePass` must not complete again),
+  and clears `carryOpen` after `onSubmit`. Any real submit completes an open carry: a
+  non-deferrable flush, Present, a wait's flush, `submit(true)`.
 - The context destructor completes an open carry (`submit(true)`).
 
 ### 4.4 Deferrable sites (frontend)
@@ -176,6 +207,9 @@ What a carry does:
   ("not submitted yet"). It must never happen. The tests treat that line as a FAILURE (§5).
 - One queue, one submitter: the serial is taken and signalled in submission order (the same
   invariant as perf/serial-cache-retire).
+- Heuristic side effect, with no waiter: a carried flush's `m_submissionFence` value signals
+  later, so GpuFlushTracker sees more submissions pending and flushes a little less often
+  during a carry.
 
 ### 4.7 Counters
 - STATS `carried=` (carries per frame), `carryRefused=` (deferrable flushes refused by the

@@ -61,11 +61,15 @@ namespace dxvk {
     virtual MtlGpuQueryStatus getData(MtlQueryData& out);
     // Blocks until the submission holding the query's end has completed.
     virtual void waitData() { }
+    // Its end is recorded in a submission that isn't submitted yet (G1: a poll on it may
+    // have to complete a carried flush, docs/g1-early-commit.md §4.5).
+    virtual bool unsubmitted() const { return false; }
   };
 
   class MtlEvent : public RcObject {
   public:
     virtual MtlGpuEventStatus test();
+    virtual bool unsubmitted() const { return false; }
   };
 
   using MtlSignal = sync::Signal;

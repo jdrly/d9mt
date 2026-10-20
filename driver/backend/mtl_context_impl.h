@@ -34,6 +34,7 @@ namespace dxvk::backend {
 
     MtlGpuQueryStatus getData(MtlQueryData& out) override;
     void waitData() override;
+    bool unsubmitted() const override { return tracker && serial && serial >= tracker->nextSerial(); }
   };
 
   class MtlBackendEvent : public MtlEvent {
@@ -42,6 +43,7 @@ namespace dxvk::backend {
     SubmissionTracker* tracker = nullptr;
 
     MtlGpuEventStatus test() override;
+    bool unsubmitted() const override { return tracker && serial && serial >= tracker->nextSerial(); }
   };
 
   enum ContextDirtyBit : uint32_t {
@@ -494,11 +496,15 @@ namespace dxvk::backend {
     void commitRecorded();
     void commitPrefix();
     bool carryOpenPass();
-    static constexpr uint32_t kMaxCarries = 8u;   // carries in a row for one pass
+    void completeCarry();
+    static constexpr uint32_t kMaxCarriesPerSerial = 2u;
     bool     m_earlyCommit         = false;       // D9MT_EARLY_COMMIT (default on with attOpt)
-    bool     m_earlyCommitAlways   = false;       // =always: no idle-GPU gate (tests)
+    bool     m_earlyCommitAlways   = false;       // =always: no backlog gate (tests)
     uint64_t m_earlyCommitMinBytes = 8ull << 20;  // D9MT_EARLY_COMMIT_MIN_MIB
-    uint32_t m_carries             = 0u;          // of the open pass
+    uint32_t m_carries             = 0u;          // carries of the open serial
+    bool     m_completePending     = false;       // a carried flush completes when its pass closes
+    bool     m_frameEnding         = false;       // endFrame ran: the next submit is the frame's last
+    uint64_t m_frameLastSerial     = 0u;          // that submit's serial (the backlog gate)
     bool     m_prefixWork          = false;       // the command buffer holds encoded work
     bool     m_serialPrefixCommitted = false;     // commitPrefix() ran for the open serial
 
