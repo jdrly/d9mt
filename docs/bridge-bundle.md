@@ -114,6 +114,17 @@ Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, m
 6. An IR-only archive entry doesn't compile synchronously inside the lookup.
 7. Concurrent lookups from compile and prewarm threads under TSan (`compile_mt_test`).
 
+**Verification result** (`bridge/tests/archfirst_test.m check`, native x86_64 as the bridge runs, plain and TSan, 2026-10-20):
+
+| item | result |
+|---|---|
+| 2 hits / misses | 64/64 archived descriptors come back from `MTL4Archive`. A descriptor never built returns **nil without compiling**, with the error "Failed to find fragment function … with key …". Blend state is part of the function key on Apple GPUs. |
+| 3 usable | a PSO from the archive renders the same pixel as the compiler's (ff4080bf = ff4080bf) |
+| 5 not captured | after 64 archive hits a serializer-attached compiler's serializer has "Nothing to serialize"; after one compiler build its archive holds that PSO and 0 of the 64 hits |
+| 7 concurrency | 4 threads × 4 rounds of lookups: all hits, no TSan report |
+| 1, 4 cost | `archfirst_test time`: needs a quiet window. The miss on one archive was 0.14-0.97 ms in the check run (not a measurement) |
+| 6 IR-only entries | not tested: the bridge's serializer captures binaries (CaptureBinaries), so its archives hold none |
+
 **Ships only together with part 4 (M7).** Today's retention (the newest 8 sessions) is safe only because every session re-captures its whole working set. With part 3 a session holds only deltas, and dropping a session deletes PSOs nothing else holds: churn and new-PSO stalls.
 
 ### 4. Consolidation: waits for the re-review
