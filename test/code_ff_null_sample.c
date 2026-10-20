@@ -1,11 +1,10 @@
 /* A fixed-function stage whose op reads a texture that isn't there (review of
  * fix/ff-unbound-slots M-1): stage 0 SELECTARG1 TEXTURE (colour and alpha) with no texture
- * bound, on a green diffuse quad. The stage's value is the FF shader's null-texture value,
- * (0, 0, 0, 0) on base, where the empty slot read as 0. With null resources in the
- * unbound slots the shader must not read the (uninitialised) null texture: the quad stays
- * black. A second quad MODULATEs the diffuse colour by it: black too.
- * (port/ff-null-texture, DXVK 7d248817, makes the null value (1, 1, 1, 1); merged with it,
- * this test's expected colours become the diffuse colour and white.) */
+ * bound, and MODULATE TEXTURE, DIFFUSE, on green diffuse quads. With null resources in the
+ * unbound slots, the result must not change from base, where the empty slot read as 0.
+ * Measured on base (2a1bc00): both quads stay green, i.e. this FF path doesn't use a null
+ * stage's texture value for these ops (only D3DTOP_PREMODULATE observes it:
+ * port/ff-null-texture's code_ff_null_tex). The test pins that: green, base = fix. */
 #include "t_xfer.h"
 
 struct V { float x, y, z, rhw; DWORD c; };
@@ -39,8 +38,8 @@ static void frame(int n) {
   IDirect3DDevice9_EndScene(x_dev);
   if (n == 1) {
     XReadback r = x_read(x_backBuffer);
-    x_expect("SELECTARG1 TEXTURE without a texture", &r, 160, 240, 0xff000000u, 0x00ffffffu);
-    x_expect("MODULATE TEXTURE, DIFFUSE without a texture", &r, 480, 240, 0xff000000u, 0x00ffffffu);
+    x_expect("SELECTARG1 TEXTURE without a texture", &r, 160, 240, 0xff00ff00u, 0x00ffffffu);
+    x_expect("MODULATE TEXTURE, DIFFUSE without a texture", &r, 480, 240, 0xff00ff00u, 0x00ffffffu);
     x_expect("outside the quads", &r, 320, 40, 0xff000080u, 0x00ffffffu);
     x_done(&r);
     x_report("code_ff_null_sample");
