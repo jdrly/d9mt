@@ -279,7 +279,14 @@ namespace dxvk::backend {
   }
 
   void MtlDeviceImpl::psoArchiveCoverage(bool complete) {
-    D9MTPsoArchiveCoverage(complete);
+    // Looked up, not imported: a bridge older than the bundle has no such export, and an
+    // import would keep this d3d9.dll from loading next to it. Without it, no signal: the
+    // bridge then never consolidates.
+    using Fn = void (*)(bool);
+    static const Fn fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleA("winemetal.dll"), "D9MTPsoArchiveCoverage")));
+    if (fn)
+      fn(complete);
   }
 
   MtlDeviceImpl::~MtlDeviceImpl() {
