@@ -362,6 +362,8 @@ namespace dxvk::backend {
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
+    // (a prefix commit, G1, ran under this same open serial: its stamps are this serial's)
+    lifetime::checkSubmitSerial(m_currentSerial, serial);
     m_carries = 0u;
     m_serialPrefixCommitted = false;
     m_device->setCarryOpen(false);
@@ -1172,6 +1174,14 @@ namespace dxvk::backend {
   obj_handle_t MtlContextImpl::newRenderEncoder(obj_handle_t cmdbuf, WMTRenderPassInfo* info) {
     if (unlikely(prof::g_profEnabled))
       m_rs[rstats::RenderPasses]++;
+    if (unlikely(lifetime::enabled())) {
+      for (const WMTColorAttachmentInfo& c : info->colors) {
+        lifetime::noteUse(c.texture, m_currentSerial, lifetime::Use::Attachment);
+        lifetime::noteUse(c.resolve_texture, m_currentSerial, lifetime::Use::Attachment);
+      }
+      lifetime::noteUse(info->depth.texture, m_currentSerial, lifetime::Use::Attachment);
+      lifetime::noteUse(info->stencil.texture, m_currentSerial, lifetime::Use::Attachment);
+    }
     return MTL4CommandBuffer_renderCommandEncoder(cmdbuf, info);
   }
 

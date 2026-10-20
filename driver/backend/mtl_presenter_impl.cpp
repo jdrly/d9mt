@@ -162,6 +162,7 @@ namespace dxvk::backend {
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
       obj_handle_t drawableTex = MetalDrawable_texture(drawable);
+      lifetime::markDrawable(drawableTex);
       tex->texture.tex = drawableTex;
       tex->format      = desc.imageFormat;
       uint32_t dw = uint32_t(MTLTexture_width(drawableTex));

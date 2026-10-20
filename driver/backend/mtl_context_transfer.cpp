@@ -448,9 +448,11 @@ namespace dxvk::backend {
                 if (!full && !(dirtyTexs & (1u << e.reg)))
                   continue;
                 v = 0u;
-                if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr)
-                  v = static_cast<MtlTextureViewImpl*>(
-                    b.textures[e.reg].ptr())->gpuResourceId;
+                if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr) {
+                  auto* tv = static_cast<MtlTextureViewImpl*>(b.textures[e.reg].ptr());
+                  v = tv->gpuResourceId;
+                  lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
+                }
               } break;
               case MtlShaderFunction::AbWordKind::Sampler: {
                 if (!full && !(dirtySmps & (1u << e.reg)))
@@ -521,6 +523,7 @@ namespace dxvk::backend {
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+        lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
         appendTableTexture(shadow, table, tv->gpuResourceId, slot);
       }
 
@@ -799,6 +802,8 @@ namespace dxvk::backend {
     WMTOrigin dstOrigin = { uint64_t(dstOff.x), uint64_t(dstOff.y), uint64_t(dstOff.z) };
     const obj_handle_t stex = s->texture.tex;
     const obj_handle_t dtex = d->texture.tex;
+    lifetime::noteUse(stex, m_currentSerial, lifetime::Use::CopySrc);
+    lifetime::noteUse(dtex, m_currentSerial, lifetime::Use::CopyDst);
     encodeDirect([this, keepD = dst, keepS = src, stex, dtex,
                   srcSub, dstSub, srcOrigin, srcSize, dstOrigin]
                  (obj_handle_t cmdbuf) {
@@ -929,6 +934,7 @@ namespace dxvk::backend {
       extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
     const obj_handle_t sbuf = s->handle.buf;
     const obj_handle_t dtex = d->texture.tex;
+    lifetime::noteUse(dtex, m_currentSerial, lifetime::Use::CopyDst);
     encodeDirect([this, keepD = dst, keepS = src, sbuf, dtex, off,
                   bytesPerRow, bytesPerImage, size, dstSub, origin]
                  (obj_handle_t cmdbuf) {
@@ -962,6 +968,7 @@ namespace dxvk::backend {
       extent, rowAlign, sliceAlign, bytesPerRow, bytesPerImage);
     const obj_handle_t stex = s->texture.tex;
     const obj_handle_t dbuf = d->handle.buf;
+    lifetime::noteUse(stex, m_currentSerial, lifetime::Use::CopySrc);
     encodeDirect([this, keepD = dst, keepS = src, stex, dbuf, off,
                   bytesPerRow, bytesPerImage, size, srcSub, origin]
                  (obj_handle_t cmdbuf) {
@@ -1564,6 +1571,7 @@ namespace dxvk::backend {
 
     obj_handle_t table = selectBlitArgTable();
     MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
+    lifetime::noteUse(srcTv->view.tex, m_currentSerial, lifetime::Use::Sampled);
     MTL4ArgumentTable_setTexture(table, srcTv->gpuResourceId, 0u);
     auto* smp = static_cast<MtlSamplerStateImpl*>(
       m_blitSamplers[filter == MtlSamplerFilter::Linear ? 1u : 0u].ptr());
@@ -1603,6 +1611,7 @@ namespace dxvk::backend {
       view->image->setTrackingSerial(m_currentSerial);
       noteTransferRead(view->image.ptr());
     }
+    lifetime::noteUse(tex, m_currentSerial, lifetime::Use::CopyDst);
     encodeDirect([this, keepView = view, tex](obj_handle_t cmdbuf) {
       obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
       MTL4ComputeCommandEncoder_generateMipmaps(enc, tex);

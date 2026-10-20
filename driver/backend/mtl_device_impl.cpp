@@ -138,6 +138,7 @@ namespace dxvk::backend {
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
     m_tracker = std::make_unique<SubmissionTracker>(m_device.handle());
+    lifetime::attach(m_tracker.get());
     m_residency = std::make_unique<MtlResidencyTracker>(m_device.handle(), m_queue.handle(), !profile.legacy);
     m_ring = std::make_unique<UploadRing>(m_device.handle(), UploadRingChunkSize, m_residency.get(),
                                          profile.ringKeep, profile.legacy);
@@ -294,8 +295,10 @@ namespace dxvk::backend {
     /* Retirement callbacks reach into the residency tracker, which is
      * destroyed after this body runs — the pump must be stopped and
      * drained here, before that member teardown happens. */
-    if (m_tracker)
+    if (m_tracker) {
       m_tracker->drainAndStopPump();
+      lifetime::detach(m_tracker.get());
+    }
   }
 
   void* MtlDeviceImpl::hostAlloc(uint64_t size) {

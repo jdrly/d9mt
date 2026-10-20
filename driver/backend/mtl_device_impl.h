@@ -263,7 +263,10 @@ namespace dxvk::backend {
     if (residencyDevice && owned) {
       const obj_handle_t h = owned.detach();
       SubmissionTracker& st = residencyDevice->submissions();
-      st.retireAfter(st.nextSerial(), [h] () { NSObject_release(h); });
+      st.retireAfter(st.nextSerial(), [h] () {
+        lifetime::checkRelease(h, "texture view");
+        NSObject_release(h);
+      });
     }
   }
 

@@ -4,11 +4,16 @@
 // a buffer belongs) fail at compile time instead of at the ABI boundary.
 
 #include <cstdint>
+#include <type_traits>
 #include <utility>
 
 #include "../../bridge/winemetal.h"
 
+#include "mtl_lifetime.h"
+
 namespace dxvk::backend {
+
+struct TextureTag;
 
 template<typename Tag>
 class WmtRef {
@@ -49,6 +54,8 @@ public:
 
   void reset() {
     if (m_handle) {
+      if constexpr (std::is_same_v<Tag, TextureTag>)
+        lifetime::checkRelease(m_handle, "texture");
       NSObject_release(m_handle);
       m_handle = 0u;
     }

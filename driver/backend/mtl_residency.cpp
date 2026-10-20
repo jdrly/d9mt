@@ -80,6 +80,7 @@ namespace dxvk::backend {
     // Order matters: set removal + commit (beforeSubmit) -> object release ->
     // host free, so the Metal buffer dies before its bytesNoCopy memory.
     for (const PendingRemoval& p : released) {
+      lifetime::checkRelease(p.alloc, "texture");
       NSObject_release(p.alloc);
       if (p.hostMem)
         VirtualFree(p.hostMem, 0, MEM_RELEASE);
