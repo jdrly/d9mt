@@ -17,6 +17,7 @@ namespace dxvk::backend::lifetime {
 
     struct Stamp {
       uint64_t serial   = 0u;
+      uint32_t refs     = 0u;  // d9mt's references (noteAcquire), 0 = not counted
       Use      use      = Use::Sampled;
       bool     drawable = false;
     };
@@ -76,6 +77,11 @@ namespace dxvk::backend::lifetime {
     }
   }
 
+  void noteAcquireSlow(obj_handle_t texture) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_stamps[texture].refs++;
+  }
+
   void noteUseSlow(obj_handle_t texture, uint64_t serial, Use use) {
     std::lock_guard<std::mutex> lock(g_mutex);
     Stamp& s = g_stamps[texture];
@@ -97,6 +103,11 @@ namespace dxvk::backend::lifetime {
       auto it = g_stamps.find(texture);
       if (it == g_stamps.end())
         return;
+      // not d9mt's last reference: another wrapper still holds it
+      if (it->second.refs > 1u) {
+        it->second.refs--;
+        return;
+      }
       s = it->second;
       // A later object can get the same handle: it starts unstamped.
       g_stamps.erase(it);

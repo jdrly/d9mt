@@ -38,9 +38,18 @@ namespace lifetime {
   void attach(SubmissionTracker* tracker);
   void detach(SubmissionTracker* tracker);
 
+  void noteAcquireSlow(obj_handle_t texture);
   void noteUseSlow(obj_handle_t texture, uint64_t serial, Use use);
   void markDrawableSlow(obj_handle_t texture);
   void checkReleaseSlow(obj_handle_t texture, const char* what);
+
+  // d9mt takes a reference to texture (WmtRef<Texture>::adopt/retain): only the release of the
+  // last one is checked, as several wrappers can hold the same texture (a drawable's, which
+  // Core Animation hands out again while an older frame's wrapper still holds it)
+  inline void noteAcquire(obj_handle_t texture) {
+    if (unlikely(enabled()) && texture)
+      noteAcquireSlow(texture);
+  }
 
   // texture is used by the command buffer of serial
   inline void noteUse(obj_handle_t texture, uint64_t serial, Use use) {
@@ -54,7 +63,7 @@ namespace lifetime {
       markDrawableSlow(texture);
   }
 
-  // d9mt is about to release its reference to texture
+  // d9mt is about to release a reference to texture (checked if it is the last one)
   inline void checkRelease(obj_handle_t texture, const char* what) {
     if (unlikely(enabled()) && texture)
       checkReleaseSlow(texture, what);

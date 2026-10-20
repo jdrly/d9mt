@@ -25,6 +25,8 @@ public:
   static WmtRef adopt(obj_handle_t handle) {
     WmtRef ref;
     ref.m_handle = handle;
+    if constexpr (std::is_same_v<Tag, TextureTag>)
+      lifetime::noteAcquire(handle);
     return ref;
   }
 

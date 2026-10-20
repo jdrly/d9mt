@@ -6,6 +6,7 @@
 //  - released once the GPU is past it, or never used: nothing;
 //  - the stamp goes with the release: a later object with the same handle starts clean;
 //  - a drawable's texture is reported as "drawable" and never aborts;
+//  - with several of d9mt's references to one texture, only the last release is checked;
 //  - a submit serial that differs from the recorded one is reported once.
 // D9MT_LIFETIME_CHECK=log (set by the test itself: abort mode would end it at the first).
 //   x86_64-w64-mingw32-g++ -std=c++17 -O1 '-DWINEMETAL_API=extern "C"' -I driver/backend \
@@ -108,6 +109,18 @@ int main() {
   CHECK(g_lines.size() == 4u);
   CHECK(has(3, "D9MT-LIFETIME drawable: texture 0x6000"));
   CHECK(has(3, "Core Animation still holds the drawable"));
+
+  // 5b. two of d9mt's references to one texture (a drawable Core Animation hands out again while
+  //     an older frame's wrapper still holds it): only the last release is checked
+  lifetime::noteAcquire(0x6100u);
+  lifetime::noteAcquire(0x6100u);
+  lifetime::noteUse(0x6100u, st.nextSerial(), lifetime::Use::CopyDst);
+  lifetime::checkRelease(0x6100u, "texture");
+  CHECK(g_lines.size() == 4u);
+  lifetime::checkRelease(0x6100u, "texture");
+  CHECK(g_lines.size() == 5u);
+  CHECK(has(4, "D9MT-LIFETIME: texture 0x6100"));
+  g_lines.pop_back();
 
   // 6. the submit serial differs from the recorded one: once
   lifetime::checkSubmitSerial(7u, 7u);
