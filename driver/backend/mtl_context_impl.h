@@ -68,7 +68,7 @@ namespace dxvk::backend {
 
     void beginRecording() override;
     void endFrame() override;
-    void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
+    void flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable = false) override;
     void synchronizeWsi(MtlPresenterSync sync) override;
 
     void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
@@ -488,6 +488,19 @@ namespace dxvk::backend {
     void flushResources();
     void flushDynamicState();
     void submit(bool waitCompleted);
+    // A2, commit != complete: commitRecorded() ends and commits the recorded command buffers
+    // with no serial; submit() adds the serial and its bookkeeping; commitPrefix() begins the
+    // next command buffer under the same serial (G1, carryOpenPass).
+    void commitRecorded();
+    void commitPrefix();
+    bool carryOpenPass();
+    static constexpr uint32_t kMaxCarries = 8u;   // carries in a row for one pass
+    bool     m_earlyCommit         = false;       // D9MT_EARLY_COMMIT (default on with attOpt)
+    bool     m_earlyCommitAlways   = false;       // =always: no idle-GPU gate (tests)
+    uint64_t m_earlyCommitMinBytes = 8ull << 20;  // D9MT_EARLY_COMMIT_MIN_MIB
+    uint32_t m_carries             = 0u;          // of the open pass
+    bool     m_prefixWork          = false;       // the command buffer holds encoded work
+    bool     m_serialPrefixCommitted = false;     // commitPrefix() ran for the open serial
 
     void         ensureVisBuffer();
     void         armVisibility();

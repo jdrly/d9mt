@@ -211,6 +211,14 @@ void SubmissionTracker::pumpThread() {
 void SubmissionTracker::waitFor(uint64_t serial) {
   if (isComplete(serial))
     return;
+  if (serial >= nextSerial()) {
+    // Never signalled before its submit (e.g. a pass kept open by a deferrable flush, G1):
+    // whoever waits must flush first. Logged once; the bounded wait below still applies.
+    static std::atomic<bool> logged = { false };
+    if (!logged.exchange(true))
+      Logger::warn(str::format("SubmissionTracker: waiting on serial ", serial,
+        ", which is not submitted yet (next ", nextSerial(), ")"));
+  }
   // Bounded blocking wait, not a spin, so a never-signalled command buffer degrades to a logged stall instead of a hang.
   for (int i = 0; i < 5; i++) {
     if (MTLSharedEvent_waitUntilSignaledValue(m_event.handle(), serial, 2000u)) {

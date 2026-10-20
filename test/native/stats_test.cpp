@@ -62,6 +62,7 @@ int main() {
   CHECK(has(line, " savedMiB=32.0 attMs=2.00 clrFold=6.0 clrPass=1.0 | sh=3 "));
   CHECK(has(line, "| sh=3 pso=2 wait=1/12.5ms | allocMiB=5000 att=on"));
   CHECK(has(line, " att=on | split=8.0 splitSubmit=6.0 splitXfer=0.0 splitClear=2.0 splitMiB=420.0"));
+  CHECK(has(line, " splitMiB=420.0 carried=0.0 carryCap=0.0"));
 
   // The next window reports deltas only, and a negative saving (restores).
   for (int i = 0; i < 63; i++) {

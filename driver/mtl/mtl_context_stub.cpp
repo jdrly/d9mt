@@ -24,7 +24,7 @@ namespace dxvk {
 
   void MtlContext::beginRecording()                            { MTL_STUB("beginRecording"); }
   void MtlContext::endFrame()                                  { MTL_STUB("endFrame"); }
-  void MtlContext::flushCommandList(const char*, MtlSubmitStatus* status) {
+  void MtlContext::flushCommandList(const char*, MtlSubmitStatus* status, bool) {
     MTL_STUB("flushCommandList");
     if (status) { status->submissionId = 0; status->completed = true; }
   }

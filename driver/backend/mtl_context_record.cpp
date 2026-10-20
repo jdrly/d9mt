@@ -65,6 +65,16 @@ namespace dxvk::backend {
       ? "D9MT: a clear that ends a pass skips the pass's store of what it clears"
       : "D9MT: a clear that ends a pass keeps the pass's stores (D9MT_CLEAR_DISCARD=0 or no attachment optimization)");
 
+    const char* earlyCommit = std::getenv("D9MT_EARLY_COMMIT");
+    m_earlyCommit       = m_attOpt && !deferredPassesEnabled() && !(earlyCommit && std::strcmp(earlyCommit, "0") == 0);
+    m_earlyCommitAlways = m_earlyCommit && earlyCommit && std::strcmp(earlyCommit, "always") == 0;
+    if (const char* mib = std::getenv("D9MT_EARLY_COMMIT_MIN_MIB"); mib && *mib)
+      m_earlyCommitMinBytes = uint64_t(std::strtoull(mib, nullptr, 10)) << 20;
+    Logger::info(m_earlyCommit
+      ? str::format("D9MT: a heuristic flush inside a pass commits the work before it and keeps the pass open",
+          m_earlyCommitAlways ? " (always)" : "", ", targets >= ", m_earlyCommitMinBytes >> 20, " MiB")
+      : std::string("D9MT: heuristic flushes end the open pass (D9MT_EARLY_COMMIT=0 or no attachment optimization)"));
+
     const char* passBarrier = std::getenv("D9MT_PASS_BARRIER");
     m_narrowBarrier = m_attOpt && !(passBarrier && std::strcmp(passBarrier, "all") == 0);
     Logger::info(m_narrowBarrier
@@ -91,6 +101,10 @@ namespace dxvk::backend {
   }
 
   MtlContextImpl::~MtlContextImpl() {
+    // A prefix committed under the open serial may still run: complete the serial, so the
+    // tracker's drain (which waits for submitted serials only) waits for it too.
+    if (m_serialPrefixCommitted)
+      submit(true);
     if (m_pass.active)
       closePass();
     // Recorded for a command buffer that is never submitted: the tracker runs it at the
@@ -167,6 +181,7 @@ namespace dxvk::backend {
       MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
     MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
     m_currentSerial = m_device->submissions().nextSerial();
+    m_prefixWork = false;
   }
 
   static int  s_gpuCaptureRemaining = -2;
@@ -222,18 +237,7 @@ namespace dxvk::backend {
     }
   }
 
-  void MtlContextImpl::submit(bool waitCompleted) {
-    prof::Scope profScope(prof::Submit);
-    if (m_pass.active) {
-      prof::bump(prof::CntPassCloseSubmit);
-      closePass();
-    }
-
-    flushFramePasses();
-
-    if (!m_cmdbuf)
-      return;
-
+  void MtlContextImpl::commitRecorded() {
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
     obj_handle_t cbs[2] = { };
@@ -257,9 +261,50 @@ namespace dxvk::backend {
     gpuCaptureAfterCommit();
     if (unlikely(prof::g_profEnabled))
       m_rs[rstats::CmdBufs] += cbCount;
+  }
+
+  void MtlContextImpl::commitPrefix() {
+    prof::Scope profScope(prof::Submit);
+    commitRecorded();
+
+    /* Metal 4 command buffers don't keep themselves alive while they run: both stay until
+     * the open serial completes, which the next submit() signals after the continuation. */
+    if (m_initCmdbuf) {
+      auto doneInit = std::make_shared<WmtCommandBuffer>(std::move(m_initCmdbuf));
+      m_initCmdbuf.reset();
+      m_device->submissions().retireAfter(m_currentSerial,
+        [doneInit]() mutable { doneInit->reset(); });
+    }
+    auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
+    m_device->submissions().retireAfter(m_currentSerial,
+      [doneCmd]() mutable { doneCmd->reset(); });
+
+    // Same allocator slot, same serial: the slot is reset only once the serial completed.
+    m_cmdbuf = WmtCommandBuffer::adopt(
+      MTLDevice_newMTL4CommandBuffer(m_device->wmtDevice()));
+    MTL4CommandBuffer_beginCommandBuffer(m_cmdbuf.handle(), m_allocator);
+    m_prefixWork = false;
+    m_serialPrefixCommitted = true;
+  }
+
+  void MtlContextImpl::submit(bool waitCompleted) {
+    prof::Scope profScope(prof::Submit);
+    if (m_pass.active) {
+      prof::bump(prof::CntPassCloseSubmit);
+      closePass();
+    }
+
+    flushFramePasses();
+
+    if (!m_cmdbuf)
+      return;
+
+    commitRecorded();
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
+    m_carries = 0u;
+    m_serialPrefixCommitted = false;
 
     RetireBatch& retire = retireBatch();
     if (m_initCmdbuf)
@@ -299,7 +344,14 @@ namespace dxvk::backend {
     m_device->uploadRing().onComplete(completed);
   }
 
-  void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status) {
+  void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable) {
+    if (deferrable && carryOpenPass()) {
+      if (status) {
+        status->submissionId = m_currentSerial;
+        status->completed    = false;
+      }
+      return;
+    }
     submit(false);
     beginRecording();
     if (status) {
@@ -568,6 +620,7 @@ namespace dxvk::backend {
       m_pass.discardDs    = false;
       m_pass.discardMask  = 0u;
       m_pass.epoch        = ++m_attEpoch;
+      m_carries           = 0u;
       if (unlikely(prof::g_profEnabled)) {
         m_pass.openSerial = m_currentSerial;
         m_pass.openXfers  = m_splitXfers;
@@ -727,6 +780,7 @@ namespace dxvk::backend {
     if (m_attOpt) {
       const bool encoded = m_pass.encoder != 0 || createPassEncoder(false);
       if (encoded) {
+        m_prefixWork = true;
         flushCmdChunk();
         if (unlikely(prof::g_profEnabled))
           splitNoteClosed();
@@ -828,6 +882,7 @@ namespace dxvk::backend {
     // Its own (empty) encoder: no render encoder may be open. The barrier
     // waits for the fragment stage of every earlier encoder on the queue.
     ensureCommandBuffer();
+    m_prefixWork = true;
     obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
     emitProducerBarrier(enc, uint64_t(WMTStageFragment), beforeStages);
     MTLCommandEncoder_endEncoding(enc);
@@ -954,6 +1009,46 @@ namespace dxvk::backend {
       }
     }
 
+  }
+
+
+  bool MtlContextImpl::carryOpenPass() {
+    /* G1, docs/g1-early-commit.md: a heuristic flush in the middle of a pass commits what
+     * is recorded before the pass and leaves the pass open under the same serial, instead
+     * of ending it (a store now and a load of every attachment when it resumes). */
+    if (!m_earlyCommit || !m_attOpt || deferredPassesEnabled()
+     || !m_pass.active || m_pass.encoder || !m_cmdbuf)
+      return false;
+    if (m_carries >= kMaxCarries) {
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::CarryCapped]++;
+      return false;
+    }
+
+    uint64_t bytes = 0u;
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+      if (m_pass.targets.color[i] != nullptr)
+        bytes += attBytes(m_pass.targets.color[i]->image.ptr(), i);
+    }
+    if (m_pass.targets.depthStencil != nullptr)
+      bytes += attBytes(m_pass.targets.depthStencil->image.ptr(), 4u);
+    if (bytes < m_earlyCommitMinBytes)
+      return false;
+
+    // Nothing to commit and an idle GPU: carrying would leave it idle until the pass ends.
+    const bool prefix = m_prefixWork || m_initCmdbuf;
+    if (!prefix && !m_earlyCommitAlways) {
+      SubmissionTracker& st = m_device->submissions();
+      if (st.completedSerial() >= st.lastSubmittedSerial())
+        return false;
+    }
+
+    if (prefix)
+      commitPrefix();
+    m_carries++;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::FlushesCarried]++;
+    return true;
   }
 
 
@@ -1804,6 +1899,7 @@ namespace dxvk::backend {
     if (unlikely(prof::g_profEnabled))
       (passCloseCounter == uint32_t(prof::CntPassCloseClear) ? m_splitClears : m_splitXfers)++;
     ensureCommandBuffer();
+    m_prefixWork = true;
   }
 
   void MtlContextImpl::encodeDirect(std::function<void(obj_handle_t)>&& fn) {

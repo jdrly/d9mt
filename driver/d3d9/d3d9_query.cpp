@@ -191,6 +191,11 @@ namespace dxvk {
       synced = true;
     }
 
+    // A pass kept open by a deferrable flush may hold the query's end: complete it, also
+    // without FLUSH (a deferrable flush used to submit the query's command buffer at once).
+    if (hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN)
+      m_parent->FlushIfDeferred();
+
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();
       m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);

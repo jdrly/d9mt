@@ -1704,7 +1704,7 @@ namespace dxvk {
 
     ConsiderFlush(RenderTargetIndex == 0
       ? GpuFlushType::ImplicitStrongHint
-      : GpuFlushType::ImplicitWeakHint);
+      : GpuFlushType::ImplicitWeakHint, true);
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
@@ -1783,7 +1783,7 @@ namespace dxvk {
     if (m_state.depthStencil == ds)
       return D3D_OK;
 
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
     // Metal's depthBias is in units of r like Vulkan's (measured on Apple GPUs:
@@ -1843,7 +1843,7 @@ namespace dxvk {
     if (unlikely(!m_inScene))
       return D3DERR_INVALIDCALL;
 
-    ConsiderFlush(GpuFlushType::ImplicitStrongHint);
+    ConsiderFlush(GpuFlushType::ImplicitStrongHint, true);
 
     m_inScene = false;
 
@@ -4751,6 +4751,8 @@ namespace dxvk {
 
     if (stagingBufferAllocated > MaxMemoryInFlight) {
       const uint64_t target = stagingBufferAllocated - MaxMemoryInFlight;
+      if (m_stagingBufferFence->value() < target)
+        FlushIfDeferred();
       if (unlikely(hitch::g_enabled) && m_stagingBufferFence->value() < target) {
         hitch::Scope hs(m_hitch, hitch::Throttle);
         m_stagingBufferFence->wait(target);
@@ -4790,7 +4792,12 @@ namespace dxvk {
 
     if (m_dxvkDevice->isResourceInUse(Resource)) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
-        ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+        // A poll: the GPU must be able to finish, so a pass kept open by a deferrable flush
+        // is completed here; otherwise a hint, as before.
+        if (m_flushDeferPending.load(std::memory_order_acquire))
+          ExecuteFlush(false);
+        else
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
         return false;
       }
 
@@ -5730,12 +5737,12 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType) {
+  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType, bool AllowDefer) {
     uint64_t chunkId = GetCurrentSequenceNumber();
     uint64_t submissionId = m_submissionFence->value();
 
     if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId, 0u))
-      ExecuteFlush(false);
+      ExecuteFlush(false, AllowDefer);
   }
 
 
@@ -6016,7 +6023,7 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ExecuteFlush(bool Synchronize9On12) {
+  void D3D9DeviceEx::ExecuteFlush(bool Synchronize9On12, bool Deferrable) {
     D3D9DeviceLock lock = LockDevice();
 
 
@@ -6029,17 +6036,19 @@ namespace dxvk {
       cSubmissionId     = submissionId,
       cSubmissionStatus = Synchronize9On12 ? &m_submitStatus : nullptr,
       cStagingBufferFence = m_stagingBufferFence,
-      cStagingBufferAllocated = m_stagingMemorySignaled
+      cStagingBufferAllocated = m_stagingMemorySignaled,
+      cDeferrable = Deferrable && !Synchronize9On12
     ] (MtlContext* ctx) {
       ctx->signal(cSubmissionFence, cSubmissionId);
       ctx->signal(cStagingBufferFence, cStagingBufferAllocated);
-      ctx->flushCommandList(nullptr, cSubmissionStatus);
+      ctx->flushCommandList(nullptr, cSubmissionStatus, cDeferrable);
     });
 
     FlushCsChunk();
 
     m_flushSeqNum = m_csSeqNum;
     m_flushTracker.notifyFlush(m_flushSeqNum, submissionId);
+    m_flushDeferPending.store(Deferrable && !Synchronize9On12, std::memory_order_release);
 
     (void) Synchronize9On12;
 

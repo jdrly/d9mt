@@ -34,6 +34,8 @@ namespace dxvk::rstats {
     SplitsXfer,      //   ... else with a copy/blit/resolve encoder in between
     SplitsClear,     //   ... else with a clear in between (the rest: a view change or a vertex fence)
     SplitBytes,      // attachment bytes those passes load
+    FlushesCarried,  // heuristic flushes that kept the open pass (G1, D9MT_EARLY_COMMIT)
+    CarryCapped,     // ... that ended it after kMaxCarries carries
     Count
   };
 
