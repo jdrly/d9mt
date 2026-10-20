@@ -306,10 +306,10 @@ vec4 sampleTexture(uint stage, vec4 texcoord, vec4 previousStageTextureVal) {
             texcoord = calculateBumpmapCoords(stage, texcoord, previousStageTextureVal);
     }
 
-    // We can encounter null textures in certain scenarios where only alpha
-    // samples the texture, or the color op itself implicitly samples. For
-    // some reason this appears to return a null vector on native.
-    vec4 texVal = vec4(0.0f);
+    // The only time we should ever be able to observe a null texture is with
+    // D3DTOP_PREMODULATE. It's not 100% clear what's supposed to happen in
+    // that case, but make it so that the multiplication has no effect for now.
+    vec4 texVal = vec4(1.0f);
 
     // v2: Metal's argument table caps at ~16 texture bindings, but the DXVK FF
     // layout wants 5 type-arrays x8 = 40 [[texture]] slots. Keep only t2d + tcube
@@ -318,6 +318,8 @@ vec4 sampleTexture(uint stage, vec4 texcoord, vec4 previousStageTextureVal) {
     // FF; TYPE_3D falls back to a 2D sample, and DREF/shadow modes sample the
     // colour texture (no hardware depth compare).
     switch (state.type) {
+        case TEXTURE_TYPE_NULL:
+            break;
         case TEXTURE_TYPE_CUBE:
             texVal = texture(samplerCube(tcube[stage], samplers[stage]), texcoord.xyz);
             break;
