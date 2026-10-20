@@ -77,7 +77,7 @@ Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, m
 - **`.sum` v2** = `2 size mtime_ns sha256`.
   - Parsed exactly (P2-M1): four tokens separated by single spaces, the first `2`, decimal size and mtime, 64 lowercase hex, nothing else. A v1 sum whose size starts with 2 can't pass for v2: with `sscanf("2 %llu %llu %64s")` that was ~11% of v1 archives, deleted instead of migrated.
   - Load = size + mtime + the shape check. `D9MT_PSO_VERIFY=1` = the full SHA as today.
-- **fsync before rename (M4).** The flush `fsync`s (`F_BARRIERFSYNC`) the tmp archive and the tmp sum before the renames, on the flush thread. A power loss after a flush then can't leave a renamed file whose data blocks never reached the disk; APFS checksums metadata, not data.
+- **fsync before rename (M4).** The flush `fsync`s (`F_BARRIERFSYNC`) the tmp archive and the tmp sum before the renames, on the thread that flushes: on this branch still the build path (P2-C), the flush thread once part 5 is in. A power loss after a flush then can't leave a renamed file whose data blocks never reached the disk; APFS checksums metadata, not data.
 - **v1 migration (M5).** A v1 `.sum` (`size sha`) is verified once with the full SHA and rewritten as v2 (tmp + rename).
   - So the archives survive the update, which already makes the AIR cache cold: no double cold start. The archives stay valid across S1, because the AIR bytes don't change, only their key.
   - **Downgrade:** an old bridge compares whole strings, so a v2 sum mismatches and it deletes the archive. Safe, just cold.

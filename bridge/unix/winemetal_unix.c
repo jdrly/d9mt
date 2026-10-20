@@ -5807,6 +5807,7 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <mach-o/loader.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 
@@ -5904,10 +5905,27 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    across an AIR cache key change). An older bridge deletes v2-summed
  *    archives: just cold, never a crash.
  * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>/; other
- * os-* directories (OS or GPU change) are removed. The newest
- * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
- * it used, hits included).
+ * os-* directories (OS or GPU change) are removed.
+ * Archive first (bundle parts 3 and 4, docs/bridge-bundle.md): a render PSO
+ * is first asked of the loaded archives ([MTL4Archive
+ * newRenderPipelineStateWithDescriptor:], nil without compiling on a miss),
+ * which neither compiles nor goes through the serializer; only a miss is
+ * built by the compiler and captured. So a session's own archives ("deltas")
+ * hold only PSOs no loaded archive had, and flushes stay small. Every
+ * requested descriptor is recorded; once the session has been idle for
+ * D9MT_PSO_CONSOLIDATE_IDLE_MS (10 s), a BACKGROUND-QoS thread rebuilds them
+ * through its own compiler and serializer (archive lookups, so mostly cheap)
+ * into one consolidated archive "c-<unix-time>-<pid>.mtl4archive", and then
+ * deletes the archives it replaces: the ones loaded at this start and this
+ * session's deltas flushed before it began (an flock on .consolidate keeps
+ * two processes from doing it at once). Kept at startup: the newest
+ * consolidated archive and every delta newer than it, looked up in that
+ * order. With the state cache prewarm, the recorded set is the whole working
+ * set. Without it (D9MT_STATE_CACHE=0) archive first and consolidation are
+ * off and everything is captured as before: the newest D9MT_PSO_KEEP_SESSIONS
+ * sessions are kept (a session's files hold every PSO it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
+ *   D9MT_PSO_ARCHIVE_FIRST=0       archive first and consolidation off
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
  *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
@@ -5922,6 +5940,15 @@ static unsigned                          g_pso_seq;
 static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
 static _Atomic unsigned                  g_pso_pending;
 static bool                              g_pso_verify;
+static bool                              g_pso_archive_first;
+static NSArray<id<MTL4Archive>>         *g_pso_lookup;       /* consolidated first, then deltas newest first */
+static NSMutableArray<NSString *>       *g_pso_parts;        /* files a consolidation replaces */
+static NSMutableArray                   *g_pso_requested;    /* descriptors requested this session */
+static pthread_mutex_t                   g_pso_record_mutex = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t                  g_pso_last_request; /* CLOCK_UPTIME_RAW ns */
+static _Atomic uint64_t                  g_pso_hits, g_pso_misses;
+static uint64_t                          g_pso_consolidate_idle_ns = 10000000000ull;
+static id<MTLDevice>                     g_pso_device;
 
 static NSString *
 pso_sum_text(NSString *path) {
@@ -6035,11 +6062,20 @@ pso_flush_locked(void) {
     unlink(sumTmp.fileSystemRepresentation);
     pso_remove_archive(path);
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+    return;
+  }
+  if (g_pso_archive_first) {
+    pthread_mutex_lock(&g_pso_record_mutex);
+    [g_pso_parts addObject:path];
+    pthread_mutex_unlock(&g_pso_record_mutex);
   }
 }
 
 static void
 pso_flush_atexit(void) {
+  if (g_pso_archive_first)
+    fprintf(stderr, "d9mt: PSO archive first: %llu hits, %llu misses\n",
+            (unsigned long long)atomic_load(&g_pso_hits), (unsigned long long)atomic_load(&g_pso_misses));
   /* Another thread may still be compiling (or died holding the lock while
    * the process tears down): never block exit on it. */
   if (pthread_rwlock_trywrlock(&g_pso_lock))
@@ -6048,6 +6084,127 @@ pso_flush_atexit(void) {
     pso_flush_locked();
   }
   pthread_rwlock_unlock(&g_pso_lock);
+}
+
+/* Bundle part 4: once the session has been idle for g_pso_consolidate_idle_ns,
+ * rebuild every descriptor requested this session through a compiler of its
+ * own (its own serializer; the loaded archives and this session's deltas as
+ * lookupArchives, so mostly lookups) into one consolidated archive, then
+ * delete the files it replaces. Runs once per session, at BACKGROUND QoS,
+ * holding no lock the game takes. An exit during it leaves a .tmp (cleaned
+ * at a later start) and the parts in place. */
+static void
+pso_consolidate(void) {
+  NSString *lockPath = [g_pso_dir stringByAppendingPathComponent:@".consolidate"];
+  const int lockFd = open(lockPath.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+  if (lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB)) {
+    if (lockFd >= 0)
+      close(lockFd);
+    return;
+  }
+  pthread_mutex_lock(&g_pso_record_mutex);
+  NSArray *requested = [[g_pso_requested copy] autorelease];
+  NSArray<NSString *> *parts = [[g_pso_parts copy] autorelease];
+  pthread_mutex_unlock(&g_pso_record_mutex);
+  /* Nothing new and at most one archive: rebuilding would only drop what this
+   * session didn't use. */
+  if (parts.count <= 1u && !atomic_load(&g_pso_misses)) {
+    flock(lockFd, LOCK_UN);
+    close(lockFd);
+    return;
+  }
+
+  NSMutableArray *lookup = [NSMutableArray arrayWithArray:g_pso_lookup ?: @[]];
+  for (NSString *path in parts) {
+    if ([lookup count] >= D9MT_PSO_MAX_ARCHIVES)
+      break;
+    id<MTL4Archive> a = [g_pso_device newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
+    if (a) {
+      [lookup addObject:a];
+      [a release];
+    }
+  }
+  MTL4PipelineDataSetSerializerDescriptor *sd = [[MTL4PipelineDataSetSerializerDescriptor alloc] init];
+  sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+  id<MTL4PipelineDataSetSerializer> ser = [g_pso_device newPipelineDataSetSerializerWithDescriptor:sd];
+  [sd release];
+  MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
+  cd.pipelineDataSetSerializer = ser;
+  NSError *err = nil;
+  id<MTL4Compiler> compiler = ser ? [g_pso_device newCompilerWithDescriptor:cd error:&err] : nil;
+  [cd release];
+  MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
+  opt.lookupArchives = lookup;
+  unsigned built = 0u;
+  for (MTL4RenderPipelineDescriptor *d in compiler ? requested : @[]) {
+    @autoreleasepool {
+      id<MTLRenderPipelineState> pso = [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
+      if (pso) {
+        built++;
+        [pso release];
+      }
+    }
+  }
+  [opt release];
+
+  NSString *path = [g_pso_dir stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"c-%@.mtl4archive", g_pso_session]];
+  NSString *tmp = [path stringByAppendingString:@".tmp"];
+  NSString *sumTmp = [path stringByAppendingString:@".sum.tmp"];
+  bool ok = false;
+  if (built && [ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&err]) {
+    pso_sync_file(tmp);
+    NSString *sum = pso_sum_text(tmp);
+    struct stat st;
+    ok = sum && !stat(tmp.fileSystemRepresentation, &st) && pso_write_sum(sumTmp, sum, &st)
+      && !rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
+      && !rename(sumTmp.fileSystemRepresentation, [path stringByAppendingString:@".sum"].fileSystemRepresentation);
+  }
+  if (ok) {
+    for (NSString *part in parts)
+      pso_remove_archive(part);
+    fprintf(stderr, "d9mt: PSO archives consolidated: %u pipelines into %s, %lu replaced\n", built,
+            path.lastPathComponent.UTF8String, (unsigned long)parts.count);
+  } else {
+    unlink(tmp.fileSystemRepresentation);
+    unlink(sumTmp.fileSystemRepresentation);
+    if (built)
+      fprintf(stderr, "d9mt: PSO archive consolidation failed: %s\n",
+              err ? err.localizedDescription.UTF8String : "(write)");
+  }
+  [compiler release];
+  [ser release];
+  flock(lockFd, LOCK_UN);
+  close(lockFd);
+}
+
+static void *
+pso_consolidate_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-consolidate");
+  pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+  for (;;) {
+    const uint64_t last = atomic_load(&g_pso_last_request);
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (last && now - last >= g_pso_consolidate_idle_ns) {
+      @autoreleasepool {
+        pso_consolidate();
+      }
+      return NULL;
+    }
+    const uint64_t wait = last ? g_pso_consolidate_idle_ns - (now - last) : 1000000000ull;
+    struct timespec ts = { (time_t)(wait / 1000000000ull), (long)(wait % 1000000000ull) };
+    nanosleep(&ts, NULL);
+  }
+}
+
+static void
+pso_consolidate_start(void) {
+  if (!g_pso_archive_first)
+    return;
+  pthread_t thread;
+  if (!pthread_create(&thread, NULL, pso_consolidate_thread, NULL))
+    pthread_detach(thread);
 }
 
 static NSString *
@@ -6076,6 +6233,13 @@ pso_archive_init(id<MTLDevice> device) {
   const char *every = getenv("D9MT_PSO_FLUSH_EVERY");
   if (every && atoi(every) > 0)
     g_pso_flush_every = (unsigned)atoi(every);
+  /* Archive first needs the consolidation, which covers the working set only
+   * with the state cache's prewarm: off together with the state cache (R1). */
+  const char *sc = getenv("D9MT_STATE_CACHE"), *af = getenv("D9MT_PSO_ARCHIVE_FIRST");
+  g_pso_archive_first = !(sc && !strcmp(sc, "0")) && !(af && !strcmp(af, "0"));
+  const char *idle = getenv("D9MT_PSO_CONSOLIDATE_IDLE_MS");
+  if (idle && *idle)
+    g_pso_consolidate_idle_ns = (uint64_t)strtoull(idle, NULL, 10) * 1000000ull;
 
   NSString *base;
   if (env) {
@@ -6124,12 +6288,56 @@ pso_archive_init(id<MTLDevice> device) {
         unlink(path.fileSystemRepresentation);
     }
   }
-  /* "<unix-time>-<pid>-<seq>": lexical order == age; newest first. */
+  /* "<unix-time>-<pid>-<seq>" (deltas) and "c-<unix-time>-<pid>" (consolidated):
+   * lexical order == age; newest first. */
   [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [b compare:a]; }];
 
   NSMutableArray *archives = [NSMutableArray array];
+  NSMutableArray<NSString *> *parts = [NSMutableArray array];
+  if (g_pso_archive_first) {
+    /* The newest consolidated archive, then every delta newer than it, newest first. */
+    NSString *consolidated = nil;
+    for (NSString *name in names) {
+      if ([name hasPrefix:@"c-"]) {
+        NSString *path = [dir stringByAppendingPathComponent:name];
+        if (!consolidated && pso_archive_valid(path))
+          consolidated = name;
+        else
+          pso_remove_archive(path);
+      }
+    }
+    NSString *since = consolidated ? [consolidated substringWithRange:NSMakeRange(2u, 10u)] : nil;
+    NSMutableArray<NSString *> *keep = [NSMutableArray array];
+    if (consolidated)
+      [keep addObject:consolidated];
+    for (NSString *name in names) {
+      if ([name hasPrefix:@"c-"])
+        continue;
+      NSString *path = [dir stringByAppendingPathComponent:name];
+      if ((since && name.length >= 10u && [[name substringToIndex:10u] compare:since] == NSOrderedAscending)
+       || keep.count >= D9MT_PSO_MAX_ARCHIVES || !pso_archive_valid(path)) {
+        pso_remove_archive(path);
+        continue;
+      }
+      [keep addObject:name];
+    }
+    for (NSString *name in keep) {
+      NSString *path = [dir stringByAppendingPathComponent:name];
+      NSError *err = nil;
+      id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+      if (a) {
+        [archives addObject:a];
+        [parts addObject:path];
+        [a release];
+      } else {
+        fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+                err ? err.localizedDescription.UTF8String : "(no error)");
+        pso_remove_archive(path);
+      }
+    }
+  }
   NSMutableSet<NSString *> *sessions = [NSMutableSet set];
-  for (NSString *name in names) {
+  for (NSString *name in g_pso_archive_first ? @[] : names) {
     NSString *path = [dir stringByAppendingPathComponent:name];
     NSArray<NSString *> *parts = [name componentsSeparatedByString:@"-"];
     NSString *session = parts.count >= 3u ? [NSString stringWithFormat:@"%@-%@", parts[0], parts[1]] : nil;
@@ -6155,6 +6363,12 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
     g_pso_task_options.lookupArchives = archives;
   }
+  if (g_pso_archive_first) {
+    g_pso_lookup = [archives copy];
+    g_pso_parts = [parts retain];
+    g_pso_requested = [[NSMutableArray alloc] init];
+    g_pso_device = [device retain];
+  }
 
   MTL4PipelineDataSetSerializerDescriptor *sd = [[MTL4PipelineDataSetSerializerDescriptor alloc] init];
   sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
@@ -6164,10 +6378,11 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_dir = [dir retain];
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
     atexit(pso_flush_atexit);
+    pso_consolidate_start();
   }
-  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
+  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u), archive first %s\n",
           (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
-          g_pso_flush_every);
+          g_pso_flush_every, g_pso_archive_first ? "on" : "off");
 }
 
 static void
@@ -6670,6 +6885,26 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
       info->alpha_to_coverage_enabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
   descriptor.rasterizationEnabled = info->rasterization_enabled ? YES : NO;
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
+
+  /* Archive first (bundle part 3): a hit neither compiles nor is captured, and
+   * takes neither g_pso_lock nor a pso_note_compiled() count (M6). */
+  if (g_pso_archive_first) {
+    pthread_mutex_lock(&g_pso_record_mutex);
+    [g_pso_requested addObject:descriptor];
+    pthread_mutex_unlock(&g_pso_record_mutex);
+    atomic_store(&g_pso_last_request, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    for (id<MTL4Archive> a in g_pso_lookup) {
+      id<MTLRenderPipelineState> hit = [a newRenderPipelineStateWithDescriptor:descriptor error:nil];
+      if (hit) {
+        atomic_fetch_add(&g_pso_hits, 1u);
+        params->ret_pso = (obj_handle_t)hit;
+        params->ret_error = 0;
+        [descriptor release];
+        return STATUS_SUCCESS;
+      }
+    }
+    atomic_fetch_add(&g_pso_misses, 1u);
+  }
 
   NSError *err = NULL;
   pthread_rwlock_rdlock(&g_pso_lock);

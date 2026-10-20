@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fstream>
 #include <functional>
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "../winemetal.h"
@@ -231,6 +233,7 @@ int main(int argc, char** argv) {
   }
   const std::string work = argv[2];
   const unsigned nThreads = getenv("MT_THREADS") ? unsigned(atoi(getenv("MT_THREADS"))) : 6u;
+  printf("pid: %d\n", int(getpid()));
 
   // Bridge reads these on first use.
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
@@ -352,6 +355,33 @@ int main(int argc, char** argv) {
   const double ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
+
+  // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated PSO archive
+  // ("c-<time>-<pid>.mtl4archive", written once the bridge has been idle) is in place.
+  if (const char* w = getenv("MT_WAIT_CONSOLIDATED")) {
+    const auto t0w = std::chrono::steady_clock::now();
+    const std::string tag = "-" + std::to_string(getpid()) + ".mtl4archive.sum";
+    bool found = false;
+    while (!found && std::chrono::steady_clock::now() - t0w < std::chrono::seconds(atoi(w))) {
+      if (DIR* base = opendir((work + "/pso").c_str())) {
+        while (dirent* d = readdir(base)) {
+          if (strncmp(d->d_name, "os-", 3)) continue;
+          if (DIR* sub = opendir((work + "/pso/" + d->d_name).c_str())) {
+            while (dirent* f = readdir(sub)) {
+              const std::string n = f->d_name;
+              if (!n.compare(0, 2, "c-") && n.size() > tag.size() && !n.compare(n.size() - tag.size(), tag.size(), tag))
+                found = true;
+            }
+            closedir(sub);
+          }
+        }
+        closedir(base);
+      }
+      if (!found)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    printf("consolidated archive: %s\n", found ? "written" : "none");
+  }
 
   // Compare with the first run on this workdir: metallibs must be
   // byte-identical (AIR cache hits included) and no PSO that built before
