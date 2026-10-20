@@ -57,21 +57,26 @@ Release builds are clean builds: `build-d9mtair.sh` rebuilds by `.cpp` mtime, so
 | T3 `air_cache.c` changed | a34449b9… | new |
 | T4 back to base | cc6bf9c5… | **07C777C2 (reproducible)** |
 
-Still to run: `scripts/test-compile-mt.sh` cold → warm across T0 and T1 (the same AIR cache table, 100% hits), and the hash suite with the bundle bridge.
+Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, metallibs consistent (`n013-issues/results/s1-cross-cache.txt`). The reviewer's verdict on part 1 (review-014/bridge-bundle-s1-part2.md): **MERGE** into the bundle. Still a bundle gate: the hash suite with the bundle bridge.
 
-### 2. Startup integrity check without hashing every archive
+### 2. Startup integrity check without hashing every archive (implemented)
 
 **Change:**
-- **A structural check instead of a full SHA-256 at load (M4).** The archive is a GPU fat container (two real archives measured by the reviewer). Check:
-  1. magic `CB FE BA BE`;
-  2. big-endian `nfat_arch` in 1..8;
-  3. every `offset + size ≤ st_size`, and the largest `== st_size`;
-  4. `MTLB` at each slice offset;
-  5. `ENDT` at each slice end.
-
-  That's a few `pread`s, which catches truncation, zero-filled files and foreign files: the inputs that crash `newArchiveWithURL`.
-  - **Unknown layout:** an unknown magic or layout (a future OS format) falls back to the full SHA-256, it isn't deleted. An OS update then costs the old 1.2 s, not the cache.
-- **`.sum` v2** = `2 size mtime_ns sha256`. Load = size + mtime + structural check. `D9MT_PSO_VERIFY=1` = the full SHA as today.
+- **A structural check instead of a full SHA-256 at load (M4)**, in `bridge/unix/pso_archive_check.c` (pure C, unit-tested by `bridge/tests/pso_archive_check_test.c`).
+- **The shape Metal writes:**
+  - 623 archives on this machine (reviewer) and 347 in n013-issues, 2 or 3 slices each;
+  - a GPU fat container: magic `CB FE BA BE`, big-endian `nfat_arch`, `{cputype, subtype, offset, size, align}` per slice;
+  - one or two metallib slices (`MTLB` head, `ENDT` in its last 4 bytes) and a Mach-O slice (`CF FA ED FE` head, `ENDT` at 0, 4, 8 or 12 of its last 16 bytes: 0-12 bytes of padding after it);
+  - the last slice ends at EOF.
+- **The check returns:**
+  - **1, load:** every slice inside the file with an `MTLB` or Mach-O head and `ENDT` in its last 16 bytes, and the last slice ending at EOF.
+  - **0, delete, only proof of damage:** a slice offset/size outside the file, a short read, or the last slice not ending at EOF.
+  - **−1, the full SHA-256 decides (P2-M2):** another magic or slice kind, `nfat_arch` outside 1..64, or no `ENDT` in the window. That may be a format change, and deleting there would delete a good archive at every start, a silently cold cache. It is logged once, so a format change shows up.
+- **Residual:** a zeroed range *inside* a slice passes the shape (media rot); `D9MT_PSO_VERIFY=1` catches it.
+- **The power-loss file** (the tail never written, size and mtime as in the sum) has no `ENDT`. The SHA fallback catches it and it's deleted (`test-pso-archive-check.sh` `tailzero`, with the log line). The fsync below keeps that file from arising in the first place.
+- **`.sum` v2** = `2 size mtime_ns sha256`.
+  - Parsed exactly (P2-M1): four tokens separated by single spaces, the first `2`, decimal size and mtime, 64 lowercase hex, nothing else. A v1 sum whose size starts with 2 can't pass for v2: with `sscanf("2 %llu %llu %64s")` that was ~11% of v1 archives, deleted instead of migrated.
+  - Load = size + mtime + the shape check. `D9MT_PSO_VERIFY=1` = the full SHA as today.
 - **fsync before rename (M4).** The flush `fsync`s (`F_BARRIERFSYNC`) the tmp archive and the tmp sum before the renames, on the flush thread. A power loss after a flush then can't leave a renamed file whose data blocks never reached the disk; APFS checksums metadata, not data.
 - **v1 migration (M5).** A v1 `.sum` (`size sha`) is verified once with the full SHA and rewritten as v2 (tmp + rename).
   - So the archives survive the update, which already makes the AIR cache cold: no double cold start. The archives stay valid across S1, because the AIR bytes don't change, only their key.
@@ -79,12 +84,23 @@ Still to run: `scripts/test-compile-mt.sh` cold → warm across T0 and T1 (the s
 
 **Gain:** ~1.2 s at the first draw with 430 MB of archives under Rosetta.
 
+**Ship condition (P2-C):**
+- On this branch the flush still runs inline on the build path, and part 2 adds `F_BARRIERFSYNC` × 2 (archive + sum) to that render-thread stall.
+- **Part 2 must not reach main or a release ahead of part 5** (the flush thread). If it ever goes alone, measure the flush with and without the fsync first.
+
+**Tests:**
+- `bridge/tests/pso_archive_check_test.c`:
+  - parser: the P2-M1 strings, extra tokens, newline, double space, case, length;
+  - shape: ENDT at 0-12, tail zeroed, truncated, longer than the last slice, an offset outside, zero-filled, another magic, an unknown slice kind, 9 / 65 / 0 slices;
+  - every real archive given on the command line has the shape.
+- `scripts/test-pso-archive-check.sh` (through the bridge, no Wine): v2 written and loaded, v1 loaded and rewritten, trunc/zero/shape/tailzero deleted without a crash, and a wrong SHA with the right shape loads (so the shape check accepted it), which `D9MT_PSO_VERIFY=1` refuses.
+
 **S3:** after parts 3+4 the archive set is about one working set: SWTOR ~350 PSOs × ~40 KB ≈ 14 MB, so ≈ 40 ms of SHA. Re-measure then. If part 2 stays, a background SHA after load (BACKGROUND QoS) restores rot detection for the next start at no startup cost.
 
 ### 3. Capture only misses (archive first): waits for the re-review
 
 **Change:**
-- For a render PSO the bridge first asks the loaded archives, newest first: `[MTL4Archive newRenderPipelineStateWithDescriptor:error:]` (MTL4Archive.h, nil if the archive doesn't hold the pipeline).
+- For a render PSO the bridge first asks the loaded archives: **the consolidated archive first** (it holds most PSOs), then the deltas newest first (R4). The call is `[MTL4Archive newRenderPipelineStateWithDescriptor:error:]` (MTL4Archive.h, nil if the archive doesn't hold the pipeline).
 - That goes past the serializer-attached compiler, so it isn't captured, and it needs no `g_pso_lock`.
 - **Archive hits skip `pso_note_compiled` (M6)**, so `pending` counts only captured misses.
 - Only a miss is built through the compiler (serializer attached, `lookupArchives` unchanged).
@@ -113,7 +129,12 @@ Still to run: `scripts/test-compile-mt.sh` cold → warm across T0 and T1 (the s
 
 **Coverage:**
 - PSOs the state cache doesn't replay are lost: state cache off, or keys it evicted. That's a recompile on next use, acceptable.
-- No consolidation when the state cache is disabled. Then retention stays as today.
+- **State cache off (R1):** consolidation can't run, and then neither does archive-first. Part 3 is off, and every build is captured as today, so today's retention (the newest 8 sessions) stays safe. Archive-first only runs when consolidation can run.
+
+**Retention with consolidation (R5):**
+- Keep the consolidated archive plus all deltas newer than it. Consolidate above 4 deltas.
+- A failed or interrupted consolidation keeps the parts. The `.tmp` cleanup at startup removes its leftovers.
+- The consolidated archive gets a v2 sum and an fsync before any part is deleted.
 
 **Concurrency:**
 - an `flock` on `<dir>/.consolidate` (two clients, or a crash and a fast restart);
@@ -125,13 +146,18 @@ Still to run: `scripts/test-compile-mt.sh` cold → warm across T0 and T1 (the s
 
 **A compile never waits on a flush (M9):**
 - The compile thunk does `pthread_rwlock_tryrdlock`.
-- If a flush holds the lock, it builds the miss through a second, **serializer-less** `MTL4Compiler` (created at init, same `lookupArchives`) and doesn't wait.
+- If a flush holds the lock, it builds the miss through a second, **serializer-less** `MTL4Compiler` (same `lookupArchives`) and doesn't wait.
+  - **Where it comes from (R3):** created in `pso_archive_init` next to the serializer, for that device. One device per process is assumed: d9mt creates one MTLDevice. If that ever changes, key the fallback by device.
+  - **MetalFX scaler creation** (`_MTLDevice_newMTL4SpatialScaler`) also takes `g_pso_lock` shared and can't use the fallback, so it still waits on a flush. That's rare: creation at init and on resize.
 - That PSO isn't captured this session; it is the next time it misses.
 - Why: Darwin's `pthread_rwlock` probably doesn't donate QoS to the holder, which is to be verified. Lowering the flusher's QoS would otherwise lengthen exactly the wait #11 is about.
 - This keeps the hard rule for every flush trigger, the 60 s backstop included.
 
 **When to flush:**
 - **(M10) Visibility:** the bridge's own `g_vis_flags` (AppKit notifications, `winemetal_unix.c` ~4016). No new thunk, no per-Present call.
+  - **(R2)** `g_vis_flags` is zero until the first visibility query, which would read as "not visible": during startup and loading before the first Present, in headless harnesses (`compile_mt_test`), and on present paths that never query it.
+  - So "paused" means `g_vis_observing && !(g_vis_flags & VISIBLE)`.
+  - Gate: harness runs don't take the pause path unless asked.
 - **Hint:** `d9mt_pso_pause_hint` (PE → unix) only for device Reset, edge-triggered.
 - **The "frame > 250 ms with no draws" loading trigger is dropped (S5):** SWTOR's loading screens draw.
 - Flush when due and (not visible, or Reset, or idle 10 s); the 60 s backstop stays.
@@ -155,6 +181,7 @@ Still to run: `scripts/test-compile-mt.sh` cold → warm across T0 and T1 (the s
      - a truncated archive, a zero-filled archive with the size/mtime of its `.sum`, and a foreign file → deleted, no crash;
      - an unknown magic → SHA fallback;
      - v1 `.sum` archives survive (loaded, rewritten as v2).
+   - R2: a harness run (no visibility query) doesn't take the pause path.
    - The S1 build tests (above) and `compile_mt_test` (plain, TSan) across two builds.
    - Hash suite with the bundle bridge.
    - One SWTOR session by Jan.

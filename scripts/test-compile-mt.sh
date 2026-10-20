@@ -52,7 +52,7 @@ run_pair "$OUT/compile_mt_test" "$V2/build/bridge/winemetal.so" "$OUT/work"
 echo "[compile-mt] ThreadSanitizer build of the unix side"
 TS=(-fsanitize=thread -g -O1)
 CFLAGS_UNIX=(-ObjC -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" "$BR/unix/pso_archive_check.c"; do
   clang "${CFLAGS_UNIX[@]}" "${TS[@]}" -c "$src" -o "$OUT/$(basename "$src").tsan.o"
 done
 clang++ "${INC[@]}" "${TS[@]}" -fvisibility=hidden \
@@ -64,7 +64,7 @@ printf '%s\n' ___wine_unix_call_funcs ___wine_unix_call_wow64_funcs _d9mtair_ver
 # AirBuilder/LLVM/dxbc-spirv stay uninstrumented (prebuilt): TSan still sees
 # every lock and shared access in the bridge code that drives them.
 clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
-  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/air_cache.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT/airlib_unix.tsan.o" \
+  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/air_cache.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT"/pso_archive_check.c.tsan.o "$OUT/airlib_unix.tsan.o" \
   "$AIRLIB_OBJ"/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OBJ"/third_party_dxbc-spirv_util_*.o \
   "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" \
   "$LLVM"/lib/libLLVM*.a \

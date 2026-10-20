@@ -47,7 +47,8 @@ clang++ "${CXXFLAGS_UNIX[@]}" \
   -c "$V2/airlib/unix.cpp" -o "$OBJ/airlib_unix_renamed.o"
 
 echo "[bridge] unix winemetal.so"
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" \
+           "$BR/unix/pso_archive_check.c"; do
   obj="$OBJ/$(basename "$src").o"
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
     echo "[cc] ${src#$BR/}"
@@ -87,7 +88,7 @@ echo "[bridge] AIR codegen identity ${codegen_id:0:32} (${#CODEGEN_OBJS[@]} inpu
 
 clang++ -arch x86_64 -dynamiclib \
   -o "$OUT/winemetal.so" \
-  "$OBJ/winemetal_unix.c.o" "$OBJ/dxso_stubs.c.o" "$OBJ/air_codegen_id.c.o" \
+  "$OBJ/winemetal_unix.c.o" "$OBJ/dxso_stubs.c.o" "$OBJ/pso_archive_check.c.o" "$OBJ/air_codegen_id.c.o" \
   "${CODEGEN_OBJS[@]}" \
   -install_name @rpath/winemetal.so \
   -Wl,-exported_symbols_list,"$OUT/exports.list" \

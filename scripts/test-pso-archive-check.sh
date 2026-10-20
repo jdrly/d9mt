@@ -8,6 +8,8 @@
 #   trunc   an archive cut short (its .sum unchanged)               -> deleted
 #   zero    an archive zero-filled, size and mtime kept as in .sum   -> deleted (SHA fallback)
 #   shape   fat magic with an offset past EOF, size and mtime kept   -> deleted (shape check)
+#   tailzero the last 4 KB zeroed, size and mtime kept (power loss)  -> deleted (no ENDT: the
+#           SHA fallback, logged)
 #   verify  D9MT_PSO_VERIFY=1 loads the good archives (full SHA-256)
 #   shapeok a wrong SHA in .sum with the right size, mtime and shape still loads (so the
 #           shape check, not the hash, accepted it); with D9MT_PSO_VERIFY=1 it doesn't
@@ -17,6 +19,9 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 BR="$V2/bridge"; DX="$V2/third_party/dxbc-spirv"; LLVM="$V2/toolchains/llvm-x86_64"
 OUT="$V2/build/pso-check"; SO="$V2/build/bridge/winemetal.so"
 rm -rf "$OUT"; mkdir -p "$OUT"
+# the parser and the shape decisions on crafted input (bridge/tests/pso_archive_check_test.c)
+clang -O1 "$BR/tests/pso_archive_check_test.c" "$BR/unix/pso_archive_check.c" -o "$OUT/pso_archive_check_test" \
+  && "$OUT/pso_archive_check_test" | tail -1 || { echo "FATAL: pso_archive_check_test" >&2; exit 1; }
 clang++ -std=c++17 -O1 -g -arch x86_64 -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib" \
   -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS \
   "$BR/tests/compile_mt_test.cpp" "$V2"/build/airlib/obj/third_party_dxbc-spirv_*.o -lpthread -o "$OUT/compile_mt_test" \
@@ -69,6 +74,9 @@ echo "[pso-check] damaged archives"
 damage trunc "import os; os.truncate(f, os.path.getsize(f) // 2)"
 damage zero "import os; n=os.path.getsize(f); open(f,'r+b').write(bytes(n))"
 damage shape "d=bytearray(open(f,'rb').read()); d[16:20]=(len(d)+4096).to_bytes(4,'big'); open(f,'wb').write(d)"
+damage tailzero "import os; n=os.path.getsize(f); h=open(f,'r+b'); h.seek(n-4096); h.write(bytes(4096))"
+grep -q 'unexpected shape (no ENDT)' "$OUT/tailzero.log" && echo "  tailzero: decided by the SHA fallback (logged)" \
+  || { echo "  tailzero: FAIL (no fallback log line)"; fails=$((fails + 1)); }
 
 echo "[pso-check] the shape check, not the SHA, accepts good archives"
 W="$OUT/shapeok"; rm -rf "$W"; cp -Rp "$OUT/w" "$W"; n=$(cnt)

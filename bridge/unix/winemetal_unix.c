@@ -5806,7 +5806,6 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 #include "../../airlib/d9mtair.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
-#include <libkern/OSByteOrder.h>
 #include <mach-o/loader.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -5893,7 +5892,7 @@ _MTLDevice_newArgumentTable(void *obj) {
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum written after it:
  *    "2 <size> <mtime ns> <SHA-256>". At load, size and mtime must match and
- *    the file must have the shape Metal writes (pso_archive_shape); a file of
+ *    the file must have the shape Metal writes (pso_archive_check.c); a file of
  *    another shape is checked against the SHA-256 instead (a future format
  *    costs the hash, not the cache), and anything that doesn't match is
  *    deleted. Hashing every archive at every start cost 1.2 s for 430 MB in
@@ -5968,45 +5967,9 @@ pso_write_sum(NSString *file, NSString *v1, const struct stat *st) {
   return true;
 }
 
-/* The shape Metal writes (macOS 27 / Metal 4, every archive seen): a GPU fat
- * container, CB FE BA BE + big-endian nfat_arch + {cputype, subtype, offset,
- * size, align} per slice; each slice a metallib ("MTLB") or a Mach-O
- * (CF FA ED FE) with an "ENDT" tag in its last 16 bytes; the last slice ends
- * at EOF. 1 = that shape, 0 = that container but inconsistent (truncated or
- * overwritten), -1 = another layout (the caller checks the SHA-256). */
-static int
-pso_archive_shape(const char *path, uint64_t size) {
-  const int fd = open(path, O_RDONLY);
-  if (fd < 0)
-    return 0;
-  int result = -1;
-  uint8_t hdr[8 + 8 * 20];
-  if (pread(fd, hdr, 8, 0) == 8 && OSReadBigInt32(hdr, 0) == 0xcbfebabeu) {
-    const uint32_t n = OSReadBigInt32(hdr, 4);
-    result = 0;
-    if (n >= 1u && n <= 8u && pread(fd, hdr + 8, n * 20u, 8) == (ssize_t)(n * 20u)) {
-      uint64_t end = 0u;
-      bool ok = true;
-      for (uint32_t i = 0u; ok && i < n; i++) {
-        const uint64_t off = OSReadBigInt32(hdr, 8 + 20 * i + 8), len = OSReadBigInt32(hdr, 8 + 20 * i + 12);
-        uint8_t head[4], tail[16];
-        ok = off >= 8u + n * 20u && len >= 16u && off + len <= size
-          && pread(fd, head, 4, (off_t)off) == 4 && pread(fd, tail, 16, (off_t)(off + len - 16u)) == 16;
-        if (ok && memcmp(head, "MTLB", 4) && memcmp(head, "\xcf\xfa\xed\xfe", 4)) {
-          result = -1;  // a slice kind not seen yet
-          break;
-        }
-        ok = ok && memmem(tail, sizeof(tail), "ENDT", 4) != NULL;
-        if (off + len > end)
-          end = off + len;
-      }
-      if (ok && end == size)
-        result = 1;
-    }
-  }
-  close(fd);
-  return result;
-}
+/* bridge/unix/pso_archive_check.c (pure C, unit-tested by bridge/tests/pso_archive_check_test.c) */
+int d9mt_pso_archive_shape(const char *path, uint64_t size);
+bool d9mt_pso_sum_parse_v2(const char *text, uint64_t *size, uint64_t *mtime_ns, char sha[65]);
 
 /* Whether an archive may be passed to newArchiveWithURL. */
 static bool
@@ -6016,16 +5979,16 @@ pso_archive_valid(NSString *path) {
   struct stat st;
   if (!want || stat(path.fileSystemRepresentation, &st))
     return false;
-  unsigned long long size, mtime;
+  uint64_t size, mtime;
   char sha[65];
-  if (sscanf(want.UTF8String, "2 %llu %llu %64s", &size, &mtime, sha) == 3) {
-    if (size != (unsigned long long)st.st_size || mtime != pso_mtime_ns(&st))
+  if (d9mt_pso_sum_parse_v2(want.UTF8String, &size, &mtime, sha)) {
+    if (size != (uint64_t)st.st_size || mtime != pso_mtime_ns(&st))
       return false;
-    const int shape = g_pso_verify ? -1 : pso_archive_shape(path.fileSystemRepresentation, size);
+    const int shape = g_pso_verify ? -1 : d9mt_pso_archive_shape(path.fileSystemRepresentation, size);
     if (shape >= 0)
       return shape == 1;
     NSString *have = pso_sum_text(path);
-    return have && [have isEqualToString:[NSString stringWithFormat:@"%llu %s", size, sha]];
+    return have && [have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]];
   }
   /* v1 */
   NSString *have = pso_sum_text(path);
