@@ -434,8 +434,12 @@ digest), unpacked under `~/Development/personal/swtor-mac-proper/arm-engines/`:
    notarized with the app; the game process must be `wine.app`'s main
    executable (only it gets the entitlement; arm-tso/README.md).
 3. **Our winemac patches** (`swtor-on-mac/patches/winemac-*.patch`, mouse and
-   keyboard) ported to athei/wine `arm64-patched`: that means building that
-   Wine (athei's `wine-build`), not done.
+   keyboard): ported to athei's 11.19 and built (only the Mac driver, with
+   athei's configure, against the release's own `ntdll.so`/`win32u.so`) in
+   `swtor-mac-proper/arm-work/winemac-arm64/` (2026-10-20). Window-free
+   tests pass (keys by position with Czech/German/US layouts; the input
+   thread in 64-bit and WoW64 processes); the raw mouse moves need real
+   input in the game.
 4. **Game files** in an arm64 prefix without touching Jan's installs (an APFS
    clone he makes or approves, or a fresh download).
 5. **Launcher and login** under Jan's account-safety rules: Broadsword's
