@@ -203,8 +203,15 @@ What a carry does:
   cover a committed prefix of the open serial. That is safe only because nothing outlives
   the device without completing N: the context destructor completes an open carry before the
   tracker drains.
-- `waitFor(serial ≥ nextSerial())` is a bounded 10 s stall plus a one-time log line
-  ("not submitted yet"). It must never happen. The tests treat that line as a FAILURE (§5).
+- `waitFor()` on a serial that is **still** not submitted after a whole 2 s slice logs
+  "still not submitted yet after N s" (it is part of a bounded 10 s stall). It must never
+  happen; the tests treat that line as a FAILURE (§5).
+  - Waiting on the serial the CS thread is about to submit is normal and older than G1:
+    `WaitForResource` flushes and then syncs the CS thread only up to the resource's last
+    use, so the wait can start just before the submit.
+  - Batch 9 saw that 130 times in the hash suites in every mode, also with
+    `D9MT_EARLY_COMMIT=0`, and it always ended within the first slice. So the log moved
+    behind the first slice (revision 1 logged it at the start).
 - One queue, one submitter: the serial is taken and signalled in submission order (the same
   invariant as perf/serial-cache-retire).
 - Heuristic side effect, with no waiter: a carried flush's `m_submissionFence` value signals
