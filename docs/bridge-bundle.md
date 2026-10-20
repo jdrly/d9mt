@@ -218,6 +218,21 @@ Notes from the milestone 6 review (no code):
 - **Skipped** also covers "function gone" (the shader was released before its prewarm job ran). A game that releases and recreates its shaders would keep skipping, signal complete, and consolidate away what those entries' PSOs were: churn. SWTOR keeps its shaders (0 skipped in Jan's logs).
 - **The argv check under Wine is a batch gate:** if the init line doesn't show `<base>/<name>.exe/os-…`, the fallback has silently turned parts 3+4 off; the dynamic batch fails on that.
 
+**Known, open: failed builds shadow archived vertex functions for the direct lookup.** `MTL4Archive newRenderPipelineStateWithDescriptor:` composes a pipeline from per-function binaries, keyed by function and a key that depends on the pipeline. A failed build through the serializer-attached compiler (here: VS/PS interface mismatches, which the harness makes by pairing every VS with every PS) leaves something in the serializer that hides the good pipelines' variant of the same vertex function from the direct lookup ("Failed to find vertex function main with key"). The compiler's `lookupArchives` still serves them, possibly with a real VS compile.
+- **Measured** (compile_mt_test, vs_mvp with pixel shaders, warm after one clean flush):
+  - the 11 good pixel shaders alone: 44/44 direct hits;
+  - plus one failing pixel shader: 0-1 good pairs miss (tex3d, texcoords, texldd: 1; the rest: 0);
+  - plus all 12 failing ones: all 44 good pairs miss.
+  - The misses repeat every session: each session writes a new ~420 KB delta of the same pipelines, and the archive captured from exactly those builds doesn't serve them either.
+  - Full harness set: 884 of 928 good pipelines hit directly.
+- **Detecting "served by lookupArchives, no compile" isn't possible in Metal 4:**
+  - `MTL4CompilerTaskOptions` has only `lookupArchives`, and `MTL4PipelineOptions` has only validation/reflection; `MTLPipelineOptionFailOnBinaryArchiveMiss` is Metal 3 only;
+  - a second lookup is the direct lookup that misses;
+  - a compile-time threshold would be a guess.
+  - So consolidation can't count them as archived, and they're captured again.
+- **SWTOR:** d9mt links pixel shaders to the vertex shader's outputs, and Jan's sessions show prewarm `failed=0` and no "pipeline build failed" lines. So this doesn't apply today.
+- **If a game shows repeated archive-first misses across sessions** (`D9MT_PSO_STATS=1`: misses in session 2+ beyond its new PSOs), a candidate fix is to build descriptors whose last build failed (the state cache knows them) through the serializer-less compiler.
+
 Known limit: a partly corrupt state cache file blocks `complete` for that session only. The next session's file has lost those entries, and its consolidation drops their PSOs: a recompile on next use, as for an evicted key.
 
 **Future, not in the bundle: per-part coverage, for games with per-zone shaders.** Today `complete` is all or nothing: one entry whose shaders weren't announced (content this session didn't load) means the prewarm never drains its whole index, no signal is sent, and nothing consolidates. SWTOR doesn't hit this: Jan's logs show prewarm built = prewarmable (318/330/344) with 0 skipped. A game that loads shaders per zone would never consolidate and keep accumulating deltas up to `D9MT_PSO_MAX_ARCHIVES`/`D9MT_PSO_MAX_MB`. The sketch: the state cache reports coverage per delta (the deltas whose recorded pipelines were all replayed) and the consolidation deletes only those, keeping the rest as deltas. Open question: does SWGL Legends load shaders per zone? Check its prewarm lines (built vs prewarmable, skipped) before building this.

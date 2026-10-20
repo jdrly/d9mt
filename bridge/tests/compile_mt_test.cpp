@@ -336,6 +336,9 @@ int main(int argc, char** argv) {
       results[s.name] = h.str();
     }
     printf("shaders: %u/%zu compiled\n", okShaders, shaders.size());
+    if (getenv("MT_PRINT_LIBS"))   // the MTLLibrary of each shader (bridge diagnostics name libraries by pointer)
+      for (auto& s : shaders)
+        printf("lib %s %p\n", s.name.c_str(), (void*)uintptr_t(s.library));
 
     // PSOs: every VS x PS pair in 4 state variants, all in flight at once.
     // MT_REPEAT=<n>: the whole set n times (the same descriptors requested again).
