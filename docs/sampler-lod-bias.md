@@ -59,10 +59,17 @@ equivalent of D3D9's sampler-state bias, which D3D9 also defines per sampler.
   - `_MTLDevice_newSamplerState` sets `sampler_desc.lodBias = info->lod_bias` (macOS 26 API,
     within d9mt's minimum, no `@available` needed; guard it anyway if the bridge still builds
     against older SDKs).
-  - This changes `winemetal.so`'s LC_UUID, which is the AIR cache key: every user rebuilds the
-    shader cache once. **So it lands in the bridge bundle together with the cache-key
-    decoupling (S1), not alone.**
+  - It lands in the bridge bundle after S1 (the AIR cache key decoupled from `winemetal.so`'s
+    LC_UUID), so it costs no shader-cache rebuild.
   - The PE side (`winemetal.dll` thunk) takes the struct by pointer, so only the size changes.
+  - **Version skew (M-1, decided):**
+    - the former padding byte at offset 23 becomes `lod_bias_present`;
+    - `lod_bias` sits at 32, the struct is 40 bytes;
+    - callers must zero the struct (the only caller does: `WMTSamplerInfo samplerInfo = {}`).
+
+    So an old d3d9.dll sends 0 at offset 23 and the bridge never reads past its 32 bytes. A new
+    d3d9.dll with an old bridge: the old bridge ignores the flag; `gpu_resource_id` stays at
+    offset 24 either way.
 - **Backend:** `createSampler`: `samplerInfo.lod_bias = key.mipLodBias;` (clamped to
   [-16, 15.999]).
 - **Frontend:** unchanged, the key already holds the bias.
@@ -71,6 +78,17 @@ equivalent of D3D9's sampler-state bias, which D3D9 also defines per sampler.
   objects. In base, the hash covered the bias bytes too.
 - **Per-draw cost:** none. The bias is part of the sampler state, which is created once per
   distinct key and cached.
+- **The sampler limit (M-2):**
+  - Every distinct bias is its own sampler, the cache never evicts, and argument buffers
+    reference at most `maxArgumentBufferSamplerCount` samplers.
+  - So the frontend quantises the bias in the key to Metal's S4.6: round(b × 64) / 64, clamped
+    to [-16, 1023/64]. That also folds -0 into 0 and turns NaN into 0.
+  - DXVK keys its bias at 1/256 (`encodeFixed<int32_t, 6, 8>`), finer than Metal can apply,
+    so there's no coarser upstream rule to match.
+  - `createSampler` logs at 256/512/768/1000 distinct samplers. If a biased sampler fails, it
+    falls back to bias 0 with a log line; never a silent null.
+- Prior art: dxmt (D3D11 on Metal) applies `MipLODBias` shader-side through the argument
+  buffer (`dxmt_context.cpp:285`), because it predates `lodBias`.
 - **Version skew:** d3d9.dll and the bridge always ship together in the app bundle. A
   development d3d9.dll with an old bridge would pass a 40-byte struct to a 32-byte reader; the
   unix side reads by pointer, so it would ignore the bias and not crash. The reverse (an old
@@ -88,10 +106,16 @@ equivalent of D3D9's sampler-state bias, which D3D9 also defines per sampler.
 
    Base fails the non-zero cases (they show mip 0's level); the fix passes.
 2. Hash suite: the 33 programs identical to base (none sets a bias).
-3. `texldb` + sampler bias together (SM3 `ps_3_0`: texldb with w = 1 and sampler bias = 1 → 2
+3. Review additions (in code_lodbias):
+   - T-2: `texldl` LOD 1 + sampler bias +1. Reported (`INFO … -> mip N`), not checked. Vulkan
+     (DXVK) adds the bias, giving mip 2; if Metal gives mip 1, that's documented, no IR fix;
+   - T-4: MAXMIPLEVEL 2 + bias −2 must stay at mip 2;
+   - T-5: 200 bias values in 1/64 steps, so 200 sampler states. Every quad must be drawn, and
+     no "createSampler failed".
+4. `texldb` + sampler bias together (SM3 `ps_3_0`: texldb with w = 1 and sampler bias = 1 → 2
    levels): confirms Metal adds them. If Metal's sampler bias *replaced* the shader's, option A
    would need an IR-side add for texldb shaders only (still zero cost elsewhere).
-4. `MTL_DEBUG_LAYER=1` on test 1.
+5. `MTL_DEBUG_LAYER=1` on test 1.
 
 ## 6. Order
 1. The diagnostic (§2) now, in any build Jan plays next.
