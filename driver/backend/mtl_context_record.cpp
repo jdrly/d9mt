@@ -1052,7 +1052,9 @@ namespace dxvk::backend {
      * would queue behind that work anyway; once it has caught up, holding them back would
      * leave it idle (what made perf/pass-splits slower), so the flush goes ahead as before.
      * Re-checked at every carry. */
-    if (!m_earlyCommitAlways && m_device->submissions().completedSerial() >= m_frameLastSerial) {
+    SubmissionTracker& st = m_device->submissions();
+    if (!m_earlyCommitAlways && (st.completedSerialCached() >= m_frameLastSerial
+                              || st.completedSerial() >= m_frameLastSerial)) {
       if (unlikely(prof::g_profEnabled))
         m_rs[rstats::CarryRefused]++;
       return false;
@@ -1409,6 +1411,7 @@ namespace dxvk::backend {
     if (unlikely(prof::g_profEnabled))
       m_splitXfers++;
     ensureCommandBuffer();
+    m_prefixWork = true;
     t->setTrackingSerial(m_currentSerial);
 
     const MtlFormatInfo* fi = lookupFormatInfo(t->format);
@@ -1931,6 +1934,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::encodeDirect(std::function<void(obj_handle_t)>&& fn) {
     if (!deferredPassesEnabled()) {
+      m_prefixWork = true;
       fn(m_cmdbuf.handle());
       return;
     }
