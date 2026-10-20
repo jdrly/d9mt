@@ -17,6 +17,7 @@
 //     test/native/submission_tracker_test.cpp driver/backend/mtl_submission.cpp \
 //     build/driver-x64/obj/util_{log_log,thread,util_env,util_string}.cpp.o ... -o stt.exe
 #include "mtl_submission.h"
+#include "mtl_profiler.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -325,8 +326,41 @@ static void stress() {
     CHECK(seen[s] == 1);
 }
 
+// G1's diagnostic (PROF unsubWait=): a waitFor() that starts on a serial nobody submitted yet
+// is counted and timed until it returns. Positive test: the serial is submitted and completed
+// 20 ms later from another thread. Needs D9MT_PROFILE=1 (prof::g_profEnabled is read once).
+static void unsubmittedWait() {
+  if (!prof::g_profEnabled) {
+    std::printf("FAIL unsubmittedWait: run with D9MT_PROFILE=1\n");
+    g_fail++;
+    return;
+  }
+  g_signaled = 0u;
+  SubmissionTracker t(0x1u);
+  const uint64_t before = prof::g_unsubWaits.load();
+  prof::g_unsubWaitMaxNs.store(0u);
+  const uint64_t open = t.nextSerial();
+  std::thread cs([&t, open] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    uint64_t s = t.onSubmit(0x2u);
+    if (s == open)
+      gpuComplete(s);
+  });
+  t.waitFor(open);
+  cs.join();
+  CHECK(prof::g_unsubWaits.load() == before + 1u);
+  CHECK(prof::g_unsubWaitMaxNs.load() >= 15000000u);   // >= 15 ms of the 20 ms
+  // A wait on a submitted serial isn't counted.
+  uint64_t s2 = t.onSubmit(0x2u);
+  std::thread gpu([s2] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); gpuComplete(s2); });
+  t.waitFor(s2);
+  gpu.join();
+  CHECK(prof::g_unsubWaits.load() == before + 1u);
+}
+
 int main() {
   basics();
+  unsubmittedWait();
   signalsWithoutCs();
   manyDue();
   drain();
