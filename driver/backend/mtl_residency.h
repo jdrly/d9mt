@@ -43,8 +43,13 @@ namespace dxvk::backend {
 
     void releaseCommitted();
 
-    bool attachLayer(obj_handle_t layer);
-    void detachLayer(obj_handle_t layer);
+    // A CAMetalLayer's residency set on the queue (its drawables' textures), retained while it
+    // is attached. detachLayer only takes it out of the list and returns it (0 if it wasn't
+    // attached): frames that wrote the layer's drawables can still be on the GPU, so the
+    // caller removes it from the queue with removeLayerSet once they have retired.
+    bool         attachLayer(obj_handle_t layer);
+    obj_handle_t detachLayer(obj_handle_t layer);
+    void         removeLayerSet(obj_handle_t set);
 
     int64_t  netResident()     const { return int64_t(m_adds.load()) - int64_t(m_removes.load()); }
     uint64_t totalAdds()       const { return m_adds.load(); }

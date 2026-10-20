@@ -165,8 +165,11 @@ namespace dxvk::backend {
     // latest when the device drains.
     if (m_retire != nullptr && !m_retire->empty())
       m_device->submissions().retireBatch(m_device->submissions().nextSerial(), std::move(m_retire));
-    for (auto& kv : m_fxScalers)
-      NSObject_release(kv.second.scaler);
+    for (auto& kv : m_fxScalers) {
+      const obj_handle_t scaler = kv.second.scaler;
+      m_device->submissions().retireAfter(m_device->submissions().nextSerial(),
+        [scaler] () { NSObject_release(scaler); });
+    }
     if (m_visBuffer) {
       m_device->residency().allocDestroyed(m_visBuffer.detach(), m_visCpu,
         m_device->submissions().nextSerial(), uint64_t(kVisSlots) * 8u);
@@ -495,7 +498,11 @@ namespace dxvk::backend {
       MetalDrawable_presentAfterMinimumDuration(sync.drawable, sync.minDuration);
     else
       MetalDrawable_present(sync.drawable);
-    NSObject_release(sync.drawable);
+    // d9mt's reference until the command buffer that wrote it has retired (Core Animation
+    // holds its own until the drawable is on screen)
+    const obj_handle_t drawable = sync.drawable;
+    m_device->submissions().retireAfter(m_device->submissions().lastSubmittedSerial(),
+      [drawable] () { NSObject_release(drawable); });
   }
 
 

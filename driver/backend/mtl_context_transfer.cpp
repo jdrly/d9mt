@@ -804,6 +804,10 @@ namespace dxvk::backend {
     const obj_handle_t dtex = d->texture.tex;
     lifetime::noteUse(stex, m_currentSerial, lifetime::Use::CopySrc);
     lifetime::noteUse(dtex, m_currentSerial, lifetime::Use::CopyDst);
+    // until the command buffer retires (Metal 4 doesn't retain them): the present copy's
+    // destination is a drawable, whose texture only this wrapper's reference keeps for d9mt
+    m_keepAlive.push_back(dst);
+    m_keepAlive.push_back(src);
     encodeDirect([this, keepD = dst, keepS = src, stex, dtex,
                   srcSub, dstSub, srcOrigin, srcSize, dstOrigin]
                  (obj_handle_t cmdbuf) {
