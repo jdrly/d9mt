@@ -39,6 +39,12 @@ extern "C" void MTL4CommandQueue_signalEvent(obj_handle_t, obj_handle_t, uint64_
 extern "C" void NSObject_release(obj_handle_t) { }
 extern "C" void NSObject_retain(obj_handle_t) { }
 
+// RetireBatch::run lives in mtl_device_impl.cpp (it recycles buffer storage); this test hands
+// over no batches, so the tracker's calls to it never run.
+namespace dxvk::backend {
+  void RetireBatch::run() { }
+}
+
 namespace dxvk {
   void Logger::info(const std::string&) { }
   void Logger::warn(const std::string&) { }
