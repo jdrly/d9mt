@@ -152,6 +152,9 @@ namespace dxvk::backend {
     static constexpr uint32_t kVertexBufferBaseIndex = 3u;
     static constexpr uint32_t kPushConstantIndex = 20u;
     static constexpr uint32_t kAbIndex = 21u;
+    /* The fixed-function fragment shader's texture slots: t2d 0-7, tcube 8-15
+     * (scripts/build-driver.sh pins them). */
+    static constexpr uint32_t kNullCubeFirstSlot = 8u;
     static constexpr uint32_t kPushSharedBlockSize = 32u;
     static constexpr size_t kCmdChunkFlushBytes = 1u << 22;
 
@@ -256,6 +259,17 @@ namespace dxvk::backend {
     };
 
     Rc<MtlDeviceImpl>  m_device;
+
+    /* Bound wherever nothing is (Metal API validation asserts on a slot a function
+     * declares and the table never set, e.g. the FF ubershader's null stream, its
+     * vertex-blend buffer and its cube textures): a zeroed buffer, a 1x1 2D and a
+     * 1x1 cube texture, a default sampler. Written into every argument table once at
+     * creation and wherever a slot is unbound, so the table never holds 0. */
+    Rc<MtlBuffer>       m_nullBuffer;
+    Rc<MtlTexture>      m_nullImage2D, m_nullImageCube;
+    Rc<MtlTextureView>  m_nullView2D, m_nullViewCube;
+    Rc<MtlSamplerState> m_nullSampler;
+    uint64_t            m_nullAddress = 0u, m_null2DId = 0u, m_nullCubeId = 0u, m_nullSamplerId = 0u;
     Rc<MtlPresenter>   m_presenter;
 
     WmtCommandBuffer   m_cmdbuf;
@@ -474,6 +488,10 @@ namespace dxvk::backend {
     uint32_t     m_psoMruCursor = 0u;
     uint32_t     m_layoutGen = 0u, m_strideGen = 0u, m_blendGen = 0u;
     ArgTablePair createArgumentTablePair() const;
+    void initNullBindings(ArgTablePair& pair) const;
+    uint64_t nullTextureId(uint32_t stage, uint32_t slot) const {
+      return stage == 1u && slot >= kNullCubeFirstSlot ? m_nullCubeId : m_null2DId;
+    }
     void selectArgumentTablesForPass();
     void bindArgumentTables();
     void flushVertexBuffers();
