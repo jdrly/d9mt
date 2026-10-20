@@ -62,6 +62,7 @@ private:
   std::condition_variable m_retireCond;
   std::vector<Retirement> m_retirements;
   bool m_stop = false;
+  bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
 
   dxvk::thread m_pump;
 

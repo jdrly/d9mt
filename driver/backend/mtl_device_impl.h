@@ -73,6 +73,10 @@ namespace dxvk::backend {
   public:
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
+    // Set for views from createImageView (not the presenter's drawable views): the
+    // Metal view is released once the GPU is past every command buffer that may use it.
+    class MtlDeviceImpl* residencyDevice = nullptr;
+    ~MtlTextureViewImpl();
   };
 
   class MtlSamplerStateImpl : public MtlSamplerState {
@@ -241,6 +245,17 @@ namespace dxvk::backend {
       residencyDevice->residency().allocDestroyed(
         owned.detach(), nullptr,
         residencyDevice->submissions().nextSerial(), bytes);
+    }
+  }
+
+  // Metal 4 command buffers don't retain what they use: a draw's argument table holds the
+  // view's resource ID and a pass its handle, so the view outlives the last Rc until the
+  // GPU is past the command buffer being recorded (released on the retire thread).
+  inline MtlTextureViewImpl::~MtlTextureViewImpl() {
+    if (residencyDevice && owned) {
+      const obj_handle_t h = owned.detach();
+      SubmissionTracker& st = residencyDevice->submissions();
+      st.retireAfter(st.nextSerial(), [h] () { NSObject_release(h); });
     }
   }
 
