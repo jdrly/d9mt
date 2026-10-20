@@ -9,6 +9,14 @@
 #            the results (metallib hashes, PSO ok/fail) equal a cold run of the same set
 #   R1       D9MT_STATE_CACHE=0: archive first off, hits through lookupArchives are captured
 #            (a delta of this run), no consolidation
+#   F-1      a delta flushed while the consolidation rebuilds (D9MT_PSO_CONSOLIDATE_DELAY_MS
+#            holds it after its snapshot) is newer than the consolidated archive's name and so
+#            kept at the next start, where its PSOs are hits
+#   cap      only the newest D9MT_PSO_ARCHIVE_FIRST_MAX (8) deltas are asked first: a PSO only
+#            in an older one is a miss built through the compiler's lookupArchives, consistent
+#            with the run that recorded it, and captured again; with a cap of 64, a hit
+#   restore  archives copied without their times: the SHA-256 decides (same size, other time),
+#            the sums are rewritten; a byte changed in the copy: deleted
 #   TSan     the cold and warm runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
@@ -91,8 +99,86 @@ suite() { # <label>
   check "R1: no consolidation" "$(grep -c 'consolidated archive: written' "$OUT/$1-r1.log")" 0
 }
 
+misses_of() { stat_line "$1" | sed -n 's/.* \([0-9]*\) misses$/\1/p'; }
+hits_of() { stat_line "$1" | sed -n 's/^\([0-9]*\) hits.*/\1/p'; }
+shared() { mkdir -p "$1" "$2"; ln -sfn "$2" "$1/pso"; }   # <workdir> <pso dir>: workdirs sharing a pso dir
+
+m6() {
+  echo "[pso-first] F-1: a delta flushed during the consolidation's rebuild survives the next start"
+  local F="$OUT/f1"
+  # idle 0: the consolidation snapshots within 1 s of the coverage signal, then holds 4 s;
+  # the late PSOs come 1.5 s after the signal and flush every 5 (FLUSH_EVERY) into deltas
+  run "$F" f1-cold D9MT_PSO_CONSOLIDATE_IDLE_MS=0 D9MT_PSO_CONSOLIDATE_DELAY_MS=4000 MT_LATE_PSOS=1500 \
+    MT_WAIT_CONSOLIDATED=30 -- "${SET_A[@]}"
+  local late
+  late=$(python3 -I -c '
+import os, re, sys
+d, pid = sys.argv[1], sys.argv[2]
+fs = os.listdir(d)
+c = [f for f in fs if re.match(r"c-\d+-%s\.mtl4archive$" % pid, f)]
+if c:
+    stamp, cm = int(c[0][2:12]), os.stat(os.path.join(d, c[0])).st_mtime
+    print(" ".join(f for f in fs if re.match(r"\d+-%s-\d+\.mtl4archive$" % pid, f)
+                   and stamp <= os.stat(os.path.join(d, f)).st_mtime < cm))' "$(ls -d "$F"/pso/os-*)" "$(pid_of f1-cold)")
+  local n; n=$(wc -w <<< "$late" | tr -d ' ')
+  [ "$n" -gt 0 ] && echo "  F-1: $n delta(s) flushed between the snapshot and the consolidated archive" \
+    || { echo "  F-1: FAIL (no delta flushed during the rebuild: the test didn't hit the window)"; fails=$((fails + 1)); }
+  run "$F" f1-next MT_COVERAGE=0 MT_LATE_PSOS=0 -- "${SET_A[@]}"
+  local gone=0 f
+  for f in $late; do [ -e "$(ls -d "$F"/pso/os-*)/$f" ] || gone=$((gone + 1)); done
+  check "F-1: those deltas kept at the next start" "$gone" 0
+  check "F-1: next start, late PSOs included: misses" "$(misses_of f1-next)" 0
+
+  echo "[pso-first] lookup cap: a PSO only in a delta past the newest 8"
+  local K="$OUT/cap" i
+  shared "$K/w0" "$K/pso"
+  run "$K/w0" cap-old MT_COVERAGE=0 -- "${SET_A[@]}"
+  local oldn; oldn=$(deltas "$K/w0")
+  sleep 1   # later sessions' names sort newer
+  # sessions with one new pixel shader each (one delta each) until more than 8 deltas are newer
+  local more=($(ls "$B"/ps_*.bin | grep -v -e ps_show -e ps_pp))
+  for i in "${!more[@]}"; do
+    [ $(( $(deltas "$K/w0") - oldn )) -gt 8 ] && break
+    shared "$K/w$((i + 1))" "$K/pso"
+    run "$K/w$((i + 1))" "cap-$i" MT_COVERAGE=0 -- "$B/vs_mvp.bin" "${more[$i]}"
+  done
+  local newer=$(( $(deltas "$K/w0") - oldn ))
+  [ "$newer" -gt 8 ] && echo "  cap: $newer newer deltas over the $oldn of the recording run" \
+    || { echo "  cap: FAIL (only $newer newer deltas, want more than 8)"; fails=$((fails + 1)); }
+  # the control: the same directory with every delta asked first
+  cp -Rp "$K/pso" "$K/pso64"; mkdir -p "$K/c64"; cp -p "$K/w0/results.txt" "$K/c64/"; ln -sfn "$K/pso64" "$K/c64/pso"
+  run "$K/c64" cap-64 MT_COVERAGE=0 D9MT_PSO_ARCHIVE_FIRST_MAX=64 -- "${SET_A[@]}"
+  check "cap 64: all hits" "$(misses_of cap-64)" 0
+  run "$K/w0" cap-8 MT_COVERAGE=0 -- "${SET_A[@]}"
+  local ok; ok=$(grep -o 'psos: [0-9]* ok' "$OUT/cap-8.log" | grep -o '[0-9]*' | head -1)
+  check "cap 8: the old delta's PSOs miss archive first" "$(misses_of cap-8)" "$ok"
+  grep -q 'consistent' "$OUT/cap-8.log" && echo "  cap 8: results consistent with the recording run" \
+    || { echo "  cap 8: FAIL (results differ)"; fails=$((fails + 1)); }
+  [ "$(own_deltas "$K/w0" "$(pid_of cap-8)")" -gt 0 ] && echo "  cap 8: captured again into a delta of its own" \
+    || { echo "  cap 8: FAIL (not captured)"; fails=$((fails + 1)); }
+
+  echo "[pso-first] restore: archives copied without their file times"
+  local Rs="$OUT/restore" Rb="$OUT/restore-bad"
+  cp -R "$OUT/plain-w" "$Rs"; cp -R "$OUT/plain-w" "$Rb"
+  run "$Rs" restore MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "restore: all hits" "$(misses_of restore)" 0
+  check "restore: dropped archives" "$(grep -c 'dropping PSO archive' "$OUT/restore.log")" 0
+  check "restore: sums now carry the copies' times" "$(python3 -I -c '
+import glob, os, sys
+bad = 0
+for f in glob.glob(sys.argv[1] + "/pso/os-*/*.mtl4archive"):
+    t = open(f + ".sum").read().split()
+    bad += len(t) != 4 or t[0] != "2" or int(t[2]) != os.stat(f).st_mtime_ns
+print(bad)' "$Rs")" 0
+  local c; c=$(ls -d "$Rb"/pso/os-*)/$(ls "$Rb"/pso/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
+  python3 -I -c 'import os,sys; f=open(sys.argv[1],"r+b"); n=os.path.getsize(sys.argv[1]); f.seek(n//2); b=f.read(1); f.seek(n//2); f.write(bytes([b[0]^1]))' "$c"
+  run "$Rb" restore-bad MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "restore: a changed byte (same size, other time) deleted" "$([ -e "$c" ] && echo kept || echo deleted)" deleted
+}
+
 HARNESS="$OUT/compile_mt_test"
 suite plain
+m6
 if [ "${TSAN:-1}" != 0 ]; then
   TS=(-fsanitize=thread -g -O1)
   CF=(-ObjC -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")

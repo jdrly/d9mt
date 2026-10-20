@@ -30,6 +30,9 @@ namespace dxvk::statecache {
   constexpr uint32_t DefaultMaxEntries = 1024u;
   constexpr uint32_t MinMaxEntries     = 64u;
   constexpr uint32_t MaxMaxEntries     = 16384u;
+  /// Sessions a file must have been recorded under its key before its prewarm counts
+  /// as covering the PSO archives (MtlStateCacheBackend::psoArchiveCoverage).
+  constexpr uint32_t CoverageMinSessions = 8u;
   /// Entries not used in this many sessions are kept (until the cap) but not prewarmed.
   constexpr uint32_t PrewarmSessions = 32u;
 

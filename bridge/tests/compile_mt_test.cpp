@@ -191,7 +191,7 @@ static obj_handle_t buildPso(obj_handle_t compiler, obj_handle_t vs, obj_handle_
   info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
   for (uint32_t i = 0; i < 2; i++) {
     info.colors[i].pixel_format = formats[(variant + i) % 3];
-    info.colors[i].write_mask = 0xf;
+    info.colors[i].write_mask = variant >= 4u ? 0x7 : 0xf;   // 4..7: the late PSOs
     info.colors[i].blending_enabled = (variant >> 1) & 1;
     info.colors[i].rgb_blend_operation = WMTBlendOperationAdd;
     info.colors[i].alpha_blend_operation = WMTBlendOperationAdd;
@@ -362,6 +362,22 @@ int main(int argc, char** argv) {
     struct unixcall_generic_obj_noret cov = {};
     cov.handle = obj_handle_t(atoi(c) ? 1 : 0);
     g_funcs[213](&cov);
+  }
+
+  // MT_LATE_PSOS=<ms>: that much later, 4 new state variants of every pair (misses, flushed
+  // into deltas while a consolidation started by the coverage signal may still run)
+  if (const char* l = getenv("MT_LATE_PSOS")) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(l)));
+    unsigned ok = 0, fail = 0;
+    for (auto& vs : shaders) {
+      if (vs.isPs || !vs.ok) continue;
+      for (auto& ps : shaders) {
+        if (!ps.isPs || !ps.ok) continue;
+        for (uint32_t v = 4; v < 8; v++)
+          (buildPso(compiler, vs.library, ps.library, v) ? ok : fail)++;
+      }
+    }
+    printf("late psos: %u ok, %u failed\n", ok, fail);
   }
 
   // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated PSO archive

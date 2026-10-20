@@ -486,6 +486,14 @@ struct FakeBackend : public MtlStateCacheBackend {
   uint32_t urgentCompilesQueued() override {
     return urgent.load();
   }
+
+  std::atomic<int> coverage = { -1 };   // -1 never sent, else the last `complete`
+  std::atomic<uint32_t> coverageCalls = { 0u };
+
+  void psoArchiveCoverage(bool complete) override {
+    coverage.store(complete ? 1 : 0);
+    coverageCalls++;
+  }
 };
 
 struct FakeFnTask : public MtlCompileTask {
@@ -799,7 +807,7 @@ static void testFailedAndCorrupt() {
     std::vector<Entry> onDisk;
     auto d = readFile(cfg.file);
     ParseResult r = parse(d.data(), d.size(), Sig, onDisk);
-    CHECK(r.status == ParseStatus::Ok && onDisk.empty() && r.session == 5u);
+    CHECK(r.status == ParseStatus::Ok && onDisk.empty() && r.session == 1u);   // counted afresh
   }
 
   // Cap: a file with more than the default maximum (1024) loads capped and
@@ -1626,6 +1634,98 @@ static void testBoost() {
 }
 
 // A failed prewarm build is not adopted: the draw builds its own.
+// psoArchiveCoverage (bridge bundle): complete once the prewarm has handled every
+// prewarmable entry of a file recorded for CoverageMinSessions sessions under its key.
+// Entries outside the prewarm window, over the cap or whose shader doesn't compile
+// here don't block it; a young file, a rejected entry or a dropped file do.
+static void testCoverage() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 2u);
+  Workload w(4u, 20u, 100u, 31u);
+
+  { // Record the workload once.
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    sc->shutdown();
+    CHECK(be.coverageCalls == 0u);   // nothing loaded: nothing to cover
+  }
+  std::vector<Entry> recorded;
+  { auto d = readFile(cfg.file);
+    parse(d.data(), d.size(), Sig, recorded);
+    CHECK(recorded.size() == 100u); }
+
+  // One session on `file` (written at `session`); the coverage it sent, after shutdown.
+  auto run = [&](const std::vector<uint8_t>& file, const MtlStateCacheConfig& c, uint32_t* built = nullptr) {
+    writeFile(c.file, file);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, c);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(!c.threads || sc->waitPrewarmIdle(10000u));
+    sc->shutdown();
+    CHECK(be.coverageCalls <= 1u);
+    if (built) *built = uint32_t(sc->stats().built);
+    return be.coverage.load();
+  };
+  const uint32_t Min = statecache::CoverageMinSessions;
+
+  // Sessions: the file at Min - 2 loads as session Min - 1 (young), at Min - 1 as Min.
+  std::vector<Entry> fresh = recorded;
+  for (Entry& e : fresh) e.lastSession = Min - 2u;
+  CHECK(run(serialize(fresh, Sig, Min - 2u), cfg) == 0);
+  for (Entry& e : fresh) e.lastSession = Min - 1u;
+  CHECK(run(serialize(fresh, Sig, Min - 1u), cfg) == 1);
+
+  // Half the entries unused for more than PrewarmSessions: not prewarmed, still complete.
+  std::vector<Entry> stale = recorded;
+  const uint32_t S = 50u;
+  for (size_t i = 0u; i < stale.size(); i++)
+    stale[i].lastSession = i % 2u ? S : S - PrewarmSessions - 1u;
+  uint32_t built = 0u;
+  CHECK(run(serialize(stale, Sig, S), cfg, &built) == 1 && built == 50u);
+
+  // Over the cap: the dropped entries are the cache's own retention, still complete.
+  MtlStateCacheConfig small = cfg;
+  small.maxEntries = MinMaxEntries;
+  for (Entry& e : fresh) e.lastSession = S;
+  CHECK(run(serialize(fresh, Sig, S), small, &built) == 1 && built == MinMaxEntries);
+
+  // A vertex shader that doesn't compile here: its entries are skipped, still complete.
+  { const uint64_t keep = w.vs[0]->libBase;
+    uint32_t skippedVs0 = 0u;
+    for (const Entry& e : fresh) skippedVs0 += !std::memcmp(e.vsSha, w.vs[0]->id.sha, sizeof(e.vsSha));
+    CHECK(skippedVs0 > 0u);
+    w.vs[0] = makeShader(MtlShaderStage::Vertex, 1000u);   // fresh functions, library 0
+    w.vs[0]->libBase = 0u;
+    CHECK(run(serialize(fresh, Sig, S), cfg, &built) == 1 && built == 100u - skippedVs0);
+    w.vs[0] = makeShader(MtlShaderStage::Vertex, 1000u);
+    CHECK(w.vs[0]->libBase == keep); }
+
+  // An entry the backend rejects: not complete.
+  { std::vector<Entry> bad = fresh;
+    bad[0].key[0] = 0xeeu;
+    CHECK(run(serialize(bad, Sig, S), cfg) == 0); }
+
+  // A partly corrupt file: not complete.
+  { std::vector<uint8_t> f = serialize(fresh, Sig, S);
+    f[HeaderSize + 5u * EntrySize + 100u] ^= 0x40u;   // inside entry 5's key
+    CHECK(run(f, cfg) == 0); }
+
+  // No prewarm threads: the queue never drains, no signal (the bridge then never consolidates).
+  CHECK(run(serialize(fresh, Sig, S), configFor(dir, 0u)) == -1);
+
+  // Another key signature: entries dropped, the count starts over at 1; nothing loaded,
+  // no signal; complete again only after Min sessions under the new key.
+  { CHECK(run(serialize(fresh, Sig + 7u, S), cfg) == -1);
+    std::vector<Entry> onDisk;
+    auto d = readFile(cfg.file);
+    ParseResult r = parse(d.data(), d.size(), Sig, onDisk);
+    CHECK(r.status == ParseStatus::Ok && r.session == 1u); }
+}
+
 static void testFailedPrewarmNotAdopted() {
   const std::string dir = tempDir();
   const MtlStateCacheConfig cfg = configFor(dir, 1u);
@@ -1726,6 +1826,7 @@ int main(int argc, char** argv) {
   testCrashChain();
   testBoost();
   testFailedPrewarmNotAdopted();
+  testCoverage();
 
   if (g_failures) {
     std::printf("state_cache_test: %d FAILED\n", g_failures);

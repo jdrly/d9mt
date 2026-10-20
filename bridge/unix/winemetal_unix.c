@@ -5949,6 +5949,8 @@ static pthread_mutex_t                   g_pso_record_mutex = PTHREAD_MUTEX_INIT
 static _Atomic uint64_t                  g_pso_last_request; /* CLOCK_UPTIME_RAW ns */
 static _Atomic uint64_t                  g_pso_hits, g_pso_misses;
 static uint64_t                          g_pso_consolidate_idle_ns = 120000000000ull;
+static unsigned                          g_pso_archive_first_max = 8u;   /* deltas asked first */
+static unsigned                          g_pso_consolidate_delay_ms;      /* tests: after the snapshot */
 static id<MTLDevice>                     g_pso_device;
 static NSMutableArray<NSString *>       *g_pso_session_parts; /* this session's deltas */
 static bool                              g_pso_recording;     /* until the consolidation */
@@ -6038,8 +6040,23 @@ pso_archive_judge(NSString *path) {
   uint64_t size, mtime;
   char sha[65];
   if (d9mt_pso_sum_parse_v2(want.UTF8String, &size, &mtime, sha)) {
-    if (size != (uint64_t)st.st_size || mtime != pso_mtime_ns(&st))
+    if (size != (uint64_t)st.st_size)
       return PSO_BAD;
+    if (mtime != pso_mtime_ns(&st)) {
+      /* the same size with another time: a copy or restore that didn't keep times;
+       * the SHA-256 decides, and the sum is rewritten for the new time */
+      NSString *have = pso_sum_text(path);
+      if (!have)
+        return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+      if (![have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]])
+        return PSO_BAD;
+      NSString *tmp = [sumPath stringByAppendingString:@".tmp"];
+      if (pso_write_sum(tmp, have, &st))
+        rename(tmp.fileSystemRepresentation, sumPath.fileSystemRepresentation);
+      else
+        unlink(tmp.fileSystemRepresentation);
+      return PSO_OK;
+    }
     const int shape = g_pso_verify ? -1 : d9mt_pso_archive_shape(path.fileSystemRepresentation, size);
     if (shape == -2)
       return PSO_SKIP;
@@ -6154,6 +6171,9 @@ pso_consolidate(void) {
   }
   /* The record is final from here: recording stops, and its memory (it retains
    * every MTLLibrary the session used) goes once the rebuild is done. */
+  /* The name's time is taken with the snapshot (F-1): a delta flushed while the
+   * rebuild runs is newer than it and so kept at the next start. */
+  const time_t stamp = time(NULL);
   pthread_mutex_lock(&g_pso_record_mutex);
   NSArray *requested = [g_pso_requested autorelease];
   g_pso_requested = nil;
@@ -6161,6 +6181,8 @@ pso_consolidate(void) {
   NSArray<NSString *> *parts = [[g_pso_parts copy] autorelease];
   NSArray<NSString *> *sessionParts = [[g_pso_session_parts copy] autorelease];
   pthread_mutex_unlock(&g_pso_record_mutex);
+  if (g_pso_consolidate_delay_ms)
+    usleep(g_pso_consolidate_delay_ms * 1000u);
   /* Nothing new and at most one archive: rebuilding would only drop what this
    * session didn't use. */
   if (parts.count <= 1u && !atomic_load(&g_pso_misses)) {
@@ -6224,7 +6246,7 @@ pso_consolidate(void) {
   /* Named by consolidation time, not session start (C-3): a long session's
    * consolidation must sort newer than one made earlier by a later session. */
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
-    [NSString stringWithFormat:@"c-%010llu-%d.mtl4archive", (unsigned long long)time(NULL), (int)getpid()]];
+    [NSString stringWithFormat:@"c-%010llu-%d.mtl4archive", (unsigned long long)stamp, (int)getpid()]];
   NSString *tmp = [path stringByAppendingString:@".tmp"];
   NSString *sumTmp = [path stringByAppendingString:@".sum.tmp"];
   bool ok = false;
@@ -6290,9 +6312,9 @@ pso_consolidate_thread(void *arg) {
   }
 }
 
-/* PE side (the state cache) once its prewarm has handled every loaded entry:
- * handle = 1 if that replayed everything the archives were built from (the file
- * loaded fine and nothing was dropped, capped, rejected or skipped), else 0. */
+/* PE side (the state cache) once its prewarm has handled every prewarmable entry:
+ * handle = 1 if that replayed what the archives were built from (the file loaded
+ * whole under its key for CoverageMinSessions sessions, nothing rejected), else 0. */
 static NTSTATUS
 _D9MTPsoArchiveCoverage(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -6339,6 +6361,12 @@ pso_archive_init(id<MTLDevice> device) {
    * with the state cache's prewarm: off together with the state cache (R1). */
   const char *sc = getenv("D9MT_STATE_CACHE"), *af = getenv("D9MT_PSO_ARCHIVE_FIRST");
   g_pso_archive_first = !(sc && !strcmp(sc, "0")) && !(af && !strcmp(af, "0"));
+  const char *afm = getenv("D9MT_PSO_ARCHIVE_FIRST_MAX");
+  if (afm && *afm)
+    g_pso_archive_first_max = (unsigned)strtoul(afm, NULL, 10);
+  const char *delay = getenv("D9MT_PSO_CONSOLIDATE_DELAY_MS");
+  if (delay && *delay)
+    g_pso_consolidate_delay_ms = (unsigned)strtoul(delay, NULL, 10);
   const char *idle = getenv("D9MT_PSO_CONSOLIDATE_IDLE_MS");
   if (idle && *idle)
     g_pso_consolidate_idle_ns = (uint64_t)strtoull(idle, NULL, 10) * 1000000ull;
@@ -6401,6 +6429,7 @@ pso_archive_init(id<MTLDevice> device) {
 
   NSMutableArray *archives = [NSMutableArray array];
   NSMutableArray<NSString *> *parts = [NSMutableArray array];
+  bool haveConsolidated = false;
   if (g_pso_archive_first) {
     /* The newest consolidated archive, then every delta written after it (by
      * file time: C-3), newest first, up to D9MT_PSO_MAX_ARCHIVES files and
@@ -6458,6 +6487,8 @@ pso_archive_init(id<MTLDevice> device) {
       NSError *err = nil;
       id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
       if (a) {
+        if ([name hasPrefix:@"c-"])
+          haveConsolidated = true;
         [archives addObject:a];
         [parts addObject:path];
         [a release];
@@ -6506,7 +6537,12 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_task_options.lookupArchives = archives;
   }
   if (g_pso_archive_first) {
-    g_pso_lookup = [archives copy];
+    /* A miss asks every archive in g_pso_lookup before the compiler, so only the
+     * consolidated archive and the newest D9MT_PSO_ARCHIVE_FIRST_MAX deltas are
+     * asked first; older deltas are still lookupArchives of the compiler (a hit
+     * there is captured into a new delta, so the old one can age out). */
+    const NSUInteger first = (haveConsolidated ? 1u : 0u) + g_pso_archive_first_max;
+    g_pso_lookup = [[archives subarrayWithRange:NSMakeRange(0u, MIN(first, archives.count))] copy];
     g_pso_parts = [parts retain];
     g_pso_session_parts = [[NSMutableArray alloc] init];
     g_pso_requested = [[NSMutableArray alloc] init];
