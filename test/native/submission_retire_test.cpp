@@ -9,6 +9,8 @@
 //     test/native/submission_retire_test.cpp driver/backend/mtl_submission.cpp driver/util/thread.cpp \
 //     -o submission_retire_test.exe -static && wine submission_retire_test.exe
 #include "mtl_submission.h"
+#include "../util/log/log.h"
+#include "../util/util_env.h"
 
 #include <atomic>
 #include <chrono>
