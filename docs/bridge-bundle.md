@@ -97,7 +97,7 @@ Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, m
 
 **S3:** after parts 3+4 the archive set is about one working set: SWTOR ~350 PSOs × ~40 KB ≈ 14 MB, so ≈ 40 ms of SHA. Re-measure then. If part 2 stays, a background SHA after load (BACKGROUND QoS) restores rot detection for the next start at no startup cost.
 
-### 3. Capture only misses (archive first): waits for the re-review
+### 3. Capture only misses (archive first): implemented (422d434)
 
 **Change:**
 - For a render PSO the bridge first asks the loaded archives: **the consolidated archive first** (it holds most PSOs), then the deltas newest first (R4). The call is `[MTL4Archive newRenderPipelineStateWithDescriptor:error:]` (MTL4Archive.h, nil if the archive doesn't hold the pipeline).
@@ -127,20 +127,44 @@ Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, m
 
 **Ships only together with part 4 (M7).** Today's retention (the newest 8 sessions) is safe only because every session re-captures its whole working set. With part 3 a session holds only deltas, and dropping a session deletes PSOs nothing else holds: churn and new-PSO stalls.
 
-### 4. Consolidation: waits for the re-review
+### 4. Consolidation: implemented (422d434)
 
 **Dropped (M8):** consolidation from captured descriptors.
 - `MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors` only enables `serializeAsPipelinesScriptWithError:`, a script for the offline `metal-tt`.
 - It doesn't put descriptors into the archive, and the program can't read data out of a serializer.
 
-**Mechanism: the state cache's prewarm, routed past part 3:**
+**As implemented: the bridge records, the bridge rebuilds.**
+- Instead of routing the prewarm builds through a flag (a PE → unix ABI change), the PSO thunk records every render-pipeline descriptor requested this session, hits included.
+- The state cache's prewarm requests every recorded pipeline, so with it the record *is* the working set. That's the same coverage as the prewarm routing below, and nothing changes on the PE side.
+- Once the session has been idle for `D9MT_PSO_CONSOLIDATE_IDLE_MS` (10 s), a `QOS_CLASS_BACKGROUND` thread (`pso_consolidate`) rebuilds them:
+  - through its own compiler and serializer;
+  - `lookupArchives` = the loaded archives + this session's deltas, so mostly lookups;
+  - into one consolidated archive `c-<time>-<pid>.mtl4archive` (v2 sum, fsync before rename).
+- Then it deletes the archives it replaces: the ones loaded at this start and the deltas flushed before it began.
+- **Limits:**
+  - **Once per session**, under an `flock` on `.consolidate`.
+  - **Skipped** when the session only hit a single archive and had no miss: rebuilding then would only drop what this session didn't use.
+  - **Exit during it:** a `.tmp` (cleaned at a later start), and the parts stay.
+- **Startup:** keeps the newest consolidated archive plus every delta newer than it, looked up in that order (R4, R5).
+
+**The design-review alternative it replaces: the state cache's prewarm, routed past part 3:**
 - The prewarm builds go through a bridge-internal path: a flag on the prewarm build or a separate unix call.
 - Their own `MTL4Compiler`, with their own serializer and `lookupArchives` = the loaded parts, so they're archive hits, *captured*.
 - One flush when the prewarm queue drains, renamed to a consolidated name the retention logic recognises. Then delete only the parts that were loaded at this start.
 
 **Coverage:**
 - PSOs the state cache doesn't replay are lost: state cache off, or keys it evicted. That's a recompile on next use, acceptable.
-- **State cache off (R1):** consolidation can't run, and then neither does archive-first. Part 3 is off, and every build is captured as today, so today's retention (the newest 8 sessions) stays safe. Archive-first only runs when consolidation can run.
+- **State cache off (R1):** consolidation can't cover the working set, and then archive-first is off too. Every build is captured as today, and today's retention (the newest 8 sessions) stays safe.
+  - In code: `D9MT_STATE_CACHE=0` (or `D9MT_PSO_ARCHIVE_FIRST=0`) switches both off in `pso_archive_init`.
+  - The state cache is controlled by that variable only (`MtlStateCache::resolveConfig`), and the bridge reads it from the same process environment.
+
+**Tests** (`scripts/test-pso-archive-first.sh`, compile_mt_test, no Wine, plain and TSan):
+- **cold:** every PSO misses and is captured; after the idle period one consolidated archive replaces the deltas.
+- **warm:** "16 hits, 0 misses", and no delta of the run's own. Hits aren't captured: verification item 5, now in the real path.
+- **miss:** more shaders on the warm archives; the new PSOs miss, are compiled, and the results (metallib hashes, PSO ok/fail) equal a cold run of the same set.
+- **R1:** archive first off, the run captures its PSOs, no consolidation.
+- **TSan:** no reports.
+- `test-pso-archive-check.sh` still passes.
 
 **Retention with consolidation (R5):**
 - Keep the consolidated archive plus all deltas newer than it. Consolidate above 4 deltas.
