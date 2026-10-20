@@ -9,7 +9,10 @@
 //     4. hits from the archive are not captured: a second serializer, attached to a second
 //        compiler, sees nothing from the archive hits (its flush fails or is empty), while one
 //        compiler build after them is captured;
-//     5. 4 threads look up concurrently (run the binary under TSan for races).
+//     5. 4 threads look up concurrently (run the binary under TSan for races);
+//     6. lookups after the archive's file (and its .sum) was unlinked: a consolidation
+//        deletes the parts this process (and others) still look up in. Every lookup must
+//        still hit and render the same pixels (MTL4Archive must not reopen the URL lazily).
 //   clang -arch x86_64 -O1 bridge/tests/archfirst_test.m -framework Metal -framework Foundation -o archfirst_test
 //   (add -g -fsanitize=thread for the race check)
 //   time (needs a quiet window): hit cost via MTL4Archive vs via a compiler with
@@ -192,6 +195,34 @@ static void check(NSString *dir) {
   for (int i = 0; i < 4; i++) { pthread_join(th[i], NULL); all += jobs[i].hits; }
   CHECK(all == 4 * 4 * 16, "5. concurrent lookups: %d of %d hits", all, 4 * 4 * 16);
   [ar release];
+
+  /* 6. unlinked while loaded: a fresh archive, looked up once, then its file deleted */
+  NSString *up = [dir stringByAppendingPathComponent:@"unlinked.mtl4archive"];
+  id<MTL4Archive> ua = make_archive(up, 200, N);
+  CHECK(ua != nil, "6. archive loads");
+  MTL4RenderPipelineDescriptor *d0 = desc(200);
+  [[ua newRenderPipelineStateWithDescriptor:d0 error:nil] release];
+  [d0 release];
+  CHECK(unlink(up.fileSystemRepresentation) == 0, "6. unlink");
+  unlink([up stringByAppendingString:@".sum"].fileSystemRepresentation);
+  int uhits = 0;
+  for (int n = 200; n < 200 + N; n++) {
+    MTL4RenderPipelineDescriptor *d = desc(n);
+    id<MTLRenderPipelineState> st = [ua newRenderPipelineStateWithDescriptor:d error:nil];
+    if (st) uhits++;
+    if (n == 205 && st) {
+      id<MTL4Compiler> pc = compiler(nil);
+      id<MTLRenderPipelineState> ref = [pc newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:nil];
+      const uint32_t pu = render(st), pr = render(ref);
+      printf("6. pixel from the unlinked archive's PSO %08x, from the compiler's %08x\n", pu, pr);
+      CHECK(ref && pu == pr, "6. unlinked archive PSO renders like the compiler's");
+      [ref release]; [pc release];
+    }
+    [st release]; [d release];
+  }
+  printf("6. after unlink: %d of %d lookups hit\n", uhits, N);
+  CHECK(uhits == N, "6. every lookup still hits after the unlink");
+  [ua release];
 }
 
 static void timing(NSString *dir) {
