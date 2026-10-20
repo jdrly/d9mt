@@ -63,6 +63,20 @@ namespace dxvk::backend::prof {
     g_eventReads.fetch_add(1u, std::memory_order_relaxed);
   }
 
+  // SubmissionTracker::waitFor() calls that started on a serial not submitted yet, and how
+  // long they waited (G1's hazard: a carry holding back a submit someone waits on; also the
+  // older WaitForResource race, which ends when the CS thread submits). Any thread.
+  inline std::atomic<uint64_t> g_unsubWaits     = { 0u };
+  inline std::atomic<uint64_t> g_unsubWaitNs    = { 0u };
+  inline std::atomic<uint64_t> g_unsubWaitMaxNs = { 0u };
+
+  inline void noteUnsubmittedWait(uint64_t ns) {
+    g_unsubWaits.fetch_add(1u, std::memory_order_relaxed);
+    g_unsubWaitNs.fetch_add(ns, std::memory_order_relaxed);
+    uint64_t max = g_unsubWaitMaxNs.load(std::memory_order_relaxed);
+    while (ns > max && !g_unsubWaitMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) { }
+  }
+
   struct Scope {
     std::chrono::steady_clock::time_point t0;
     uint32_t bucket;
@@ -125,6 +139,11 @@ namespace dxvk::backend::prof {
       " vtxFence=", double(g_counts[CntVtxFence]) / kFrames, "/f");
     const uint64_t eventReads = g_eventReads.exchange(0u, std::memory_order_relaxed);
     line += str::format(" evRead=", eventReads, "(", double(eventReads) / kFrames, "/f)");
+    const uint64_t unsubWaits = g_unsubWaits.exchange(0u, std::memory_order_relaxed);
+    const uint64_t unsubNs    = g_unsubWaitNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t unsubMaxNs = g_unsubWaitMaxNs.exchange(0u, std::memory_order_relaxed);
+    line += str::format(" unsubWait=", unsubWaits, "(", double(unsubWaits) / kFrames, "/f)",
+      " unsubWaitUs=", unsubNs / 1000u, "(max ", unsubMaxNs / 1000u, ")");
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 
