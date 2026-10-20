@@ -19,15 +19,15 @@ EXP=$(x86_64-w64-mingw32-objdump -p "$BRDLL")
 ok() { echo "  $1: ok"; }; bad() { echo "  $1: FAIL"; fails=$((fails + 1)); }
 imports() { x86_64-w64-mingw32-objdump -p "$1" | awk '/DLL Name: winemetal.dll/{f=1;next} /DLL Name:/{f=0} f'; }
 exports() { x86_64-w64-mingw32-objdump -p "$1" | awk '/\[Ordinal\/Name Pointer\] Table/{f=1;next} f&&NF==0{f=0} f'; }
-echo "$IMP" | grep -q D9MTPsoArchiveCoverage && bad "d3d9.dll doesn't import D9MTPsoArchiveCoverage" \
+grep -q D9MTPsoArchiveCoverage <<< "$IMP" && bad "d3d9.dll doesn't import D9MTPsoArchiveCoverage" \
   || ok "d3d9.dll doesn't import D9MTPsoArchiveCoverage"
-echo "$IMP" | grep -q D9MTAirCompile && ok "(control) d3d9.dll imports other winemetal entries" \
+grep -q D9MTAirCompile <<< "$IMP" && ok "(control) d3d9.dll imports other winemetal entries" \
   || bad "(control) d3d9.dll imports other winemetal entries"
-echo "$EXP" | grep -q D9MTPsoArchiveCoverage && ok "this winemetal.dll exports it" || bad "this winemetal.dll exports it"
+grep -q D9MTPsoArchiveCoverage <<< "$EXP" && ok "this winemetal.dll exports it" || bad "this winemetal.dll exports it"
 grep -c '&_D9MTPsoArchiveCoverage_pooled' "$V2/bridge/unix/winemetal_unix.c" | grep -qx 2 \
   && ok "winemetal.so has it in both call tables" || bad "winemetal.so has it in both call tables"
 if [ -n "${OLD_BRIDGE:-}" ]; then
-  OLD=$(x86_64-w64-mingw32-objdump -p "$OLD_BRIDGE"); echo "$OLD" | grep -q D9MTPsoArchiveCoverage && bad "the old winemetal.dll lacks it" \
+  OLD=$(x86_64-w64-mingw32-objdump -p "$OLD_BRIDGE"); grep -q D9MTPsoArchiveCoverage <<< "$OLD" && bad "the old winemetal.dll lacks it" \
     || ok "the old winemetal.dll ($(basename "$OLD_BRIDGE")) lacks it"
 fi
 echo "[abi-mix] $fails failure(s)"
