@@ -37,5 +37,30 @@ for t in __wine_unix_call_funcs __wine_unix_call_wow64_funcs; do
   tail2=$(awk -v t="$t" '$0 ~ "const void \\*"t"\\[\\] = \\{" {f=1; next} f && /^};/ {f=0} f && /_pooled,/ {print}' "$V2/bridge/unix/winemetal_unix.c" | tail -2 | tr -d ' ,&' | paste -sd' ' -)
   [ "$tail2" = "_D9MTPsoArchiveCoverage_pooled _D9MTPsoPauseHint_pooled" ] && ok "$t ends with 213, 214" || bad "$t ends with 213, 214 (got: $tail2)"
 done
+# WMTSamplerInfo (sampler LOD bias, M-1): lod_bias_present in the old padding byte (23), the
+# id stays at 24, lod_bias at 32, 40 bytes, for the unix side and both PE targets; the bridge
+# reads lod_bias only behind the flag, and every caller zeroes the struct (an older d3d9.dll's
+# 32 bytes: 0 at 23, never read past)
+L=$(mktemp -d)
+cat > "$L/l.c" <<'C'
+#include <stddef.h>
+#include "winemetal.h"
+_Static_assert(offsetof(struct WMTSamplerInfo, lod_bias_present) == 23, "flag at 23");
+_Static_assert(offsetof(struct WMTSamplerInfo, gpu_resource_id) == 24, "id at 24");
+_Static_assert(offsetof(struct WMTSamplerInfo, lod_bias) == 32, "bias at 32");
+_Static_assert(sizeof(struct WMTSamplerInfo) == 40, "40 bytes");
+C
+for cc in "clang -arch x86_64" x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
+  $cc -fsyntax-only -I"$V2/bridge" "$L/l.c" 2> "$L/err" && ok "WMTSamplerInfo layout ($cc)" || { bad "WMTSamplerInfo layout ($cc)"; cat "$L/err"; }
+done
+rm -rf "$L"
+# every read of info->lod_bias: the flag on the same line (a ternary) or the line before (an if)
+unguarded=$(awk '/info->lod_bias([^_]|$)/ && !/lod_bias_present/ && prev !~ /if \(info->lod_bias_present\)/ {print FILENAME":"NR": "$0} {prev=$0}' "$V2/bridge/unix/winemetal_unix.c")
+nreads=$(grep -cE 'info->lod_bias([^_]|$)' "$V2/bridge/unix/winemetal_unix.c")
+[ -z "$unguarded" ] && [ "$nreads" -gt 0 ] && ok "the bridge reads lod_bias only behind lod_bias_present ($nreads reads)" \
+  || { bad "the bridge reads lod_bias only behind lod_bias_present"; echo "$unguarded"; }
+unzeroed=$(grep -rn 'WMTSamplerInfo [a-zA-Z_]* *;\|WMTSamplerInfo [a-zA-Z_]* *= *[^{ ]' "$V2/driver" "$V2/bridge/tests" 2>/dev/null)
+[ -z "$unzeroed" ] && ok "every WMTSamplerInfo caller zeroes it" || { bad "every WMTSamplerInfo caller zeroes it"; echo "$unzeroed"; }
+
 echo "[abi-mix] $fails failure(s)"
 [ "$fails" -eq 0 ]

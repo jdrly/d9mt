@@ -274,6 +274,24 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
 
 **No flush at exit.** 9a40b43's removal of the atexit flush stays.
 
+### Sampler LOD bias, the bridge side (review-014/sampler-lod-bias-design.md M-1)
+
+- **`WMTSamplerInfo`:** `uint8_t lod_bias_present` at offset 23 (the former padding byte), `gpu_resource_id` stays at 24, `float lod_bias` at 32, then `uint32_t padding`; 40 bytes (STATIC_ASSERT). The header hunk is byte-identical to `fix/sampler-lod-bias` 131f28a, so the two branches merge without a conflict.
+- **`_MTLDevice_newSamplerState`:** `if (info->lod_bias_present) sampler_desc.lodBias = info->lod_bias;`.
+  - No copy-in: the unix side dereferences the caller's struct in place (`params->info.ptr`, as before), so the only bytes it reads past offset 31 are behind the flag.
+  - An older d3d9.dll zeroes its 32-byte struct (`WMTSamplerInfo samplerInfo = {}`, the only driver caller; `bridge_smoke` too), so it sends 0 at 23 and the bridge never reads past it.
+  - A new d3d9.dll next to an older bridge: the old bridge ignores the flag and the bias; `gpu_resource_id` is at 24 for both.
+  - The apitrace sampler record carries `lod_bias` (0 without the flag).
+- **The PE side** (createSampler sets the flag and the quantised bias; the key's quantisation; the fallback to bias 0) is `fix/sampler-lod-bias`'s.
+- **`scripts/check-abi-mix.sh`:**
+  - the layout (23/24/32/40) compiled for the unix side, mingw x86_64 and i686;
+  - every read of `info->lod_bias` behind the flag (an awk check; removing the `if` makes it fail);
+  - no `WMTSamplerInfo` caller in driver/ or bridge/tests without `= {}`.
+- **Game-gate list:** `code_lodbias` (T-2/T-4/T-5) under Wine:
+  - with `fix/sampler-lod-bias`'s d3d9.dll and this bridge;
+  - the skew cases: that d3d9.dll with the shipping bridge, and base d3d9.dll with this bridge (bias ignored, no crash);
+  - the hash suite with base d3d9.dll and this bridge (no stray bias).
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).

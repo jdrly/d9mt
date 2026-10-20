@@ -1046,6 +1046,7 @@ dxmt_apitrace_sampler_descriptor_json(const struct WMTSamplerInfo *info, obj_han
     @"lod_average" : @(info->lod_average),
     @"normalized_coordinates" : @(info->normalized_coords),
     @"support_argument_buffers" : @(info->support_argument_buffers),
+    @"lod_bias" : @(info->lod_bias_present ? info->lod_bias : 0.0f),
   });
 }
 
@@ -1817,6 +1818,10 @@ _MTLDevice_newSamplerState(void *obj) {
   sampler_desc.lodAverage = info->lod_average;
   sampler_desc.normalizedCoordinates = info->normalized_coords;
   sampler_desc.supportArgumentBuffers = info->support_argument_buffers;
+  /* Only with the flag (M-1): a caller built before lod_bias passes a zeroed 32-byte
+   * struct, 0 at offset 23 and nothing of its own at 32. */
+  if (info->lod_bias_present)
+    sampler_desc.lodBias = info->lod_bias;
 
   id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_desc];
   info->gpu_resource_id = info->support_argument_buffers ? [sampler gpuResourceID]._impl : 0;
