@@ -7,6 +7,8 @@ namespace dxvk::statecache {
   namespace {
 
     constexpr char     Magic[8]      = { 'D', '9', 'M', 'T', 'S', 'T', 'C', '\0' };
+    constexpr char     JournalMagic[8] = { 'D', '9', 'M', 'T', 'S', 'T', 'J', '\0' };
+    constexpr uint32_t JournalCheckedHeader = 24u;   // magic, version, entry size, key signature
     constexpr uint32_t CheckedHeader = 56u;   // bytes covered by the header check
 
     // Identity = origins + link flag, then both SHA-1s and the key.
@@ -162,6 +164,83 @@ namespace dxvk::statecache {
   }
 
 
+  std::vector<uint8_t> journalHeader(uint64_t keySignature) {
+    std::vector<uint8_t> out(JournalHeaderSize, uint8_t(0u));
+    std::memcpy(out.data(), JournalMagic, sizeof(JournalMagic));
+    put<uint32_t>(out, 8u,  JournalVersion);
+    put<uint32_t>(out, 12u, EntrySize);
+    put<uint64_t>(out, 16u, keySignature);
+    put<uint64_t>(out, JournalCheckedHeader, fnv1a(out.data(), JournalCheckedHeader));
+    return out;
+  }
+
+
+  void appendRecords(std::vector<uint8_t>& out, const std::vector<Entry>& entries) {
+    size_t offset = out.size();
+    out.resize(offset + entries.size() * EntrySize);
+    for (const Entry& e : entries) {
+      put<uint64_t>(out, offset, fnv1a(&e, sizeof(Entry)));
+      std::memcpy(out.data() + offset + 8u, &e, sizeof(Entry));
+      offset += EntrySize;
+    }
+  }
+
+
+  JournalParseResult parseJournal(const uint8_t* data, size_t size, uint64_t keySignature,
+                                  std::vector<Entry>& out) {
+    JournalParseResult r;
+    out.clear();
+
+    if (!data || !size)
+      return r;   // Empty
+
+    if (size < 12u || std::memcmp(data, JournalMagic, sizeof(JournalMagic))) {
+      r.status = ParseStatus::BadHeader;
+      return r;
+    }
+
+    const uint32_t version = get<uint32_t>(data + 8u);
+    if (version != JournalVersion) {
+      r.status = version > JournalVersion ? ParseStatus::NewerVersion : ParseStatus::OlderVersion;
+      return r;
+    }
+
+    if (size < JournalHeaderSize
+     || get<uint32_t>(data + 12u) != EntrySize
+     || get<uint64_t>(data + JournalCheckedHeader) != fnv1a(data, JournalCheckedHeader)) {
+      r.status = ParseStatus::BadHeader;
+      return r;
+    }
+
+    if (get<uint64_t>(data + 16u) != keySignature) {
+      r.status = ParseStatus::KeyMismatch;
+      return r;
+    }
+
+    const size_t n = (size - JournalHeaderSize) / EntrySize;
+    r.records   = uint32_t(n);
+    r.tornBytes = uint32_t((size - JournalHeaderSize) % EntrySize);
+    out.reserve(n);
+
+    for (size_t i = 0u; i < n; i++) {
+      const uint8_t* p = data + JournalHeaderSize + i * EntrySize;
+      Entry e;
+      std::memcpy(&e, p + 8u, sizeof(e));
+
+      if (get<uint64_t>(p) != fnv1a(&e, sizeof(e)) || !entryValid(e)) {
+        r.corrupt++;
+        continue;
+      }
+
+      r.maxSession = std::max(r.maxSession, e.lastSession);
+      out.push_back(e);
+    }
+
+    r.status = ParseStatus::Ok;
+    return r;
+  }
+
+
   void noteUse(Entry& e, uint32_t session, uint32_t firstUseMs) {
     if (e.lastSession != session) {
       e.lastSession = std::max(e.lastSession, session);
@@ -216,6 +295,12 @@ namespace dxvk::statecache {
 
     noteUse(m_entries[uint32_t(i)], session, e.firstUseMs);
     return false;
+  }
+
+
+  const Entry* Database::get(const Entry& e) const {
+    const int32_t i = find(e, identityHash(e));
+    return i < 0 ? nullptr : &m_entries[size_t(i)];
   }
 
 

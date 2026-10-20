@@ -91,6 +91,37 @@ namespace dxvk::statecache {
   std::vector<uint8_t> serialize(const std::vector<Entry>& entries,
                                  uint64_t keySignature, uint32_t session);
 
+  /// The journal, <file>.journal (docs/state-cache-journal.md): records made since the last
+  /// write of the main file, so a session that ends without that write (a crash, a kill, or
+  /// SWTOR's ExitProcess) keeps them. A 32-byte header tied to the key signature, then the
+  /// main file's entry records (an 8-byte check + Entry), appended, never rewritten.
+  constexpr uint32_t JournalVersion    = 1u;
+  constexpr uint32_t JournalHeaderSize = 32u;
+
+  std::vector<uint8_t> journalHeader(uint64_t keySignature);
+
+  /// Appends `entries` as records (the main file's encoding) to `out`.
+  void appendRecords(std::vector<uint8_t>& out, const std::vector<Entry>& entries);
+
+  struct JournalParseResult {
+    ParseStatus status     = ParseStatus::Empty;   // Ok, Empty, BadHeader, Older/NewerVersion, KeyMismatch
+    uint32_t    records    = 0u;   // whole records read (good or not)
+    uint32_t    corrupt    = 0u;   // of them: bad check or invalid content, skipped
+    uint32_t    tornBytes  = 0u;   // bytes of a partial record at the end (an append cut short)
+    uint32_t    maxSession = 0u;   // highest lastSession of the good records
+  };
+
+  /// Every whole record with a good check is kept; a damaged record is skipped, a torn tail ignored.
+  JournalParseResult parseJournal(const uint8_t* data, size_t size, uint64_t keySignature,
+                                  std::vector<Entry>& out);
+
+  /// The bytes of a journal of `size` that are its header plus whole records: where the next
+  /// record must go (a torn tail is cut off first).
+  inline size_t journalAlignedSize(size_t size) {
+    return size < JournalHeaderSize ? 0u
+      : JournalHeaderSize + (size - JournalHeaderSize) / EntrySize * EntrySize;
+  }
+
   /// Marks one use in `session` (once per session) and keeps the earliest first use.
   void noteUse(Entry& e, uint32_t session, uint32_t firstUseMs);
 
@@ -111,6 +142,9 @@ namespace dxvk::statecache {
     bool use(const Entry& e, uint32_t session);
 
     bool erase(const Entry& e);
+
+    /// The stored entry with e's identity (merged counters), or null.
+    const Entry* get(const Entry& e) const;
 
     /// Erases e unless it was used in `session` (a draw built it then,
     /// which proves it fine). True if erased.

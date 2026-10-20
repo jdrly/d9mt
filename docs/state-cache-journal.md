@@ -1,10 +1,23 @@
 # State cache: an append-only journal for the records since the last write (design)
 
-Status: design only (n013-perf, 2026-10-20). Base: `ac70a8c`. Not implemented yet, for one
-reason: the state cache's native test suite (`scripts/test-state-cache.sh`,
-`test/native/state_cache_test.cpp`) needs DXVK's native Windows headers, and they aren't on
-this machine. The journal changes the load and write paths that guard against crash loops,
-so it should land together with the tests below.
+Status: implemented (n013-perf, 2026-10-21, `feat/state-cache-journal` on 2a1bc00), with the
+tests of §7 in `test/native/state_cache_test.cpp` (`testJournalFormat`,
+`testJournalSessions`, `testJournalTwoProcesses`); `scripts/test-state-cache.sh` passes plain
+and under ThreadSanitizer. No file-format change to the main file and no key-signature bump.
+Where the implementation differs from the design below:
+- Compaction **removes** the journal after a successful write (§5 step 3 said "truncate to
+  its header"). The next append creates it again with a fresh header. A session that never
+  appends leaves no journal at all, so a load with no journal costs one failed open.
+- A failed append is retried once, after re-preparing the file (another process's write may
+  have removed it). If that fails too, the journal is off for the rest of the session, with
+  one log line. The main file is still written as before.
+- The `load` line reads `journal=<status>/<records>/<replayed>`, plus ` corrupt=`,
+  ` torn=` and ` invalid=` when they aren't 0. `Stats` gets `journaled` and
+  `journalReplayed`; forged journal records count in `invalid`.
+- The session number after a killed session: `max(file's session, journal's newest
+  lastSession) + 1`. Otherwise the killed session's records would count as used in this one.
+- A journal from a newer d9mt (same magic, newer version) is left alone, and this session
+  doesn't journal.
 
 ## 1. What is already crash-safe, and what isn't
 

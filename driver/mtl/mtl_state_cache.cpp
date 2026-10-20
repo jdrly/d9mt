@@ -313,6 +313,58 @@ namespace dxvk {
       return ok;
     }
 
+    /// The journal before this session's first append (docs/state-cache-journal.md §3): a
+    /// file without our exact header (none, bad, another key signature) is started over with
+    /// it; a torn tail (an append cut short) is cut back to whole records. Not touched if a
+    /// newer d9mt wrote it (`newer`). False on an IO error.
+    bool prepareJournal(const std::string& path, const std::vector<uint8_t>& header, bool& newer) {
+      newer = false;
+      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+      LARGE_INTEGER size = { };
+      bool ok = ::GetFileSizeEx(h, &size);
+      std::vector<uint8_t> head(header.size(), uint8_t(0u));
+      DWORD n = 0u;
+      const bool haveHead = ok && uint64_t(size.QuadPart) >= header.size()
+        && ::ReadFile(h, head.data(), DWORD(head.size()), &n, nullptr) && n == head.size();
+
+      uint64_t keep = 0u;
+      if (haveHead && head == header)
+        keep = statecache::journalAlignedSize(size_t(size.QuadPart));
+      else if (haveHead && !std::memcmp(head.data(), header.data(), 8u)
+            && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+        newer = true;
+
+      // A new or unusable file is cut to 0 and gets the header; ours keeps its whole records.
+      if (ok && !newer && (!keep || keep != uint64_t(size.QuadPart))) {
+        LARGE_INTEGER pos = { };
+        pos.QuadPart = LONGLONG(keep);
+        ok = ::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) && ::SetEndOfFile(h);
+        if (ok && !keep)
+          ok = ::WriteFile(h, header.data(), DWORD(header.size()), &n, nullptr) && n == header.size();
+      }
+
+      ::CloseHandle(h);
+      return ok;
+    }
+
+    /// Appends at the end of an existing file (an append-only handle: two processes' appends
+    /// don't overwrite each other). False if the file is gone (another process's write removed
+    /// it): the caller prepares it again, so records never land in a file without the header.
+    bool appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+      HANDLE h = ::CreateFileW(widen(path).c_str(), FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE)
+        return false;
+      DWORD n = 0u;
+      const bool ok = ::WriteFile(h, data.data(), DWORD(data.size()), &n, nullptr) && n == data.size();
+      ::CloseHandle(h);
+      return ok;
+    }
+
     void* openCurrentThread() {
       return ::OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, FALSE, ::GetCurrentThreadId());
     }
@@ -447,6 +499,44 @@ namespace dxvk {
       if (!ok)
         ::unlink(tmp.c_str());
       return ok;
+    }
+
+    bool prepareJournal(const std::string& path, const std::vector<uint8_t>& header, bool& newer) {
+      newer = false;
+      const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
+      if (fd < 0)
+        return false;
+
+      struct stat st;
+      bool ok = !::fstat(fd, &st);
+      std::vector<uint8_t> head(header.size(), uint8_t(0u));
+      const bool haveHead = ok && size_t(st.st_size) >= header.size()
+        && ::pread(fd, head.data(), head.size(), 0) == ssize_t(head.size());
+
+      off_t keep = 0;
+      if (haveHead && head == header)
+        keep = off_t(statecache::journalAlignedSize(size_t(st.st_size)));
+      else if (haveHead && !std::memcmp(head.data(), header.data(), 8u)
+            && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+        newer = true;
+
+      // A new or unusable file is cut to 0 and gets the header; ours keeps its whole records.
+      if (ok && !newer && (!keep || keep != st.st_size)) {
+        ok = !::ftruncate(fd, keep);
+        if (ok && !keep)
+          ok = ::pwrite(fd, header.data(), header.size(), 0) == ssize_t(header.size());
+      }
+
+      ok = !::close(fd) && ok;
+      return ok;
+    }
+
+    bool appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+      const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND);
+      if (fd < 0)
+        return false;
+      const bool ok = ::write(fd, data.data(), data.size()) == ssize_t(data.size());
+      return !::close(fd) && ok;
     }
 
     // Thread priorities are Win32 (Wine) only; natively the boost is counted.
@@ -792,6 +882,8 @@ namespace dxvk {
     s.trips        = m_loadTrips.load();
     s.fileDropped  = m_fileDropped.load();
     s.prewarmOff   = m_prewarmOff.load();
+    s.journaled       = m_journalRecords.load();
+    s.journalReplayed = m_journalReplayed.load();
     return s;
   }
 
@@ -944,7 +1036,44 @@ namespace dxvk {
     if (m_fileDropped.load())
       m_trips = 0u;
 
-    m_session = r.session + 1u;
+    // The journal: what a session that ended without writing recorded, through the same
+    // filters as the file's entries (docs/state-cache-journal.md §4). No journal: one failed open.
+    JournalParseResult jr;
+    uint32_t journalInvalid = 0u;
+    bool journalFound = false;
+    if (m_readOnly) {
+      m_journalOn = false;
+    } else if (std::vector<uint8_t> jdata; readAll(journalPath(), jdata)) {
+      journalFound = true;
+      std::vector<Entry> jentries;
+      jr = parseJournal(jdata.data(), jdata.size(), m_config.keySignature, jentries);
+      if (jr.status == ParseStatus::Ok) {
+        for (const Entry& e : jentries) {
+          const uint64_t id = identityHash(e);
+          if (m_fileDropped.load() || (!suspects.empty() && suspects.count(id)) || m_dropped.count(id)) {
+            m_dropped.insert(id);
+            continue;
+          }
+          if (!m_config.noValidate && !m_backend->psoStateValid(e.key, nullptr)) {
+            journalInvalid++;
+            m_dropped.insert(id);
+            continue;
+          }
+          m_db.merge(e);
+          m_journalReplayed.fetch_add(1u, std::memory_order_relaxed);
+        }
+        m_dirty |= !jentries.empty();
+        m_invalid.fetch_add(journalInvalid);
+      } else if (jr.status == ParseStatus::NewerVersion) {
+        m_journalOn = false;          // a newer d9mt's: neither read nor touched
+      } else {
+        removeFile(journalPath());    // bad header, older format, another key layout: useless
+      }
+    }
+
+    // A session that never wrote the file has the same number as this one would: count
+    // past its journal records, so they don't count as used in this session.
+    m_session = std::max(r.session, jr.maxSession) + 1u;
     const uint32_t capped = m_db.applyCap(m_config.maxEntries);
     m_dirty |= capped != 0u;
     m_entries.store(m_db.size());
@@ -972,6 +1101,9 @@ namespace dxvk {
       invalid ? str::format(" (first: ", invalidWhy, ")") : std::string(),
       " capped=", capped, " max=", m_config.maxEntries,
       m_guardTripped.load() ? " guard=tripped" : "",
+      journalFound ? str::format(" journal=", statusName(jr.status), "/", jr.records, "/",
+        m_journalReplayed.load(), " corrupt=", jr.corrupt, " torn=", jr.tornBytes,
+        journalInvalid ? str::format(" invalid=", journalInvalid) : std::string()) : std::string(),
       " threads=", m_config.threads,
       " ms=", std::chrono::duration<double, std::milli>(Clock::now() - t0).count()));
   }
@@ -987,6 +1119,11 @@ namespace dxvk {
 
       if (m_db.use(r.entry, m_session))
         m_recorded.fetch_add(1u, std::memory_order_relaxed);
+
+      if (m_journalOn && m_journaled.insert(identityHash(r.entry)).second) {
+        if (const Entry* stored = m_db.get(r.entry))
+          m_journalPending.push_back(*stored);
+      }
 
       m_dropped.erase(identityHash(r.entry));
       m_dirty = true;
@@ -1036,7 +1173,49 @@ namespace dxvk {
       }
     }
 
+    if (!m_journalPending.empty())
+      appendJournal();
+
     m_entries.store(m_db.size());
+  }
+
+
+  void MtlStateCache::appendJournal() {
+    // Writer thread, once per intake that used new entries: one append, never on the render thread.
+    if (!m_journalOn) {
+      m_journalPending.clear();
+      return;
+    }
+
+    std::vector<uint8_t> bytes;
+    statecache::appendRecords(bytes, m_journalPending);
+
+    bool ok = false;
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+      if (!m_journalReady) {
+        bool newer = false;
+        if (!prepareJournal(journalPath(), statecache::journalHeader(m_config.keySignature), newer) || newer) {
+          m_journalOn = false;
+          Logger::warn(newer
+            ? std::string("STATECACHE journal written by a newer d9mt: not appending")
+            : str::format("STATECACHE journal unusable: ", m_config.displayPath, ".journal"));
+          m_journalPending.clear();
+          return;
+        }
+        m_journalReady = true;
+      }
+      ok = appendFile(journalPath(), bytes);
+      // Gone (another process's write removed it): prepare it again, then retry once.
+      m_journalReady = ok;
+    }
+
+    if (ok)
+      m_journalRecords.fetch_add(m_journalPending.size(), std::memory_order_relaxed);
+    else {
+      m_journalOn = false;
+      Logger::warn(str::format("STATECACHE journal append failed: ", m_config.displayPath, ".journal"));
+    }
+    m_journalPending.clear();
   }
 
 
@@ -1052,6 +1231,7 @@ namespace dxvk {
 
       if (r.status == ParseStatus::NewerVersion) {
         m_readOnly = true;
+        m_journalOn = false;
         Logger::info("STATECACHE write skipped: the file was written by a newer d9mt");
         return false;
       }
@@ -1064,6 +1244,21 @@ namespace dxvk {
             m_db.merge(e);
         }
         session = std::max(session, r.session);
+      }
+    }
+
+    // ... and what they journaled since their last write (it is removed below).
+    if (m_journalOn) {
+      std::vector<uint8_t> jdata;
+      if (readAll(journalPath(), jdata)) {
+        std::vector<Entry> jentries;
+        const JournalParseResult jr = parseJournal(jdata.data(), jdata.size(), m_config.keySignature, jentries);
+        for (const Entry& e : jentries) {
+          if (!m_dropped.count(identityHash(e))
+           && (m_config.noValidate || m_backend->psoStateValid(e.key, nullptr)))
+            m_db.merge(e);
+        }
+        session = std::max(session, jr.maxSession);
       }
     }
 
@@ -1081,6 +1276,13 @@ namespace dxvk {
 
     m_dirty = false;
     m_writes.fetch_add(1u, std::memory_order_relaxed);
+
+    // Everything journaled is in the file now. A crash between the rename and this only
+    // replays records the file already has (merge is a union).
+    if (m_journalOn) {
+      removeFile(journalPath());
+      m_journalReady = false;
+    }
     m_entries.store(m_db.size());
 
     Logger::info(str::format("STATECACHE write entries=", m_db.size(), " bytes=", bytes.size(),
