@@ -188,8 +188,9 @@ namespace dxvk::backend {
       tex->m_info.sampleCount = 1u;
       tex->m_info.usage       = MtlTextureUsageRenderTarget;
 
+      // (no reference of its own: the view holds the wrapper, whose reference lives until the
+      // command buffer that writes the drawable has retired)
       Rc<MtlTextureViewImpl> view = new MtlTextureViewImpl();
-      view->owned      = WmtTexture::retain(drawableTex);
       view->view.tex   = drawableTex;
       view->image      = tex.ptr();
       view->key.format = desc.imageFormat;

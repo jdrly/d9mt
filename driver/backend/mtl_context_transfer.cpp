@@ -1546,7 +1546,7 @@ namespace dxvk::backend {
     m_keepAlive.push_back(srcView);
 
     WMTRenderPassInfo info = {};
-    info.colors[0].texture      = dstTv->owned.handle();
+    info.colors[0].texture      = dstTv->view.tex;
     info.colors[0].load_action  = WMTLoadActionLoad;
     info.colors[0].store_action = WMTStoreActionStore;
     info.render_target_width    = dstExtent.width;
