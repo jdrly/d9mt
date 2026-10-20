@@ -5892,8 +5892,14 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    goes to its own file (<unix-time>-<pid>-<seq>.mtl4archive);
  *  - flushing while another thread compiles through the same compiler
  *    crashes, so compiles hold g_pso_lock shared and flushes hold it
- *    exclusively; flushes run on the compiling (render) thread every
- *    D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if uncontended);
+ *    exclusively. Flushes run on a thread of their own (bundle part 5): at a
+ *    pause (the window known not visible, or a device Reset), after
+ *    D9MT_PSO_FLUSH_IDLE_MS (10 s) without a build, or once
+ *    D9MT_PSO_FLUSH_EVERY new PSOs have waited 60 s for either. It takes the
+ *    lock with trywrlock, so it never queues ahead of a build, and a build
+ *    that finds it held goes to a serializer-less compiler instead of
+ *    waiting (not captured this session). Nothing is flushed at exit or at
+ *    device destruction (exiting threads may hold Metal/objc locks: #11);
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum written after it:
  *    "2 <size> <mtime ns> <SHA-256>". At load, size and mtime must match and
@@ -5917,7 +5923,8 @@ _MTLDevice_newArgumentTable(void *obj) {
  * built by the compiler and captured. So a session's own archives ("deltas")
  * hold only PSOs no loaded archive had, and flushes stay small. Every
  * requested descriptor is recorded; once the session has been idle for
- * D9MT_PSO_CONSOLIDATE_IDLE_MS (10 s), a BACKGROUND-QoS thread rebuilds them
+ * D9MT_PSO_CONSOLIDATE_IDLE_MS (120 s) or at a pause, and once the state cache
+ * has reported that its prewarm covered the archives, a BACKGROUND-QoS thread rebuilds them
  * through its own compiler and serializer (archive lookups, so mostly cheap)
  * into one consolidated archive "c-<unix-time>-<pid>.mtl4archive", and then
  * deletes the archives it replaces: the ones loaded at this start and this
@@ -5931,12 +5938,25 @@ _MTLDevice_newArgumentTable(void *obj) {
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
  *   D9MT_PSO_ARCHIVE_FIRST=0       archive first and consolidation off
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
- *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256) */
+ *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs pending before the 60 s backstop counts (default 256)
+ *   D9MT_PSO_FLUSH_IDLE_MS=<ms>     flush after this long without a build (default 10000)
+ *   D9MT_PSO_STATS=1                hit/miss/uncaptured counts at exit (tests) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
 #define D9MT_PSO_FLUSH_DEFAULT 256u
 
 static id<MTL4PipelineDataSetSerializer> g_pso_serializer;
+static id<MTL4Compiler>                  g_pso_fallback;     /* no serializer: builds while a flush runs */
+static pthread_mutex_t                   g_pso_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t                    g_pso_flush_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t                  g_pso_last_build;   /* CLOCK_UPTIME_RAW ns of the last captured build */
+static _Atomic uint64_t                  g_pso_due_since;    /* when FLUSH_EVERY were first pending, 0 = not */
+static _Atomic bool                      g_pso_pause_hint;   /* a device Reset (D9MTPsoPauseHint) */
+static _Atomic uint64_t                  g_pso_uncaptured;   /* builds through g_pso_fallback */
+static uint64_t                          g_pso_flush_idle_ns = 10000000000ull;
+static uint64_t                          g_pso_flush_backstop_ns = 60000000000ull;
+static unsigned                          g_pso_flush_hold_ms;  /* tests: inside the write lock */
+static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: a line at exit */
 static MTL4CompilerTaskOptions          *g_pso_task_options;
 static NSString                         *g_pso_dir;
 static NSString                         *g_pso_session;
@@ -6110,6 +6130,7 @@ pso_flush_locked(void) {
   if (!g_pso_serializer || !atomic_load(&g_pso_pending))
     return;
   atomic_store(&g_pso_pending, 0u);
+  atomic_store(&g_pso_due_since, 0u);
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
     [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
   NSString *tmp = [path stringByAppendingString:@".tmp"];
@@ -6141,19 +6162,86 @@ pso_flush_locked(void) {
   }
 }
 
+/* D9MT_PSO_STATS=1 (tests): the session's counts at exit. Nothing else runs at
+ * exit: no flush (#11, part 5). */
 static void
-pso_flush_atexit(void) {
-  if (g_pso_archive_first)
-    fprintf(stderr, "d9mt: PSO archive first: %llu hits, %llu misses\n",
-            (unsigned long long)atomic_load(&g_pso_hits), (unsigned long long)atomic_load(&g_pso_misses));
-  /* Another thread may still be compiling (or died holding the lock while
-   * the process tears down): never block exit on it. */
-  if (pthread_rwlock_trywrlock(&g_pso_lock))
-    return;
-  @autoreleasepool {
-    pso_flush_locked();
+pso_stats_atexit(void) {
+  fprintf(stderr, "d9mt: PSO archive first: %llu hits, %llu misses\n",
+          (unsigned long long)atomic_load(&g_pso_hits), (unsigned long long)atomic_load(&g_pso_misses));
+  fprintf(stderr, "d9mt: PSO builds not captured (a flush held the lock): %llu\n",
+          (unsigned long long)atomic_load(&g_pso_uncaptured));
+}
+
+static bool pso_paused(void);
+
+/* Bundle part 5: the flush thread. Flushes whatever is pending at a device Reset
+ * (D9MTPsoPauseHint), while the window is known not visible (pso_paused, R2) and
+ * no build came for 500 ms (a hidden window still compiles in bursts: one delta
+ * per burst, not per PSO), after g_pso_flush_idle_ns without a captured build,
+ * or once FLUSH_EVERY have been pending for g_pso_flush_backstop_ns. UTILITY QoS: safe because a build
+ * never waits for it (M9). The lock is taken with trywrlock, retried every
+ * 50 ms, so a waiting flush never blocks new builds behind it. */
+static void *
+pso_flush_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-flush");
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+  for (;;) {
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    uint64_t wait = 1000000000ull;
+    if (atomic_load(&g_pso_pending)) {
+      const uint64_t idle = now - atomic_load(&g_pso_last_build);
+      const uint64_t due = atomic_load(&g_pso_due_since);
+      const bool hint = atomic_exchange(&g_pso_pause_hint, false);
+      if (hint || (idle >= 500000000ull && pso_paused()) || idle >= g_pso_flush_idle_ns
+       || (due && now - due >= g_pso_flush_backstop_ns)) {
+        while (pthread_rwlock_trywrlock(&g_pso_lock)) {
+          struct timespec ts = { 0, 50000000 };
+          nanosleep(&ts, NULL);
+        }
+        if (g_pso_flush_hold_ms)
+          usleep(g_pso_flush_hold_ms * 1000u);
+        @autoreleasepool {
+          pso_flush_locked();
+        }
+        pthread_rwlock_unlock(&g_pso_lock);
+        continue;
+      }
+      /* pending: look again within 250 ms (a pause starts without a wake) */
+      wait = 250000000ull;
+      if (g_pso_flush_idle_ns - idle < wait)
+        wait = g_pso_flush_idle_ns - idle;
+      if (due && g_pso_flush_backstop_ns - (now - due) < wait)
+        wait = g_pso_flush_backstop_ns - (now - due);
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    const uint64_t at = (uint64_t)ts.tv_nsec + wait;
+    ts.tv_sec += (time_t)(at / 1000000000ull);
+    ts.tv_nsec = (long)(at % 1000000000ull);
+    pthread_mutex_lock(&g_pso_flush_mutex);
+    pthread_cond_timedwait(&g_pso_flush_cond, &g_pso_flush_mutex, &ts);
+    pthread_mutex_unlock(&g_pso_flush_mutex);
   }
-  pthread_rwlock_unlock(&g_pso_lock);
+  return NULL;
+}
+
+static void
+pso_flush_wake(void) {
+  pthread_mutex_lock(&g_pso_flush_mutex);
+  pthread_cond_signal(&g_pso_flush_cond);
+  pthread_mutex_unlock(&g_pso_flush_mutex);
+}
+
+/* PE side at a device Reset: a pause, flush now (edge: one flush per call). */
+static NTSTATUS
+_D9MTPsoPauseHint(void *obj) {
+  (void)obj;
+  if (g_pso_serializer) {
+    atomic_store(&g_pso_pause_hint, true);
+    pso_flush_wake();
+  }
+  return STATUS_SUCCESS;
 }
 
 /* Bundle part 4: once the session has been idle for g_pso_consolidate_idle_ns,
@@ -6421,6 +6509,17 @@ pso_archive_init(id<MTLDevice> device) {
   const char *afm = getenv("D9MT_PSO_ARCHIVE_FIRST_MAX");
   if (afm && *afm)
     g_pso_archive_first_max = (unsigned)strtoul(afm, NULL, 10);
+  const char *fidle = getenv("D9MT_PSO_FLUSH_IDLE_MS");
+  if (fidle && *fidle)
+    g_pso_flush_idle_ns = (uint64_t)strtoull(fidle, NULL, 10) * 1000000ull;
+  const char *fback = getenv("D9MT_PSO_FLUSH_BACKSTOP_MS");
+  if (fback && *fback)
+    g_pso_flush_backstop_ns = (uint64_t)strtoull(fback, NULL, 10) * 1000000ull;
+  const char *fhold = getenv("D9MT_PSO_FLUSH_HOLD_MS");
+  if (fhold && *fhold)
+    g_pso_flush_hold_ms = (unsigned)strtoul(fhold, NULL, 10);
+  const char *stats = getenv("D9MT_PSO_STATS");
+  g_pso_stats = stats && !strcmp(stats, "1");
   const char *delay = getenv("D9MT_PSO_CONSOLIDATE_DELAY_MS");
   if (delay && *delay)
     g_pso_consolidate_delay_ms = (unsigned)strtoul(delay, NULL, 10);
@@ -6628,7 +6727,15 @@ pso_archive_init(id<MTLDevice> device) {
   if (g_pso_serializer) {
     g_pso_dir = [dir retain];
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
-    atexit(pso_flush_atexit);
+    /* One device per process (d9mt makes one): the fallback is this device's (R3). */
+    MTL4CompilerDescriptor *plain = [[MTL4CompilerDescriptor alloc] init];
+    g_pso_fallback = [device newCompilerWithDescriptor:plain error:nil];
+    [plain release];
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, pso_flush_thread, NULL))
+      pthread_detach(thread);
+    if (g_pso_stats)
+      atexit(pso_stats_atexit);
     pso_consolidate_start();
   }
   fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u), archive first %s\n",
@@ -6652,15 +6759,22 @@ pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
     desc.pipelineDataSetSerializer = g_pso_serializer;
 }
 
+/* A captured build: the flush thread decides when to write it (part 5). It
+ * only needs waking for the first pending PSO (it sleeps up to 1 s otherwise)
+ * and when FLUSH_EVERY are pending (the backstop's clock starts). */
 static void
 pso_note_compiled(void) {
   if (!g_pso_serializer)
     return;
-  if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
-    return;
-  pthread_rwlock_wrlock(&g_pso_lock);
-  pso_flush_locked();
-  pthread_rwlock_unlock(&g_pso_lock);
+  const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  atomic_store(&g_pso_last_build, now);
+  const unsigned n = atomic_fetch_add(&g_pso_pending, 1u) + 1u;
+  if (n == g_pso_flush_every) {
+    uint64_t zero = 0u;
+    atomic_compare_exchange_strong(&g_pso_due_since, &zero, now);
+  }
+  if (n == 1u || n == g_pso_flush_every)
+    pso_flush_wake();
 }
 
 static NTSTATUS
@@ -7159,7 +7273,20 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   }
 
   NSError *err = NULL;
-  pthread_rwlock_rdlock(&g_pso_lock);
+  /* A flush holds the lock: build through the serializer-less compiler instead of
+   * waiting for it (M9); that PSO isn't captured, it is the next time it misses. */
+  if (g_pso_fallback && pthread_rwlock_tryrdlock(&g_pso_lock)) {
+    params->ret_pso = (obj_handle_t)[g_pso_fallback newRenderPipelineStateWithDescriptor:descriptor
+                                                                   compilerTaskOptions:g_pso_task_options
+                                                                                 error:&err];
+    params->ret_error = (obj_handle_t)[err retain];
+    if (params->ret_pso)
+      atomic_fetch_add(&g_pso_uncaptured, 1u);
+    [descriptor release];
+    return STATUS_SUCCESS;
+  }
+  if (!g_pso_fallback)
+    pthread_rwlock_rdlock(&g_pso_lock);
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:g_pso_task_options
                                                                                                    error:&err];
@@ -7605,6 +7732,7 @@ D9MT_POOLED(thunk_AirconvUnsupportedInitialize)
 D9MT_POOLED(thunk_D9MTAirCompile)
 D9MT_POOLED(thunk_D9MTAirFree)
 D9MT_POOLED(_D9MTPsoArchiveCoverage)
+D9MT_POOLED(_D9MTPsoPauseHint)
 D9MT_POOLED(thunk_D9MTAirVersion)
 D9MT_POOLED(thunk_DXSOCompile)
 D9MT_POOLED(thunk_DXSODestroy)
@@ -7841,6 +7969,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
     &_D9MTPsoArchiveCoverage_pooled,
+    &_D9MTPsoPauseHint_pooled,
 
 };
 
@@ -8062,6 +8191,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
     &_D9MTPsoArchiveCoverage_pooled,
+    &_D9MTPsoPauseHint_pooled,
 
 };
 #endif

@@ -246,6 +246,9 @@ int main(int argc, char** argv) {
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
   setenv("D9MT_PSO_ARCHIVE_DIR", (work + "/pso").c_str(), 1);
   setenv("D9MT_PSO_FLUSH_EVERY", getenv("MT_FLUSH_EVERY") ? getenv("MT_FLUSH_EVERY") : "5", 1);
+  // Nothing is flushed at exit (bundle part 5): a short idle, and MT_SETTLE_MS before exit.
+  setenv("D9MT_PSO_FLUSH_IDLE_MS", "200", 0);
+  setenv("D9MT_PSO_STATS", "1", 0);
 
   void* bridge = dlopen(argv[1], RTLD_NOW);
   if (!bridge) { fprintf(stderr, "FAIL: dlopen: %s\n", dlerror()); return 1; }
@@ -390,6 +393,12 @@ int main(int argc, char** argv) {
     printf("late psos: %u ok, %u failed\n", ok, fail);
   }
 
+  // MT_HINT=1: the PE side's pause hint (a device Reset: D9MTPsoPauseHint, unix call 214)
+  if (getenv("MT_HINT") && atoi(getenv("MT_HINT"))) {
+    struct unixcall_generic_obj_noret hint = {};
+    g_funcs[214](&hint);
+  }
+
   // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated PSO archive
   // ("c-<time>-<pid>.mtl4archive", written once the bridge has been idle) is in place.
   if (const char* w = getenv("MT_WAIT_CONSOLIDATED")) {
@@ -458,6 +467,9 @@ int main(int argc, char** argv) {
     for (auto& r : results) out << r.first << " = " << r.second << "\n";
     printf("results recorded to %s\n", resPath.c_str());
   }
+
+  // MT_SETTLE_MS (700): time for the flush thread (idle 200 ms) before exit
+  std::this_thread::sleep_for(std::chrono::milliseconds(getenv("MT_SETTLE_MS") ? atoi(getenv("MT_SETTLE_MS")) : 700));
 
   // MT_EXIT_DELAY_MS=<ms>: exit that much later (a quit while the bridge consolidates)
   if (const char* x = getenv("MT_EXIT_DELAY_MS"))

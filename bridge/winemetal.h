@@ -2250,6 +2250,9 @@ WINEMETAL_API uint64_t MetalView_visibility(obj_handle_t view);
  * bridge may consolidate them and delete the parts. */
 WINEMETAL_API void D9MTPsoArchiveCoverage(bool complete);
 
+/* d9mt PSO archives: a pause (device Reset); the bridge flushes pending PSOs now. */
+WINEMETAL_API void D9MTPsoPauseHint(void);
+
 WINEMETAL_API void MTL4RenderCommandEncoder_setVisibilityResultMode(
     obj_handle_t encoder, uint32_t mode, uint64_t offset);
 

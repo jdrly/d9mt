@@ -17,7 +17,12 @@
 #            with the run that recorded it, and captured again; with a cap of 64, a hit
 #   restore  archives copied without their times: the SHA-256 decides (same size, other time),
 #            the sums are rewritten; a byte changed in the copy: deleted
-#   TSan     the cold and warm runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
+#   part 5   the flush thread: idle (a delta before exit, the next run all hits); nothing at
+#            exit (idle never reached: no delta, the next run misses); the Reset hint and the
+#            backstop flush without the idle; M9: builds while a flush holds the lock (held
+#            3 s, D9MT_PSO_FLUSH_HOLD_MS) go to the serializer-less compiler, all succeed, are
+#            not captured, and miss again in the next run
+#   TSan     the cold, warm and part 5 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
 set -uo pipefail
@@ -89,6 +94,28 @@ suite() { # <label>
   [ "${misses:-0}" -gt 0 ] && echo "  miss: $misses misses compiled" || { echo "  miss: FAIL (no misses)"; fails=$((fails + 1)); }
   cmp -s "$R/results.txt" "$M/results.txt" && echo "  miss: results equal a cold run" \
     || { echo "  miss: FAIL (results differ from a cold run)"; diff "$R/results.txt" "$M/results.txt" | head -5; fails=$((fails + 1)); }
+
+  echo "[pso-first:$1] part 5: the flush thread"
+  local N5="$OUT/$1-p5" lateok
+  run "$N5-idle" "$1-p5-idle" MT_COVERAGE=0 MT_FLUSH_EVERY=1000 -- "${SET_A[@]}"
+  [ "$(own_deltas "$N5-idle" "$(pid_of "$1-p5-idle")")" -gt 0 ] && echo "  idle: a delta before exit" \
+    || { echo "  idle: FAIL (no delta)"; fails=$((fails + 1)); }
+  run "$N5-idle" "$1-p5-idle2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "idle: next run misses" "$(stat_line "$1-p5-idle2" | sed 's/.* \([0-9]*\) misses/\1/')" 0
+  run "$N5-exit" "$1-p5-exit" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 -- "${SET_A[@]}"
+  check "no flush at exit: deltas" "$(own_deltas "$N5-exit" "$(pid_of "$1-p5-exit")")" 0
+  run "$N5-hint" "$1-p5-hint" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 MT_FLUSH_EVERY=1000 MT_HINT=1 -- "${SET_A[@]}"
+  [ "$(own_deltas "$N5-hint" "$(pid_of "$1-p5-hint")")" -gt 0 ] && echo "  Reset hint: a delta without the idle" \
+    || { echo "  Reset hint: FAIL (no delta)"; fails=$((fails + 1)); }
+  run "$N5-back" "$1-p5-back" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 D9MT_PSO_FLUSH_BACKSTOP_MS=300 -- "${SET_A[@]}"
+  [ "$(own_deltas "$N5-back" "$(pid_of "$1-p5-back")")" -gt 0 ] && echo "  backstop: a delta without the idle" \
+    || { echo "  backstop: FAIL (no delta)"; fails=$((fails + 1)); }
+  run "$N5-m9" "$1-p5-m9" MT_COVERAGE=0 D9MT_PSO_FLUSH_HOLD_MS=3000 MT_LATE_PSOS=1000 MT_SETTLE_MS=3500 -- "${SET_A[@]}"
+  lateok=$(sed -n 's/^late psos: \([0-9]*\) ok.*/\1/p' "$OUT/$1-p5-m9.log")
+  check "M9: late builds during the held flush all succeed" "$(sed -n 's/^late psos: [0-9]* ok, \([0-9]*\) failed/\1/p' "$OUT/$1-p5-m9.log")" 0
+  check "M9: built by the serializer-less compiler, not captured" "$(sed -n 's/.*not captured (a flush held the lock): //p' "$OUT/$1-p5-m9.log")" "$lateok"
+  run "$N5-m9" "$1-p5-m9b" MT_COVERAGE=0 MT_LATE_PSOS=0 -- "${SET_A[@]}"
+  check "M9: those miss again in the next run" "$(stat_line "$1-p5-m9b" | sed 's/.* \([0-9]*\) misses/\1/')" "$lateok"
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"

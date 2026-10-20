@@ -1804,6 +1804,13 @@ D9MTPsoArchiveCoverage(bool complete) {
 }
 
 WINEMETAL_API void
+D9MTPsoPauseHint(void) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = 0u;
+  UNIX_CALL(214, &params);
+}
+
+WINEMETAL_API void
 MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after) {
   struct unixcall_generic_obj_obj_double_noret params;
   params.handle = drawable;

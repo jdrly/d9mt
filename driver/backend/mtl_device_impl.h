@@ -131,6 +131,8 @@ namespace dxvk::backend {
     uint32_t urgentCompilesQueued() override;
     void psoArchiveCoverage(bool complete) override;
 
+    void psoPauseHint() override;
+
     Rc<MtlContext> createContext() override;
 
     uint64_t getCompletedSerial() override;

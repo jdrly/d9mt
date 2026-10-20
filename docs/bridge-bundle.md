@@ -222,7 +222,34 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
 
 **Future, not in the bundle: per-part coverage, for games with per-zone shaders.** Today `complete` is all or nothing: one entry whose shaders weren't announced (content this session didn't load) means the prewarm never drains its whole index, no signal is sent, and nothing consolidates. SWTOR doesn't hit this: Jan's logs show prewarm built = prewarmable (318/330/344) with 0 skipped. A game that loads shaders per zone would never consolidate and keep accumulating deltas up to `D9MT_PSO_MAX_ARCHIVES`/`D9MT_PSO_MAX_MB`. The sketch: the state cache reports coverage per delta (the deltas whose recorded pipelines were all replayed) and the consolidation deletes only those, keeping the rest as deltas. Open question: does SWGL Legends load shaders per zone? Check its prewarm lines (built vs prewarmable, skipped) before building this.
 
-### 5. Flush at pauses, never in a build's way: waits for the re-review
+### 5. Flush at pauses, never in a build's way: implemented
+
+**As implemented:**
+- `pso_note_compiled` no longer flushes. It stamps the last build and wakes the `d9mt-pso-flush` thread for the first pending PSO and when `D9MT_PSO_FLUSH_EVERY` are pending (the backstop's clock starts then).
+- **The thread (UTILITY QoS) flushes whatever is pending:**
+  - on the Reset hint;
+  - while the window is known not visible (`pso_paused`, R2) and no build came for 500 ms, so a hidden window that compiles in bursts writes one delta per burst, not per PSO;
+  - after `D9MT_PSO_FLUSH_IDLE_MS` (10 s) without a build;
+  - or once `FLUSH_EVERY` have waited `D9MT_PSO_FLUSH_BACKSTOP_MS` (60 s).
+  - While anything is pending it looks again every 250 ms; otherwise it sleeps until woken (at most 1 s).
+- **The lock:** the thread takes `g_pso_lock` with `trywrlock`, retried every 50 ms, so a waiting flush never queues ahead of builds.
+- **M9:** a build that finds the lock held (`tryrdlock` fails) goes to `g_pso_fallback`, a serializer-less `MTL4Compiler` of the same device with the same task options (`lookupArchives`). It is not captured and not counted as pending; it misses again next session and is captured then.
+- **Reset hint:** `D9MTPsoPauseHint` (unix call 214, appended to both tables after 213). `D3D9DeviceEx::Reset`/`ResetEx` call it through `MtlDevice::psoPauseHint`, which looks it up with `GetProcAddress` like the coverage signal, so an older bridge means no hint and an older d3d9.dll means no call. `scripts/check-abi-mix.sh` covers both entries and that the tables end with 213, 214.
+- **Nothing at exit, nothing at device destruction:** the atexit flush is gone. `D9MT_PSO_STATS=1` (tests) prints the hit/miss/uncaptured counts at exit, which is the only atexit work, and only then.
+- **Cost:**
+  - PSOs built in the last 10 s before a quit, with no pause after them, aren't saved; they miss again next session.
+  - A long session with sporadic misses writes a small delta after each quiet 10 s. That means more files, up to `D9MT_PSO_MAX_ARCHIVES`, and the next consolidation merges them.
+
+**Tests** (`test-pso-archive-first.sh` part 5, plain and TSan):
+- **idle:** a delta before exit; the next run has 0 misses.
+- **no flush at exit:** with the idle out of reach, the run leaves no delta.
+- **Reset hint:** `MT_HINT=1`, unix call 214 → a delta without the idle.
+- **backstop** 300 ms → a delta without the idle.
+- **M9:** a flush held 3 s inside the write lock (`D9MT_PSO_FLUSH_HOLD_MS`, test hook) with 16 builds during it. All succeed, all 16 through the serializer-less compiler ("not captured: 16"), and the next run misses exactly those 16.
+- The harness now waits `MT_SETTLE_MS` (700) before exit, with `D9MT_PSO_FLUSH_IDLE_MS=200`.
+- The quit test (shared) exits while the flush thread or a consolidation may run.
+
+**The design, as reviewed:**
 
 **A compile never waits on a flush (M9):**
 - The compile thunk does `pthread_rwlock_tryrdlock`.

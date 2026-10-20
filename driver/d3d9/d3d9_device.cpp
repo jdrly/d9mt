@@ -410,6 +410,9 @@ namespace dxvk {
         return hr;
     }
 
+    // A pause: the bridge writes pending PSO archives now.
+    m_dxvkDevice->psoPauseHint();
+
     if (!IsExtended()) {
       ResetState(pPresentationParameters);
       m_implicitSwapchain->DestroyBackBuffers();
@@ -4388,6 +4391,8 @@ namespace dxvk {
       if (unlikely(FAILED(hr)))
         return hr;
     }
+
+    m_dxvkDevice->psoPauseHint();
 
     hr = ResetSwapChain(pPresentationParameters, pFullscreenDisplayMode);
     if (FAILED(hr))

@@ -289,6 +289,15 @@ namespace dxvk::backend {
       fn(complete);
   }
 
+  void MtlDeviceImpl::psoPauseHint() {
+    // Looked up like D9MTPsoArchiveCoverage: an older bridge has no such export.
+    using Fn = void (*)();
+    static const Fn fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleA("winemetal.dll"), "D9MTPsoPauseHint")));
+    if (fn)
+      fn();
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
     // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
     // never got that far (e.g. its constructor threw after creating the
