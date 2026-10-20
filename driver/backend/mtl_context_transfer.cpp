@@ -18,18 +18,6 @@ namespace dxvk::backend {
 
   namespace {
 
-    WMTPrimitiveTopologyClass topologyClass(MtlPrimitiveTopology t) {
-      switch (t) {
-        case MtlPrimitiveTopology::PointList:
-          return WMTPrimitiveTopologyClassPoint;
-        case MtlPrimitiveTopology::LineList:
-        case MtlPrimitiveTopology::LineStrip:
-          return WMTPrimitiveTopologyClassLine;
-        default:
-          return WMTPrimitiveTopologyClassTriangle;
-      }
-    }
-
     WMTAttributeFormat attributeFormat(MtlFormat f) {
       switch (f) {
         case MtlFormat::R32Float:     return WMTAttributeFormatFloat;
@@ -162,7 +150,7 @@ namespace dxvk::backend {
     snap.blendGen   = m_blendGen;
     snap.msaaPacked = (passSamples << 1)
                     | (m_msaa.alphaToCoverage ? 1u : 0u);
-    snap.topoClass  = uint32_t(topologyClass(m_topology));
+    snap.topoClass  = 0u;   // not part of the key (RenderPsoKey::topologyClass)
 
     if (!mruOff) {
       for (uint32_t i = 0u; i < 4u; i++) {
@@ -229,7 +217,6 @@ namespace dxvk::backend {
     key.colorCount = colorCount;
 
     key.sampleCount     = uint8_t(passSamples);
-    key.topologyClass   = uint8_t(topologyClass(m_topology));
     key.alphaToCoverage = m_msaa.alphaToCoverage ? 1u : 0u;
 
     const char* vsEntry = m_vs->entryName ? m_vs->entryName : "main";
@@ -1271,7 +1258,6 @@ namespace dxvk::backend {
     key.colors[0].pixelFormat = uint32_t(view->key.format);
     key.colorCount            = 1u;
     key.sampleCount           = uint8_t(std::max(view->image->info().sampleCount, 1u));
-    key.topologyClass         = uint8_t(WMTPrimitiveTopologyClassTriangle);
     obj_handle_t pso = m_psoCache.getSync(
       key, m_blitVs->library, m_fillFs->library,
       m_blitVs->entryName, m_fillFs->entryName);
@@ -1359,8 +1345,6 @@ namespace dxvk::backend {
     key.fsCookie      = 0u;
     key.colorCount    = 0u;
     key.sampleCount   = uint8_t(std::max(view->image->info().sampleCount, 1u));
-    key.topologyClass = uint8_t(WMTPrimitiveTopologyClassTriangle);
-    key.depthFormat   = uint32_t(view->key.format);
     obj_handle_t pso = m_psoCache.getSync(
       key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
     if (!pso)
@@ -1526,7 +1510,6 @@ namespace dxvk::backend {
     key.colors[0].pixelFormat = uint32_t(dstView->key.format);
     key.colorCount           = 1u;
     key.sampleCount          = uint8_t(std::max(dstView->image->info().sampleCount, 1u));
-    key.topologyClass        = uint8_t(WMTPrimitiveTopologyClassTriangle);
     obj_handle_t pso = m_psoCache.getSync(
       key, m_blitVs->library, m_blitFs->library,
       m_blitVs->entryName, m_blitFs->entryName);

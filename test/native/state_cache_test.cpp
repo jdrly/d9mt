@@ -1052,7 +1052,7 @@ static backend::RenderPsoKey drawShapedKey() {
   k.colors[0].rgbDstFactor = 5u;
   k.colorCount = 1u;
   k.sampleCount = 1u;
-  k.topologyClass = 3u;
+  k.topologyClass = 0u;   // always 0 since kPsoKeyMappingVersion 4
   return k;
 }
 
@@ -1114,6 +1114,8 @@ static void testKeyValidator() {
     { "sample count 3",        [] (RenderPsoKey& k) { k.sampleCount = 3u; } },
     { "sample count 16",       [] (RenderPsoKey& k) { k.sampleCount = 16u; } },
     { "topology 4",            [] (RenderPsoKey& k) { k.topologyClass = 4u; } },
+    { "topology 3",            [] (RenderPsoKey& k) { k.topologyClass = 3u; } },
+    { "padding",               [] (RenderPsoKey& k) { k.padding[1] = 1u; } },
     { "alpha to coverage 2",   [] (RenderPsoKey& k) { k.alphaToCoverage = 2u; } },
     { "depth format",          [] (RenderPsoKey& k) { k.depthFormat = uint32_t(MtlFormat::Depth32Float); } },
     { "stencil format",        [] (RenderPsoKey& k) { k.stencilFormat = uint32_t(MtlFormat::Stencil8); } },
