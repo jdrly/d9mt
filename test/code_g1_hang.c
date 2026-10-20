@@ -163,6 +163,11 @@ int main(void) {
     IDirect3DDevice9_SetDepthStencilSurface(dev, bds);
     IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
   }
+  /* D9MT_PROFILE writes its PROF line (unsubWait=) every 256 frames: present empty frames until one is out */
+  for (int i = 0; i < 260; i++) {
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0);
+    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+  }
   printf("RESULT g1hang ok=%d fail=%d\n", g_ok, g_fail);
   fflush(stdout);
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);
