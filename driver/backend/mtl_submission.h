@@ -39,7 +39,8 @@ struct RetireBatch {
   }
 
   // In recording order: recycles and object releases, the fence signals, then the command
-  // buffers and their keep-alives. Keeps the vectors' capacity.
+  // buffers and their keep-alives. Keeps the vectors' capacity. Runs with the tracker's
+  // m_runMutex held: nothing it releases may call processRetirements() (see there).
   void run();
 };
 
@@ -57,6 +58,10 @@ public:
 
   size_t retirementCount() { std::lock_guard<std::mutex> l(m_retireMutex); return m_retirements.size() + m_batches.size(); }
 
+  // Invariant: one queue and one submitter (the one context, on the CS thread). The serial is
+  // taken and signalled here in submission order; isComplete's "serial >= nextSerial() is not
+  // complete" fast path and m_batches' FIFO order (batches are handed over in serial order)
+  // both rely on it.
   uint64_t onSubmit(obj_handle_t queue);
 
   // Reads the shared event (a unix call) and refreshes the cache.
@@ -83,6 +88,9 @@ public:
   std::unique_ptr<RetireBatch> retireBatch(uint64_t serial, std::unique_ptr<RetireBatch>&& batch);
 
   // Runs what is due. Blocks while another thread runs retirements (pump, host-alloc retry).
+  // Invariant: a retirement (RetireBatch::run, a retireAfter callback) must never call
+  // processRetirements(), directly or through e.g. a host-allocation failure path: it would
+  // wait for m_runMutex, which the thread running it holds.
   void processRetirements();
 
   // CS thread, `completed` from a completedSerial() it just made. Skipped while the pump runs
@@ -111,7 +119,7 @@ private:
   std::mutex m_runMutex;
   std::condition_variable m_retireCond;
   std::vector<Retirement> m_retirements;
-  std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>> m_batches;  // serial order
+  std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>> m_batches;  // serial order (one submitter, see onSubmit)
   std::vector<std::unique_ptr<RetireBatch>> m_freeBatches;
   bool m_stop = false;
   bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
