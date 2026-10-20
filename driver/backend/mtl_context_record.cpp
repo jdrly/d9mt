@@ -74,7 +74,10 @@ namespace dxvk::backend {
     obj_handle_t dev = m_device->wmtDevice();
 
     { MtlBufferCreateInfo bi;
-      bi.size      = 64u << 10;   // the null stream (16 bytes per instance), FF constant blocks
+      /* The null stream is per instance (16 bytes each, 4096 instances) and the FF
+       * constant blocks fit. A stream left unbound under a per-vertex layout reads
+       * stride x index past its end, as it read past address 0 before. */
+      bi.size      = 64u << 10;
       bi.usage     = MtlUsage::VertexBuffer | MtlUsage::UniformBuffer;
       bi.cpuAccess = MtlCpuAccess::Write;
       m_nullBuffer = m_device->createBuffer(bi);
@@ -122,6 +125,21 @@ namespace dxvk::backend {
     m_initAllocators.emplace_back();
     m_allocatorSerial.push_back(0u);
     m_allocator     = m_allocators[0].handle();
+
+    /* The null textures are sampled: the FF shader's TEXTURE_TYPE_NULL stage reads
+     * its slot. Private storage starts undefined (and may be compressed with garbage
+     * metadata): zero them from the null buffer once, as slot 0 read before. */
+    if (m_nullBuffer != nullptr) {
+      for (uint32_t layer = 0u; layer < 7u; layer++) {
+        const Rc<MtlTexture>& img = layer == 0u ? m_nullImage2D : m_nullImageCube;
+        if (img == nullptr)
+          continue;
+        MtlSubresourceLayers sub;
+        sub.baseLayer = layer == 0u ? 0u : layer - 1u;
+        copyBufferToTexture(img, sub, MtlOrigin { 0, 0, 0 }, MtlSize { 1u, 1u, 1u },
+          m_nullBuffer, 0u, 0u, 0u, MtlFormat::RGBA8Unorm);
+      }
+    }
   }
 
   MtlContextImpl::~MtlContextImpl() {
@@ -133,6 +151,11 @@ namespace dxvk::backend {
       m_device->residency().allocDestroyed(m_visBuffer.detach(), m_visCpu,
         m_device->submissions().nextSerial(), uint64_t(kVisSlots) * 8u);
     }
+    /* Every argument table holds the null resources: keep them until the GPU is
+     * past everything this context submitted, whatever the device's teardown order. */
+    m_device->submissions().retireAfter(m_device->submissions().nextSerial(),
+      [buf = std::move(m_nullBuffer), i2 = std::move(m_nullImage2D), ic = std::move(m_nullImageCube),
+       v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube), smp = std::move(m_nullSampler)]() { });
   }
 
 
