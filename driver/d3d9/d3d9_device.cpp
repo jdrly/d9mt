@@ -4476,6 +4476,20 @@ namespace dxvk {
         m_textureSlotTracking.fetch4SamplerState |= samplerBit;
       else if (unlikely(Value == Fetch4Disabled))
         m_textureSlotTracking.fetch4SamplerState &= ~samplerBit;
+      else if (Value != 0u) {
+        // docs/sampler-lod-bias.md §2: does the game use a sampler LOD bias (it has no effect
+        // yet)? The first 4 distinct values, once each.
+        static DWORD s_seen[4] = { };
+        static uint32_t s_count = 0u;
+        bool known = false;
+        for (uint32_t i = 0u; i < s_count; i++)
+          known |= s_seen[i] == Value;
+        if (!known && s_count < 4u) {
+          s_seen[s_count++] = Value;
+          Logger::warn(str::format("D9MT: the game sets D3DSAMP_MIPMAPLODBIAS = ", bit::cast<float>(Value),
+            " on sampler ", StateSampler, " (not applied yet: docs/sampler-lod-bias.md)"));
+        }
+      }
 
       UpdateActiveFetch4(StateSampler);
     }
