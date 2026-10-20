@@ -230,6 +230,21 @@ What a carry does:
 - The open RetireBatch is handed over only at the completing submit, with serial N.
 
 ## 5. Tests (correctness)
+
+**Merge gates** (0a2ecf2d, review-014):
+- **(a)** The hash suite with G1 forced (`=always`, `D9MT_EARLY_COMMIT_MIN_MIB=0`), alone and with
+  `MTL_DEBUG_LAYER=1`, and with G1 default: frame-identical to base. Under the debug layer it
+  is compared with the base's own debug run (the FF ubershader's validation failures in
+  `code`/`code_ff` predate this).
+- **(b)** `code_g1_hang` 1–6 pass in all modes. No run may log "still not submitted yet"
+  (a wait on a serial still unsubmitted after a whole 2 s slice): suite.sh, runexe.sh and
+  bench-multi.sh treat it as FAIL.
+- **(c)** Waits on unsubmitted serials (`PROF-UNSUB` lines and PROF `unsubWait=`, with
+  D9MT_PROFILE): over the hash suite, G1 default and forced count no more than G1 off. The
+  longest stays in single-digit ms, never near 2 s. Without a carry they come from the older
+  WaitForResource race (§4.6); a carry holding back a submit that someone waits on would
+  show here as more or longer waits.
+  - The counter's positive test: `submission_tracker_test` `unsubmittedWait()`.
 - **Hash suite** (33 programs) with G1 on, with `D9MT_EARLY_COMMIT=always`, and with it off:
   all frame-identical to base, also with `MTL_DEBUG_LAYER=1` (two sequential command buffers
   per allocator).
