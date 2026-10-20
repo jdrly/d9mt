@@ -260,3 +260,34 @@ Uncapped, 10 rotated rounds, paired diffs, in a quiet window.
 | **bench_getdata** (new: 4K, chunk flushes, GetData spin on the previous frame's occlusion query) | no extra submits from the poll hooks |
 | **bench_upload** (new: 4K pass, per-draw DISCARD renames + managed texture updates per frame) | bounded serial length: ring/rename/staging recycling |
 | bindbench, churnbench | CPU regression check |
+
+### 6.1 What G1 costs when it doesn't carry (static, 2fc13bb vs perf/serial-cache-retire)
+
+Per frame on bench_4kw "wait": ~13 flushes (~10 of them deferrable), ~30 passes, ~4 command
+buffers, and ~500 GetData S_FALSE polls (20 µs spin).
+
+| added work | where | count/frame | cost |
+|---|---|---|---|
+| a deferrable flag in the CS lambda + `m_flushDeferPending.store` | ExecuteFlush | ~13 | a few ns each |
+| `carryOpenPass()` refusal: flags, attachment-byte sum (5 × `lookupFormatInfo`), cap, `completedSerialCached()`, and one `MTLSharedEvent_signaledValue` only while the cache lags `m_frameLastSerial` | flushCommandList, deferrable only | ~10 | ≤ ~1 µs each with the unix read, ~50 ns without |
+| `rstats::CarryRefused++` | D9MT_PROFILE only | ~10 | ns |
+| `m_completePending` test | closePass | ~30 | ns |
+| `setCarryOpen(false)` atomic store, `m_frameEnding` test | submit | ~4 | ns |
+| `commitRecorded()` as its own function | submit | ~4 | one call |
+| `m_prefixWork = true` stores | closePass, prepareDirectEncode, encodeDirect, attRestore, vertexFence | ~30 | ns |
+| `CarryOpen()` acquire load | GetData S_FALSE | ~500 | ~1 ns each |
+| `m_dxvkDevice->carryOpen()` | DONOTWAIT / staging throttle | rare | ns |
+| `serial >= nextSerial()` check | SubmissionTracker::waitFor | per wait | ns |
+
+- In total **≤ ~15 µs per frame, worst case with every refusal reading the event; typically
+  < 2 µs.** Nothing comes near 0.1 ms.
+- The one non-local effect is **layout**:
+  - ~48 bytes of new members in the middle of `MtlContextImpl` (with `submit`'s declarations),
+    which moves every later member;
+  - an 8-byte atomic at the end of `MtlDevice`, which moves `MtlDeviceImpl`'s members;
+  - the n013 controls showed that a rebuild moves microbenches by up to ±3%.
+- The window therefore has `g1-off` (the same DLL, `D9MT_EARLY_COMMIT=0`: identical code and
+  layout, no carry) against serial on 4kwait, at its start and its end. That splits code+layout
+  from carry effects, and the start/end pair controls drift.
+- If code+layout shows a cost, the first step is to move the new members to the end of the
+  class (cold) and put the refusal counters behind `prof::g_profEnabled`. They are already.
