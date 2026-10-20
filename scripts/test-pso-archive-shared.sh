@@ -6,6 +6,11 @@
 #   orphan   a .sum whose archive isn't there: the same
 #   owner    an old delta (older than the consolidated archive) of a process that still runs
 #            is left alone; of one that ended, deleted
+#   exe      the directory per executable (<base>/<exe>/os-...): argv[0]'s basename as Wine
+#            gives it, sanitized; not an .exe: the flat layout with archive first off
+#   migrate  [MIGRATIONS] rounds: two executables start at once on a flat directory of an
+#            earlier release: exactly one takes it, the other starts cold, no crash; a flat
+#            start afterwards doesn't touch either executable's directory
 #   stress   [RUNS] rounds of two processes on one archive directory: one consolidates
 #            (idle 200 ms) while the other starts, checks and builds. No crash, no FAIL line,
 #            no "dropping PSO archive" (a file passed to newArchiveWithURL that wasn't
@@ -35,7 +40,7 @@ run() { # <workdir> <log> [env...]: one harness run whose pso dir is $P (bins: B
 ages() { python3 -I -c 'import os,sys,time; t=time.time()-float(sys.argv[2]); [os.utime(f,(t,t)) for f in sys.argv[3:]]' x "$@"; }
 # resum <archive>: a v2 .sum matching the archive as it is now (size, mtime, SHA-256)
 resum() { python3 -I -c 'import os,sys,hashlib; f=sys.argv[1]; st=os.stat(f); h=hashlib.sha256(open(f,"rb").read()).hexdigest(); open(f+".sum","w").write("2 %d %d %s" % (st.st_size, st.st_mtime_ns, h))' "$1"; }
-dirof() { ls -d "$P"/os-* | head -1; }
+dirof() { ls -d "$P"/mt.exe/os-* | head -1; }
 
 echo "[pso-shared] young / orphan / owner"
 P="$OUT/p1"; mkdir -p "$P"
@@ -68,10 +73,57 @@ check "old delta of a live process" "$(e 0000000001-$live-0000.mtl4archive)" kep
 check "old delta of an ended process" "$(e 0000000002-$dead-0000.mtl4archive)" deleted
 kill $live 2>/dev/null
 
+echo "[pso-shared] exe: the directory per executable"
+loaded_from() { sed -n 's/^d9mt: PSO archives: [0-9]* loaded from \(.*\), capture.*/\1/p' "$OUT/$1.log"; }
+P="$OUT/e"; mkdir -p "$P"; i=0
+for c in 'C:\Program Files\SWTOR\retailclient\SWTOR.EXE|swtor.exe' '/games/My Game!.exe|my_game_.exe' \
+         'C:\x\OS-x.exe|os_x.exe' "C:\\$(printf 'a%.0s' $(seq 70)).exe|$(printf 'a%.0s' $(seq 64))"; do
+  i=$((i + 1)); run "$OUT/e$i" "e$i" MT_COVERAGE=0 MT_EXE="${c%%|*}"
+  check "exe ${c%%|*}" "$(loaded_from "e$i" | sed 's|.*/pso/||; s|/os-.*||')" "${c##*|}"
+done
+for c in 'C:\games\launcher' 'C:\games\' 'game.exe.bak'; do
+  i=$((i + 1)); run "$OUT/e$i" "e$i" MT_COVERAGE=0 MT_EXE="$c"
+  check "not an exe: $c: flat" "$(loaded_from "e$i" | sed 's|.*/pso/||')" "$(basename "$(loaded_from "e$i")")"
+  check "not an exe: $c: archive first off" "$(grep -c 'archive first off' "$OUT/e$i.log")" 1
+done
+
+echo "[pso-shared] migrate: ${MIGRATIONS:-10} rounds of two executables on a flat directory"
+claims=0; colds=0; flatleft=0
+for r in $(seq "${MIGRATIONS:-10}"); do
+  P="$OUT/m$r"; mkdir -p "$P"
+  run "$OUT/m$r-seed" "m$r-seed" MT_COVERAGE=0 MT_EXE=          # an earlier release: flat
+  flat=$(loaded_from "m$r-seed")
+  run "$OUT/m$r-a" "m$r-a" MT_COVERAGE=0 MT_EXE='C:\g\a.exe' & pa=$!
+  run "$OUT/m$r-b" "m$r-b" MT_COVERAGE=0 MT_EXE='C:\g\b.exe' & pb=$!
+  wait $pa $pb
+  got=$(cat "$OUT/m$r-a.log" "$OUT/m$r-b.log" | grep -c 'of earlier releases now')
+  [ "$got" = 1 ] && claims=$((claims + 1))
+  na=$(sed -n 's/^d9mt: PSO archives: \([0-9]*\) loaded.*/\1/p' "$OUT/m$r-a.log")
+  nb=$(sed -n 's/^d9mt: PSO archives: \([0-9]*\) loaded.*/\1/p' "$OUT/m$r-b.log")
+  { [ "$na" = 0 ] && [ "$nb" -gt 0 ]; } || { [ "$nb" = 0 ] && [ "$na" -gt 0 ]; } && colds=$((colds + 1))
+  [ -e "$flat" ] && flatleft=$((flatleft + 1))
+  if [ "$r" = 1 ]; then
+    # a flat start (an executable that isn't one, or an earlier release) and an archive set of
+    # another macOS build: the flat cleanup takes the latter, never an executable's directory
+    before=$(ls "$P"/a.exe/os-*/ "$P"/b.exe/os-*/ | grep -c 'mtl4archive$')
+    mkdir -p "$P/os-0OLD-gpu" "$P/a.exe/os-0OLD-gpu"
+    run "$OUT/m$r-flat" "m$r-flat" MT_COVERAGE=0 MT_EXE=
+    check "flat start: executables' archives untouched" "$(ls "$P"/a.exe/os-*/ "$P"/b.exe/os-*/ | grep -c 'mtl4archive$')" "$before"
+    check "flat start: another build's flat set removed" "$([ -e "$P/os-0OLD-gpu" ] && echo kept || echo removed)" removed
+    run "$OUT/m$r-a2" "m$r-a2" MT_COVERAGE=0 MT_EXE='C:\g\a.exe'
+    check "exe start: another build's set in its directory removed" "$([ -e "$P/a.exe/os-0OLD-gpu" ] && echo kept || echo removed)" removed
+    check "exe start: the flat directory left alone" "$([ -e "$flat" ] && echo kept || echo removed)" kept
+  fi
+done
+check "rounds where exactly one took the flat directory" "$claims" "${MIGRATIONS:-10}"
+check "rounds where the other started cold" "$colds" "${MIGRATIONS:-10}"
+check "rounds with the flat directory left behind" "$flatleft" 0
+check "crashes" "$(cat "$OUT"/m*.log | grep -c '^CRASH')" 0
+
 echo "[pso-shared] stress: ${RUNS:-20} rounds of two processes on one directory"
 P="$OUT/p2"; mkdir -p "$P"
 for i in $(seq "${RUNS:-20}"); do
-  rm -rf "$P"/os-*/*.tmp 2>/dev/null
+  rm -rf "$P"/mt.exe/os-*/*.tmp 2>/dev/null
   # one more pixel shader per round: new PSOs, so every round has misses, a delta and a consolidation
   RUN_EXTRA="${EXTRA[$(( (i - 1) % ${#EXTRA[@]} ))]}" run "$OUT/a$i" "a$i" MT_WAIT_CONSOLIDATED=3 &
   a=$!

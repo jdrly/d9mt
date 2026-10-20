@@ -28,7 +28,7 @@ run_pair() { # <harness> <winemetal.so> <workdir>
   "$1" "$2" "$3" "${BINS[@]}"
   echo "--- $(basename "$1"): warm"
   "$1" "$2" "$3" "${BINS[@]}"
-  ls "$3/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  ls "$3/pso"/mt.exe/os-*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
 }
 
 # Needs DXVK's native Windows headers (include/native/{windows,directx} of a

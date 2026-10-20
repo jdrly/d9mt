@@ -42,10 +42,10 @@ run() { # <dir> <log> <env...> -- <bins...>
   grep -q '^FAIL' "$OUT/$log.log" && { echo "  $log: FAIL lines:"; grep '^FAIL' "$OUT/$log.log" | head -5; fails=$((fails + 1)); }
 }
 stat_line() { sed -n 's/^d9mt: PSO archive first: \(.*\)$/\1/p' "$OUT/$1.log"; }
-deltas() { ls "$1"/pso/os-*/ 2>/dev/null | grep -E '^[0-9]+-[0-9]+-[0-9]+\.mtl4archive$' | wc -l | tr -d ' '; }
-own_deltas() { ls "$1"/pso/os-*/ 2>/dev/null | grep -cE "^[0-9]+-$2-[0-9]+\.mtl4archive$"; }
+deltas() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -E '^[0-9]+-[0-9]+-[0-9]+\.mtl4archive$' | wc -l | tr -d ' '; }
+own_deltas() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -cE "^[0-9]+-$2-[0-9]+\.mtl4archive$"; }
 pid_of() { sed -n 's/^pid: //p' "$OUT/$1.log"; }
-consolidated() { ls "$1"/pso/os-*/ 2>/dev/null | grep -cE '^c-.*\.mtl4archive$'; }
+consolidated() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -cE '^c-.*\.mtl4archive$'; }
 
 suite() { # <label>
   local W="$OUT/$1-w"
@@ -65,8 +65,8 @@ suite() { # <label>
   run "$W" "$1-cold" MT_WAIT_CONSOLIDATED=20 -- "${SET_A[@]}"
   na=$(sed -n 's/.*, \([0-9]*\) not archived yet$/\1/p' "$OUT/$1-cold.log")
   echo "  cold: consolidation never compiles: ${na:-?} unflushed misses left to a later delta"
-  local cname; cname=$(ls "$W"/pso/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
-  local first; first=$(ls "$W"/pso/os-*/ | grep -E '^[0-9]+-' | sort | head -1)
+  local cname; cname=$(ls "$W"/pso/mt.exe/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
+  local first; first=$(ls "$W"/pso/mt.exe/os-*/ | grep -E '^[0-9]+-' | sort | head -1)
   echo "  cold: consolidated as $cname (named by consolidation time)"
   check "consolidated archive written" "$(grep -c 'consolidated archive: written' "$OUT/$1-cold.log")" 1
   check "archives after cold: consolidated" "$(consolidated "$W")" 1
@@ -119,13 +119,13 @@ c = [f for f in fs if re.match(r"c-\d+-%s\.mtl4archive$" % pid, f)]
 if c:
     stamp, cm = int(c[0][2:12]), os.stat(os.path.join(d, c[0])).st_mtime
     print(" ".join(f for f in fs if re.match(r"\d+-%s-\d+\.mtl4archive$" % pid, f)
-                   and stamp <= os.stat(os.path.join(d, f)).st_mtime < cm))' "$(ls -d "$F"/pso/os-*)" "$(pid_of f1-cold)")
+                   and stamp <= os.stat(os.path.join(d, f)).st_mtime < cm))' "$(ls -d "$F"/pso/mt.exe/os-*)" "$(pid_of f1-cold)")
   local n; n=$(wc -w <<< "$late" | tr -d ' ')
   [ "$n" -gt 0 ] && echo "  F-1: $n delta(s) flushed between the snapshot and the consolidated archive" \
     || { echo "  F-1: FAIL (no delta flushed during the rebuild: the test didn't hit the window)"; fails=$((fails + 1)); }
   run "$F" f1-next MT_COVERAGE=0 MT_LATE_PSOS=0 -- "${SET_A[@]}"
   local gone=0 f
-  for f in $late; do [ -e "$(ls -d "$F"/pso/os-*)/$f" ] || gone=$((gone + 1)); done
+  for f in $late; do [ -e "$(ls -d "$F"/pso/mt.exe/os-*)/$f" ] || gone=$((gone + 1)); done
   check "F-1: those deltas kept at the next start" "$gone" 0
   check "F-1: next start, late PSOs included: misses" "$(misses_of f1-next)" 0
 
@@ -166,11 +166,11 @@ if c:
   check "restore: sums now carry the copies' times" "$(python3 -I -c '
 import glob, os, sys
 bad = 0
-for f in glob.glob(sys.argv[1] + "/pso/os-*/*.mtl4archive"):
+for f in glob.glob(sys.argv[1] + "/pso/mt.exe/os-*/*.mtl4archive"):
     t = open(f + ".sum").read().split()
     bad += len(t) != 4 or t[0] != "2" or int(t[2]) != os.stat(f).st_mtime_ns
 print(bad)' "$Rs")" 0
-  local c; c=$(ls -d "$Rb"/pso/os-*)/$(ls "$Rb"/pso/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
+  local c; c=$(ls -d "$Rb"/pso/mt.exe/os-*)/$(ls "$Rb"/pso/mt.exe/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
   python3 -I -c 'import os,sys; f=open(sys.argv[1],"r+b"); n=os.path.getsize(sys.argv[1]); f.seek(n//2); b=f.read(1); f.seek(n//2); f.write(bytes([b[0]^1]))' "$c"
   run "$Rb" restore-bad MT_COVERAGE=0 -- "${SET_A[@]}"
   check "restore: a changed byte (same size, other time) deleted" "$([ -e "$c" ] && echo kept || echo deleted)" deleted

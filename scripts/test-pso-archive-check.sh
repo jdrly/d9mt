@@ -36,7 +36,7 @@ run() { # <name> [env...]: one compile_mt_test run on work dir $W; prints the lo
   sed -n 's/^d9mt: PSO archives: \([0-9]*\) loaded.*/\1/p' "$OUT/$name.log"
 }
 check() { if [ "$2" = "$3" ]; then echo "  $1: ok ($2)"; else echo "  $1: FAIL (got $2, want $3)"; fails=$((fails + 1)); fi; }
-archives() { ls "$W"/pso/os-*/*.mtl4archive 2>/dev/null | sort; }
+archives() { ls "$W"/pso/mt.exe/os-*/*.mtl4archive 2>/dev/null | sort; }
 keep_time() { python3 -I -c 'import os,sys; st=os.stat(sys.argv[1]); open(sys.argv[1],"r+b").close(); os.utime(sys.argv[1], ns=(st.st_atime_ns, int(sys.argv[2])))' "$1" "$2"; }
 
 W="$OUT/w"; mkdir -p "$W"

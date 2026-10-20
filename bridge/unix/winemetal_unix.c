@@ -5811,6 +5811,9 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <crt_externs.h>
+#include <ctype.h>
+#include <strings.h>
 
 struct d9mt_air_version_params;
 struct d9mt_air_compile_params;
@@ -6262,7 +6265,7 @@ pso_consolidate(void) {
     for (NSString *part in parts)
       if (!pso_owner_alive(part.lastPathComponent))
         pso_remove_archive(part);
-    fprintf(stderr, "d9mt: PSO archives consolidated: %u pipelines into %s, %lu replaced, %u not archived yet\n",
+    fprintf(stderr, "d9mt: PSO archives consolidated: %u builds into %s, %lu replaced, %u not archived yet\n",
             built, path.lastPathComponent.UTF8String, (unsigned long)parts.count, notArchived);
   } else {
     unlink(tmp.fileSystemRepresentation);
@@ -6344,6 +6347,60 @@ pso_sanitize(NSString *s) {
   return [NSString stringWithUTF8String:out];
 }
 
+/* The game's executable, a directory of its own under the PSO base: consolidation
+ * deletes what the state cache of one executable doesn't replay, so two games (or a
+ * game and its launcher) must not share archives. Under Wine argv[0] is the Windows
+ * path ("C:\...\swtor.exe"). Lowercase, [a-z0-9._-], at most 64 characters, never
+ * "os-..." (the cleanup's prefix); nil if it isn't an .exe. */
+static NSString *
+pso_exe_component(void) {
+  char **argv = *_NSGetArgv();
+  const char *a = argv ? argv[0] : NULL;
+  if (!a)
+    return nil;
+  for (const char *p = a; *p; p++)
+    if (*p == '/' || *p == '\\')
+      a = p + 1;
+  const size_t len = strlen(a);
+  if (len <= 4u || strcasecmp(a + len - 4u, ".exe"))
+    return nil;
+  char out[65];
+  size_t n = 0u;
+  for (; n < len && n < 64u; n++) {
+    const char c = (char)tolower((unsigned char)a[n]);
+    out[n] = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '.' || c == '-' ? c : '_';
+  }
+  out[n] = '\0';
+  if (!strncmp(out, "os-", 3u))
+    out[2] = '_';
+  return [NSString stringWithUTF8String:out];
+}
+
+/* The first executable to start after the update takes the flat directory of earlier
+ * releases (<base>/os-<leaf>, every executable's PSOs together) as its own, with one
+ * atomic rename under an flock on <base>/.migrate; the others start cold. */
+static void
+pso_migrate_flat(NSString *base, NSString *root, NSString *leaf) {
+  NSString *flat = [base stringByAppendingPathComponent:leaf];
+  NSString *mine = [root stringByAppendingPathComponent:leaf];
+  struct stat st;
+  if (!stat(mine.fileSystemRepresentation, &st) || stat(flat.fileSystemRepresentation, &st))
+    return;
+  const int fd = open([base stringByAppendingPathComponent:@".migrate"].fileSystemRepresentation,
+                      O_RDWR | O_CREAT, 0644);
+  if (fd < 0)
+    return;
+  if (!flock(fd, LOCK_EX)) {
+    if (stat(mine.fileSystemRepresentation, &st) && !stat(flat.fileSystemRepresentation, &st)
+     && (!mkdir(root.fileSystemRepresentation, 0755) || errno == EEXIST)) {
+      if (!rename(flat.fileSystemRepresentation, mine.fileSystemRepresentation))
+        fprintf(stderr, "d9mt: PSO archives of earlier releases now %s's\n", root.lastPathComponent.UTF8String);
+    }
+    flock(fd, LOCK_UN);
+  }
+  close(fd);
+}
+
 static void
 pso_archive_init(id<MTLDevice> device) {
   const char *off = getenv("D9MT_PSO_ARCHIVE");
@@ -6393,16 +6450,30 @@ pso_archive_init(id<MTLDevice> device) {
   NSString *leaf = [NSString stringWithFormat:@"os-%@-%@",
     pso_sanitize([NSString stringWithUTF8String:osbuild] ?: @"unknown"),
     pso_sanitize(device.name ?: @"gpu")];
-  NSString *dir = [base stringByAppendingPathComponent:leaf];
+  /* <base>/<exe>/os-<leaf>. Not an .exe: the flat <base>/os-<leaf> of earlier
+   * releases, shared, so as there: archive first and consolidation off. */
+  NSString *exe = pso_exe_component();
+  NSString *root = exe ? [base stringByAppendingPathComponent:exe] : base;
+  NSString *dir = [root stringByAppendingPathComponent:leaf];
+  if (!exe)
+    g_pso_archive_first = false;
 
   NSFileManager *fm = [NSFileManager defaultManager];
+  if (exe && [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil])
+    pso_migrate_flat(base, root, leaf);
   if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) {
     fprintf(stderr, "d9mt: PSO archives disabled (cannot create %s)\n", dir.UTF8String);
     return;
   }
-  for (NSString *name in [fm contentsOfDirectoryAtPath:base error:nil]) {
-    if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
-      [fm removeItemAtPath:[base stringByAppendingPathComponent:name] error:nil];
+  /* Archives of another macOS build or GPU: in this executable's directory and,
+   * left by earlier releases, in the flat one (never the flat os-<leaf> itself,
+   * which an earlier release may still use; an executable's directory has no
+   * "os-" prefix). */
+  for (NSString *r in exe ? @[ root, base ] : @[ base ]) {
+    for (NSString *name in [fm contentsOfDirectoryAtPath:r error:nil]) {
+      if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
+        [fm removeItemAtPath:[r stringByAppendingPathComponent:name] error:nil];
+    }
   }
 
   /* Collect archives, drop leftovers of interrupted writes and orphans. */

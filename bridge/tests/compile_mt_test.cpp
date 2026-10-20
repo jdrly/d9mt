@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <crt_externs.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -235,10 +236,16 @@ int main(int argc, char** argv) {
   const unsigned nThreads = getenv("MT_THREADS") ? unsigned(atoi(getenv("MT_THREADS"))) : 6u;
   printf("pid: %d\n", int(getpid()));
 
+  // MT_EXE: the argv[0] the bridge sees; its PSO directory is <workdir>/pso/<exe>/os-...
+  // Wine's form by default. Empty: the harness's own (not an .exe: the flat layout).
+  static std::string exe = getenv("MT_EXE") ? getenv("MT_EXE") : "C:\\games\\mt.exe";
+  if (!exe.empty())
+    (*_NSGetArgv())[0] = &exe[0];
+
   // Bridge reads these on first use.
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
   setenv("D9MT_PSO_ARCHIVE_DIR", (work + "/pso").c_str(), 1);
-  setenv("D9MT_PSO_FLUSH_EVERY", "5", 1);
+  setenv("D9MT_PSO_FLUSH_EVERY", getenv("MT_FLUSH_EVERY") ? getenv("MT_FLUSH_EVERY") : "5", 1);
 
   void* bridge = dlopen(argv[1], RTLD_NOW);
   if (!bridge) { fprintf(stderr, "FAIL: dlopen: %s\n", dlerror()); return 1; }
@@ -328,8 +335,11 @@ int main(int argc, char** argv) {
     printf("shaders: %u/%zu compiled\n", okShaders, shaders.size());
 
     // PSOs: every VS x PS pair in 4 state variants, all in flight at once.
+    // MT_REPEAT=<n>: the whole set n times (the same descriptors requested again).
     std::vector<std::unique_ptr<Job>> psos;
     std::atomic<unsigned> psoOk = { 0 }, psoFail = { 0 };
+    const unsigned reps = getenv("MT_REPEAT") ? unsigned(std::max(1, atoi(getenv("MT_REPEAT")))) : 1u;
+    for (unsigned rep = 0; rep < reps; rep++)
     for (auto& vs : shaders) {
       if (vs.isPs || !vs.ok) continue;
       for (auto& ps : shaders) {
@@ -387,20 +397,29 @@ int main(int argc, char** argv) {
     const std::string tag = "-" + std::to_string(getpid()) + ".mtl4archive.sum";
     bool found = false;
     while (!found && std::chrono::steady_clock::now() - t0w < std::chrono::seconds(atoi(w))) {
-      if (DIR* base = opendir((work + "/pso").c_str())) {
+      // <pso>/os-* (flat) and <pso>/<exe>/os-*
+      std::function<void(const std::string&, int)> scan = [&](const std::string& dir, int depth) {
+        DIR* base = opendir(dir.c_str());
+        if (!base) return;
         while (dirent* d = readdir(base)) {
-          if (strncmp(d->d_name, "os-", 3)) continue;
-          if (DIR* sub = opendir((work + "/pso/" + d->d_name).c_str())) {
-            while (dirent* f = readdir(sub)) {
-              const std::string n = f->d_name;
-              if (!n.compare(0, 2, "c-") && n.size() > tag.size() && !n.compare(n.size() - tag.size(), tag.size(), tag))
-                found = true;
+          const std::string n = d->d_name;
+          if (n == "." || n == "..") continue;
+          if (!n.compare(0, 3, "os-")) {
+            if (DIR* sub = opendir((dir + "/" + n).c_str())) {
+              while (dirent* f = readdir(sub)) {
+                const std::string a = f->d_name;
+                if (!a.compare(0, 2, "c-") && a.size() > tag.size() && !a.compare(a.size() - tag.size(), tag.size(), tag))
+                  found = true;
+              }
+              closedir(sub);
             }
-            closedir(sub);
+          } else if (depth == 0 && d->d_type == DT_DIR) {
+            scan(dir + "/" + n, 1);
           }
         }
         closedir(base);
-      }
+      };
+      scan(work + "/pso", 0);
       if (!found)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
