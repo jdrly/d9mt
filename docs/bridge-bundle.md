@@ -247,6 +247,7 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
   - after `D9MT_PSO_FLUSH_IDLE_MS` (10 s) without a build;
   - or once `FLUSH_EVERY` have waited `D9MT_PSO_FLUSH_BACKSTOP_MS` (60 s).
   - While anything is pending it looks again every 250 ms; otherwise it sleeps until woken (at most 1 s).
+  - "Not visible" comes from the presenter's `isVisible()`, which the CS thread calls on every present (`d3d9_swapchain.cpp:829`) whatever `D9MT_BG_FPS` is, so the pause trigger doesn't depend on the background throttle. In batch-dyn2 the vd window was occluded only for its first 20 ms (0x2000, then 0x2002), so that run had no pause, and no pause flush was correct.
 - **The lock:** the thread takes `g_pso_lock` with `trywrlock`, retried every 50 ms, so a waiting flush never queues ahead of builds.
 - **M9:** a build that finds the lock held (`tryrdlock` fails) goes to `g_pso_fallback`, a serializer-less `MTL4Compiler` of the same device with the same task options (`lookupArchives`). It is not captured and not counted as pending; it misses again next session and is captured then.
 - **Reset hint:** `D9MTPsoPauseHint` (unix call 214, appended to both tables after 213). `D3D9DeviceEx::Reset`/`ResetEx` call it through `MtlDevice::psoPauseHint`, which looks it up with `GetProcAddress` like the coverage signal, so an older bridge means no hint and an older d3d9.dll means no call. `scripts/check-abi-mix.sh` covers both entries and that the tables end with 213, 214.
