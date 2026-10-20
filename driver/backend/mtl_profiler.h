@@ -70,7 +70,10 @@ namespace dxvk::backend::prof {
   inline std::atomic<uint64_t> g_unsubWaitNs    = { 0u };
   inline std::atomic<uint64_t> g_unsubWaitMaxNs = { 0u };
 
-  inline void noteUnsubmittedWait(uint64_t ns) {
+  inline void noteUnsubmittedWait(uint64_t ns, uint64_t serial) {
+    // One line per event too: short runs (the hash suite's 5 frames, ExitProcess) never reach
+    // a PROF window. Rare by nature; only with D9MT_PROFILE.
+    Logger::info(str::format("PROF-UNSUB serial=", serial, " waitedUs=", ns / 1000u));
     g_unsubWaits.fetch_add(1u, std::memory_order_relaxed);
     g_unsubWaitNs.fetch_add(ns, std::memory_order_relaxed);
     uint64_t max = g_unsubWaitMaxNs.load(std::memory_order_relaxed);

@@ -215,13 +215,14 @@ void SubmissionTracker::waitFor(uint64_t serial) {
   // D9MT_PROFILE: a wait that starts on a serial nobody submitted yet, timed until it returns.
   struct UnsubmittedWait {
     std::chrono::steady_clock::time_point t0;
+    uint64_t serial;
     bool on;
     ~UnsubmittedWait() {
       if (on)
         prof::noteUnsubmittedWait(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - t0).count()));
+          std::chrono::steady_clock::now() - t0).count()), serial);
     }
-  } unsubmitted = { std::chrono::steady_clock::now(), prof::g_profEnabled && serial >= nextSerial() };
+  } unsubmitted = { std::chrono::steady_clock::now(), serial, prof::g_profEnabled && serial >= nextSerial() };
   // Bounded blocking wait, not a spin, so a never-signalled command buffer degrades to a logged stall instead of a hang.
   for (int i = 0; i < 5; i++) {
     if (MTLSharedEvent_waitUntilSignaledValue(m_event.handle(), serial, 2000u)) {
