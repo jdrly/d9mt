@@ -115,6 +115,7 @@ static void test_shape(void) {
 
   memset(d, 0, sizeof(d));
   CHECK(shape_of(d, 65536, "zero") == -1, "zero-filled: SHA fallback");
+  CHECK(d9mt_pso_archive_shape("/nonexistent/d9mt-pact.mtl4archive", 4096) == -2, "a vanished file: skip, not damage");
 
   memset(d, 0x5a, sizeof(d));
   n = craft(d, 0xcafebabeu, 2, two, 2);
@@ -148,9 +149,12 @@ static void test_real(const char *dir) {
     snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
     struct stat st;
     if (stat(p, &st)) continue;
+    /* a live directory: a file another process deletes in between is skipped (-2) */
+    const int r = d9mt_pso_archive_shape(p, (uint64_t)st.st_size);
+    if (r == -2) continue;
     n++;
-    if (d9mt_pso_archive_shape(p, (uint64_t)st.st_size) == 1) ok++;
-    else printf("FAIL real archive without the shape: %s\n", p), g_fail++;
+    if (r == 1) ok++;
+    else printf("FAIL real archive without the shape (%d): %s\n", r, p), g_fail++;
   }
   closedir(dd);
   printf("%s: %d/%d archives have the shape\n", dir, ok, n);

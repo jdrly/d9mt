@@ -1,6 +1,7 @@
 /* PSO archive integrity checks of winemetal.so's pipeline archives (bridge bundle part 2,
  * docs/bridge-bundle.md), pure C so bridge/tests/pso_archive_check_test.c can test them
  * on crafted files and sums. */
+#include <errno.h>
 #include <fcntl.h>
 #include <libkern/OSByteOrder.h>
 #include <stdatomic.h>
@@ -23,6 +24,8 @@
  *       count, no ENDT where it's expected. That may just be a format change,
  *       so the caller checks the SHA-256 rather than deleting a good archive
  *       at every start, and it is logged once.
+ *  -2 = the file is gone (deleted by another process between the caller's
+ *       stat and this open): neither loaded nor counted as damage.
  * A zeroed range inside a slice passes (media rot): D9MT_PSO_VERIFY=1. */
 #define D9MT_PSO_MAX_SLICES 64u
 
@@ -38,7 +41,7 @@ int
 d9mt_pso_archive_shape(const char *path, uint64_t size) {
   const int fd = open(path, O_RDONLY);
   if (fd < 0)
-    return 0;
+    return errno == ENOENT ? -2 : 0;
   uint8_t hdr[8 + D9MT_PSO_MAX_SLICES * 20];
   int result;
   if (pread(fd, hdr, 8, 0) != 8) {

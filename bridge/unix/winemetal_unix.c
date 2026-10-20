@@ -5805,6 +5805,7 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 #endif
 #include "../../airlib/d9mtair.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <mach-o/loader.h>
 #include <sys/file.h>
@@ -5998,35 +5999,78 @@ pso_write_sum(NSString *file, NSString *v1, const struct stat *st) {
 int d9mt_pso_archive_shape(const char *path, uint64_t size);
 bool d9mt_pso_sum_parse_v2(const char *text, uint64_t *size, uint64_t *mtime_ns, char sha[65]);
 
-/* Whether an archive may be passed to newArchiveWithURL. */
+/* Several processes share the directory (two clients; a client starting
+ * while another consolidates). Every file is written as .tmp and renamed into
+ * place, archive first, then its .sum: between the two renames an archive has
+ * no sum yet, and another process's file may disappear at any time. So the
+ * verdict on a file has three outcomes, and a file is only deleted for proof
+ * of damage or by the retention rule, never because it vanished or is young. */
+enum { PSO_SKIP = -1, PSO_BAD = 0, PSO_OK = 1 };
+#define D9MT_PSO_YOUNG_S 600
+
 static bool
-pso_archive_valid(NSString *path) {
+pso_gone(NSString *path) {
+  struct stat st;
+  return stat(path.fileSystemRepresentation, &st) && errno == ENOENT;
+}
+
+/* Whether an archive may be passed to newArchiveWithURL (PSO_OK), must be
+ * deleted (PSO_BAD), or is to be left alone (PSO_SKIP: gone, or written by
+ * another process just now). */
+static int
+pso_archive_judge(NSString *path) {
+  struct stat st;
+  if (stat(path.fileSystemRepresentation, &st))
+    return errno == ENOENT ? PSO_SKIP : PSO_BAD;
   NSString *sumPath = [path stringByAppendingString:@".sum"];
   NSString *want = [NSString stringWithContentsOfFile:sumPath encoding:NSUTF8StringEncoding error:nil];
-  struct stat st;
-  if (!want || stat(path.fileSystemRepresentation, &st))
-    return false;
+  if (!want) {
+    /* between another process's two renames, or a writer that died right there */
+    if (pso_gone(path))
+      return PSO_SKIP;
+    return time(NULL) - st.st_mtime < D9MT_PSO_YOUNG_S ? PSO_SKIP : PSO_BAD;
+  }
   uint64_t size, mtime;
   char sha[65];
   if (d9mt_pso_sum_parse_v2(want.UTF8String, &size, &mtime, sha)) {
     if (size != (uint64_t)st.st_size || mtime != pso_mtime_ns(&st))
-      return false;
+      return PSO_BAD;
     const int shape = g_pso_verify ? -1 : d9mt_pso_archive_shape(path.fileSystemRepresentation, size);
+    if (shape == -2)
+      return PSO_SKIP;
     if (shape >= 0)
-      return shape == 1;
+      return shape == 1 ? PSO_OK : PSO_BAD;
     NSString *have = pso_sum_text(path);
-    return have && [have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]];
+    if (!have)
+      return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+    return [have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]] ? PSO_OK : PSO_BAD;
   }
   /* v1 */
   NSString *have = pso_sum_text(path);
-  if (!have || ![have isEqualToString:want])
-    return false;
+  if (!have)
+    return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+  if (![have isEqualToString:want])
+    return PSO_BAD;
   NSString *tmp = [sumPath stringByAppendingString:@".tmp"];
   if (pso_write_sum(tmp, have, &st))
     rename(tmp.fileSystemRepresentation, sumPath.fileSystemRepresentation);
   else
     unlink(tmp.fileSystemRepresentation);
-  return true;
+  return PSO_OK;
+}
+
+/* The session in the name ("<time>-<pid>-<seq>" or "c-<time>-<pid>") belongs to
+ * another process that still runs: the retention rule leaves its files. */
+static bool
+pso_owner_alive(NSString *name) {
+  NSArray<NSString *> *p = [([name hasPrefix:@"c-"] ? [name substringFromIndex:2u] : name)
+                            componentsSeparatedByString:@"-"];
+  if (p.count < 2u)
+    return false;
+  const int pid = [p[1] intValue];
+  if (pid <= 0 || pid == getpid())
+    return false;
+  return !kill(pid, 0) || errno == EPERM;
 }
 
 static void
@@ -6162,7 +6206,8 @@ pso_consolidate(void) {
   }
   if (ok) {
     for (NSString *part in parts)
-      pso_remove_archive(part);
+      if (!pso_owner_alive(part.lastPathComponent))
+        pso_remove_archive(part);
     fprintf(stderr, "d9mt: PSO archives consolidated: %u pipelines into %s, %lu replaced\n", built,
             path.lastPathComponent.UTF8String, (unsigned long)parts.count);
   } else {
@@ -6284,7 +6329,9 @@ pso_archive_init(id<MTLDevice> device) {
       if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > 600)
         unlink(path.fileSystemRepresentation);
     } else if ([name hasSuffix:@".mtl4archive.sum"]) {
-      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]])
+      struct stat st;
+      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]]
+       && !stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
         unlink(path.fileSystemRepresentation);
     }
   }
@@ -6300,9 +6347,12 @@ pso_archive_init(id<MTLDevice> device) {
     for (NSString *name in names) {
       if ([name hasPrefix:@"c-"]) {
         NSString *path = [dir stringByAppendingPathComponent:name];
-        if (!consolidated && pso_archive_valid(path))
+        const int v = consolidated ? PSO_OK : pso_archive_judge(path);
+        if (v == PSO_SKIP)
+          continue;
+        if (!consolidated && v == PSO_OK)
           consolidated = name;
-        else
+        else if (v == PSO_BAD || !pso_owner_alive(name))
           pso_remove_archive(path);
       }
     }
@@ -6315,11 +6365,16 @@ pso_archive_init(id<MTLDevice> device) {
         continue;
       NSString *path = [dir stringByAppendingPathComponent:name];
       if ((since && name.length >= 10u && [[name substringToIndex:10u] compare:since] == NSOrderedAscending)
-       || keep.count >= D9MT_PSO_MAX_ARCHIVES || !pso_archive_valid(path)) {
-        pso_remove_archive(path);
+       || keep.count >= D9MT_PSO_MAX_ARCHIVES) {
+        if (!pso_owner_alive(name))
+          pso_remove_archive(path);
         continue;
       }
-      [keep addObject:name];
+      const int v = pso_archive_judge(path);
+      if (v == PSO_BAD)
+        pso_remove_archive(path);
+      if (v == PSO_OK)
+        [keep addObject:name];
     }
     for (NSString *name in keep) {
       NSString *path = [dir stringByAppendingPathComponent:name];
@@ -6330,9 +6385,11 @@ pso_archive_init(id<MTLDevice> device) {
         [parts addObject:path];
         [a release];
       } else {
-        fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
-                err ? err.localizedDescription.UTF8String : "(no error)");
-        pso_remove_archive(path);
+        if (!pso_gone(path)) {
+          fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+                  err ? err.localizedDescription.UTF8String : "(no error)");
+          pso_remove_archive(path);
+        }
       }
     }
   }
@@ -6343,9 +6400,15 @@ pso_archive_init(id<MTLDevice> device) {
     NSString *session = parts.count >= 3u ? [NSString stringWithFormat:@"%@-%@", parts[0], parts[1]] : nil;
     if (session && ![sessions containsObject:session] && sessions.count < D9MT_PSO_KEEP_SESSIONS)
       [sessions addObject:session];
-    if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES
-     || !pso_archive_valid(path)) {
-      pso_remove_archive(path);
+    if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES) {
+      if (!pso_owner_alive(name))
+        pso_remove_archive(path);
+      continue;
+    }
+    const int v = pso_archive_judge(path);
+    if (v != PSO_OK) {
+      if (v == PSO_BAD)
+        pso_remove_archive(path);
       continue;
     }
     NSError *err = nil;
@@ -6354,9 +6417,11 @@ pso_archive_init(id<MTLDevice> device) {
       [archives addObject:a];
       [a release];
     } else {
-      fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
-              err ? err.localizedDescription.UTF8String : "(no error)");
-      pso_remove_archive(path);
+      if (!pso_gone(path)) {
+        fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+                err ? err.localizedDescription.UTF8String : "(no error)");
+        pso_remove_archive(path);
+      }
     }
   }
   if (archives.count) {
