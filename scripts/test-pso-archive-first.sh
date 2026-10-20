@@ -21,7 +21,8 @@
 #            exit (idle never reached: no delta, the next run misses); the Reset hint and the
 #            backstop flush without the idle; M9: builds while a flush holds the lock (held
 #            3 s, D9MT_PSO_FLUSH_HOLD_MS) go to the serializer-less compiler, all succeed, are
-#            not captured, and miss again in the next run
+#            not captured, and miss again in the next run; S-1: a build's count comes before
+#            its unlock (every other count held 600 ms: no flush of a drained serializer)
 #   TSan     the cold, warm and part 5 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
@@ -116,6 +117,13 @@ suite() { # <label>
   check "M9: built by the serializer-less compiler, not captured" "$(sed -n 's/.*not captured (a flush held the lock): //p' "$OUT/$1-p5-m9.log")" "$lateok"
   run "$N5-m9" "$1-p5-m9b" MT_COVERAGE=0 MT_LATE_PSOS=0 -- "${SET_A[@]}"
   check "M9: those miss again in the next run" "$(stat_line "$1-p5-m9b" | sed 's/.* \([0-9]*\) misses/\1/')" "$lateok"
+
+  # S-1: every other build's count delayed 600 ms (D9MT_PSO_NOTE_DELAY_MS): counted before the
+  # unlock, no flush can come between a build and its count, so none writes a drained serializer
+  run "$N5-s1" "$1-p5-s1" MT_COVERAGE=0 D9MT_PSO_NOTE_DELAY_MS=600 MT_SETTLE_MS=2500 -- "${SET_A[@]}"
+  check "S-1: no flush of a drained serializer" "$(grep -c 'PSO archive flush failed' "$OUT/$1-p5-s1.log")" 0
+  run "$N5-s1" "$1-p5-s1b" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "S-1: next run misses" "$(stat_line "$1-p5-s1b" | sed 's/.* \([0-9]*\) misses/\1/')" 0
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"

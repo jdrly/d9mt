@@ -5960,6 +5960,8 @@ static _Atomic bool                      g_pso_pause_hint;   /* a device Reset (
 static _Atomic uint64_t                  g_pso_uncaptured;   /* builds through g_pso_fallback */
 static uint64_t                          g_pso_flush_idle_ns = 10000000000ull;
 static uint64_t                          g_pso_flush_backstop_ns = 60000000000ull;
+static unsigned                          g_pso_note_delay_ms;  /* tests: every other build, before its count */
+static _Atomic unsigned                  g_pso_note_delay_n;
 static unsigned                          g_pso_flush_hold_ms;  /* tests: the first flush, inside the write lock */
 static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: a line at exit */
 static MTL4CompilerTaskOptions          *g_pso_task_options;
@@ -6522,6 +6524,9 @@ pso_archive_init(id<MTLDevice> device) {
   const char *fback = getenv("D9MT_PSO_FLUSH_BACKSTOP_MS");
   if (fback && *fback)
     g_pso_flush_backstop_ns = (uint64_t)strtoull(fback, NULL, 10) * 1000000ull;
+  const char *ndelay = getenv("D9MT_PSO_NOTE_DELAY_MS");
+  if (ndelay && *ndelay)
+    g_pso_note_delay_ms = (unsigned)strtoul(ndelay, NULL, 10);
   const char *fhold = getenv("D9MT_PSO_FLUSH_HOLD_MS");
   if (fhold && *fhold)
     g_pso_flush_hold_ms = (unsigned)strtoul(fhold, NULL, 10);
@@ -7297,10 +7302,16 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:g_pso_task_options
                                                                                                    error:&err];
+  /* Counted before the lock is released (S-1): otherwise a flush could serialize
+   * this build in between, and the late count would make the next flush write a
+   * drained serializer. Only atomics and a signal. */
+  if (params->ret_pso) {
+    if (g_pso_note_delay_ms && (atomic_fetch_add(&g_pso_note_delay_n, 1u) & 1u))
+      usleep(g_pso_note_delay_ms * 1000u);
+    pso_note_compiled();
+  }
   pthread_rwlock_unlock(&g_pso_lock);
   params->ret_error = (obj_handle_t)[err retain];
-  if (params->ret_pso)
-    pso_note_compiled();
   [descriptor release];
   return STATUS_SUCCESS;
 }

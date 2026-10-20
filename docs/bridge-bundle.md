@@ -264,6 +264,12 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
 - **M9:** a flush held 3 s inside the write lock (`D9MT_PSO_FLUSH_HOLD_MS`, test hook) with 16 builds during it. All succeed, all 16 through the serializer-less compiler ("not captured: 16"), and the next run misses exactly those 16.
 - The harness now waits `MT_SETTLE_MS` (700) before exit, with `D9MT_PSO_FLUSH_IDLE_MS=200`.
 - The quit test (shared) exits while the flush thread or a consolidation may run.
+- **S-1** (whole-bundle review): a captured build is counted before `g_pso_lock` is released. Counted after it, a flush could serialize the build in between and reset the count; the late count then made the next flush write a drained serializer ("flush failed", and fragmented deltas taking archive-first slots). Test: `D9MT_PSO_NOTE_DELAY_MS` (test hook) holds every other count 600 ms. The old order gives 1 failed flush and 3 deltas; counting before the unlock gives 0 failures and 1 delta.
+
+**Under Wine** (results/dyn2-summary.txt, dyn3-pause.txt):
+- **Quit tests:** quitting during a consolidation or during a held flush, and exiting without an idle flush, all give rc=0, no hang and a clean next start.
+- **Pause flush while the window isn't visible:** proven. repro/pauseflush.c on the vd, in a locked session where every window reads as occluded (`occlusionState` 0x2000). With the idle flush out of reach, exactly one delta was written ≈500 ms after the build burst, and the next start had 135 hits. Minimise is seen (0x2 → 0x6 → 0x2).
+- **The transition visible → hidden:** still open. It needs an unlocked session (the same batch, ≈2 min).
 
 **The design, as reviewed:**
 
