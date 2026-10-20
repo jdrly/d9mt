@@ -22,15 +22,16 @@
 
 static const DWORD kColors[7] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff, 0xff00ffff, 0xffffffff };
 
-/* vs_3_0: dcl_position v0; dcl_texcoord v1; dcl_position o0; dcl_texcoord o1; mov o0, v0; mov o1, v1 */
+/* vs_3_0: dcl_position v0; dcl_texcoord v1; dcl_position o0; dcl_texcoord o1; mov o0, v0; mov o1, v1
+ * (o# is D3DSPR_OUTPUT = 6) */
 static const DWORD kVs[] = {
   0xFFFE0300,
   0x0200001F, 0x80000000, 0x900F0000,
   0x0200001F, 0x80000005, 0x900F0001,
-  0x0200001F, 0x80000000, 0xB00F0800,
-  0x0200001F, 0x80000005, 0xB00F0801,
-  0x02000001, 0xB00F0800, 0x90E40000,
-  0x02000001, 0xB00F0801, 0x90E40001,
+  0x0200001F, 0x80000000, 0xE00F0000,
+  0x0200001F, 0x80000005, 0xE00F0001,
+  0x02000001, 0xE00F0000, 0x90E40000,
+  0x02000001, 0xE00F0001, 0x90E40001,
   0x0000FFFF };
 /* ps_3_0: dcl_texcoord v0; dcl_2d s0; texldb r0, v0, s0; mov oC0, r0 */
 /* ps_3_0: dcl_texcoord v0; dcl_2d s0; texldl r0, v0, s0; mov oC0, r0 */
