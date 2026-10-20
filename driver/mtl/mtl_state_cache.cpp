@@ -960,7 +960,14 @@ namespace dxvk {
       m_indexBuilt = true;
       indexed = m_index.indexedCount();
       ready   = m_index.readyCount();
+      m_coverageEntries = indexed;
     }
+
+    // The prewarm can replay what the PSO archives were built from only when the file
+    // loaded whole and every entry of it is prewarmable (psoArchiveCoverage).
+    m_coverageAtLoad.store(r.status == ParseStatus::Ok && !r.corrupt && !r.truncated && !invalid
+      && !m_suspects.load() && !capped && !m_prewarmOff.load() && !m_fileDropped.load()
+      && indexed && indexed == m_db.size());
 
     m_loaded.store(true, std::memory_order_release);
     m_prewarmCond.notify_all();
@@ -1177,6 +1184,8 @@ namespace dxvk {
 
       // One line each time the queue drains (start-up, then rarely).
       const uint64_t done = m_built.load() + m_dup.load() + m_failedCount.load() + m_skipped.load();
+      if (drained && m_coverageEntries && done >= m_coverageEntries && !m_coverageSent.exchange(true))
+        m_backend->psoArchiveCoverage(m_coverageAtLoad.load() && !m_skipped.load());
       if (drained && m_prewarmLogged.exchange(done) != done) {
         Logger::info(str::format("STATECACHE prewarm t=", seconds(), "s built=", m_built.load(),
           " dup=", m_dup.load(), " failed=", m_failedCount.load(), " skipped=", m_skipped.load(),

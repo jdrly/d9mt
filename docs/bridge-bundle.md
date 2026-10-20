@@ -177,6 +177,24 @@ Cold → warm across T0 and T1 (different LC_UUIDs): the same AIR cache table, m
 
 **QoS (S4):** `QOS_CLASS_BACKGROUND`. Gate on time-to-first-frame with consolidation running (archload-style). Nothing needs the result before the next start, so it may also wait for the first pause.
 
+### Parts 3+4 review fixes (review-014/bridge-bundle-part34.md, FIX FIRST)
+
+| point | fix | test |
+|---|---|---|
+| **C-1** coverage | Consolidation only after a positive signal from the PE side: `D9MTPsoArchiveCoverage(complete)` (unix call 213, the bundle's ABI bump). The state cache sends it once its prewarm has handled every entry loaded at start. `complete` requires: the file loaded `Ok` (not new, reset by a key-signature change, corrupt or truncated), nothing invalid, suspect or capped, prewarm on, every entry prewarmable, and nothing skipped. Without the signal, or with `complete = 0`, no consolidation runs and nothing is deleted. Deltas stay up to `D9MT_PSO_MAX_ARCHIVES` files and `D9MT_PSO_MAX_MB` (512) MB, not by session count. | `test-pso-archive-first.sh`: no signal → no consolidation; signal 0 → none; signal 1 → consolidated |
+| **C-2** rename order | an archive without its `.sum`, and a `.sum` without its archive, are left alone while younger than 600 s (04e3389) | `test-pso-archive-shared.sh` young/orphan |
+| **C-3** naming and the startup lock | The consolidated archive is named by consolidation time (`c-<time>-<pid>`). A delta is dropped for being older than it by its file time, not its session start. The startup scan takes the `.consolidate` flock non-blocking; while another process holds it, that start deletes only proven damage. Rule-based deletes skip files of live pids (04e3389). | shared: stress, owner |
+| **C-4** unlinked parts | verified: after the file and its sum are unlinked, every lookup in the loaded `MTL4Archive` still hits and renders the same pixels (plain and TSan). If MTL4Archive reopened the URL, it would fail on the missing path whatever the page cache holds. | `archfirst_test check` item 6 |
+| **cost** | Consolidation never compiles: it rebuilds only descriptors a loaded archive (or this session's deltas) already holds, checked with an `MTL4Archive` lookup. A PSO no archive holds yet comes later as a delta, which the retention keeps. It runs at a pause (the window known not visible: `g_vis_observing && !VISIBLE`, R2; off with `D9MT_PSO_PAUSE_VIS=0`, M12) or after `D9MT_PSO_CONSOLIDATE_IDLE_MS` (now 120 s) without a PSO request, never at the old 10 s. | first: the cold run reports "N not archived yet"; R2 run |
+| should | Recording stops at the consolidation, and its record (which retains every MTLLibrary) is released. Only this session's deltas are loaded for the rebuild, not the archives already in `g_pso_lookup`. | code |
+| quit during consolidation | idle 0 + exit right after the builds, looped: no crash, no hang, the next start finds only sound archives (this branch still has the atexit flush) | shared: quit |
+
+**Still a gate (dynamic, game gate / quiet window):**
+- `archfirst_test time`;
+- `test-compile-mt.sh` 1700 PSOs cold/warm with archive-first on, plain + TSan, `D9MT_PSO_CONSOLIDATE_IDLE_MS=500` plus a coverage signal so that consolidation overlaps live compiles;
+- the hash suite twice;
+- psoab with a consolidation inside the steady phase (`D9MT_PSO_CONSOLIDATE_IDLE_MS=2000 D9MT_PSO_PAUSE_VIS=0`, state cache on with a loaded file so the signal comes): 0/6 worse, plus the RSS peak.
+
 ### 5. Flush at pauses, never in a build's way: waits for the re-review
 
 **A compile never waits on a flush (M9):**

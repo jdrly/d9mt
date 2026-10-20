@@ -356,6 +356,14 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
 
+  // MT_COVERAGE=1|0: what the state cache reports once its prewarm has handled every
+  // entry (D9MTPsoArchiveCoverage, unix call 213): 1 lets the bridge consolidate.
+  if (const char* c = getenv("MT_COVERAGE")) {
+    struct unixcall_generic_obj_noret cov = {};
+    cov.handle = obj_handle_t(atoi(c) ? 1 : 0);
+    g_funcs[213](&cov);
+  }
+
   // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated PSO archive
   // ("c-<time>-<pid>.mtl4archive", written once the bridge has been idle) is in place.
   if (const char* w = getenv("MT_WAIT_CONSOLIDATED")) {
@@ -415,6 +423,10 @@ int main(int argc, char** argv) {
     for (auto& r : results) out << r.first << " = " << r.second << "\n";
     printf("results recorded to %s\n", resPath.c_str());
   }
+
+  // MT_EXIT_DELAY_MS=<ms>: exit that much later (a quit while the bridge consolidates)
+  if (const char* x = getenv("MT_EXIT_DELAY_MS"))
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(x)));
 
   if (g_failures) {
     fprintf(stderr, "%d failure(s)\n", g_failures.load());

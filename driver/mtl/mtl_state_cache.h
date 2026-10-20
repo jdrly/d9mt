@@ -68,6 +68,12 @@ namespace dxvk {
     /// Urgent compile tasks queued on the worker pool.
     virtual uint32_t urgentCompilesQueued() = 0;
 
+    /// The prewarm has handled every entry loaded at start. complete: that
+    /// replayed every pipeline the PSO archives were built from (the file
+    /// loaded fine, nothing dropped, capped, rejected or skipped), so the
+    /// bridge may consolidate the archives and delete the parts it replaces.
+    virtual void psoArchiveCoverage(bool complete) { (void)complete; }
+
   protected:
 
     ~MtlStateCacheBackend() = default;
@@ -230,6 +236,9 @@ namespace dxvk {
     std::atomic<uint64_t> m_suspects = { 0u };
     std::atomic<bool>     m_prewarmOff = { false };
     std::atomic<bool>     m_fileDropped = { false };
+    std::atomic<bool>     m_coverageAtLoad = { false };
+    std::atomic<bool>     m_coverageSent = { false };
+    uint64_t              m_coverageEntries = 0u;
     std::atomic<uint32_t> m_loadTrips = { 0u };
 
     // Crash-loop guard: <file>.prewarm lists the entries whose prewarm jobs

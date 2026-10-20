@@ -29,7 +29,7 @@ check() { if [ "$2" = "$3" ]; then echo "  $1: ok ($2)"; else echo "  $1: FAIL (
 run() { # <dir> <log> <env...> -- <bins...>
   local d=$1 log=$2; shift 2
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  env MT_THREADS=2 D9MT_PSO_CONSOLIDATE_IDLE_MS=500 ${envs[@]+"${envs[@]}"} "$HARNESS" "$SO" "$d" "$@" > "$OUT/$log.log" 2>&1
+  env MT_THREADS=2 D9MT_PSO_CONSOLIDATE_IDLE_MS=500 MT_COVERAGE=1 ${envs[@]+"${envs[@]}"} "$HARNESS" "$SO" "$d" "$@" > "$OUT/$log.log" 2>&1
   local rc=$?; [ $rc -ge 128 ] && { echo "  $log: CRASH (signal $((rc - 128)))"; fails=$((fails + 1)); }
   grep -q '^FAIL' "$OUT/$log.log" && { echo "  $log: FAIL lines:"; grep '^FAIL' "$OUT/$log.log" | head -5; fails=$((fails + 1)); }
 }
@@ -41,8 +41,25 @@ consolidated() { ls "$1"/pso/os-*/ 2>/dev/null | grep -cE '^c-.*\.mtl4archive$';
 
 suite() { # <label>
   local W="$OUT/$1-w"
+  echo "[pso-first:$1] C-1: no consolidation without the state cache's coverage signal"
+  local N="$OUT/$1-nocov"
+  run "$N" "$1-nocov-seed" MT_COVERAGE=0 -- "${SET_A[@]}"
+  run "$N" "$1-nocov-unset" MT_COVERAGE= MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
+  check "no signal: no consolidation" "$(grep -c 'consolidated archive: written' "$OUT/$1-nocov-unset.log")" 0
+  run "$N" "$1-nocov-0" MT_COVERAGE=0 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
+  check "incomplete coverage: no consolidation" "$(grep -c 'consolidated archive: written' "$OUT/$1-nocov-0.log")" 0
+  check "no consolidated archive" "$(consolidated "$N")" 0
+  echo "[pso-first:$1] R2: no visibility query, no pause: a long idle means no consolidation"
+  run "$N" "$1-r2" D9MT_PSO_CONSOLIDATE_IDLE_MS=600000 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
+  check "R2: harness run not taken for a pause" "$(grep -c 'consolidated archive: written' "$OUT/$1-r2.log")" 0
+
   echo "[pso-first:$1] cold"
   run "$W" "$1-cold" MT_WAIT_CONSOLIDATED=20 -- "${SET_A[@]}"
+  na=$(sed -n 's/.*, \([0-9]*\) not archived yet$/\1/p' "$OUT/$1-cold.log")
+  echo "  cold: consolidation never compiles: ${na:-?} unflushed misses left to a later delta"
+  local cname; cname=$(ls "$W"/pso/os-*/ | grep -E '^c-.*\.mtl4archive$' | head -1)
+  local first; first=$(ls "$W"/pso/os-*/ | grep -E '^[0-9]+-' | sort | head -1)
+  echo "  cold: consolidated as $cname (named by consolidation time)"
   check "consolidated archive written" "$(grep -c 'consolidated archive: written' "$OUT/$1-cold.log")" 1
   check "archives after cold: consolidated" "$(consolidated "$W")" 1
   check "first-run misses" "$(stat_line "$1-cold" | sed 's/.* \([0-9]*\) misses/\1/')" "$(grep -o 'psos: [0-9]* ok' "$OUT/$1-cold.log" | grep -o '[0-9]*' | head -1)"

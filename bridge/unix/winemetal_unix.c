@@ -5948,8 +5948,13 @@ static NSMutableArray                   *g_pso_requested;    /* descriptors requ
 static pthread_mutex_t                   g_pso_record_mutex = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t                  g_pso_last_request; /* CLOCK_UPTIME_RAW ns */
 static _Atomic uint64_t                  g_pso_hits, g_pso_misses;
-static uint64_t                          g_pso_consolidate_idle_ns = 10000000000ull;
+static uint64_t                          g_pso_consolidate_idle_ns = 120000000000ull;
 static id<MTLDevice>                     g_pso_device;
+static NSMutableArray<NSString *>       *g_pso_session_parts; /* this session's deltas */
+static bool                              g_pso_recording;     /* until the consolidation */
+static bool                              g_pso_pause_vis = true;
+static _Atomic int                       g_pso_coverage;      /* 1 = the prewarm replayed everything */
+#define D9MT_PSO_MAX_MB 512u
 
 static NSString *
 pso_sum_text(NSString *path) {
@@ -6111,6 +6116,7 @@ pso_flush_locked(void) {
   if (g_pso_archive_first) {
     pthread_mutex_lock(&g_pso_record_mutex);
     [g_pso_parts addObject:path];
+    [g_pso_session_parts addObject:path];
     pthread_mutex_unlock(&g_pso_record_mutex);
   }
 }
@@ -6146,9 +6152,14 @@ pso_consolidate(void) {
       close(lockFd);
     return;
   }
+  /* The record is final from here: recording stops, and its memory (it retains
+   * every MTLLibrary the session used) goes once the rebuild is done. */
   pthread_mutex_lock(&g_pso_record_mutex);
-  NSArray *requested = [[g_pso_requested copy] autorelease];
+  NSArray *requested = [g_pso_requested autorelease];
+  g_pso_requested = nil;
+  g_pso_recording = false;
   NSArray<NSString *> *parts = [[g_pso_parts copy] autorelease];
+  NSArray<NSString *> *sessionParts = [[g_pso_session_parts copy] autorelease];
   pthread_mutex_unlock(&g_pso_record_mutex);
   /* Nothing new and at most one archive: rebuilding would only drop what this
    * session didn't use. */
@@ -6158,8 +6169,10 @@ pso_consolidate(void) {
     return;
   }
 
+  /* The archives loaded at start are already in g_pso_lookup: load only this
+   * session's deltas. */
   NSMutableArray *lookup = [NSMutableArray arrayWithArray:g_pso_lookup ?: @[]];
-  for (NSString *path in parts) {
+  for (NSString *path in sessionParts) {
     if ([lookup count] >= D9MT_PSO_MAX_ARCHIVES)
       break;
     id<MTL4Archive> a = [g_pso_device newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
@@ -6179,9 +6192,26 @@ pso_consolidate(void) {
   [cd release];
   MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
   opt.lookupArchives = lookup;
-  unsigned built = 0u;
+  /* Never a backend compile: only what an archive already holds is rebuilt
+   * (through the serializer, so it's captured); a PSO no archive holds yet is a
+   * miss of this session still waiting in the game's serializer and comes in a
+   * later delta, which the retention keeps. */
+  unsigned built = 0u, notArchived = 0u;
   for (MTL4RenderPipelineDescriptor *d in compiler ? requested : @[]) {
     @autoreleasepool {
+      bool held = false;
+      for (id<MTL4Archive> a in lookup) {
+        id<MTLRenderPipelineState> probe = [a newRenderPipelineStateWithDescriptor:d error:nil];
+        if (probe) {
+          [probe release];
+          held = true;
+          break;
+        }
+      }
+      if (!held) {
+        notArchived++;
+        continue;
+      }
       id<MTLRenderPipelineState> pso = [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
       if (pso) {
         built++;
@@ -6191,8 +6221,10 @@ pso_consolidate(void) {
   }
   [opt release];
 
+  /* Named by consolidation time, not session start (C-3): a long session's
+   * consolidation must sort newer than one made earlier by a later session. */
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
-    [NSString stringWithFormat:@"c-%@.mtl4archive", g_pso_session]];
+    [NSString stringWithFormat:@"c-%010llu-%d.mtl4archive", (unsigned long long)time(NULL), (int)getpid()]];
   NSString *tmp = [path stringByAppendingString:@".tmp"];
   NSString *sumTmp = [path stringByAppendingString:@".sum.tmp"];
   bool ok = false;
@@ -6208,8 +6240,8 @@ pso_consolidate(void) {
     for (NSString *part in parts)
       if (!pso_owner_alive(part.lastPathComponent))
         pso_remove_archive(part);
-    fprintf(stderr, "d9mt: PSO archives consolidated: %u pipelines into %s, %lu replaced\n", built,
-            path.lastPathComponent.UTF8String, (unsigned long)parts.count);
+    fprintf(stderr, "d9mt: PSO archives consolidated: %u pipelines into %s, %lu replaced, %u not archived yet\n",
+            built, path.lastPathComponent.UTF8String, (unsigned long)parts.count, notArchived);
   } else {
     unlink(tmp.fileSystemRepresentation);
     unlink(sumTmp.fileSystemRepresentation);
@@ -6223,6 +6255,18 @@ pso_consolidate(void) {
   close(lockFd);
 }
 
+/* The game window is known not to be visible: a pause. Not before AppKit has
+ * been asked once (R2): g_vis_flags starts at 0. */
+static bool
+pso_paused(void) {
+  return g_pso_pause_vis && atomic_load(&g_vis_observing)
+      && !(atomic_load(&g_vis_flags) & WMT_VISIBILITY_VISIBLE);
+}
+
+/* Consolidation runs once, and only after the state cache reported that its
+ * prewarm replayed every recorded pipeline (C-1: otherwise deleting the parts
+ * would drop PSOs of content this session didn't draw), at a pause or after a
+ * long idle (no PSO request for D9MT_PSO_CONSOLIDATE_IDLE_MS, 120 s). */
 static void *
 pso_consolidate_thread(void *arg) {
   (void)arg;
@@ -6231,16 +6275,29 @@ pso_consolidate_thread(void *arg) {
   for (;;) {
     const uint64_t last = atomic_load(&g_pso_last_request);
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (last && now - last >= g_pso_consolidate_idle_ns) {
+    if (atomic_load(&g_pso_coverage) == 1 && last
+     && (pso_paused() || now - last >= g_pso_consolidate_idle_ns)) {
       @autoreleasepool {
         pso_consolidate();
       }
       return NULL;
     }
-    const uint64_t wait = last ? g_pso_consolidate_idle_ns - (now - last) : 1000000000ull;
+    uint64_t wait = 1000000000ull;
+    if (last && now - last < g_pso_consolidate_idle_ns && g_pso_consolidate_idle_ns - (now - last) < wait)
+      wait = g_pso_consolidate_idle_ns - (now - last);
     struct timespec ts = { (time_t)(wait / 1000000000ull), (long)(wait % 1000000000ull) };
     nanosleep(&ts, NULL);
   }
+}
+
+/* PE side (the state cache) once its prewarm has handled every loaded entry:
+ * handle = 1 if that replayed everything the archives were built from (the file
+ * loaded fine and nothing was dropped, capped, rejected or skipped), else 0. */
+static NTSTATUS
+_D9MTPsoArchiveCoverage(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  atomic_store(&g_pso_coverage, params->handle ? 1 : -1);
+  return STATUS_SUCCESS;
 }
 
 static void
@@ -6285,6 +6342,9 @@ pso_archive_init(id<MTLDevice> device) {
   const char *idle = getenv("D9MT_PSO_CONSOLIDATE_IDLE_MS");
   if (idle && *idle)
     g_pso_consolidate_idle_ns = (uint64_t)strtoull(idle, NULL, 10) * 1000000ull;
+  /* M12: benchmarks on an occluded virtual display turn the pause trigger off */
+  const char *pv = getenv("D9MT_PSO_PAUSE_VIS");
+  g_pso_pause_vis = !(pv && !strcmp(pv, "0"));
 
   NSString *base;
   if (env) {
@@ -6342,7 +6402,13 @@ pso_archive_init(id<MTLDevice> device) {
   NSMutableArray *archives = [NSMutableArray array];
   NSMutableArray<NSString *> *parts = [NSMutableArray array];
   if (g_pso_archive_first) {
-    /* The newest consolidated archive, then every delta newer than it, newest first. */
+    /* The newest consolidated archive, then every delta written after it (by
+     * file time: C-3), newest first, up to D9MT_PSO_MAX_ARCHIVES files and
+     * D9MT_PSO_MAX_MB. While another process consolidates (it holds the flock),
+     * this start deletes only proven damage. */
+    const int lockFd = open([dir stringByAppendingPathComponent:@".consolidate"].fileSystemRepresentation,
+                            O_RDWR | O_CREAT, 0644);
+    const bool ruleDeletes = lockFd >= 0 && !flock(lockFd, LOCK_EX | LOCK_NB);
     NSString *consolidated = nil;
     for (NSString *name in names) {
       if ([name hasPrefix:@"c-"]) {
@@ -6352,29 +6418,40 @@ pso_archive_init(id<MTLDevice> device) {
           continue;
         if (!consolidated && v == PSO_OK)
           consolidated = name;
-        else if (v == PSO_BAD || !pso_owner_alive(name))
+        else if (v == PSO_BAD || (ruleDeletes && !pso_owner_alive(name)))
           pso_remove_archive(path);
       }
     }
-    NSString *since = consolidated ? [consolidated substringWithRange:NSMakeRange(2u, 10u)] : nil;
+    const time_t since = consolidated && consolidated.length >= 12u
+      ? (time_t)strtoll([consolidated substringWithRange:NSMakeRange(2u, 10u)].UTF8String, NULL, 10) : 0;
     NSMutableArray<NSString *> *keep = [NSMutableArray array];
     if (consolidated)
       [keep addObject:consolidated];
+    uint64_t bytes = 0u;
     for (NSString *name in names) {
       if ([name hasPrefix:@"c-"])
         continue;
       NSString *path = [dir stringByAppendingPathComponent:name];
-      if ((since && name.length >= 10u && [[name substringToIndex:10u] compare:since] == NSOrderedAscending)
-       || keep.count >= D9MT_PSO_MAX_ARCHIVES) {
-        if (!pso_owner_alive(name))
+      struct stat st;
+      const bool have = !stat(path.fileSystemRepresentation, &st);
+      if (have && ((since && st.st_mtime < since) || keep.count >= D9MT_PSO_MAX_ARCHIVES
+                   || bytes + (uint64_t)st.st_size > (uint64_t)D9MT_PSO_MAX_MB << 20)) {
+        if (ruleDeletes && !pso_owner_alive(name))
           pso_remove_archive(path);
         continue;
       }
       const int v = pso_archive_judge(path);
       if (v == PSO_BAD)
         pso_remove_archive(path);
-      if (v == PSO_OK)
+      if (v == PSO_OK) {
         [keep addObject:name];
+        bytes += have ? (uint64_t)st.st_size : 0u;
+      }
+    }
+    if (lockFd >= 0) {
+      if (ruleDeletes)
+        flock(lockFd, LOCK_UN);
+      close(lockFd);
     }
     for (NSString *name in keep) {
       NSString *path = [dir stringByAppendingPathComponent:name];
@@ -6431,7 +6508,9 @@ pso_archive_init(id<MTLDevice> device) {
   if (g_pso_archive_first) {
     g_pso_lookup = [archives copy];
     g_pso_parts = [parts retain];
+    g_pso_session_parts = [[NSMutableArray alloc] init];
     g_pso_requested = [[NSMutableArray alloc] init];
+    g_pso_recording = true;
     g_pso_device = [device retain];
   }
 
@@ -6955,7 +7034,8 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
    * takes neither g_pso_lock nor a pso_note_compiled() count (M6). */
   if (g_pso_archive_first) {
     pthread_mutex_lock(&g_pso_record_mutex);
-    [g_pso_requested addObject:descriptor];
+    if (g_pso_recording)
+      [g_pso_requested addObject:descriptor];
     pthread_mutex_unlock(&g_pso_record_mutex);
     atomic_store(&g_pso_last_request, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     for (id<MTL4Archive> a in g_pso_lookup) {
@@ -7417,6 +7497,7 @@ D9MT_POOLED(thunk_AirconvUnsupportedGetArgumentsInfo)
 D9MT_POOLED(thunk_AirconvUnsupportedInitialize)
 D9MT_POOLED(thunk_D9MTAirCompile)
 D9MT_POOLED(thunk_D9MTAirFree)
+D9MT_POOLED(_D9MTPsoArchiveCoverage)
 D9MT_POOLED(thunk_D9MTAirVersion)
 D9MT_POOLED(thunk_DXSOCompile)
 D9MT_POOLED(thunk_DXSODestroy)
@@ -7652,6 +7733,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_D9MTPsoArchiveCoverage_pooled,
 
 };
 
@@ -7872,6 +7954,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_D9MTPsoArchiveCoverage_pooled,
 
 };
 #endif

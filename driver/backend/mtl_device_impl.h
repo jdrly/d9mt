@@ -129,6 +129,7 @@ namespace dxvk::backend {
     bool psoSucceeded(MtlCompileTask* pPso) override;
     uint64_t psoBuildNs(MtlCompileTask* pPso) override;
     uint32_t urgentCompilesQueued() override;
+    void psoArchiveCoverage(bool complete) override;
 
     Rc<MtlContext> createContext() override;
 

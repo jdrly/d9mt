@@ -278,6 +278,10 @@ namespace dxvk::backend {
     return m_compileWorkers->urgentQueued();
   }
 
+  void MtlDeviceImpl::psoArchiveCoverage(bool complete) {
+    D9MTPsoArchiveCoverage(complete);
+  }
+
   MtlDeviceImpl::~MtlDeviceImpl() {
     // Normally done by ~D3D9DeviceEx; this covers a device whose D3D9 side
     // never got that far (e.g. its constructor threw after creating the

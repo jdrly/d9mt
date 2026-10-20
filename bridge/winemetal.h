@@ -2245,6 +2245,11 @@ WINEMETAL_API void MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawab
 
 WINEMETAL_API uint64_t MetalView_visibility(obj_handle_t view);
 
+/* d9mt PSO archives: the state cache's prewarm has handled every loaded entry;
+ * complete = it replayed everything the archives were built from, so the
+ * bridge may consolidate them and delete the parts. */
+WINEMETAL_API void D9MTPsoArchiveCoverage(bool complete);
+
 WINEMETAL_API void MTL4RenderCommandEncoder_setVisibilityResultMode(
     obj_handle_t encoder, uint32_t mode, uint64_t offset);
 
