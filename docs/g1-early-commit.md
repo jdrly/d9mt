@@ -240,11 +240,15 @@ What a carry does:
   (a wait on a serial still unsubmitted after a whole 2 s slice): suite.sh, runexe.sh and
   bench-multi.sh treat it as FAIL.
 - **(c)** Waits on unsubmitted serials (`PROF-UNSUB` lines and PROF `unsubWait=`, with
-  D9MT_PROFILE): over the hash suite, G1 default and forced count no more than G1 off. The
-  longest stays in single-digit ms, never near 2 s. Without a carry they come from the older
-  WaitForResource race (§4.6); a carry holding back a submit that someone waits on would
-  show here as more or longer waits.
+  D9MT_PROFILE): over the hash suite, G1 default and forced count no more than G1 off, and
+  the longest is at base's level (G1 off), never near 2 s. Without a carry they come from the
+  older WaitForResource race (§4.6); a carry holding back a submit that someone waits on
+  would show here as more or longer waits.
   - The counter's positive test: `submission_tracker_test` `unsubmittedWait()`.
+  - Result (a482510, 2026-10-21): 306 / 307 / 306 waits (off / default / forced), the same
+    per test except `code_xfer_order` (19/20/19). The longest are 31.7 / 31.4 / 31.5 ms, all in
+    `code_split_load`, `code_vtf_alias` and `code_vtf_fb`, at the same serials with G1 off
+    (pre-existing, in PLAN for later). Everything else is ≤6.3 ms. No 2 s line.
 - **Hash suite** (33 programs) with G1 on, with `D9MT_EARLY_COMMIT=always`, and with it off:
   all frame-identical to base, also with `MTL_DEBUG_LAYER=1` (two sequential command buffers
   per allocator).
