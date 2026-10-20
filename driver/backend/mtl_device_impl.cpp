@@ -608,12 +608,36 @@ namespace dxvk::backend {
     return new MtlBackendEvent();
   }
 
+  // Field by field: the padding after the bools isn't initialized by the frontend.
+  static void dssWords(const MtlDepthStencilState& ds, uint32_t (&w)[16]) {
+    const MtlStencilState* s[2] = { &ds.front, &ds.back };
+    w[0] = uint32_t(ds.depthCompareOp);
+    w[1] = uint32_t(ds.depthTest) | uint32_t(ds.depthWrite) << 1 | uint32_t(ds.stencilEnable) << 2;
+    for (uint32_t i = 0u; i < 2u; i++) {
+      w[2 + 6 * i] = uint32_t(s[i]->failOp);
+      w[3 + 6 * i] = uint32_t(s[i]->depthFailOp);
+      w[4 + 6 * i] = uint32_t(s[i]->passOp);
+      w[5 + 6 * i] = uint32_t(s[i]->compareOp);
+      w[6 + 6 * i] = s[i]->readMask;
+      w[7 + 6 * i] = s[i]->writeMask;
+    }
+    w[14] = w[15] = 0u;
+  }
+
   size_t MtlDeviceImpl::DssHash::operator () (const MtlDepthStencilState& ds) const {
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(&ds);
+    uint32_t w[16];
+    dssWords(ds, w);
     uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0u; i < sizeof(ds); i++)
-      h = (h ^ p[i]) * 0x100000001b3ull;
+    for (uint32_t x : w)
+      h = (h ^ x) * 0x100000001b3ull;
     return size_t(h ^ (h >> 32));
+  }
+
+  bool MtlDeviceImpl::DssEq::operator () (const MtlDepthStencilState& a, const MtlDepthStencilState& b) const {
+    uint32_t wa[16], wb[16];
+    dssWords(a, wa);
+    dssWords(b, wb);
+    return !std::memcmp(wa, wb, sizeof(wa));
   }
 
   obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {

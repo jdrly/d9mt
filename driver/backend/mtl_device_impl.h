@@ -226,8 +226,7 @@ namespace dxvk::backend {
     struct SamplerKeyHash { size_t operator () (const MtlSamplerKey& k) const { return k.hash(); } };
     struct SamplerKeyEq   { bool operator () (const MtlSamplerKey& a, const MtlSamplerKey& b) const { return a.eq(b); } };
     struct DssHash { size_t operator () (const MtlDepthStencilState& ds) const; };
-    struct DssEq   { bool operator () (const MtlDepthStencilState& a, const MtlDepthStencilState& b) const {
-      return !std::memcmp(&a, &b, sizeof(a)); } };
+    struct DssEq   { bool operator () (const MtlDepthStencilState& a, const MtlDepthStencilState& b) const; };
 
     std::mutex m_samplerMutex;
     std::unordered_map<MtlSamplerKey, Rc<MtlSamplerState>, SamplerKeyHash, SamplerKeyEq> m_samplerCache;

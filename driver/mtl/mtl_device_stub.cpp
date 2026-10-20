@@ -12,16 +12,34 @@
 
 namespace dxvk {
 
+  // Field by field, not over the bytes: the padding after compareEnable is not initialized
+  // by whoever fills the key, so equal keys could hash and compare different.
+  static uint32_t floatBits(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    return u;
+  }
+
   size_t MtlSamplerKey::hash() const {
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(this);
+    const uint32_t words[] = {
+      uint32_t(magFilter), uint32_t(minFilter), uint32_t(mipMode),
+      uint32_t(addressU), uint32_t(addressV), uint32_t(addressW), maxAnisotropy,
+      floatBits(mipLodBias), floatBits(minLod), floatBits(maxLod),
+      uint32_t(compareOp), uint32_t(compareEnable), uint32_t(borderColor) };
     uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < sizeof(*this); i++)
-      h = (h ^ p[i]) * 0x100000001b3ull;
+    for (uint32_t w : words)
+      h = (h ^ w) * 0x100000001b3ull;
     return size_t(h ^ (h >> 32));
   }
 
   bool MtlSamplerKey::eq(const MtlSamplerKey& other) const {
-    return !std::memcmp(this, &other, sizeof(*this));
+    return magFilter == other.magFilter && minFilter == other.minFilter && mipMode == other.mipMode
+        && addressU == other.addressU && addressV == other.addressV && addressW == other.addressW
+        && maxAnisotropy == other.maxAnisotropy
+        && floatBits(mipLodBias) == floatBits(other.mipLodBias)
+        && floatBits(minLod) == floatBits(other.minLod) && floatBits(maxLod) == floatBits(other.maxLod)
+        && compareOp == other.compareOp && compareEnable == other.compareEnable
+        && borderColor == other.borderColor;
   }
 
   const char* memCategoryName(MtlMemCategory c) {
