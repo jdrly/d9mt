@@ -192,7 +192,7 @@ static obj_handle_t buildPso(obj_handle_t compiler, obj_handle_t vs, obj_handle_
   info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
   for (uint32_t i = 0; i < 2; i++) {
     info.colors[i].pixel_format = formats[(variant + i) % 3];
-    info.colors[i].write_mask = variant >= 4u ? 0x7 : 0xf;   // 4..7: the late PSOs
+    info.colors[i].write_mask = variant >= 8u ? 0x3 : variant >= 4u ? 0x7 : 0xf;   // 4..7, 8..11: the late PSOs
     info.colors[i].blending_enabled = (variant >> 1) & 1;
     info.colors[i].rgb_blend_operation = WMTBlendOperationAdd;
     info.colors[i].alpha_blend_operation = WMTBlendOperationAdd;
@@ -391,6 +391,20 @@ int main(int argc, char** argv) {
       }
     }
     printf("late psos: %u ok, %u failed\n", ok, fail);
+  }
+  // MT_LATE2_PSOS=<ms>: that much later again, variants 8..11 (the same functions)
+  if (const char* l = getenv("MT_LATE2_PSOS")) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(l)));
+    unsigned ok = 0, fail = 0;
+    for (auto& vs : shaders) {
+      if (vs.isPs || !vs.ok) continue;
+      for (auto& ps : shaders) {
+        if (!ps.isPs || !ps.ok) continue;
+        for (uint32_t v = 8; v < 12; v++)
+          (buildPso(compiler, vs.library, ps.library, v) ? ok : fail)++;
+      }
+    }
+    printf("late2 psos: %u ok, %u failed\n", ok, fail);
   }
 
   // MT_HINT=1: the PE side's pause hint (a device Reset: D9MTPsoPauseHint, unix call 214)

@@ -5955,7 +5955,7 @@ static _Atomic bool                      g_pso_pause_hint;   /* a device Reset (
 static _Atomic uint64_t                  g_pso_uncaptured;   /* builds through g_pso_fallback */
 static uint64_t                          g_pso_flush_idle_ns = 10000000000ull;
 static uint64_t                          g_pso_flush_backstop_ns = 60000000000ull;
-static unsigned                          g_pso_flush_hold_ms;  /* tests: inside the write lock */
+static unsigned                          g_pso_flush_hold_ms;  /* tests: the first flush, inside the write lock */
 static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: a line at exit */
 static MTL4CompilerTaskOptions          *g_pso_task_options;
 static NSString                         *g_pso_dir;
@@ -6199,8 +6199,10 @@ pso_flush_thread(void *arg) {
           struct timespec ts = { 0, 50000000 };
           nanosleep(&ts, NULL);
         }
-        if (g_pso_flush_hold_ms)
+        if (g_pso_flush_hold_ms) {   /* the first flush only */
           usleep(g_pso_flush_hold_ms * 1000u);
+          g_pso_flush_hold_ms = 0u;
+        }
         @autoreleasepool {
           pso_flush_locked();
         }

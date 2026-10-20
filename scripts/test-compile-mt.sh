@@ -22,6 +22,8 @@ DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 # MT_BINS="a.bin b.bin" limits the shader set (all of air/tests/bin by default)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
 
+# nothing is flushed at exit (bundle part 5): time for the cold run's big flush
+export MT_SETTLE_MS="${MT_SETTLE_MS:-5000}"
 run_pair() { # <harness> <winemetal.so> <workdir>
   rm -rf "$3"; mkdir -p "$3"
   echo "--- $(basename "$1"): cold"
