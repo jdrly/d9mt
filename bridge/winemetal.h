@@ -279,10 +279,16 @@ struct WMTSamplerInfo {
   bool normalized_coords;
   bool lod_average;
   bool support_argument_buffers;
+  /* 1: lod_bias is set (MTLSamplerDescriptor.lodBias, macOS 26). Was padding: a caller built
+     before lod_bias zeroes it (callers must zero the whole struct), so its 32-byte struct is
+     never read past gpu_resource_id. */
+  uint8_t lod_bias_present;
   uint64_t gpu_resource_id;
+  float lod_bias;              /* S4.6 in Metal: [-16, 15.984], 1/64 steps */
+  uint32_t padding;
 };
 
-STATIC_ASSERT(sizeof(WMTSamplerInfo) == 32);
+STATIC_ASSERT(sizeof(WMTSamplerInfo) == 40);
 
 WINEMETAL_API obj_handle_t MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info);
 

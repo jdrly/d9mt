@@ -481,6 +481,8 @@ namespace dxvk::backend {
         return entry->second;
     }
 
+    // Callers must zero the struct: the bridge reads lod_bias only with lod_bias_present set
+    // (an older caller's struct ends before it).
     WMTSamplerInfo samplerInfo = {};
     samplerInfo.min_filter = WMTSamplerMinMagFilter(key.minFilter);
     samplerInfo.mag_filter = WMTSamplerMinMagFilter(key.magFilter);
@@ -497,8 +499,26 @@ namespace dxvk::backend {
     samplerInfo.max_anisotroy = key.maxAnisotropy;
     samplerInfo.normalized_coords = true;
     samplerInfo.support_argument_buffers = true;
+    // D3DSAMP_MIPMAPLODBIAS + d3d9.samplerLodBias, quantised to Metal's 1/64 in the key
+    // (docs/sampler-lod-bias.md).
+    samplerInfo.lod_bias_present = key.mipLodBias != 0.0f;
+    samplerInfo.lod_bias = key.mipLodBias;
 
     obj_handle_t handle = MTLDevice_newSamplerState(m_device.handle(), &samplerInfo);
+
+    if (!handle && samplerInfo.lod_bias_present) {
+      // Every distinct bias is its own sampler, and argument-buffer samplers are limited:
+      // rather a sampler without the bias than none.
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        Logger::warn(str::format("MtlDeviceImpl: sampler with LOD bias ", key.mipLodBias,
+          " failed (", m_samplerCache.size(), " samplers): using bias 0"));
+      }
+      samplerInfo.lod_bias_present = 0u;
+      samplerInfo.lod_bias = 0.0f;
+      handle = MTLDevice_newSamplerState(m_device.handle(), &samplerInfo);
+    }
 
     if (!handle) {
       Logger::err("MtlDeviceImpl: createSampler failed");
@@ -511,6 +531,10 @@ namespace dxvk::backend {
     sampler->gpuResourceId = samplerInfo.gpu_resource_id;
 
     std::lock_guard<std::mutex> lock(m_samplerMutex);
+    // Metal limits the samplers argument buffers can reference (maxArgumentBufferSamplerCount,
+    // 1024 or more on Apple GPUs); the cache never evicts. Say so before it runs out.
+    if (const size_t n = m_samplerCache.size() + 1u; n == 256u || n == 512u || n == 768u || n == 1000u)
+      Logger::warn(str::format("MtlDeviceImpl: ", n, " distinct sampler states"));
     return m_samplerCache.emplace(key, sampler).first->second;
   }
 

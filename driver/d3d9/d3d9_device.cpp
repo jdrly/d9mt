@@ -7049,6 +7049,13 @@ namespace dxvk {
         if (m_d3d9Options.clampNegativeLodBias)
           lodBias = std::max(lodBias, 0.0f);
 
+        // Metal's sampler bias is S4.6 fixed point, [-16, 15.984] in 1/64 steps: quantise here,
+        // so the key, and with it the number of distinct samplers, matches what Metal can tell
+        // apart (DXVK keys 1/256). +0.0f turns -0 into 0; NaN becomes 0.
+        if (!(lodBias == lodBias))
+          lodBias = 0.0f;
+        lodBias = std::round(std::clamp(lodBias, -16.0f, 1023.0f / 64.0f) * 64.0f) / 64.0f + 0.0f;
+
         key.mipLodBias = lodBias;
         key.minLod     = float(cState.maxMipLevel);
         key.maxLod     = 16.0f;

@@ -6,6 +6,11 @@
  * fixed function, then the same through an SM3 shader with texldb (bias from the coordinate's
  * w, D3D9 adds the sampler's):
  *   F 64x64 px texldb w=1, sampler bias 0 -> mip 1    G texldb w=1, sampler bias +1 -> mip 2
+ *   H texldl LOD 1 + sampler bias +1: reported, not checked (Vulkan/DXVK adds the bias: mip 2;
+ *     if Metal gives mip 1, that is documented, no IR fix; docs/sampler-lod-bias.md T-2)
+ *   I 64x64 px, MAXMIPLEVEL 2, bias -2 -> stays at mip 2 (T-4)
+ *   T-5: 200 draws, each with its own bias in 1/64 steps (200 sampler states): every quad drawn
+ *     (no sampler creation failure: the log must not say "createSampler failed"). 
  * The centre of each quad is read back (GetRenderTargetData) and checked against the
  * expected mip's colour: "lodbias: N checks, M failed" plus a FAIL line per wrong quad. Base
  * fails B, C, E and G (the sampler bias never reaches Metal). */
@@ -28,6 +33,14 @@ static const DWORD kVs[] = {
   0x02000001, 0xB00F0801, 0x90E40001,
   0x0000FFFF };
 /* ps_3_0: dcl_texcoord v0; dcl_2d s0; texldb r0, v0, s0; mov oC0, r0 */
+/* ps_3_0: dcl_texcoord v0; dcl_2d s0; texldl r0, v0, s0; mov oC0, r0 */
+static const DWORD kPsL[] = {
+  0xFFFF0300,
+  0x0200001F, 0x80000005, 0x900F0000,
+  0x0200001F, 0x90000000, 0xA00F0800,
+  0x0300005F, 0x800F0000, 0x90E40000, 0xA0E40800,
+  0x02000001, 0x800F0800, 0x80E40000,
+  0x0000FFFF };
 static const DWORD kPs[] = {
   0xFFFF0300,
   0x0200001F, 0x80000005, 0x900F0000,
@@ -89,14 +102,15 @@ int main(void) {
     for (UINT y = 0; y < dim; y++) for (UINT x = 0; x < dim; x++) ((DWORD *)((char *)lr.pBits + y * lr.Pitch))[x] = kColors[l];
     IDirect3DTexture9_UnlockRect(tex, l);
   }
-  IDirect3DVertexShader9 *vs = NULL; IDirect3DPixelShader9 *ps = NULL; IDirect3DVertexDeclaration9 *decl = NULL;
+  IDirect3DVertexShader9 *vs = NULL; IDirect3DPixelShader9 *ps = NULL, *psL = NULL; IDirect3DVertexDeclaration9 *decl = NULL;
   IDirect3DDevice9_CreateVertexShader(dev, kVs, &vs);
   IDirect3DDevice9_CreatePixelShader(dev, kPs, &ps);
+  IDirect3DDevice9_CreatePixelShader(dev, kPsL, &psL);
   static const D3DVERTEXELEMENT9 el[] = {
     { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
     { 0, 16, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
   IDirect3DDevice9_CreateVertexDeclaration(dev, el, &decl);
-  if (!vs || !ps || !decl) { printf("FAIL shaders\n"); return 1; }
+  if (!vs || !ps || !psL || !decl) { printf("FAIL shaders\n"); return 1; }
 
   IDirect3DSurface9 *bb = NULL, *sys = NULL;
   IDirect3DDevice9_GetRenderTarget(dev, 0, &bb);
@@ -124,6 +138,17 @@ int main(void) {
     IDirect3DDevice9_SetVertexShader(dev, vs); IDirect3DDevice9_SetPixelShader(dev, ps);
     bias(dev, 0.0f);  quadSM3(dev, 0, 120, 64, 320, 240, 1.0f);   /* F */
     bias(dev, 1.0f);  quadSM3(dev, 64, 120, 64, 320, 240, 1.0f);  /* G */
+    IDirect3DDevice9_SetPixelShader(dev, psL);
+    bias(dev, 1.0f);  quadSM3(dev, 128, 120, 64, 320, 240, 1.0f); /* H: texldl LOD 1 */
+    IDirect3DDevice9_SetVertexShader(dev, NULL); IDirect3DDevice9_SetPixelShader(dev, NULL);
+    IDirect3DDevice9_SetFVF(dev, D3DFVF_XYZRHW | D3DFVF_TEX1);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAXMIPLEVEL, 2);
+    bias(dev, -2.0f); quadFF(dev, 192, 120, 64);  /* I */
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAXMIPLEVEL, 0);
+    for (int i = 0; i < 200; i++) {               /* T-5 */
+      bias(dev, -1.5f + (float)i / 64.0f);
+      quadFF(dev, (float)(i % 40) * 8.0f, 200.0f + (float)(i / 40) * 8.0f, 4);
+    }
     bias(dev, 0.0f);
     IDirect3DDevice9_EndScene(dev);
     if (frame == 0) {
@@ -137,6 +162,19 @@ int main(void) {
         check("E minified bias -1", &lr, 40, 88, 1);
         check("F texldb +1", &lr, 32, 152, 1);
         check("G texldb +1, sampler +1", &lr, 96, 152, 2);
+        check("I MAXMIPLEVEL 2, bias -2", &lr, 224, 152, 2);
+        {
+          DWORD h = ((DWORD *)((char *)lr.pBits + 152 * lr.Pitch))[160] & 0xffffff;
+          int mip = -1;
+          for (int m = 0; m < 7; m++) if ((kColors[m] & 0xffffff) == h) mip = m;
+          printf("INFO lodbias texldl LOD 1 + sampler bias +1 -> mip %d (DXVK/Vulkan: 2)\n", mip);
+        }
+        for (int i = 0; i < 200; i++) {
+          int x = (i % 40) * 8 + 2, y = 200 + (i / 40) * 8 + 2;
+          DWORD px = ((DWORD *)((char *)lr.pBits + y * lr.Pitch))[x] & 0xffffff;
+          g_checks++;
+          if (px == 0x181828) { g_fail++; printf("FAIL lodbias T-5 quad %d (bias %.4f) not drawn\n", i, -1.5 + i / 64.0); }
+        }
         IDirect3DSurface9_UnlockRect(sys);
       }
       printf("lodbias: %d checks, %d failed\n", g_checks, g_fail);
