@@ -72,7 +72,7 @@ namespace dxvk::backend {
     }
 
     void recreate(const MtlPresenterDesc& desc) override {
-      { std::lock_guard<std::mutex> lock(m_descMutex);
+      { std::lock_guard<dxvk::mutex> lock(m_descMutex);
         m_desc = desc;
       }
       // A parked drawable has the old size/format.
@@ -84,7 +84,7 @@ namespace dxvk::backend {
       bool vsync = syncInterval != 0u;
 
       if (m_desc.vsync != vsync) {
-        { std::lock_guard<std::mutex> lock(m_descMutex);
+        { std::lock_guard<dxvk::mutex> lock(m_descMutex);
           m_desc.vsync = vsync;
         }
         applyProps(vsync ? "vsync on" : "vsync off");
@@ -141,7 +141,7 @@ namespace dxvk::backend {
     MtlAcquiredDrawable acquireNextImage(uint64_t frameId) override {
       // CS thread; m_desc is written on the app thread (recreate, setSyncInterval).
       MtlPresenterDesc desc;
-      { std::lock_guard<std::mutex> lock(m_descMutex);
+      { std::lock_guard<dxvk::mutex> lock(m_descMutex);
         desc = m_desc;
       }
       MtlAcquiredDrawable image = {};
@@ -251,7 +251,7 @@ namespace dxvk::backend {
 
     Rc<MtlDevice>    m_device;
     MtlPresenterDesc m_desc;      // written on the app thread only; m_descMutex for the CS reader
-    std::mutex       m_descMutex;
+    dxvk::mutex      m_descMutex;
     MtlDeviceImpl*   m_backend   = nullptr;
     obj_handle_t     m_wmtDevice = 0u;
     obj_handle_t     m_view      = 0u;
