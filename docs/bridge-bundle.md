@@ -454,17 +454,18 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Cost:** one more serializer-attached compiler (≈0 MB without content: `attr`). The code is about part 5's size.
 - **Gate:** the cold-session peak, uncaptured = 0, and psoab's new phase.
 
-### 7. MTL4 commit feedback errors as a log line: code on bridge/commit-feedback (built, not run; after #11's psoab gate)
+### 7. MTL4 commit feedback errors as a log line: code on bridge/commit-feedback (tests pass; the cost A/B in window A2)
 
 **Why.** Jan's Cartel Market freeze on 2026-10-21 was a real GPU hang, followed by the WindowServer watchdog and a logout (field-reports/20261021-jan-freeze/ANALYSIS.md). Nothing in wine.log could tell a timeout from a page fault. The unified log only had `IOGPUMetalError: <private>`, so the hang was inferred from timing. Metal 4 gives the cause to whoever asks. The proposal is field-reports/20261021-jan-freeze/BRIDGE-COMMIT-FEEDBACK.md.
 
 **The API, checked against the macOS 26 SDK** (MTL4CommandQueue.h, MTL4CommitFeedback.h, MTLCommandBuffer.h):
 - `[MTL4CommandQueue commit:count:options:]` takes an `MTL4CommitOptions`, and `addFeedbackHandler:` registers a `^(id<MTL4CommitFeedback>)` block.
 - The feedback has `error` (`MTLCommandBufferErrorDomain`: Internal 1, **Timeout 2, PageFault 3**, AccessRevoked 4, NotPermitted 7, OutOfMemory 8, **InvalidResource 9**) and `GPUStartTime` / `GPUEndTime`.
-- `MTL4CommitOptions` is "not thread-safe if modified from several threads". The bridge builds one, adds the handler once under `dispatch_once`, and only passes it from then on.
+- `MTL4CommitOptions` is "not thread-safe if modified from several threads".
+- **Not in the SDK, measured (native arm64 and x86_64/Rosetta):** a reused `MTL4CommitOptions` runs its handlers for its first commit only. 10 commits with one shared options object gave 1 feedback call; with an options object per commit, 10. The first design (one long-lived options object) would have reported only the session's first commit. test-commit-feedback.sh's `each` case caught it: 1 line for 5 commits.
 
 **Design (unix side only):**
-- `_MTL4CommandQueue_commit` passes the long-lived options to `commit:count:options:`.
+- The handler block is built once (`dispatch_once`, `Block_copy`). `_MTL4CommandQueue_commit` makes an `MTL4CommitOptions` per commit, adds the handler, passes it to `commit:count:options:` and releases it.
 - The block returns at once when `error == nil`. On an error it writes, in an `@autoreleasepool`: `D9MT-GPU-ERROR <hh:mm:ss.mmm> <name> (<code>): <localizedDescription> gpu=<start>-<end> now=<host time> commits=<n>`.
   - The GPU times and `now` are on the same host clock (`CACurrentMediaTime`), so `now - end` is the delay before the report. The wall time matches the `D9MT-WSI` lines and the unified log.
   - An error from another domain is named by its domain.
@@ -475,8 +476,8 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Dropped from the proposal:** `MTLCommandBufferErrorOptionEncoderExecutionStatus` is an `MTLCommandBufferDescriptor` option (Metal 3). `MTL4CommandBufferOptions` has only `logState`, so it doesn't exist for d9mt's MTL4 command buffers.
 - **Later, d9mt side:** a unixcall for the last error code, so that `D9MT-GPU-HUNG` / `D9MT-GPU-LOST` name the cause. That is an ABI addition (a new call number, check-abi-mix, the skew case of a new d3d9 on an old bridge), so it is a separate step.
 
-**Cost per commit.** Our block costs nothing when there's no error. The real cost is Metal's: with a feedback handler, Metal has to deliver a completion callback for every commit, on its own thread. Without one, an MTL4 commit probably needs no host-side completion at all, since d9mt tracks completion with its shared events. This is unverified, and the A/B decides. At ~60–600 commits/s that is that many callbacks a second, off the render thread but not free under Rosetta.
-- **Gate (hard rule):** an env A/B (`D9MT_COMMIT_FEEDBACK=0/1`) in a quiet window on bindbench and bench_4k, ABBA, nothing measurably slower (the noise floor is ±1.5 %). Also the CPU time of Metal's completion thread from a sample.
+**Cost per commit.** Our block costs nothing when there's no error. On the committing thread: one `MTL4CommitOptions` alloc/init, `addFeedbackHandler:` (a retain of the shared block) and a release. The larger unknown is Metal's: with a feedback handler, Metal has to deliver a completion callback for every commit, on its own thread. Without one, an MTL4 commit probably needs no host-side completion at all, since d9mt tracks completion with its shared events. This is unverified, and the A/B decides. At ~60–600 commits/s that is that many callbacks a second, off the render thread but not free under Rosetta.
+- **Gate (hard rule):** window A2, `n013-issues/scripts/qw-cfb.sh`: on / on2 (the A-A control) / off, bindbench 3060 and bench_4k 600, 10 rounds each with the order rotated, d3d9 = main 58f3d5d. on − off must be within the on − on2 spread.
 - If it measures worse, it ships off by default and on under `D9MT_WSILOG` / Collect Logs.
 
 **ABI and LC_UUID.**

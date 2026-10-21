@@ -7699,10 +7699,11 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
 
 /* Bundle part 7: the GPU's own error for a failed commit (Timeout, PageFault, InvalidResource,
  * ...) as a "D9MT-GPU-ERROR" line in wine.log; until now only the unified log had it, as
- * "IOGPUMetalError: <private>". One options object with one handler for every commit, built
- * once and then only passed (MTL4CommitOptions isn't thread-safe to modify). The feedback names
- * no commit, so the line gives the GPU times, the host time now (the same clock) and the
- * commits so far. Lines go through the diagnostic limit (30 per 10 s): after a hang the dead
+ * "IOGPUMetalError: <private>". The handler block is built once; the options object is made per
+ * commit: Metal runs a reused MTL4CommitOptions' handlers for its first commit only (measured:
+ * 10 commits with one shared options object, 1 call; with one each, 10). The feedback names no
+ * commit, so the line gives the GPU times, the host time now (the same clock) and the commits
+ * so far. Lines go through the diagnostic limit (30 per 10 s): after a hang the dead
  * channel rejects every later commit.
  *   D9MT_COMMIT_FEEDBACK=0       no handler: commit:count: as before
  *   D9MT_COMMIT_FEEDBACK_TEST=n  tests only: every commit's feedback reads as error n */
@@ -7725,18 +7726,17 @@ gpu_error_name(long code) {
   }
 }
 
-static MTL4CommitOptions *
-commit_options(void) {
+static MTL4CommitFeedbackHandler
+commit_feedback_handler(void) {
   static dispatch_once_t once;
-  static MTL4CommitOptions *options;
+  static MTL4CommitFeedbackHandler handler;
   dispatch_once(&once, ^{
     const char *on = getenv("D9MT_COMMIT_FEEDBACK");
     if (on && !strcmp(on, "0"))
       return;
     const char *test = getenv("D9MT_COMMIT_FEEDBACK_TEST");
     const long fake = test ? strtol(test, NULL, 10) : 0;
-    options = [[MTL4CommitOptions alloc] init];
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
+    handler = Block_copy(^(id<MTL4CommitFeedback> fb) {
       NSError *err = fb.error;
       if (!err && !fake)
         return;
@@ -7756,9 +7756,9 @@ commit_options(void) {
           fprintf(stderr, " [%d earlier lines suppressed]", dropped);
         fputc('\n', stderr);
       }
-    }];
+    });
   });
-  return options;
+  return handler;
 }
 
 static NTSTATUS
@@ -7769,12 +7769,16 @@ _MTL4CommandQueue_commit(void *obj) {
   const unsigned long k = atomic_fetch_add_explicit(&g_commits, 1, memory_order_relaxed);
   if (d9mt_wsilog_enabled() && (k < 24 || (k % 100) == 0))
     fprintf(stderr, "D9MT-WSI[unix] queue_commit #%lu count=%lu\n", k, (unsigned long)count);
-  MTL4CommitOptions *options = commit_options();
-  if (options)
+  MTL4CommitFeedbackHandler handler = commit_feedback_handler();
+  if (handler) {
+    MTL4CommitOptions *options = [[MTL4CommitOptions alloc] init];
+    [options addFeedbackHandler:handler];
     [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count
                                         options:options];
-  else
+    [options release];
+  } else {
     [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
+  }
   return STATUS_SUCCESS;
 }
 
