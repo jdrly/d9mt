@@ -178,8 +178,9 @@ doesn't apply.
 3. **Hand releases to the retire queue; don't release on the CS thread at the call site.**
    Releasing texture views on the CS thread (`ac70a8c`) was 1.3–1.5 % slower in churnbench; #24
    hands them to the retire queue instead (ADR-0001). Today the queue runs on the `d9mt-retire`
-   pump or, at the end of a frame, on the CS thread (`endFrame` → `processRetirements`), and
-   `retireAfter` releases inline when the serial is already complete. _Open:_ moving all of it to
+   pump plus serialised drains on the calling thread (`submit` and `endFrame` on the CS thread,
+   and the recovery from a failed host allocation), and `retireAfter` releases inline when the
+   serial is already complete. _Open:_ moving all of it to
    the retire thread, with one owner of GPU lifetimes, is not done (ADR-0001).
 4. **Keep waits off the render thread, and bound the ones that remain.** `RenderPsoCache::get`
    looks up or starts a build without waiting for it. The limits today: a PSO miss and the
