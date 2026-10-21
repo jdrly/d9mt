@@ -166,6 +166,28 @@ The frame-pass rules of the experimental `D9MT_DEFERRED` mode (`flushFramePasses
 `driver/backend/mtl_context_record.cpp`; `D9MT_NO_RULE_{B,C,E,F}` in the README). _Open:_ they are
 defined only in code.
 
+## Presentation and pacing
+
+**Frame cap**
+`D9MT_FPS_CAP`: Present returns on a fixed cadence for a set frame rate. With vsync on and a rate
+that divides the refresh rate it is **vsync-aligned**: every frame stays on screen for the same
+number of refreshes (`presentAfterMinimumDuration`); otherwise it is a plain timer
+(`driver/d3d9/d3d9_frame_cap.h`; README, *Environment variables*; #44).
+_Avoid_: “FPS limiter” for d9mt's cap (SWTOR on Mac's *Frame Rate Limit* is the setting that
+turns it on); DXVK's `d3d9.maxFrameRate` is the **DXVK limiter**.
+
+**Background throttle**
+`D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED`: while the window is hidden or minimized, d9mt skips the
+presents and Present sleeps to this rate (default 30 / 10 fps); for the first second after the
+window disappears, or while there is no drawable, it paces to the display rate instead
+(`driver/d3d9/d3d9_swapchain.cpp`; README).
+
+**Sleeper**
+The sleep of the frame cap and the background throttle: the system's sleep in halves down to a
+last piece of at most 1 ms, then a spin as long as the last piece recently overslept (200 µs to
+4 ms). Wine's sleep on macOS wakes late by about half its length, and DXVK's `Sleep` busy-waits
+4 ms and more of every sleep (`driver/d3d9/d3d9_frame_cap.h`; #44).
+
 ## Diagnostics and measurement
 
 **Hitch**
