@@ -372,6 +372,85 @@ static void archload(NSString *dir) {
          ars.count ? (t1 - t0) / ars.count : 0.0, ars.count ? (now_ms() - t1) / ars.count : 0.0);
 }
 
+/* attr <workdir>: where a bundle bridge's extra GPU memory comes from (review of part 6: IOAccelerator
+ * 151-153 MB in every bundle variant vs 92 MB on base). Step by step, in the bridge's order: the
+ * footprint and vmmap's IOAccelerator (graphics) resident size after each. Needs the mem archive. */
+static void iosnap(const char *step) {
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "vmmap --summary %d 2>/dev/null | awk '/^IOAccelerator \\(graphics\\)/ {print $3\" virt \"$4\" resident \"$5\" dirty\"}'", (int)getpid());
+  FILE *f = popen(cmd, "r");
+  char line[128] = "?";
+  if (f) { if (!fgets(line, sizeof(line), f)) strcpy(line, "?\n"); pclose(f); }
+  line[strcspn(line, "\n")] = 0;
+  printf("ATTR %-52s footprint %7.1f MB  IOAccelerator %s\n", step, footprint_mb(), line);
+  fflush(stdout);
+}
+
+static void attr(NSString *dir) {
+  const int N = 800;
+  if (!big_library()) return;
+  NSError *err = nil;
+  NSString *path = [dir stringByAppendingPathComponent:@"mem.mtl4archive"];
+  if (![[NSFileManager defaultManager] fileExistsAtPath:path]) { printf("FAIL no %s (run mem once first)\n", path.UTF8String); g_fail++; return; }
+  for (int i = 1; i < 8; i++) {   /* 8 archives to load: copies of the mem archive */
+    NSString *cp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"mem%d.mtl4archive", i]];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:cp])
+      [[NSFileManager defaultManager] copyItemAtPath:path toPath:cp error:nil];
+  }
+  iosnap("start (device, library)");
+  id<MTL4PipelineDataSetSerializer> ser = serializer();
+  id<MTL4Compiler> game = compiler(ser);
+  iosnap("+ serializer-attached compiler (the game's)");
+  id<MTL4Compiler> fallback = compiler(nil);
+  iosnap("+ fallback compiler (part 5, unused)");
+  NSMutableArray *ars = [NSMutableArray array];
+  id<MTL4Archive> a0 = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+  [ars addObject:a0]; [a0 release];
+  iosnap("+ 1 archive loaded");
+  for (int i = 1; i < 8; i++) {
+    id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:
+      [NSString stringWithFormat:@"mem%d.mtl4archive", i]]] error:nil];
+    if (a) { [ars addObject:a]; [a release]; }
+  }
+  iosnap("+ 7 more archives loaded (8)");
+  MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
+  opt.lookupArchives = ars;
+  NSMutableArray *live = [NSMutableArray arrayWithCapacity:N];
+  for (int n = 0; n < N / 2; n++) @autoreleasepool {
+    MTL4RenderPipelineDescriptor *d = desc(n);
+    id<MTLRenderPipelineState> p = [game newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
+    if (p) { [live addObject:p]; [p release]; }
+    [d release];
+  }
+  iosnap("+ 400 PSOs via the game compiler (lookups)");
+  for (int n = N / 2; n < N; n++) @autoreleasepool {
+    MTL4RenderPipelineDescriptor *d = desc(n);
+    id<MTLRenderPipelineState> p = [ars[0] newRenderPipelineStateWithDescriptor:d error:nil];
+    if (p) { [live addObject:p]; [p release]; }
+    [d release];
+  }
+  iosnap("+ 400 PSOs via MTL4Archive direct (archive first)");
+  id<MTL4PipelineDataSetSerializer> cser = serializer();
+  id<MTL4Compiler> cons = compiler(cser);
+  iosnap("+ consolidation compiler + serializer");
+  for (int n = 0; n < N; n++) @autoreleasepool {
+    MTL4RenderPipelineDescriptor *d = desc(n);
+    [[cons newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil] release];
+    [d release];
+  }
+  iosnap("+ consolidation rebuilt 800 (not flushed)");
+  NSString *out = [dir stringByAppendingPathComponent:@"attr-c.mtl4archive"];
+  if (![cser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:out] error:&err]) { printf("FAIL serialize\n"); g_fail++; }
+  iosnap("+ consolidation flushed");
+  [cons release]; [cser release];
+  iosnap("- consolidation compiler + serializer released");
+  [live removeAllObjects];
+  iosnap("- 800 PSOs released");
+  [fallback release];
+  iosnap("- fallback compiler released");
+  [opt release]; [game release]; [ser release];
+}
+
 static void mem(const char *mode, NSString *dir) {
   const int N = 800;
   if (!big_library()) return;
@@ -430,6 +509,11 @@ int main(int argc, char **argv) {
       if (argc < 4) { fprintf(stderr, "usage: archfirst peak <chunk|0> <workdir>\n"); return 2; }
       peak(atoi(argv[2]), [NSString stringWithUTF8String:argv[3]]);
       printf("archfirst peak %s: %s (%d failures)\n", argv[2], g_fail ? "FAIL" : "ok", g_fail);
+      return g_fail ? 1 : 0;
+    }
+    if (!strcmp(argv[1], "attr")) {
+      attr([NSString stringWithUTF8String:argv[2]]);
+      printf("archfirst attr: %s (%d failures)\n", g_fail ? "FAIL" : "ok", g_fail);
       return g_fail ? 1 : 0;
     }
     if (!strcmp(argv[1], "archload")) {

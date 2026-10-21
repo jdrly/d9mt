@@ -314,7 +314,7 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
   - the skew cases: that d3d9.dll with the shipping bridge, and base d3d9.dll with this bridge (bias ignored, no crash);
   - the hash suite with base d3d9.dll and this bridge (no stray bias).
 
-### 6. Proposal: consolidation at pauses, chunked serialization (after the quiet window, 2026-10-21)
+### 6. Proposal: consolidation in the startup window, complete chunked sets (after the quiet window, 2026-10-21; revised after review)
 
 **What the quiet window and batch-rss showed** (n013-issues/results/qw-psoab.txt, rss-summary.txt, psobench 350 4 5000 on a 9-session seed):
 - **New-PSO phase:** the bundle is far ahead of base: worst frame 1501 → 418 ms, −2.45 s, 0/6 worse.
@@ -327,23 +327,38 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
   - The floor without archives is 234 MB.
   - GPU memory for the pipelines (IOAccelerator) is 151-153 MB in every bundle variant (archive first on or off) vs 92 MB on base: a separate, smaller question (archfirst_test mem).
 
-**Proposal:**
-1. **Consolidation only at a real pause:** the window hidden or minimised, or a device Reset (the pause hint). Not after 120 s of idle in gameplay. It's the bundle's only heavy job, and its peak is ≈ 2-3× the working-set archive.
-2. **Fallback for players who never pause** (SWTOR players can play for hours without minimising): when no consolidation has completed for 8 sessions and the deltas exceed K files or X MB, consolidate **chunked** after 120 s idle at BACKGROUND QoS.
-   - At most 256 descriptors per serializer, each chunk flushed to its own `c-<time>-<pid>-<n>` archive before the next one starts.
-   - The peak is then one chunk, not the working set.
-   - The startup then loads a few consolidated archives (archload: ≈ 1-2 ms each; the lookup cap counts them as consolidated, not deltas).
-   - The session count since the last completed consolidation goes in a small file next to the archives.
-3. **Skip when it isn't worth it** (kept): nothing new and at most one archive; and, new, at most N small deltas (the lookup cap already bounds a miss's cost).
-4. **Chunked capture flushes:**
-   - Today a cold session holds every capture in the serializer until the idle/pause flush (af0: 945 PSOs, 72 MB, one flush, +185 MB over the floor).
-   - Proposed: once `D9MT_PSO_FLUSH_EVERY` (256) are pending, flush as soon as the lock is free (trywrlock between builds, as now), not only at idle or pause or after the 60 s backstop.
-   - The serializer then never holds more than ~256 PSOs.
-   - Cost: a flush may land in gameplay (UTILITY QoS, ~20 MB per chunk). Builds during it go to the fallback compiler (M9, captured the next time).
-5. **Numbers before code** (native, archfirst_test):
-   - the transient peak footprint for chunk sizes 128 / 256 / whole, and the time per chunk;
-   - the startup cost per extra consolidated archive;
-   - for the steady phase: the psoab re-run in a quiet window after the change (with a consolidation completing at a pause).
+**Proposal (revised after review-014/bridge-bundle-part6.md):**
+
+Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only runs at device setup, so a pause-only trigger would hardly ever fire.
+
+1. **Primary trigger: the startup window (S-1).**
+   - Consolidate at the coverage signal if it arrives within the first ~30 s of the process.
+   - In Jan's sessions coverage arrives at 1.6-8 s and world entry at 21-27 s; ~350 PSOs ≈ 1 s of rebuild. So the consolidation and its peak fall into login / character select, not gameplay.
+   - Order: startup window → real pause (hidden or minimised, device Reset) → chunked fallback (3).
+   - No 120 s idle trigger in gameplay any more.
+2. **A chunked set only counts once complete (M-1).**
+   - Chunks are written as `c-<time>-<pid>-<n>.mtl4archive` (each with its sum), then a marker **written last**: `c-<time>-<pid>.set` with the chunk count and each chunk's v2 sum, fsynced before its rename.
+   - Only a set with its marker exists for the startup rules: it anchors the delta rule (deltas older than it are dropped) and all its chunks are kept and looked up first.
+   - A set without a marker (an exit between chunks) is ignored: it anchors nothing, its chunks are removed by the young-file rule, and the parts it would have replaced stay. Nothing is lost.
+   - The parts are deleted only after the marker is in place.
+   - A single-chunk consolidation is the same with n = 1, so there is one format.
+   - Test (native, compile_mt_test): exit between chunks (a hold hook after chunk k) → the next start uses the old archives, 0 misses, nothing dropped; a complete set → its chunks loaded, the parts gone.
+3. **Fallback for sessions with neither:** no completed consolidation for 8 sessions and the deltas over K files or X MB → chunked (≤256 descriptors per serializer) after 120 s idle at BACKGROUND QoS. The session count since the last completed set goes in a small file beside the archives.
+4. **Skip when it isn't worth it** (kept): nothing new and at most one archive; and at most N small deltas.
+5. **Chunked capture flushes (point 4 of the review), with conditions:**
+   - At ≥ `D9MT_PSO_FLUSH_EVERY` (256) pending, flush only after a **quiet gap** of ≥500 ms without a build: the end of a burst, not inside it.
+   - The cold-session numbers report `g_pso_uncaptured` (builds that went to the fallback compiler during these flushes, captured only next time).
+   - Gate: psoab with a 256-flush inside the steady phase, 0/6 worse.
+6. **Before shipping: GPU memory.**
+   - IOAccelerator (graphics) is 151-153 MB in every bundle variant, archive first on or off, vs 92 MB on base.
+   - archfirst_test `attr` attributes it step by step: a serializer-less compiler, the serializer-attached one, the fallback compiler, 0/1/8 archives loaded, 800 PSOs, a consolidation compiler and serializer; footprint and IOAccelerator after each step.
+   - If it stays unexplained, it's a regression for 8 GB Macs and blocks the bundle.
+7. **Numbers before code** (native, archfirst_test):
+   - `mem direct|compiler|probe`: live PSO memory by path;
+   - `peak 0|256|128`: a consolidation's peak footprint and time by chunk size;
+   - `archload`: the startup cost per extra consolidated archive;
+   - `attr`: point 6.
+   - Then the psoab re-run in a quiet window with the changes.
 
 ## Order and gates
 
