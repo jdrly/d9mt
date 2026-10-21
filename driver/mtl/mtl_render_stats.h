@@ -34,6 +34,9 @@ namespace dxvk::rstats {
     SplitsXfer,      //   ... else with a copy/blit/resolve encoder in between
     SplitsClear,     //   ... else with a clear in between (the rest: a view change or a vertex fence)
     SplitBytes,      // attachment bytes those passes load
+    FlushesCarried,  // deferrable flushes that kept the open pass (G1, D9MT_EARLY_COMMIT)
+    CarryRefused,    // deferrable flushes inside a pass the backlog gate refused (GPU caught up)
+    CarryCapped,     // ... that ended the pass after the per-serial carry cap
     Count
   };
 

@@ -61,11 +61,15 @@ namespace dxvk {
     virtual MtlGpuQueryStatus getData(MtlQueryData& out);
     // Blocks until the submission holding the query's end has completed.
     virtual void waitData() { }
+    // Its end is recorded in a submission that isn't submitted yet (G1: a poll on it may
+    // have to complete a carried flush, docs/g1-early-commit.md §4.5).
+    virtual bool unsubmitted() const { return false; }
   };
 
   class MtlEvent : public RcObject {
   public:
     virtual MtlGpuEventStatus test();
+    virtual bool unsubmitted() const { return false; }
   };
 
   using MtlSignal = sync::Signal;
@@ -89,7 +93,10 @@ namespace dxvk {
 
     virtual void beginRecording();
     virtual void endFrame();
-    virtual void flushCommandList(const char* reason, MtlSubmitStatus* status);
+    /* deferrable: a heuristic flush nothing waits on. The backend may commit what was
+     * recorded before the open pass and keep the pass open under the same submission
+     * (docs/g1-early-commit.md); the next flush that isn't deferrable completes it. */
+    virtual void flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable = false);
     virtual Rc<MtlCommandBuffer> beginExternalRendering();
     virtual void synchronizeWsi(MtlPresenterSync sync);
     virtual void beginLatencyTracking(const Rc<MtlLatencyTracker>&, uint64_t frameId);

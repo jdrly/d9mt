@@ -43,6 +43,19 @@ namespace dxvk {
 
     HRESULT GetQueryData(void* pData, DWORD dwSize);
 
+    // Its end is recorded in a submission that isn't submitted yet (G1 poll hook).
+    bool Unsubmitted() const {
+      for (const auto& q : m_query) {
+        if (q != nullptr && q->unsubmitted())
+          return true;
+      }
+      for (const auto& e : m_event) {
+        if (e != nullptr && e->unsubmitted())
+          return true;
+      }
+      return false;
+    }
+
     void Begin(MtlContext* ctx);
     void End(MtlContext* ctx);
 
