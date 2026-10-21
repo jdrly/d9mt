@@ -380,6 +380,27 @@ int main(int argc, char** argv) {
     g_funcs[213](&cov);
   }
 
+  // MT_BURST_MS=<ms>: for that long, request the main set's PSOs again every ~20 ms (archive hits:
+  // requests that keep a consolidation waiting for a quiet gap, like a world entry)
+  if (const char* bm = getenv("MT_BURST_MS")) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(atoi(bm));
+    unsigned n = 0;
+    while (std::chrono::steady_clock::now() < end) {
+      for (auto& vs : shaders) {
+        if (vs.isPs || !vs.ok) continue;
+        for (auto& ps : shaders) {
+          if (!ps.isPs || !ps.ok) continue;
+          buildPso(compiler, vs.library, ps.library, 0);
+          n++;
+          break;
+        }
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    printf("burst: %u requests\n", n);
+  }
+
   // MT_LATE_PSOS=<ms>: that much later, 4 new state variants of every pair (misses, flushed
   // into deltas while a consolidation started by the coverage signal may still run)
   if (const char* l = getenv("MT_LATE_PSOS")) {
@@ -416,11 +437,11 @@ int main(int argc, char** argv) {
     g_funcs[214](&hint);
   }
 
-  // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated PSO archive
-  // ("c-<time>-<pid>.mtl4archive", written once the bridge has been idle) is in place.
+  // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated set is complete (its marker
+  // "c-<time>-<pid>.set", written after its last chunk).
   if (const char* w = getenv("MT_WAIT_CONSOLIDATED")) {
     const auto t0w = std::chrono::steady_clock::now();
-    const std::string tag = "-" + std::to_string(getpid()) + ".mtl4archive.sum";
+    const std::string tag = "-" + std::to_string(getpid()) + ".set";
     bool found = false;
     while (!found && std::chrono::steady_clock::now() - t0w < std::chrono::seconds(atoi(w))) {
       // <pso>/os-* (flat) and <pso>/<exe>/os-*

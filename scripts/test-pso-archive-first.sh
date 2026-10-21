@@ -23,7 +23,12 @@
 #            3 s, D9MT_PSO_FLUSH_HOLD_MS) go to the serializer-less compiler, all succeed, are
 #            not captured, and miss again in the next run; S-1: a build's count comes before
 #            its unlock (every other count held 600 ms: no flush of a drained serializer)
-#   TSan     the cold, warm and part 5 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
+#   part 6   consolidated sets: the startup window (at once at coverage) and outside it (none);
+#            chunks + marker (the next start loads the set); an exit between chunks (no marker:
+#            the old archives serve, the chunks go only once old and ownerless); a second process
+#            while one consolidates (neither loads nor deletes its chunks); yields to requests;
+#            the capture flush at FLUSH_EVERY after a quiet gap
+#   TSan     the cold, warm, part 5 and part 6 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
 set -uo pipefail
@@ -47,6 +52,7 @@ run() { # <dir> <log> <env...> -- <bins...>
   local rc=$?; [ $rc -ge 128 ] && { echo "  $log: CRASH (signal $((rc - 128)))"; fails=$((fails + 1)); }
   grep -q '^FAIL' "$OUT/$log.log" && { echo "  $log: FAIL lines:"; grep '^FAIL' "$OUT/$log.log" | head -5; fails=$((fails + 1)); }
 }
+ages() { python3 -I -c 'import os,sys,time; t=time.time()-float(sys.argv[1]); [os.utime(f,(t,t)) for f in sys.argv[2:]]' "$@"; }
 stat_line() { sed -n 's/^d9mt: PSO archive first: \(.*\)$/\1/p' "$OUT/$1.log"; }
 deltas() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -E '^[0-9]+-[0-9]+-[0-9]+\.mtl4archive$' | wc -l | tr -d ' '; }
 own_deltas() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -cE "^[0-9]+-$2-[0-9]+\.mtl4archive$"; }
@@ -64,7 +70,7 @@ suite() { # <label>
   check "incomplete coverage: no consolidation" "$(grep -c 'consolidated archive: written' "$OUT/$1-nocov-0.log")" 0
   check "no consolidated archive" "$(consolidated "$N")" 0
   echo "[pso-first:$1] R2: no visibility query, no pause: a long idle means no consolidation"
-  run "$N" "$1-r2" D9MT_PSO_CONSOLIDATE_IDLE_MS=600000 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
+  run "$N" "$1-r2" D9MT_PSO_STARTUP_WINDOW_S=0 D9MT_PSO_CONSOLIDATE_IDLE_MS=600000 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
   check "R2: harness run not taken for a pause" "$(grep -c 'consolidated archive: written' "$OUT/$1-r2.log")" 0
 
   echo "[pso-first:$1] cold"
@@ -103,7 +109,7 @@ suite() { # <label>
     || { echo "  idle: FAIL (no delta)"; fails=$((fails + 1)); }
   run "$N5-idle" "$1-p5-idle2" MT_COVERAGE=0 -- "${SET_A[@]}"
   check "idle: next run misses" "$(stat_line "$1-p5-idle2" | sed 's/.* \([0-9]*\) misses/\1/')" 0
-  run "$N5-exit" "$1-p5-exit" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 -- "${SET_A[@]}"
+  run "$N5-exit" "$1-p5-exit" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 MT_FLUSH_EVERY=1000 -- "${SET_A[@]}"
   check "no flush at exit: deltas" "$(own_deltas "$N5-exit" "$(pid_of "$1-p5-exit")")" 0
   run "$N5-hint" "$1-p5-hint" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 MT_FLUSH_EVERY=1000 MT_HINT=1 -- "${SET_A[@]}"
   [ "$(own_deltas "$N5-hint" "$(pid_of "$1-p5-hint")")" -gt 0 ] && echo "  Reset hint: a delta without the idle" \
@@ -124,6 +130,70 @@ suite() { # <label>
   check "S-1: no flush of a drained serializer" "$(grep -c 'PSO archive flush failed' "$OUT/$1-p5-s1.log")" 0
   run "$N5-s1" "$1-p5-s1b" MT_COVERAGE=0 -- "${SET_A[@]}"
   check "S-1: next run misses" "$(stat_line "$1-p5-s1b" | sed 's/.* \([0-9]*\) misses/\1/')" 0
+
+  echo "[pso-first:$1] part 6: consolidated sets"
+  local N6="$OUT/$1-p6" L
+  ldd() { sed -n 's/^d9mt: PSO archives: \([0-9]*\) loaded.*/\1/p' "$OUT/$1.log"; }
+  chunks() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -cE '^c-[0-9]+-[0-9]+-[0-9]+\.mtl4archive$'; }
+  markers() { ls "$1"/pso/mt.exe/os-*/ 2>/dev/null | grep -cE '^c-[0-9]+-[0-9]+\.set$'; }
+  misses_in() { stat_line "$1" | sed 's/.* \([0-9]*\) misses/\1/'; }
+  # the startup window: the coverage signal (right after the builds) is in it, so at once, no idle
+  run "$N6-sw" "$1-p6-sw" D9MT_PSO_CONSOLIDATE_IDLE_MS=600000 MT_WAIT_CONSOLIDATED=20 -- "${SET_A[@]}"
+  check "startup window: decided" "$(grep -c 'consolidating now (startup window)' "$OUT/$1-p6-sw.log")" 1
+  check "startup window: a complete set without the idle" "$(markers "$N6-sw")" 1
+  # outside it (window 0), no pause in the harness, no fallback yet: none
+  run "$N6-out" "$1-p6-out" D9MT_PSO_STARTUP_WINDOW_S=0 D9MT_PSO_CONSOLIDATE_IDLE_MS=300 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
+  check "outside the startup window: decided" "$(grep -c 'outside the startup window: at a pause$' "$OUT/$1-p6-out.log")" 1
+  check "outside the startup window: no set" "$(markers "$N6-out")" 0
+  # chunks of 4: 4 chunks and a marker; the next start loads the 4 as consolidated, 0 misses
+  run "$N6-ch" "$1-p6-ch" D9MT_PSO_CONSOLIDATE_CHUNK=4 MT_WAIT_CONSOLIDATED=20 -- "${SET_A[@]}"
+  check "chunked: chunks" "$(chunks "$N6-ch")" 4
+  check "chunked: marker" "$(markers "$N6-ch")" 1
+  run "$N6-ch" "$1-p6-ch2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "chunked: next start loads the set" "$(ldd "$1-p6-ch2")" 4
+  check "chunked: next start misses" "$(misses_in "$1-p6-ch2")" 0
+  # an exit between chunks (held 3 s after each): no marker; the next start uses the old archives
+  run "$N6-ex" "$1-p6-ex0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  # (SET_B: new PSOs, so the consolidation has work; SET_A's 16 are archived: 4 chunks of 4)
+  mkdir -p "$N6-exB"; ln -sfn "$N6-ex/pso" "$N6-exB/pso"   # SET_B in a workdir of its own, the same archives
+  run "$N6-exB" "$1-p6-ex" D9MT_PSO_CONSOLIDATE_CHUNK=4 D9MT_PSO_CHUNK_HOLD_MS=3000 MT_SETTLE_MS=0 MT_EXIT_DELAY_MS=2500 -- "${SET_B[@]}"
+  local cn; cn=$(chunks "$N6-ex")
+  if [ "$cn" -ge 1 ] && [ "$(markers "$N6-ex")" = 0 ]; then echo "  exit between chunks: $cn chunk(s), no marker: ok"
+  else echo "  exit between chunks: FAIL ($cn chunks, $(markers "$N6-ex") markers)"; fails=$((fails + 1)); fi
+  L=$(deltas "$N6-ex")
+  run "$N6-ex" "$1-p6-ex2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "exit between chunks: next start loads only the deltas" "$(ldd "$1-p6-ex2")" "$L"
+  check "exit between chunks: next start misses" "$(misses_in "$1-p6-ex2")" 0
+  check "exit between chunks: young chunks of an ended owner kept" "$(chunks "$N6-ex")" "$cn"
+  for f in "$N6-ex"/pso/mt.exe/os-*/c-*; do [ -e "$f" ] && ages 700 "$f"; done
+  run "$N6-ex" "$1-p6-ex3" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "exit between chunks: old chunks of an ended owner removed" "$(chunks "$N6-ex")" 0
+  check "exit between chunks: then still no misses" "$(misses_in "$1-p6-ex3")" 0
+  # a second process while one consolidates: A holds after each chunk; B (A's chunks aged, A alive)
+  # neither loads nor deletes them; A then completes its set
+  local A6="$N6-a"; run "$A6" "$1-p6-a0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  mkdir -p "$A6-B"; ln -sfn "$A6/pso" "$A6-B/pso"
+  run "$A6-B" "$1-p6-a" D9MT_PSO_CONSOLIDATE_CHUNK=4 D9MT_PSO_CHUNK_HOLD_MS=1500 MT_WAIT_CONSOLIDATED=40 -- "${SET_B[@]}" &
+  local apid=$!
+  for t in $(seq 150); do [ "$(chunks "$A6")" -ge 1 ] && break; sleep 0.1; done
+  for f in "$A6"/pso/mt.exe/os-*/c-*; do [ -e "$f" ] && ages 700 "$f"; done
+  local before; before=$(chunks "$A6")
+  local dl; dl=$(deltas "$A6")
+  run "$A6" "$1-p6-b" MT_COVERAGE=0 -- "${SET_A[@]}"
+  if [ "$before" -ge 1 ] && [ "$(chunks "$A6")" -ge "$before" ]; then echo "  second process: A's chunks kept ($before): ok"
+  else echo "  second process: FAIL (A's chunks $before -> $(chunks "$A6"))"; fails=$((fails + 1)); fi
+  check "second process: B loads the deltas, not A's chunks" "$(ldd "$1-p6-b")" "$dl"
+  wait $apid
+  check "second process: A's set completed" "$(markers "$A6")" 1
+  # requests during the consolidation (2.5 s of them after the coverage signal): it yields, and completes
+  run "$N6-y" "$1-p6-y" MT_BURST_MS=2500 MT_WAIT_CONSOLIDATED=30 -- "${SET_A[@]}"
+  local y; y=$(sed -n 's/.*not archived yet, \([0-9]*\) yield(s)$/\1/p' "$OUT/$1-p6-y.log")
+  if [ "${y:-0}" -gt 0 ] && [ "$(markers "$N6-y")" = 1 ]; then echo "  burst: yielded $y time(s), then completed: ok"
+  else echo "  burst: FAIL (yields '${y:-}', $(markers "$N6-y") markers)"; fails=$((fails + 1)); fi
+  # FLUSH_EVERY (5 here) pending: flushed at a quiet gap, with the idle flush out of reach
+  run "$N6-f" "$1-p6-f" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 -- "${SET_A[@]}"
+  if [ "$(grep -c 'flush starts (chunk' "$OUT/$1-p6-f.log")" -gt 0 ]; then echo "  capture flush at FLUSH_EVERY after a quiet gap: ok"
+  else echo "  capture flush at FLUSH_EVERY: FAIL"; fails=$((fails + 1)); fi
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"
@@ -150,7 +220,7 @@ m6() {
 import os, re, sys
 d, pid = sys.argv[1], sys.argv[2]
 fs = os.listdir(d)
-c = [f for f in fs if re.match(r"c-\d+-%s\.mtl4archive$" % pid, f)]
+c = [f for f in fs if re.match(r"c-\d+-%s\.set$" % pid, f)]
 if c:
     stamp, cm = int(c[0][2:12]), os.stat(os.path.join(d, c[0])).st_mtime
     print(" ".join(f for f in fs if re.match(r"\d+-%s-\d+\.mtl4archive$" % pid, f)

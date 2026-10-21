@@ -42,7 +42,7 @@ static id<MTLLibrary> g_lib;
 static MTL4RenderPipelineDescriptor *desc(int n) {
   MTL4RenderPipelineDescriptor *d = [[MTL4RenderPipelineDescriptor alloc] init];
   MTL4LibraryFunctionDescriptor *v = [[MTL4LibraryFunctionDescriptor alloc] init];
-  v.library = g_lib; v.name = @"vs";
+  v.library = g_lib; v.name = getenv("AF_BIGVS") && atoi(getenv("AF_BIGVS")) ? @"vbig" : @"vs";
   MTL4LibraryFunctionDescriptor *f = [[MTL4LibraryFunctionDescriptor alloc] init];
   f.library = g_lib; f.name = @"fs";
   d.vertexFunctionDescriptor = v; d.fragmentFunctionDescriptor = f;
@@ -284,8 +284,17 @@ static const char *kBigSrcHead =
   "vertex float4 vs(uint id [[vertex_id]]) { float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0.5, 1); }\n"
   "fragment float4 fs(float4 pos [[position]]) { float4 a = pos * 0.001; float4 b = a.yzwx;\n";
 
+/* AF_BIGVS=1: the vertex function large too (the FF ubershader's VS is), shared by every PSO */
 static bool big_library(void) {
   NSMutableString *src = [NSMutableString stringWithUTF8String:kBigSrcHead];
+  if (getenv("AF_BIGVS") && atoi(getenv("AF_BIGVS"))) {
+    NSMutableString *vs = [NSMutableString stringWithString:
+      @"vertex float4 vbig(uint id [[vertex_id]]) { float4 a = float4(float(id) * 0.01, 0.2, 0.3, 1); float4 b = a.wzyx;\n"];
+    for (int i = 0; i < 300; i++)
+      [vs appendFormat:@"  a = fma(a, b, float4(%d.5)); b = cos(a) * %d.25 + b.yxwz;\n", i % 89, i % 11];
+    [vs appendString:@"  float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0.5, 1) + a * 1e-9; }\n"];
+    [src insertString:vs atIndex:[src rangeOfString:@"fragment"].location];
+  }
   for (int i = 0; i < 300; i++)
     [src appendFormat:@"  a = fma(a, b, float4(%d.5)); b = sin(a) * %d.25 + b.wzyx;\n", i % 97, i % 13];
   [src appendString:@"  return a * 0.0001 + b * 0.0001; }\n"];
@@ -313,7 +322,7 @@ static void *sampler(void *arg) {
   return NULL;
 }
 
-static void peak(int chunk, NSString *dir) {
+static void peak(int chunk, NSString *dir, bool fresh) {
   const int N = 800;
   if (!big_library()) return;
   NSError *err = nil;
@@ -330,6 +339,7 @@ static void peak(int chunk, NSString *dir) {
   pthread_t th;
   pthread_create(&th, NULL, sampler, NULL);
   const double t0 = now_ms();
+  double reinit_ms = 0.0;
   int files = 0;
   for (int n = 0; n < N; n++) {
     @autoreleasepool {
@@ -341,14 +351,21 @@ static void peak(int chunk, NSString *dir) {
         if (![ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:out] error:&err]) {
           printf("FAIL serialize %s: %s\n", out.UTF8String, err.localizedDescription.UTF8String); g_fail++;
         }
+        if (fresh && n + 1 < N) {   /* a new serializer and compiler for the next chunk */
+          const double r0 = now_ms();
+          [c release]; [ser release];
+          ser = serializer();
+          c = compiler(ser);
+          reinit_ms += now_ms() - r0;
+        }
       }
     }
   }
   const double t1 = now_ms();
   atomic_store(&g_sampling, 0);
   pthread_join(th, NULL);
-  printf("PEAK chunk %d: %d files, %.0f ms, footprint start %.1f MB, peak +%.1f MB\n",
-         chunk, files, t1 - t0, f0, g_peak_mb - f0);
+  printf("PEAK chunk %d%s: %d files, %.0f ms (compiler re-init %.1f ms), footprint start %.1f MB, peak +%.1f MB\n",
+         chunk, fresh ? " fresh" : "", files, t1 - t0, reinit_ms, f0, g_peak_mb - f0);
   [opt release]; [c release]; [ser release]; [ar release];
 }
 
@@ -506,8 +523,8 @@ int main(int argc, char **argv) {
     NSError *err = nil;
     g_lib = [g_dev newLibraryWithSource:[NSString stringWithUTF8String:kSrc] options:nil error:&err];
     if (!strcmp(argv[1], "peak")) {
-      if (argc < 4) { fprintf(stderr, "usage: archfirst peak <chunk|0> <workdir>\n"); return 2; }
-      peak(atoi(argv[2]), [NSString stringWithUTF8String:argv[3]]);
+      if (argc < 4) { fprintf(stderr, "usage: archfirst peak <chunk|0> <workdir> [fresh]\n"); return 2; }
+      peak(atoi(argv[2]), [NSString stringWithUTF8String:argv[3]], argc > 4 && !strcmp(argv[4], "fresh"));
       printf("archfirst peak %s: %s (%d failures)\n", argv[2], g_fail ? "FAIL" : "ok", g_fail);
       return g_fail ? 1 : 0;
     }
