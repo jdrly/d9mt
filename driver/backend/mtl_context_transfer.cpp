@@ -856,13 +856,19 @@ namespace dxvk::backend {
       m_keepAlive.push_back(dst);
       m_keepAlive.push_back(src);
     }
+    // The present copy into the drawable: the command buffer's canary goes into its encoder
+    // (no encoder of its own at submit; armCanary)
+    const uint64_t canary = d->drawable ? canarySlot("present") : ~0ull;
+    const obj_handle_t canaryBuf = m_canaryBuffer.handle();
     encodeDirect([this, keepD = dst, keepS = src, stex, dtex,
-                  srcSub, dstSub, srcOrigin, srcSize, dstOrigin]
+                  srcSub, dstSub, srcOrigin, srcSize, dstOrigin, canary, canaryBuf]
                  (obj_handle_t cmdbuf) {
       obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(cmdbuf);
       MTL4ComputeCommandEncoder_copyFromTextureToTexture(
         enc, stex, srcSub.baseLayer, srcSub.mipLevel, srcOrigin, srcSize,
         dtex, dstSub.baseLayer, dstSub.mipLevel, dstOrigin);
+      if (canary != ~0ull)
+        MTL4ComputeCommandEncoder_fillBuffer(enc, canaryBuf, canary, 8u, 0xa5u);
       emitProducerBarrier(enc, uint64_t(WMTStageBlit | WMTStageDispatch));
       MTLCommandEncoder_endEncoding(enc);
       NSObject_release(enc);

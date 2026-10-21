@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -370,6 +371,41 @@ namespace dxvk::backend {
 
     uint64_t m_currentSerial = 0;
 
+    // GPU canary (D9MT_GPU_CANARY, on by default): the last encoder of every command buffer
+    // fills its serial's 8-byte slot in a shared buffer. A command buffer whose serial
+    // completed with its slot still empty was discarded by the GPU. After a GPU page fault
+    // that is always true of the command buffers queued after it ("innocent victims", several
+    // per fault), and of the faulting one itself if the fault came before the fill ran (no
+    // barrier orders the fill after the command buffer's other work: one would keep the next
+    // command buffer from overlapping with this one).
+    // Nothing else reports that to d9mt (Metal 4 command buffers have no status, the shipped
+    // bridge no commit feedback); macOS only logs IOGPUMetalError in its unified log. Logged
+    // as D9MT-GPU-LOST in wine.log.
+    static constexpr uint32_t kCanarySlots = 512u;
+    static constexpr uint64_t kCanaryFilled = 0xa5a5a5a5a5a5a5a5ull;
+    // command buffers without a present copy: a canary encoder of their own on every 4th
+    static constexpr uint32_t kCanaryEvery = 4u;
+    struct CanarySlot {
+      uint64_t    serial = 0u;  // armed for this serial, 0 = not armed
+      uint32_t    frame  = 0u;
+      const char* reason = nullptr;
+      uint64_t    offset = 0u;  // in the canary buffer (the test fault's is elsewhere)
+    };
+    WmtBuffer   m_canaryBuffer;
+    uint64_t*   m_canaryCpu     = nullptr;
+    std::array<CanarySlot, kCanarySlots> m_canarySlots = { };
+    uint64_t    m_canaryChecked = 0u;  // serials up to here are checked
+    uint64_t    m_canaryLost    = 0u;
+    uint64_t    m_canaryLostUnlogged = 0u;  // after the first 20: counted for the 10 s summary
+    std::chrono::steady_clock::time_point m_canaryLostAt = { };
+    // Unused: nothing armed yet; Armed: armed, no mark seen yet; On: a mark arrived (logged);
+    // Failed: no buffer, or no mark in 64 command buffers (logged, no canary any more)
+    enum class CanaryState : uint8_t { Unused, Armed, On, Failed };
+    CanaryState m_canaryState   = CanaryState::Unused;
+    uint64_t    m_canaryArmed   = 0u;  // D9MT_GPU_CANARY_TEST_FAULT's count
+    uint32_t    m_canaryOwn     = 0u;  // command buffers that could have had an encoder of their own
+    const char* m_submitReason  = nullptr;
+
     static constexpr uint32_t kVisSlots = 65536u;
     WmtBuffer m_visBuffer;
     void*     m_visCpu   = nullptr;
@@ -538,6 +574,9 @@ namespace dxvk::backend {
     uint64_t m_frameLastSerial     = 0u;          // that submit's serial (the backlog gate)
     bool     m_prefixWork          = false;       // the command buffer holds encoded work
     bool     m_serialPrefixCommitted = false;     // commitPrefix() ran for the open serial
+    uint64_t canarySlot(const char* reason);
+    void armCanary();
+    void checkCanaries(uint64_t completed);
 
     void         ensureVisBuffer();
     void         armVisibility();
