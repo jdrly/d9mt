@@ -29,7 +29,8 @@
 #            while one consolidates (neither loads nor deletes its chunks); yields to requests;
 #            the capture flush at FLUSH_EVERY after a quiet gap; a warm start whose consolidation
 #            deletes the loaded parts, then misses (Metal throws for a deleted lookup archive it
-#            never converted: pso_convert_lookups; unlink_lookup_test shows both)
+#            never converted: pso_convert_lookups; unlink_lookup_test shows both); the conversion
+#            late (no consolidation that session); .verify (a one-time SHA-256 check)
 #   TSan     the cold, warm, part 5 and part 6 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
@@ -233,6 +234,34 @@ suite() { # <label>
     check "Metal: converted before the deletion (the bridge's fix), no exception" \
       "$("$OUT/unlink_lookup_test" "$OUT/unlink" warmup 2>&1 | grep -c 'EXCEPTION')" 0
   fi
+
+  # the conversion not done within 5 s (held 6 s here): no consolidation this session, nothing deleted
+  local NV="$OUT/$1-p6-conv"
+  run "$NV" "$1-p6-cv0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  mkdir -p "$NV-B"; ln -sfn "$NV/pso" "$NV-B/pso"
+  run "$NV-B" "$1-p6-cv1" MT_COVERAGE=0 -- "${SET_B[@]}"
+  local dn; dn=$(deltas "$NV")
+  run "$NV" "$1-p6-cv2" D9MT_PSO_CONVERT_DELAY_MS=6000 MT_WAIT_CONSOLIDATED=10 -- "${SET_A[@]}"
+  check "conversion late: no consolidation this session" "$(grep -c 'no consolidation this session (the loaded archives not converted within 5 s)' "$OUT/$1-p6-cv2.log")" 1
+  check "conversion late: no set" "$(markers "$NV")" 0
+  check "conversion late: the deltas kept" "$(deltas "$NV")" "$dn"
+  # .verify (left by a session whose conversion failed with every file there): the next start checks
+  # every archive's SHA-256 once; a delta damaged with its size and time kept goes, the marker too
+  local NW="$OUT/$1-p6-verify" d1
+  run "$NW" "$1-p6-vf0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  mkdir -p "$NW-B"; ln -sfn "$NW/pso" "$NW-B/pso"
+  run "$NW-B" "$1-p6-vf1" MT_COVERAGE=0 -- "${SET_B[@]}"
+  d1=$(ls -d "$NW"/pso/mt.exe/os-*)/$(ls "$NW"/pso/mt.exe/os-*/ | grep -E '^[0-9]+-[0-9]+-[0-9]+\.mtl4archive$' | head -1)
+  python3 -I -c 'import os,sys; f=sys.argv[1]; st=os.stat(f); b=bytearray(open(f,"rb").read()); i=len(b)//2; b[i]^=0xff; open(f,"wb").write(b); os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))' "$d1"
+  printf '1\n' > "$(ls -d "$NW"/pso/mt.exe/os-*)/.verify"
+  local others=() f kept=0
+  for f in "$(dirname "$d1")"/*.mtl4archive; do [ "$f" != "$d1" ] && others+=("$f"); done
+  run "$NW" "$1-p6-vf2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check ".verify: SHA-256 checked this once" "$(grep -c "checking every archive's SHA-256 this once" "$OUT/$1-p6-vf2.log")" 1
+  check ".verify: the damaged delta removed" "$([ -e "$d1" ] && echo kept || echo removed)" removed
+  for f in "${others[@]}"; do [ -e "$f" ] && kept=$((kept + 1)); done
+  check ".verify: the others kept" "$kept" "${#others[@]}"
+  check ".verify: the marker gone" "$([ -e "$(ls -d "$NW"/pso/mt.exe/os-*)/.verify" ] && echo kept || echo gone)" gone
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"

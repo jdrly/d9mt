@@ -6224,6 +6224,7 @@ pso_set_chunks(NSString *dir, NSString *marker) {
  * them from then on. */
 static _Atomic bool g_pso_lookup_gone;
 static _Atomic bool g_pso_lookups_converted = true;   /* false while pso_convert_lookups runs */
+static unsigned g_pso_convert_delay_ms;                 /* tests: before the conversion */
 
 static id<MTLRenderPipelineState>
 pso_compile(id<MTL4Compiler> compiler, MTL4RenderPipelineDescriptor *d, MTL4CompilerTaskOptions *opt, NSError **err) {
@@ -6239,11 +6240,17 @@ pso_compile(id<MTL4Compiler> compiler, MTL4RenderPipelineDescriptor *d, MTL4Comp
   return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:err];
 }
 
+/* paths: the loaded archives' files. An exception while converting with every file there means an
+ * archive Metal can't read although it passed the startup check (a damaged file with the shape
+ * and its sum's size and time): ".verify" makes the next start check every archive's SHA-256
+ * (as D9MT_PSO_VERIFY=1), so the damaged one goes instead of costing every session its lookups. */
 static void
-pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
+pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt, NSArray<NSString *> *paths, NSString *dir) {
   atomic_store(&g_pso_lookups_converted, false);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
     @autoreleasepool {
+      if (g_pso_convert_delay_ms)
+        usleep(g_pso_convert_delay_ms * 1000u);
       const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       NSError *err = nil;
       id<MTLLibrary> lib = [device newLibraryWithSource:
@@ -6262,7 +6269,19 @@ pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
       d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
       MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
       id<MTL4Compiler> c = lib ? [device newCompilerWithDescriptor:cd error:&err] : nil;
+      const bool goneBefore = atomic_load(&g_pso_lookup_gone);
       id<MTLRenderPipelineState> pso = c ? pso_compile(c, d, opt, &err) : nil;
+      if (!goneBefore && atomic_load(&g_pso_lookup_gone)) {
+        bool allThere = true;
+        for (NSString *path in paths)
+          allThere = allThere && !pso_gone(path);
+        if (allThere) {
+          [@"1\n" writeToFile:[dir stringByAppendingPathComponent:@".verify"] atomically:YES
+                      encoding:NSUTF8StringEncoding error:nil];
+          fprintf(stderr, "d9mt: PSO archives: a loaded archive can't be used although its file is there; "
+                  "every archive's SHA-256 is checked at the next start\n");
+        }
+      }
       PSO_EVENT("%lu lookup archive(s) converted in %llu ms (%s)", (unsigned long)opt.lookupArchives.count,
                 (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000000ull),
                 pso ? "ok" : "no pipeline");
@@ -6461,9 +6480,18 @@ pso_consolidate(const char *why) {
     PSO_EVENT("consolidation skipped: another process holds .consolidate");
     return;
   }
-  /* Nothing is deleted before Metal has converted the loaded archives (pso_compile). */
-  for (int t = 0; t < 100 && !atomic_load(&g_pso_lookups_converted); t++)
+  /* Nothing is deleted before Metal has converted the loaded archives (pso_compile): not
+   * converted within 5 s, no consolidation this session. The 5 s are a deadline on the clock:
+   * this thread is BACKGROUND, where macOS stretches each sleep (100 x 50 ms took over 6 s). */
+  uint64_t deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 5000000000ull;
+  while (!atomic_load(&g_pso_lookups_converted) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline)
     usleep(50000);
+  if (!atomic_load(&g_pso_lookups_converted)) {
+    flock(lockFd, LOCK_UN);
+    close(lockFd);
+    fprintf(stderr, "d9mt: PSO archives: no consolidation this session (the loaded archives not converted within 5 s)\n");
+    return;
+  }
   /* This session's captures first (at the startup window they are still in the game's
    * serializer, not in an archive the rebuild could look up): a flush now, through the flush
    * thread, waited for up to 5 s. */
@@ -6471,7 +6499,8 @@ pso_consolidate(const char *why) {
     const unsigned before = atomic_load(&g_pso_flushes);
     atomic_store(&g_pso_pause_hint, true);
     pso_flush_wake();
-    for (int t = 0; t < 100 && atomic_load(&g_pso_flushes) == before; t++)
+    deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 5000000000ull;
+    while (atomic_load(&g_pso_flushes) == before && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline)
       usleep(50000);
     PSO_EVENT("consolidation: the session's captures %s", atomic_load(&g_pso_flushes) != before ? "flushed first" : "not flushed within 5 s");
   }
@@ -6831,6 +6860,9 @@ pso_archive_init(id<MTLDevice> device) {
   const char *stats = getenv("D9MT_PSO_STATS");
   g_pso_stats = stats && !strcmp(stats, "1");
   g_pso_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const char *cdelay = getenv("D9MT_PSO_CONVERT_DELAY_MS");
+  if (cdelay && *cdelay)
+    g_pso_convert_delay_ms = (unsigned)strtoul(cdelay, NULL, 10);
   const char *win = getenv("D9MT_PSO_STARTUP_WINDOW_S");
   if (win && *win)
     g_pso_startup_window_ns = (uint64_t)strtoull(win, NULL, 10) * 1000000000ull;
@@ -6898,6 +6930,15 @@ pso_archive_init(id<MTLDevice> device) {
     }
   }
 
+  /* An archive the last session couldn't convert (pso_convert_lookups): every archive's SHA-256
+   * is checked this once. */
+  NSString *verifyOnce = [dir stringByAppendingPathComponent:@".verify"];
+  const bool verifyNow = !g_pso_verify && [fm fileExistsAtPath:verifyOnce];
+  if (verifyNow) {
+    g_pso_verify = true;
+    fprintf(stderr, "d9mt: PSO archives: checking every archive's SHA-256 this once (.verify)\n");
+  }
+
   /* Collect archives, drop leftovers of interrupted writes and orphans. */
   NSMutableArray<NSString *> *names = [NSMutableArray array];
   NSMutableArray<NSString *> *markers = [NSMutableArray array];
@@ -6929,6 +6970,7 @@ pso_archive_init(id<MTLDevice> device) {
 
   NSMutableArray *archives = [NSMutableArray array];
   NSMutableArray<NSString *> *parts = [NSMutableArray array];
+  NSMutableArray<NSString *> *loadedPaths = [NSMutableArray array];   /* archives' files, both layouts */
   NSUInteger consolidatedLoaded = 0u;
   if (g_pso_archive_first) {
     /* The newest consolidated archive, then every delta written after it (by
@@ -7040,6 +7082,7 @@ pso_archive_init(id<MTLDevice> device) {
       if (a) {
         if ([name hasPrefix:@"c-"])
           consolidatedLoaded++;
+        [loadedPaths addObject:path];
         [archives addObject:a];
         [parts addObject:path];
         [a release];
@@ -7073,6 +7116,7 @@ pso_archive_init(id<MTLDevice> device) {
     NSError *err = nil;
     id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
     if (a) {
+      [loadedPaths addObject:path];
       [archives addObject:a];
       [a release];
     } else {
@@ -7083,10 +7127,14 @@ pso_archive_init(id<MTLDevice> device) {
       }
     }
   }
+  if (verifyNow) {
+    g_pso_verify = false;
+    unlink(verifyOnce.fileSystemRepresentation);
+  }
   if (archives.count) {
     g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
     g_pso_task_options.lookupArchives = archives;
-    pso_convert_lookups(device, g_pso_task_options);
+    pso_convert_lookups(device, g_pso_task_options, loadedPaths, dir);
   }
   if (g_pso_archive_first) {
     /* A miss asks every archive in g_pso_lookup before the compiler, so only the

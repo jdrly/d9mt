@@ -422,11 +422,17 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Fix:**
   - **pso_convert_lookups:** right after loading, on a UTILITY queue, one tiny pipeline (a few lines of MSL) is compiled through a serializer-less compiler with every loaded archive as lookupArchives, which makes Metal convert them while the files exist. A consolidation deletes nothing before that has finished (it waits up to 5 s).
   - **pso_compile:** every compile with lookupArchives (the thunk, the M9 fallback, the consolidation) catches that exception. It logs one line, uses no lookupArchives for the rest of the session and builds again. A consolidation that meets it stops and keeps the parts.
+  - **The catch is a last resort.** Metal's Objective-C code isn't guaranteed to be exception-safe: an exception thrown through it can leave locks held or objects half-built. What has to hold is the conversion; the catch only keeps a missed case from ending the game.
+  - **Not converted within 5 s** (a loaded system, a slow first compile): the consolidation skips this session ("no consolidation this session (the loaded archives not converted within 5 s)"). It deletes nothing, and the next session tries again. The 5 s are a clock deadline: the test found that 100 sleeps of 50 ms on the BACKGROUND consolidation thread took over 6 s (macOS stretches timers at that QoS). The wait for the session's own flush uses the same deadline.
+  - **`.verify`:** if the conversion compile throws while every loaded archive's file is still there, the cause isn't a deletion. A damaged archive whose size and time match its `.sum` would pass the startup shape check. The bridge writes `<dir>/.verify`, and the next start checks every archive's SHA-256 once (like `D9MT_PSO_VERIFY=1`), removes the bad ones and then the marker.
 - **Tests:**
   - unlink_lookup_test `unused` throws (Metal's behaviour), `warmup` doesn't (the fix);
   - first.sh part 6: 11 deltas, a warm start with only hits (the compiler unused), whose startup-window consolidation replaces all 11, then 16 new PSOs. No crash, all built, no fallback, converted at load.
   - **Mutations:** without both layers, that run aborts with exactly the convertBinaryArchives exception. With the catch alone, it survives: one "file is gone" line, all built without lookupArchives.
   - The shared stress three times: 0 crashes. Before the fix: 2 of 20 processes aborted.
+  - first.sh part 6, the review's shoulds:
+    - the conversion held 6 s (`D9MT_PSO_CONVERT_DELAY_MS`, tests only): no consolidation that session, no set, the deltas kept;
+    - `.verify` beside a delta damaged with its size and time kept: the SHA-256 check runs once, removes that delta and keeps the others, and the marker is gone.
 
 **Tried and dropped: flushes inside a burst at a minimum interval.**
 - A burst flush has to wait for the compiles in flight before it can take the write lock (it starves otherwise; def1's flush waited 7 s).
