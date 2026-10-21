@@ -90,6 +90,12 @@ buffer that completes without its mark was discarded by the GPU (after a page fa
 `D9MT-GPU-LOST` (the first 20, then a summary at most every 10 s) (README, *Environment
 variables*; #27).
 
+**GPU hang**
+A submitted command buffer the GPU never finishes: no serial completes after it, the GPU's
+timeout cuts it off with everything queued behind it, and the queue doesn't recover. Unlike a
+page fault (see GPU canary), nothing completes afterwards. A wait that sees it for 10 s logs
+`D9MT-GPU-HUNG` and ends the game (`D9MT_GPU_HUNG`; `driver/backend/mtl_submission.cpp`).
+
 **Pass split**
 A submit in the middle of a render pass: the pass ends, so its attachments are stored and loaded
 again (`docs/gpu-4k.md`, `docs/g1-early-commit.md`).
