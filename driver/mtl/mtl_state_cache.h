@@ -163,7 +163,16 @@ namespace dxvk {
       uint32_t trips = 0u;             // consecutive sessions that ended that way (at load)
       bool     prewarmOff = false;     // GuardSkipTrips reached: no prewarm this session
       bool     fileDropped = false;    // GuardDropTrips reached: the file was dropped
+      uint64_t journaled = 0u;         // records appended to the journal this session
+      uint64_t journalReplayed = 0u;   // journal records merged at load (a session that ended without writing)
     };
+
+    /// The journal's file IO (the writer thread's; public for the tests and the Wine append
+    /// test, n013-perf/bench/journal_append.cpp). openJournal never truncates a file with our
+    /// header; appendJournalRecords appends to an existing file only (Gone if it's gone), under
+    /// the journal lock, waiting at most JournalLockWaitMs (Busy).
+    static statecache::JournalOpen openJournal(const std::string& path, uint64_t keySignature);
+    static statecache::JournalAppend appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes);
 
     Stats stats();
 
@@ -210,6 +219,14 @@ namespace dxvk {
     uint32_t                      m_writeFailures = 0u;
     std::unordered_set<uint64_t>  m_dropped;   // identities of failed entries
 
+    // Journal (docs/state-cache-journal.md): every entry used this session, once, appended
+    // after the intake that recorded it; folded into the main file and removed by write().
+    // Off for a read-only cache, a journal a newer d9mt wrote, or after an IO error.
+    bool                           m_journalOn    = true;
+    bool                           m_journalReady = false;   // prepared (header, alignment) since the last removal
+    std::vector<statecache::Entry> m_journalPending;
+    std::unordered_set<uint64_t>   m_journaled;              // identities journaled this session
+
     dxvk::mutex                   m_writerMutex;
     dxvk::condition_variable      m_writerCond;
     bool                          m_stopWriter = false;   // m_writerMutex
@@ -231,6 +248,7 @@ namespace dxvk {
     std::atomic<bool>     m_prewarmOff = { false };
     std::atomic<bool>     m_fileDropped = { false };
     std::atomic<uint32_t> m_loadTrips = { 0u };
+    std::atomic<uint64_t> m_journalRecords = { 0u }, m_journalReplayed = { 0u };
 
     // Crash-loop guard: <file>.prewarm lists the entries whose prewarm jobs
     // are in flight (rewritten atomically at every job start, removed when
@@ -267,6 +285,8 @@ namespace dxvk {
     void intake(bool final);
     bool ingest(Record& r);
     bool write();
+    void appendJournal();
+    std::string journalPath() const { return m_config.file + ".journal"; }
     void logUse(bool final);
 
     void prewarmMain(uint32_t index);

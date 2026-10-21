@@ -14,8 +14,10 @@
 #ifdef _WIN32
 #include "../util/util_env.h"
 #else
+#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <ctime>
@@ -313,6 +315,115 @@ namespace dxvk {
       return ok;
     }
 
+    /// Opens the journal for appends (docs/state-cache-journal.md §3). Our header: Ready.
+    /// Never truncates a file with our header, because another process (a second client) may
+    /// be appending; a torn tail stays and the parser resyncs past it. Missing: created
+    /// exclusively with the header. Shorter than the header: another process is creating it,
+    /// so wait once; still short (its creator died) or foreign (bad header, older format,
+    /// another key signature): removed and created anew. A newer d9mt's: Newer, untouched.
+    statecache::JournalOpen openJournalFile(const std::string& path, const std::vector<uint8_t>& header) {
+      using statecache::JournalOpen;
+      for (int attempt = 0; attempt < 2; attempt++) {
+        HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+          std::vector<uint8_t> head(header.size(), uint8_t(0u));
+          DWORD n = 0u;
+          const bool read = ::ReadFile(h, head.data(), DWORD(head.size()), &n, nullptr);
+          ::CloseHandle(h);
+          if (!read)
+            return JournalOpen::Failed;
+          if (n == head.size() && head == header)
+            return JournalOpen::Ready;
+          if (n >= 12u && !std::memcmp(head.data(), header.data(), 8u)
+           && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+            return JournalOpen::Newer;
+          if (n < head.size() && !attempt) {
+            ::Sleep(5);
+            continue;
+          }
+          ::DeleteFileW(widen(path).c_str());
+        } else if (::GetLastError() != ERROR_FILE_NOT_FOUND) {
+          return JournalOpen::Failed;
+        }
+
+        h = ::CreateFileW(widen(path).c_str(), GENERIC_WRITE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+          if (::GetLastError() == ERROR_FILE_EXISTS)
+            continue;   // another process created it first: read its header
+          return JournalOpen::Failed;
+        }
+        DWORD n = 0u;
+        const bool ok = ::WriteFile(h, header.data(), DWORD(header.size()), &n, nullptr) && n == header.size();
+        ::CloseHandle(h);
+        return ok ? JournalOpen::Ready : JournalOpen::Failed;
+      }
+      return JournalOpen::Busy;
+    }
+
+    /// The journal lock: an exclusive lock on one byte far past the end (JournalLockOffset),
+    /// held around each append and around write()'s re-read and removal. Without it two
+    /// clients' appends can land at the same end: Wine writes a FILE_APPEND_DATA handle at an
+    /// end it read before, so one batch overwrote the other (n013-perf journal-wine: 0.8% of
+    /// the records lost across two wineservers, 12% in one, 0 with the lock in both). Never
+    /// waits long: up to JournalLockWaitMs of 1 ms retries, then Busy (the caller keeps the
+    /// records for the next intake). Gone if the file is gone or was removed while we waited
+    /// (another process's write): the caller opens it again, so records never land in a
+    /// journal that is about to disappear or has no header.
+    using JournalFd = HANDLE;
+    const JournalFd NoJournalFd = INVALID_HANDLE_VALUE;
+
+    OVERLAPPED journalLockRange() {
+      OVERLAPPED ov = { };
+      ov.Offset     = DWORD(statecache::JournalLockOffset);
+      ov.OffsetHigh = DWORD(statecache::JournalLockOffset >> 32);
+      return ov;
+    }
+
+    void unlockJournal(JournalFd h) {
+      OVERLAPPED ov = journalLockRange();
+      ::UnlockFileEx(h, 0u, 1u, 0u, &ov);
+      ::CloseHandle(h);
+    }
+
+    statecache::JournalAppend lockJournal(const std::string& path, JournalFd& out) {
+      using statecache::JournalAppend;
+      out = NoJournalFd;
+      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ | FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE)
+        return ::GetLastError() == ERROR_FILE_NOT_FOUND ? JournalAppend::Gone : JournalAppend::Failed;
+
+      OVERLAPPED ov = journalLockRange();
+      const ULONGLONG deadline = ::GetTickCount64() + statecache::JournalLockWaitMs;
+      bool locked = false;
+      while (!(locked = ::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0u, 1u, 0u, &ov))) {
+        const DWORD err = ::GetLastError();
+        if ((err != ERROR_LOCK_VIOLATION && err != ERROR_IO_PENDING) || ::GetTickCount64() >= deadline)
+          break;
+        ::Sleep(1);
+      }
+      if (!locked) {
+        ::CloseHandle(h);
+        return JournalAppend::Busy;
+      }
+
+      // Removed while we waited for the lock (write()'s removal holds it): append to the new one.
+      FILE_STANDARD_INFO si = { };
+      if (::GetFileInformationByHandleEx(h, FileStandardInfo, &si, sizeof(si)) && (si.DeletePending || !si.NumberOfLinks)) {
+        unlockJournal(h);
+        return JournalAppend::Gone;
+      }
+      out = h;
+      return JournalAppend::Ok;
+    }
+
+    bool writeLocked(JournalFd h, const std::vector<uint8_t>& data) {
+      DWORD n = 0u;
+      return ::WriteFile(h, data.data(), DWORD(data.size()), &n, nullptr) && n == data.size();
+    }
+
     void* openCurrentThread() {
       return ::OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, FALSE, ::GetCurrentThreadId());
     }
@@ -449,6 +560,88 @@ namespace dxvk {
       return ok;
     }
 
+    // As the Win32 openJournalFile.
+    statecache::JournalOpen openJournalFile(const std::string& path, const std::vector<uint8_t>& header) {
+      using statecache::JournalOpen;
+      for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+          std::vector<uint8_t> head(header.size(), uint8_t(0u));
+          const ssize_t n = ::pread(fd, head.data(), head.size(), 0);
+          ::close(fd);
+          if (n < 0)
+            return JournalOpen::Failed;
+          if (size_t(n) == head.size() && head == header)
+            return JournalOpen::Ready;
+          if (n >= 12 && !std::memcmp(head.data(), header.data(), 8u)
+           && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+            return JournalOpen::Newer;
+          if (size_t(n) < head.size() && !attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+          }
+          ::unlink(path.c_str());
+        } else if (errno != ENOENT) {
+          return JournalOpen::Failed;
+        }
+
+        fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+          if (errno == EEXIST)
+            continue;   // another process created it first: read its header
+          return JournalOpen::Failed;
+        }
+        bool ok = ::write(fd, header.data(), header.size()) == ssize_t(header.size());
+        ok = !::close(fd) && ok;
+        return ok ? JournalOpen::Ready : JournalOpen::Failed;
+      }
+      return JournalOpen::Busy;
+    }
+
+    // As the Win32 journal lock, with flock (a native O_APPEND write is atomic anyway; the lock
+    // keeps the two paths' rules the same, Busy included). flock locks don't meet Wine's
+    // LockFileEx locks (fcntl ranges): only a native test next to a Wine process would see two
+    // unrelated locks, never the driver (one build is either Win32 or native).
+    using JournalFd = int;
+    const JournalFd NoJournalFd = -1;
+
+    void unlockJournal(JournalFd fd) {
+      ::flock(fd, LOCK_UN);
+      ::close(fd);
+    }
+
+    statecache::JournalAppend lockJournal(const std::string& path, JournalFd& out) {
+      using statecache::JournalAppend;
+      out = NoJournalFd;
+      const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND);
+      if (fd < 0)
+        return errno == ENOENT ? JournalAppend::Gone : JournalAppend::Failed;
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(statecache::JournalLockWaitMs);
+      bool locked = false;
+      while (!(locked = !::flock(fd, LOCK_EX | LOCK_NB))) {
+        if (errno != EWOULDBLOCK || std::chrono::steady_clock::now() >= deadline)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!locked) {
+        ::close(fd);
+        return JournalAppend::Busy;
+      }
+
+      struct stat st;
+      if (!::fstat(fd, &st) && !st.st_nlink) {
+        unlockJournal(fd);
+        return JournalAppend::Gone;
+      }
+      out = fd;
+      return JournalAppend::Ok;
+    }
+
+    bool writeLocked(JournalFd fd, const std::vector<uint8_t>& data) {
+      return ::write(fd, data.data(), data.size()) == ssize_t(data.size());
+    }
+
     // Thread priorities are Win32 (Wine) only; natively the boost is counted.
     void* openCurrentThread() { return nullptr; }
     void setThreadPriorityNormal(void*) { }
@@ -458,6 +651,17 @@ namespace dxvk {
     void nameThread(const char*) { }
 
 #endif
+
+    /// One append under the journal lock (see lockJournal).
+    statecache::JournalAppend appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+      JournalFd fd = NoJournalFd;
+      const statecache::JournalAppend a = lockJournal(path, fd);
+      if (a != statecache::JournalAppend::Ok)
+        return a;
+      const bool ok = writeLocked(fd, data);
+      unlockJournal(fd);
+      return ok ? statecache::JournalAppend::Ok : statecache::JournalAppend::Failed;
+    }
 
     const char* statusName(ParseStatus s) {
       switch (s) {
@@ -792,6 +996,8 @@ namespace dxvk {
     s.trips        = m_loadTrips.load();
     s.fileDropped  = m_fileDropped.load();
     s.prewarmOff   = m_prewarmOff.load();
+    s.journaled       = m_journalRecords.load();
+    s.journalReplayed = m_journalReplayed.load();
     return s;
   }
 
@@ -944,7 +1150,44 @@ namespace dxvk {
     if (m_fileDropped.load())
       m_trips = 0u;
 
-    m_session = r.session + 1u;
+    // The journal: what a session that ended without writing recorded, through the same
+    // filters as the file's entries (docs/state-cache-journal.md §4). No journal: one failed open.
+    JournalParseResult jr;
+    uint32_t journalInvalid = 0u;
+    bool journalFound = false;
+    if (m_readOnly) {
+      m_journalOn = false;
+    } else if (std::vector<uint8_t> jdata; readAll(journalPath(), jdata)) {
+      journalFound = true;
+      std::vector<Entry> jentries;
+      jr = parseJournal(jdata.data(), jdata.size(), m_config.keySignature, jentries);
+      if (jr.status == ParseStatus::Ok) {
+        for (const Entry& e : jentries) {
+          const uint64_t id = identityHash(e);
+          if (m_fileDropped.load() || (!suspects.empty() && suspects.count(id)) || m_dropped.count(id)) {
+            m_dropped.insert(id);
+            continue;
+          }
+          if (!m_config.noValidate && !m_backend->psoStateValid(e.key, nullptr)) {
+            journalInvalid++;
+            m_dropped.insert(id);
+            continue;
+          }
+          m_db.merge(e);
+          m_journalReplayed.fetch_add(1u, std::memory_order_relaxed);
+        }
+        m_dirty |= !jentries.empty();
+        m_invalid.fetch_add(journalInvalid);
+      } else if (jr.status == ParseStatus::NewerVersion) {
+        m_journalOn = false;          // a newer d9mt's: neither read nor touched
+      } else {
+        removeFile(journalPath());    // bad header, older format, another key layout: useless
+      }
+    }
+
+    // A session that never wrote the file has the same number as this one would: count
+    // past its journal records, so they don't count as used in this session.
+    m_session = std::max(r.session, jr.maxSession) + 1u;
     const uint32_t capped = m_db.applyCap(m_config.maxEntries);
     m_dirty |= capped != 0u;
     m_entries.store(m_db.size());
@@ -972,6 +1215,9 @@ namespace dxvk {
       invalid ? str::format(" (first: ", invalidWhy, ")") : std::string(),
       " capped=", capped, " max=", m_config.maxEntries,
       m_guardTripped.load() ? " guard=tripped" : "",
+      journalFound ? str::format(" journal=", statusName(jr.status), "/", jr.records, "/",
+        m_journalReplayed.load(), " corrupt=", jr.corrupt, " torn=", jr.tornBytes,
+        journalInvalid ? str::format(" invalid=", journalInvalid) : std::string()) : std::string(),
       " threads=", m_config.threads,
       " ms=", std::chrono::duration<double, std::milli>(Clock::now() - t0).count()));
   }
@@ -987,6 +1233,11 @@ namespace dxvk {
 
       if (m_db.use(r.entry, m_session))
         m_recorded.fetch_add(1u, std::memory_order_relaxed);
+
+      if (m_journalOn && m_journaled.insert(identityHash(r.entry)).second) {
+        if (const Entry* stored = m_db.get(r.entry))
+          m_journalPending.push_back(*stored);
+      }
 
       m_dropped.erase(identityHash(r.entry));
       m_dirty = true;
@@ -1036,7 +1287,67 @@ namespace dxvk {
       }
     }
 
+    if (!m_journalPending.empty())
+      appendJournal();
+
     m_entries.store(m_db.size());
+  }
+
+
+  statecache::JournalOpen MtlStateCache::openJournal(const std::string& path, uint64_t keySignature) {
+    return openJournalFile(path, statecache::journalHeader(keySignature));
+  }
+
+
+  statecache::JournalAppend MtlStateCache::appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes) {
+    return appendFile(path, bytes);
+  }
+
+
+  void MtlStateCache::appendJournal() {
+    // Writer thread, once per intake that used new entries: one append, never on the render thread.
+    if (!m_journalOn) {
+      m_journalPending.clear();
+      return;
+    }
+
+    std::vector<uint8_t> bytes;
+    statecache::appendRecords(bytes, m_journalPending);
+
+    bool ok = false;
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+      if (!m_journalReady) {
+        const statecache::JournalOpen open = openJournal(journalPath(), m_config.keySignature);
+        if (open == statecache::JournalOpen::Busy)
+          return;   // another process is creating it: the records stay pending for the next intake
+        if (open != statecache::JournalOpen::Ready) {
+          const bool newer = open == statecache::JournalOpen::Newer;
+          m_journalOn = false;
+          Logger::warn(newer
+            ? std::string("STATECACHE journal written by a newer d9mt: not appending")
+            : str::format("STATECACHE journal unusable: ", m_config.displayPath, ".journal"));
+          m_journalPending.clear();
+          return;
+        }
+        m_journalReady = true;
+      }
+      const statecache::JournalAppend a = appendJournalRecords(journalPath(), bytes);
+      if (a == statecache::JournalAppend::Busy)
+        return;   // another client holds the lock (or is frozen holding it): next intake
+      ok = a == statecache::JournalAppend::Ok;
+      // Gone (another process's write removed it): open it again, then retry once.
+      m_journalReady = ok;
+      if (a == statecache::JournalAppend::Failed)
+        break;
+    }
+
+    if (ok)
+      m_journalRecords.fetch_add(m_journalPending.size(), std::memory_order_relaxed);
+    else {
+      m_journalOn = false;
+      Logger::warn(str::format("STATECACHE journal append failed: ", m_config.displayPath, ".journal"));
+    }
+    m_journalPending.clear();
   }
 
 
@@ -1052,6 +1363,7 @@ namespace dxvk {
 
       if (r.status == ParseStatus::NewerVersion) {
         m_readOnly = true;
+        m_journalOn = false;
         Logger::info("STATECACHE write skipped: the file was written by a newer d9mt");
         return false;
       }
@@ -1067,6 +1379,27 @@ namespace dxvk {
       }
     }
 
+    // ... and what they journaled since their last write (it is removed below). The journal
+    // lock is held from this re-read to the removal, so no other client's append can land in
+    // between, in a journal about to be removed. Busy: merged but kept (a later write removes
+    // it; replaying it is idempotent).
+    JournalFd journalFd = NoJournalFd;
+    const bool journalLocked = m_journalOn
+      && lockJournal(journalPath(), journalFd) == statecache::JournalAppend::Ok;
+    if (m_journalOn) {
+      std::vector<uint8_t> jdata;
+      if (readAll(journalPath(), jdata)) {
+        std::vector<Entry> jentries;
+        const JournalParseResult jr = parseJournal(jdata.data(), jdata.size(), m_config.keySignature, jentries);
+        for (const Entry& e : jentries) {
+          if (!m_dropped.count(identityHash(e))
+           && (m_config.noValidate || m_backend->psoStateValid(e.key, nullptr)))
+            m_db.merge(e);
+        }
+        session = std::max(session, jr.maxSession);
+      }
+    }
+
     m_db.applyCap(m_config.maxEntries);
 
     const std::vector<uint8_t> bytes = serialize(m_db.entries(), m_config.keySignature, session);
@@ -1074,6 +1407,8 @@ namespace dxvk {
     m_lastWrite = now;
 
     if (!writeAtomic(m_config.file, bytes)) {
+      if (journalLocked)
+        unlockJournal(journalFd);
       if (++m_writeFailures <= 3u)
         Logger::warn(str::format("STATECACHE write failed: ", m_config.displayPath));
       return false;
@@ -1081,6 +1416,14 @@ namespace dxvk {
 
     m_dirty = false;
     m_writes.fetch_add(1u, std::memory_order_relaxed);
+
+    // Everything journaled is in the file now. A crash between the rename and this only
+    // replays records the file already has (merge is a union).
+    if (journalLocked) {
+      removeFile(journalPath());
+      unlockJournal(journalFd);
+      m_journalReady = false;
+    }
     m_entries.store(m_db.size());
 
     Logger::info(str::format("STATECACHE write entries=", m_db.size(), " bytes=", bytes.size(),

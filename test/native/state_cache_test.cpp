@@ -16,6 +16,8 @@
 //     -I<dxvk>/include/native/directx test/native/state_cache_test.cpp \
 //     driver/mtl/mtl_state_cache_core.cpp driver/mtl/mtl_state_cache.cpp -o /tmp/sct
 
+#include <atomic>
+#include <unordered_set>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -23,6 +25,9 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "mtl/mtl_state_cache.h"
@@ -1663,6 +1668,526 @@ static void testFailedPrewarmNotAdopted() {
 
 // Render-thread cost of recording one PSO miss (the only state cache work
 // on the render thread), against the same loop without it. `bench` mode.
+
+// ---------------------------------------------------------------------------
+// The journal (docs/state-cache-journal.md).
+
+static void testJournalFormat() {
+  std::vector<Entry> in;
+  for (uint32_t i = 0u; i < 10u; i++) {
+    Entry e = makeEntry(100u + i);
+    e.lastSession = 3u + (i == 4u ? 4u : 0u);
+    in.push_back(e);
+  }
+  std::vector<uint8_t> j = journalHeader(Sig);
+  CHECK(j.size() == JournalHeaderSize);
+  appendRecords(j, in);
+  CHECK(j.size() == JournalHeaderSize + 10u * EntrySize);
+
+  std::vector<Entry> out;
+  JournalParseResult r = parseJournal(j.data(), j.size(), Sig, out);
+  CHECK(r.status == ParseStatus::Ok && r.records == 10u && r.corrupt == 0u && r.tornBytes == 0u);
+  CHECK(out.size() == 10u && r.maxSession == 7u);
+  for (uint32_t i = 0u; i < 10u; i++)
+    CHECK(!std::memcmp(&out[i], &in[i], sizeof(Entry)));
+
+  // A torn tail (the last append cut short at any byte): every whole record kept.
+  for (size_t cut = 1u; cut < EntrySize; cut += 37u) {
+    std::vector<uint8_t> t(j.begin(), j.end() - std::ptrdiff_t(cut));
+    r = parseJournal(t.data(), t.size(), Sig, out);
+    CHECK(r.status == ParseStatus::Ok && out.size() == 9u && r.corrupt == 0u && r.tornBytes == EntrySize - cut);
+  }
+
+  // A bit flip in the middle record: only that one dropped.
+  std::vector<uint8_t> f = j;
+  f[JournalHeaderSize + 5u * EntrySize + 100u] ^= 0x10u;
+  r = parseJournal(f.data(), f.size(), Sig, out);
+  CHECK(r.status == ParseStatus::Ok && r.records == 9u && r.corrupt == 1u && out.size() == 9u && r.tornBytes == 0u);
+  for (const Entry& e : out)
+    CHECK(!sameIdentity(e, in[5]));
+  // ... also in its check.
+  f = j;
+  f[JournalHeaderSize + 2u * EntrySize + 3u] ^= 0x01u;
+  r = parseJournal(f.data(), f.size(), Sig, out);
+  CHECK(r.corrupt == 1u && out.size() == 9u);
+
+  // Resync: the file is never cut, so a torn append can be followed by whole ones (a kill, then
+  // the next session's appends), and two writers' records can overlap. Every good record after
+  // such a stretch is found again.
+  auto rec = [&](uint32_t i) { return std::vector<uint8_t>(j.begin() + JournalHeaderSize + i * EntrySize,
+                                                           j.begin() + JournalHeaderSize + (i + 1u) * EntrySize); };
+  auto cat = [](std::vector<uint8_t>& to, const std::vector<uint8_t>& from, size_t a = 0u, size_t b = SIZE_MAX) {
+    to.insert(to.end(), from.begin() + a, from.begin() + std::min(b, from.size()));
+  };
+  {
+    std::vector<uint8_t> t = journalHeader(Sig);
+    for (uint32_t i = 0u; i < 4u; i++) cat(t, rec(i));
+    cat(t, rec(4u), 0u, 200u);                     // torn
+    for (uint32_t i = 5u; i < 10u; i++) cat(t, rec(i));
+    r = parseJournal(t.data(), t.size(), Sig, out);
+    CHECK(r.status == ParseStatus::Ok && r.records == 9u && out.size() == 9u && r.corrupt == 1u && r.tornBytes == 0u);
+    for (const Entry& e : out)
+      CHECK(!sameIdentity(e, in[4]));
+  }
+  {
+    std::vector<uint8_t> t = journalHeader(Sig);   // record 1 split by record 2 (an overlap)
+    cat(t, rec(0u)); cat(t, rec(1u), 0u, 150u); cat(t, rec(2u)); cat(t, rec(1u), 150u); cat(t, rec(3u));
+    r = parseJournal(t.data(), t.size(), Sig, out);
+    CHECK(r.records == 3u && r.corrupt == 2u && r.tornBytes == 0u);
+    CHECK(out.size() == 3u && !std::memcmp(&out[0], &in[0], sizeof(Entry))
+       && !std::memcmp(&out[1], &in[2], sizeof(Entry)) && !std::memcmp(&out[2], &in[3], sizeof(Entry)));
+  }
+  {
+    // Damage of any kind (overwritten, cut out, inserted, repeated bytes): a record that is
+    // kept is always one that was written, and records away from the damage stay.
+    std::mt19937 rng(1234u);
+    uint32_t kept = 0u;
+    for (int it = 0; it < 400; it++) {
+      std::vector<uint8_t> t = j;
+      const int ops = 1 + int(rng() % 3u);
+      for (int o = 0; o < ops; o++) {
+        const size_t at = JournalHeaderSize + rng() % (t.size() - JournalHeaderSize);
+        const size_t len = 1u + rng() % 500u;
+        switch (rng() % 4u) {
+          case 0: for (size_t k = at; k < std::min(t.size(), at + len); k++) t[k] = uint8_t(rng()); break;
+          case 1: t.erase(t.begin() + at, t.begin() + std::min(t.size(), at + len)); break;
+          case 2: { std::vector<uint8_t> g(len); for (auto& b : g) b = uint8_t(rng()); t.insert(t.begin() + at, g.begin(), g.end()); break; }
+          case 3: { const size_t from = JournalHeaderSize + rng() % (j.size() - JournalHeaderSize);
+                    t.insert(t.begin() + at, j.begin() + from, j.begin() + std::min(j.size(), from + len)); break; }
+        }
+      }
+      r = parseJournal(t.data(), t.size(), Sig, out);
+      CHECK(r.status == ParseStatus::Ok);
+      for (const Entry& e : out) {
+        bool written = false;
+        for (const Entry& w : in)
+          written |= !std::memcmp(&e, &w, sizeof(Entry));
+        CHECK(written);
+      }
+      kept += uint32_t(out.size());
+    }
+    CHECK(kept > 400u * 4u);   // most records survive 1-3 damaged spots
+  }
+
+  // Header cases.
+  r = parseJournal(nullptr, 0u, Sig, out);
+  CHECK(r.status == ParseStatus::Empty);
+  r = parseJournal(j.data(), j.size(), Sig + 1u, out);
+  CHECK(r.status == ParseStatus::KeyMismatch && out.empty());
+  f = j; f[20] ^= 0x01u;   // the key signature, without fixing the check
+  r = parseJournal(f.data(), f.size(), Sig, out);
+  CHECK(r.status == ParseStatus::BadHeader);
+  f = j; f[8] = uint8_t(JournalVersion + 1u);
+  r = parseJournal(f.data(), f.size(), Sig, out);
+  CHECK(r.status == ParseStatus::NewerVersion);
+  std::vector<uint8_t> mainFile = serialize(in, Sig, 1u);   // the main file is no journal
+  r = parseJournal(mainFile.data(), mainFile.size(), Sig, out);
+  CHECK(r.status == ParseStatus::BadHeader);
+  r = parseJournal(j.data(), JournalHeaderSize - 1u, Sig, out);
+  CHECK(r.status == ParseStatus::BadHeader);
+}
+
+static void copyFileIfExists(const std::string& from, const std::string& to) {
+  if (exists(from))
+    writeFile(to, readFile(from));
+  else
+    unlink(to.c_str());
+}
+
+static void testJournalSessions() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 1u);
+  const std::string journal = cfg.file + ".journal";
+  Workload w(4u, 20u, 60u, 21u);
+
+  // A session that dies before its first write (the writer waits 20 s after the last change):
+  // a copy of the directory once the journal holds the 60 records is the state a kill leaves.
+  const std::string killed = tempDir();
+  const MtlStateCacheConfig kcfg = configFor(killed, 1u);
+  {
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    CHECK(!exists(journal));   // created by the first append, not at load
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 60u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 60u && sc->stats().writes == 0u);
+    copyFileIfExists(cfg.file, kcfg.file);
+    copyFileIfExists(journal, kcfg.file + ".journal");
+    CHECK(!exists(kcfg.file) && exists(kcfg.file + ".journal"));
+    sc->shutdown();
+    CHECK(!exists(journal) && exists(cfg.file));   // folded in by the final write
+  }
+  CHECK(readFile(kcfg.file + ".journal").size() == JournalHeaderSize + 60u * EntrySize);
+
+  // Next session after the kill: the journal's records are back and prewarmed.
+  const std::vector<uint8_t> killedJournal = readFile(kcfg.file + ".journal");
+  auto loadKilled = [&](uint64_t wantReplayed, uint64_t wantBuilt) {
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, kcfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    const auto s = sc->stats();
+    CHECK(s.journalReplayed == wantReplayed && s.entries == wantReplayed && s.built == wantBuilt);
+    sc->shutdown();
+    std::vector<Entry> onDisk;
+    const ParseResult r = parse(readFile(kcfg.file).data(), readFile(kcfg.file).size(), Sig, onDisk);
+    CHECK(r.status == ParseStatus::Ok && onDisk.size() == wantReplayed);
+    // The killed session never wrote the file: its records are session 1, this one is 2.
+    CHECK(r.session == 2u);
+    for (const Entry& e : onDisk)
+      CHECK(e.lastSession == 1u);
+    CHECK(!exists(kcfg.file + ".journal"));
+  };
+  loadKilled(60u, 60u);
+
+  // A torn tail (the kill hit an append): every whole record survives.
+  unlink(kcfg.file.c_str());
+  {
+    std::vector<uint8_t> t = killedJournal;
+    t.resize(t.size() - 100u);   // the last record cut short
+    writeFile(kcfg.file + ".journal", t);
+  }
+  loadKilled(59u, 59u);
+
+  // A bit flip in a record in the middle: that one dropped, the rest stays.
+  unlink(kcfg.file.c_str());
+  {
+    std::vector<uint8_t> f = killedJournal;
+    f[JournalHeaderSize + 30u * EntrySize + 200u] ^= 0x04u;
+    writeFile(kcfg.file + ".journal", f);
+  }
+  loadKilled(59u, 59u);
+
+  // The next appends after a torn tail: the file is not cut (another client may be appending),
+  // they follow the fragment, and the parser finds every whole record on both sides of it.
+  unlink(kcfg.file.c_str());
+  {
+    std::vector<uint8_t> t = killedJournal;
+    t.resize(t.size() - 7u);
+    writeFile(kcfg.file + ".journal", t);
+    Workload w2(4u, 20u, 70u, 22u);   // other draws: new records to journal
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, kcfg);
+    waitLoaded(sc.ptr());
+    w2.announceAll(sc.ptr());
+    w2.render(sc.ptr(), be);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 70u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const std::vector<uint8_t> after = readFile(kcfg.file + ".journal");
+    CHECK(after.size() == t.size() + 70u * EntrySize);
+    std::vector<Entry> recs;
+    const JournalParseResult jr = parseJournal(after.data(), after.size(), Sig, recs);
+    CHECK(jr.status == ParseStatus::Ok && jr.corrupt == 1u && jr.tornBytes == 0u && recs.size() == 59u + 70u);
+    sc->shutdown();
+  }
+
+  // An old state file and no journal (every file before the journal): loads as before, and
+  // nothing is created at load.
+  {
+    const std::string old = tempDir();
+    const MtlStateCacheConfig ocfg = configFor(old, 0u);
+    std::vector<Entry> es;
+    for (uint32_t i = 0u; i < 20u; i++) { Entry e = makeEntry(300u + i); e.lastSession = 4u; e.sessionsUsed = 2u; es.push_back(e); }
+    writeFile(ocfg.file, serialize(es, Sig, 4u));
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, ocfg);
+    waitLoaded(sc.ptr());
+    const auto s = sc->stats();
+    CHECK(s.entries == 20u && s.journalReplayed == 0u && s.journaled == 0u);
+    CHECK(!exists(ocfg.file + ".journal"));
+    sc->shutdown();
+    std::vector<Entry> onDisk;
+    const ParseResult r = parse(readFile(ocfg.file).data(), readFile(ocfg.file).size(), Sig, onDisk);
+    CHECK(r.status == ParseStatus::Ok && onDisk.size() == 20u);
+  }
+
+  // The crash-loop guard applies to the journal too: a suspect only the journal has is dropped.
+  unlink(kcfg.file.c_str());
+  writeFile(kcfg.file + ".journal", killedJournal);
+  {
+    std::vector<Entry> recs;
+    parseJournal(killedJournal.data(), killedJournal.size(), Sig, recs);
+    CHECK(recs.size() == 60u);
+    if (recs.size() < 8u)
+      return;
+    char hex[24];
+    std::snprintf(hex, sizeof(hex), "%016llx\n", (unsigned long long)identityHash(recs[7]));
+    const std::string marker = std::string("d9mt-prewarm 1\ntrips 0\n") + hex;
+    writeFile(kcfg.file + ".prewarm", std::vector<uint8_t>(marker.begin(), marker.end()));
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, kcfg);
+    waitLoaded(sc.ptr());
+    const auto s = sc->stats();
+    CHECK(s.guardTripped && s.journalReplayed == 59u && s.entries == 59u);
+    sc->shutdown();
+  }
+
+  // The journal's records as another set (forged, another key signature), on a fresh file.
+  std::vector<Entry> recs;
+  parseJournal(killedJournal.data(), killedJournal.size(), Sig, recs);
+  auto fresh = [&](const std::vector<uint8_t>& j) {
+    for (const char* ext : { "", ".prewarm", ".trips", ".journal" })
+      unlink((kcfg.file + ext).c_str());
+    writeFile(kcfg.file + ".journal", j);
+  };
+
+  // A forged record (a valid check, a key psoStateValid rejects): dropped, never prewarmed.
+  {
+    std::vector<Entry> forged = recs;
+    forged[11].key[0] = 0xeeu;
+    std::vector<uint8_t> j = journalHeader(Sig);
+    appendRecords(j, forged);
+    fresh(j);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, kcfg);
+    w.announceAll(sc.ptr());
+    waitLoaded(sc.ptr());
+    CHECK(sc->waitPrewarmIdle(10000u));
+    const auto s = sc->stats();
+    CHECK(s.journalReplayed == 59u && s.invalid == 1u && s.entries == 59u && s.built == 59u);
+    sc->shutdown();
+  }
+
+  // A journal of another key signature (another d9mt's key layout): ignored and removed, the
+  // main file's rules apply.
+  {
+    std::vector<uint8_t> j = journalHeader(Sig ^ 1u);
+    appendRecords(j, recs);
+    fresh(j);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, kcfg);
+    waitLoaded(sc.ptr());
+    const auto s = sc->stats();
+    CHECK(s.journalReplayed == 0u && s.entries == 0u);
+    CHECK(!exists(kcfg.file + ".journal"));
+    sc->shutdown();
+  }
+
+  // A write that fails (the directory read-only by then) leaves the journal whole.
+  {
+    const std::string ro = tempDir();
+    const MtlStateCacheConfig rcfg = configFor(ro, 0u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, rcfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 60u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 60u);
+    chmod(ro.c_str(), 0555);
+    sc->shutdown();
+    chmod(ro.c_str(), 0755);
+    CHECK(!exists(rcfg.file) && sc->stats().writes == 0u);
+    CHECK(readFile(rcfg.file + ".journal").size() == JournalHeaderSize + 60u * EntrySize);
+  }
+}
+
+// Opening the journal: missing, ours (never cut), a creator's short file, foreign, newer.
+static void testJournalOpen() {
+  const std::string dir = tempDir();
+  const std::string path = dir + "/o.d9mtstate.journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  std::vector<uint8_t> t = journalHeader(Sig);
+  appendRecords(t, { makeEntry(1u), makeEntry(2u) });
+  t.resize(t.size() - 50u);   // a torn tail: kept as it is
+  writeFile(path, t);
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == t);
+
+  writeFile(path, std::vector<uint8_t>(10u, uint8_t(0u)));   // a creator killed after the create
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  writeFile(path, journalHeader(Sig ^ 1u));   // another key signature
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  std::vector<uint8_t> newer = journalHeader(Sig);
+  newer[8] = uint8_t(JournalVersion + 1u);
+  writeFile(path, newer);
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Newer);
+  CHECK(readFile(path) == newer);
+
+  unlink(path.c_str());
+  CHECK(MtlStateCache::appendJournalRecords(path, t) == JournalAppend::Gone);   // appends never create it
+  CHECK(!exists(path));
+}
+
+// Two clients appending to one journal at once, a third opening it over and over (another
+// client's first append of a session): nothing accepted is wrong, and natively (O_APPEND)
+// nothing is lost. n013-perf/scripts/journal-wine.sh runs the same under Wine.
+static void testJournalConcurrentAppend() {
+  const std::string dir = tempDir();
+  const std::string path = dir + "/c.d9mtstate.journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+
+  constexpr uint32_t Writers = 2u, Batches = 300u;
+  static const uint32_t sizes[3] = { 1u, 3u, 17u };
+  std::atomic<bool> stop = { false };
+  std::atomic<uint32_t> written = { 0u }, failed = { 0u };
+
+  std::vector<std::thread> threads;
+  for (uint32_t w = 0u; w < Writers; w++) {
+    threads.emplace_back([&, w] {
+      uint32_t seq = 0u;
+      for (uint32_t b = 0u; b < Batches; b++) {
+        std::vector<Entry> es;
+        for (uint32_t k = 0u; k < sizes[(b + w) % 3u]; k++)
+          es.push_back(makeEntry((w + 1u) * 100000u + seq++));
+        std::vector<uint8_t> bytes;
+        appendRecords(bytes, es);
+        if (MtlStateCache::appendJournalRecords(path, bytes) == JournalAppend::Ok)
+          written += uint32_t(es.size());
+        else
+          failed++;
+      }
+    });
+  }
+  std::thread opener([&] {
+    while (!stop.load())
+      if (MtlStateCache::openJournal(path, Sig) != JournalOpen::Ready)
+        failed++;
+  });
+  for (auto& t : threads)
+    t.join();
+  stop = true;
+  opener.join();
+
+  std::vector<Entry> recs;
+  const std::vector<uint8_t> data = readFile(path);
+  const JournalParseResult r = parseJournal(data.data(), data.size(), Sig, recs);
+  CHECK(failed.load() == 0u && r.status == ParseStatus::Ok);
+  CHECK(r.records == written.load() && r.corrupt == 0u && r.tornBytes == 0u);
+  std::unordered_set<uint64_t> seen;
+  for (const Entry& e : recs) {
+    const Entry want = makeEntry(e.firstUseMs);
+    CHECK(!std::memcmp(&e, &want, sizeof(Entry)));   // exactly a written record
+    CHECK(seen.insert(identityHash(e)).second);               // once
+  }
+}
+
+// The journal lock: another client holding it (or frozen while holding it, SIGSTOP style)
+// makes an append Busy within ~JournalLockWaitMs, never a long wait; the cache keeps those
+// records pending and journals them once the lock is free, none lost.
+static void testJournalLock() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 0u);
+  const std::string path = cfg.file + ".journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+
+  const int holder = ::open(path.c_str(), O_RDONLY);
+  CHECK(holder >= 0 && !::flock(holder, LOCK_EX));
+
+  std::vector<uint8_t> bytes;
+  appendRecords(bytes, { makeEntry(7u) });
+  auto t0 = std::chrono::steady_clock::now();
+  CHECK(MtlStateCache::appendJournalRecords(path, bytes) == JournalAppend::Busy);
+  const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("journal lock: Busy after %lld ms (bound %u ms)\n", (long long)waitedMs, JournalLockWaitMs);
+  // At least the lock's time bound; the upper bound allows for timer coalescing (a background-QoS
+  // process, as scripts/test-state-cache.sh under taskpolicy -b, sleeps 1 ms as ~3 ms: ~60 ms
+  // measured, ~21 ms at normal priority). The writer thread's real wait is measured under Wine
+  // (n013-perf scripts/journal-wine.sh FROZEN=1, at THREAD_PRIORITY_LOWEST).
+  CHECK(waitedMs >= JournalLockWaitMs && waitedMs < JournalLockWaitMs + 100);
+
+  // A cache whose intakes all find the lock held: the records wait, nothing is dropped.
+  Workload w(4u, 20u, 30u, 31u);
+  {
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));   // ~4 intakes, all Busy
+    CHECK(sc->stats().journaled == 0u);
+    ::flock(holder, LOCK_UN);
+    ::close(holder);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 30u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 30u);
+    std::vector<Entry> recs;
+    const std::vector<uint8_t> data = readFile(path);
+    const JournalParseResult r = parseJournal(data.data(), data.size(), Sig, recs);
+    CHECK(r.status == ParseStatus::Ok && r.records == 30u && r.corrupt == 0u);
+    sc->shutdown();
+  }
+
+  // write() while another client holds the lock: the file is written and the journal kept
+  // (only removed under the lock, so never with an append in flight).
+  {
+    Workload w2(4u, 20u, 10u, 32u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w2.announceAll(sc.ptr());
+    w2.render(sc.ptr(), be);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 10u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 10u);
+    const int h = ::open(path.c_str(), O_RDONLY);
+    CHECK(h >= 0 && !::flock(h, LOCK_EX));
+    sc->shutdown();
+    CHECK(sc->stats().writes >= 1u && exists(path));
+    ::flock(h, LOCK_UN);
+    ::close(h);
+  }
+
+  // An append that opened the journal before a write() removed it, waiting for the lock: it
+  // must not land in the removed file (Gone; Busy if its wait ran out first).
+  {
+    const std::string p2 = dir + "/r.d9mtstate.journal";
+    CHECK(MtlStateCache::openJournal(p2, Sig) == JournalOpen::Ready);
+    const int h = ::open(p2.c_str(), O_RDONLY);
+    CHECK(h >= 0 && !::flock(h, LOCK_EX));
+    std::atomic<int> res = { -1 };
+    std::thread t([&] { res = int(MtlStateCache::appendJournalRecords(p2, bytes)); });
+    // A spin, not a sleep: under taskpolicy -b a 5 ms sleep can outlast the append's 20 ms.
+    for (auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(3); ) { }
+    ::unlink(p2.c_str());
+    ::flock(h, LOCK_UN);
+    t.join();
+    struct stat st;
+    CHECK(!::fstat(h, &st) && st.st_size == off_t(JournalHeaderSize));
+    CHECK(res.load() == int(JournalAppend::Gone));
+    std::printf("journal lock: append into a removed journal -> %s\n", res.load() == int(JournalAppend::Gone) ? "Gone" : "Busy");
+    ::close(h);
+  }
+}
+
+// Two processes on one cache: one's journal survives the other's write (it merges it first).
+static void testJournalTwoProcesses() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 0u);
+  Workload wa(4u, 10u, 30u, 31u), wb(4u, 10u, 40u, 32u);
+  FakeBackend bea, beb;
+  Rc<MtlStateCache> a = new MtlStateCache(&bea, cfg);
+  Rc<MtlStateCache> b = new MtlStateCache(&beb, cfg);
+  waitLoaded(a.ptr());
+  waitLoaded(b.ptr());
+  wa.announceAll(a.ptr());
+  wa.render(a.ptr(), bea);
+  for (int i = 0; i < 5000 && a->stats().journaled < 30u; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  wb.announceAll(b.ptr());
+  wb.render(b.ptr(), beb);
+  for (int i = 0; i < 5000 && b->stats().journaled < 40u; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  b->shutdown();   // writes: its records and a's journaled ones, removes the journal
+  std::vector<Entry> onDisk;
+  parse(readFile(cfg.file).data(), readFile(cfg.file).size(), Sig, onDisk);
+  CHECK(onDisk.size() == 70u);
+  a->shutdown();
+  parse(readFile(cfg.file).data(), readFile(cfg.file).size(), Sig, onDisk);
+  CHECK(onDisk.size() == 70u);
+}
+
 static void benchRecord() {
   const std::string dir = tempDir();
   FakeBackend be;
@@ -1728,6 +2253,12 @@ int main(int argc, char** argv) {
   testCrashChain();
   testBoost();
   testFailedPrewarmNotAdopted();
+  testJournalFormat();
+  testJournalSessions();
+  testJournalOpen();
+  testJournalConcurrentAppend();
+  testJournalLock();
+  testJournalTwoProcesses();
 
   if (g_failures) {
     std::printf("state_cache_test: %d FAILED\n", g_failures);
