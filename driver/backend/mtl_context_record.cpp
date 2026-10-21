@@ -157,6 +157,8 @@ namespace dxvk::backend {
     // tracker's drain (which waits for submitted serials only) waits for it too.
     if (m_serialPrefixCommitted || m_completePending)
       submit(true);
+    // after G1's completing submit: what is left is a command buffer that is never submitted
+    lifetime::beginTeardown();
     if (m_pass.active)
       closePass();
     // Recorded for a command buffer that is never submitted: the tracker runs it at the

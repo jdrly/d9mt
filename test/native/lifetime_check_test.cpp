@@ -7,7 +7,8 @@
 //  - the stamp goes with the release: a later object with the same handle starts clean;
 //  - a drawable's texture is reported as "drawable" and never aborts;
 //  - with several of d9mt's references to one texture, only the last release is checked;
-//  - a submit serial that differs from the recorded one is reported once.
+//  - a submit serial that differs from the recorded one is reported once;
+//  - at context teardown, a never-submitted command buffer's textures are a marked line only.
 // D9MT_LIFETIME_CHECK=log (set by the test itself: abort mode would end it at the first).
 //   x86_64-w64-mingw32-g++ -std=c++17 -O1 '-DWINEMETAL_API=extern "C"' -I driver/backend \
 //     test/native/lifetime_check_test.cpp driver/backend/mtl_lifetime.cpp \
@@ -129,13 +130,21 @@ int main() {
   CHECK(g_lines.size() == 5u);
   CHECK(has(4, "recorded as serial 7 was submitted as 8"));
 
+  // 6b. at context teardown, a release of what the never-submitted command buffer used: a
+  //     line (marked), never an abort (the GPU never got it)
+  lifetime::beginTeardown();
+  lifetime::noteUse(0x6200u, st.nextSerial(), lifetime::Use::Sampled);
+  lifetime::checkRelease(0x6200u, "texture");
+  CHECK(g_lines.size() == 6u);
+  CHECK(has(5, "at context teardown, never submitted"));
+
   // 7. the device goes (GPU drained): nothing stamped is in use any more
   lifetime::noteUse(0x7000u, st.nextSerial(), lifetime::Use::Sampled);
   g_completed = st.lastSubmittedSerial();
   st.drainAndStopPump();
   lifetime::detach(&st);
   lifetime::checkRelease(0x7000u, "texture");
-  CHECK(g_lines.size() == 5u);
+  CHECK(g_lines.size() == 6u);
 
   for (const std::string& l : g_lines)
     std::printf("  %s\n", l.c_str());

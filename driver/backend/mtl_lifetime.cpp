@@ -28,6 +28,7 @@ namespace dxvk::backend::lifetime {
     uint64_t                                 g_reported = 0u;
     uint64_t                                 g_drawables = 0u;
     bool                                     g_serialWarned = false;
+    bool                                     g_teardown = false;
 
     const char* useName(Use use) {
       switch (use) {
@@ -46,24 +47,29 @@ namespace dxvk::backend::lifetime {
 
   }
 
-  int mode() {
-    static const int s_mode = [] {
-      const std::string v = env::getEnvVar("D9MT_LIFETIME_CHECK");
-      if (v.empty() || v == "0")
-        return 0;
-      int m = v == "log" ? 2 : 1;
-      Logger::warn(str::format("D9MT-LIFETIME: check on (", m == 1 ? "abort at the first" : "log only",
-        "): a texture released before the GPU is past its last command buffer is reported"));
-      return m;
-    }();
-    return s_mode;
+  int readMode() {
+    // (at load: no logging here, the logger may not be up yet; attach says it)
+    const std::string v = env::getEnvVar("D9MT_LIFETIME_CHECK");
+    if (v.empty() || v == "0")
+      return 0;
+    return v == "log" ? 2 : 1;
   }
 
   void attach(SubmissionTracker* tracker) {
     if (!enabled())
       return;
+    Logger::warn(str::format("D9MT-LIFETIME: check on (", mode() == 1 ? "abort at the first" : "log only",
+      "): a texture released before the GPU is past its last command buffer is reported"));
     std::lock_guard<std::mutex> lock(g_mutex);
     g_tracker = tracker;
+    g_teardown = false;
+  }
+
+  void beginTeardown() {
+    if (!enabled())
+      return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_teardown = true;
   }
 
   void detach(SubmissionTracker* tracker) {
@@ -99,6 +105,7 @@ namespace dxvk::backend::lifetime {
   void checkReleaseSlow(obj_handle_t texture, const char* what) {
     Stamp s;
     uint64_t completed = 0u, recording = 0u, n = 0u;
+    bool unsubmitted = false;
     { std::lock_guard<std::mutex> lock(g_mutex);
       auto it = g_stamps.find(texture);
       if (it == g_stamps.end())
@@ -117,6 +124,7 @@ namespace dxvk::backend::lifetime {
       if (s.serial <= completed)
         return;
       recording = g_tracker->nextSerial();
+      unsubmitted = g_teardown && s.serial >= recording;
       n = s.drawable ? ++g_drawables : ++g_reported;
     }
 
@@ -126,9 +134,10 @@ namespace dxvk::backend::lifetime {
     const std::string line = str::format("D9MT-LIFETIME", s.drawable ? " drawable" : "", ": ", what,
       " 0x", std::hex, texture, std::dec, " released while ", where, " uses it as ", useName(s.use),
       " (GPU completed ", completed, ", recording ", recording, ")",
+      unsubmitted ? "; at context teardown, never submitted" : "",
       s.drawable ? "; Core Animation still holds the drawable" : "", n > 1u ? str::format(" [", n, "]") : "");
 
-    if (s.drawable || mode() == 2) {
+    if (s.drawable || mode() == 2 || unsubmitted) {
       if (shouldLog(n))
         Logger::err(line);
       return;

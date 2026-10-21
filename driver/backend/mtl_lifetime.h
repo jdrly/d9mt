@@ -14,7 +14,7 @@
 // A drawable's texture is also held by Core Animation until it is on screen, so releasing
 // d9mt's reference early frees nothing: those are logged as "D9MT-LIFETIME drawable"
 // (rate-limited) and never abort, to show the present path's assumptions.
-// Off by default: one predictable branch per site.
+// Off by default: one load and a predictable branch per site (g_mode, read once at load).
 
 #include <cstdint>
 
@@ -29,14 +29,23 @@ namespace lifetime {
 
   enum class Use : uint8_t { Sampled, Attachment, CopySrc, CopyDst };
 
-  // 0 off, 1 abort, 2 log (D9MT_LIFETIME_CHECK, read once)
-  int mode();
+  // 0 off, 1 abort, 2 log: D9MT_LIFETIME_CHECK, read once when the DLL loads, so that with the
+  // check off every hook is a load and a branch, not a call (they sit in the per-draw binding
+  // path: thousands per frame)
+  int readMode();
+  inline const int g_mode = readMode();
 
-  inline bool enabled() { return mode() != 0; }
+  inline int mode() { return g_mode; }
+
+  inline bool enabled() { return g_mode != 0; }
 
   // The tracker whose serials the stamps are (the device's); nullptr when it goes.
   void attach(SubmissionTracker* tracker);
   void detach(SubmissionTracker* tracker);
+
+  // A context goes away: what its never-submitted command buffer used is released with it,
+  // which is no use-after-free (the GPU never got it); logged, never an abort.
+  void beginTeardown();
 
   void noteAcquireSlow(obj_handle_t texture);
   void noteUseSlow(obj_handle_t texture, uint64_t serial, Use use);
