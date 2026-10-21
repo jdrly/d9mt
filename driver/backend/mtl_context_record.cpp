@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include "../util/log/log.h"
+#include "../util/util_env.h"
 #include "../util/util_string.h"
 #include "../util/util_d9mt_debug.h"
 
@@ -179,6 +180,13 @@ namespace dxvk::backend {
     m_device->submissions().retireAfter(m_device->submissions().nextSerial(),
       [buf = std::move(m_nullBuffer), i2 = std::move(m_nullImage2D), ic = std::move(m_nullImageCube),
        v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube), smp = std::move(m_nullSampler)]() { });
+    if (m_canaryLost)
+      Logger::err(str::format("D9MT-GPU-LOST: ", m_canaryLost, " command buffers of this session did not run to their end",
+        m_canaryState == CanaryState::On ? "" : " (the canary's own marks never arrived: not GPU faults)"));
+    if (m_canaryBuffer) {
+      m_device->residency().allocDestroyed(m_canaryBuffer.detach(), m_canaryCpu,
+        m_device->submissions().nextSerial(), std::max<uint64_t>(uint64_t(kCanarySlots) * 8u, 16384u));
+    }
   }
 
 
@@ -363,6 +371,9 @@ namespace dxvk::backend {
     if (!m_cmdbuf)
       return;
 
+    // (the serial's last command buffer; a G1 prefix commit under it has no canary of its own:
+    // its fault discards this one too)
+    armCanary();
     commitRecorded();
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
@@ -415,6 +426,138 @@ namespace dxvk::backend {
     m_device->submissions().processRetirements(completed);
     m_device->residency().serialRetired(completed);
     m_device->uploadRing().onComplete(completed);
+    checkCanaries(completed);
+  }
+
+  static bool canaryEnabled() {
+    static const bool s_on = env::getEnvVar("D9MT_GPU_CANARY") != "0";
+    return s_on;
+  }
+
+  // Test only: D9MT_GPU_CANARY_TEST_FAULT=<n> writes the n-th armed mark far outside the canary
+  // buffer, which Metal drops: the mark stays unwritten, as a discarded command buffer's would
+  // (no GPU fault: on Apple GPUs that write simply doesn't happen).
+  static uint64_t canaryTestFault() {
+    static const uint64_t s_n = std::strtoull(env::getEnvVar("D9MT_GPU_CANARY_TEST_FAULT").c_str(), nullptr, 10);
+    return s_n;
+  }
+
+  // The canary slot of the command buffer being recorded: its offset in the canary buffer,
+  // the slot cleared and armed (with reason); ~0 if this command buffer gets no canary (off,
+  // no buffer, the slot's previous serial still on the GPU). Armed already: its offset again.
+  uint64_t MtlContextImpl::canarySlot(const char* reason) {
+    if (!canaryEnabled() || m_canaryState == CanaryState::Failed)
+      return ~0ull;
+    if (!m_canaryBuffer) {
+      // in our address space, as the visibility buffer (32-bit processes); one GPU page of
+      // Apple silicon (16 KiB; the slots use 4 KiB of it): Metal maps no-copy memory by page
+      const uint64_t length = std::max<uint64_t>(uint64_t(kCanarySlots) * 8u, 16384u);
+      void* host = VirtualAlloc(nullptr, SIZE_T(length), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      WMTBufferInfo info = {};
+      info.length  = length;
+      info.options = WMTResourceOptions(WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked);
+      info.memory.set(host);
+      obj_handle_t h = host ? MTLDevice_newBuffer(m_device->wmtDevice(), &info) : 0u;
+      if (!h) {
+        if (host)
+          VirtualFree(host, 0, MEM_RELEASE);
+        // once: no canary for this context, said so (not silently off)
+        m_canaryState = CanaryState::Failed;
+        Logger::warn("D9MT-GPU-CANARY: off: its buffer could not be created (lost command buffers won't be reported)");
+        return ~0ull;
+      }
+      m_canaryBuffer = WmtBuffer::adopt(h);
+      m_canaryCpu    = static_cast<uint64_t*>(host);
+      m_device->residency().allocCreated(h, length);
+    }
+    const uint32_t slot = uint32_t(m_currentSerial % kCanarySlots);
+    CanarySlot& s = m_canarySlots[slot];
+    if (s.serial == m_currentSerial)
+      return s.offset;
+    // the slot's previous serial still on the GPU (more than kCanarySlots in flight): none
+    if (s.serial > m_canaryChecked)
+      return ~0ull;
+    m_canaryCpu[slot] = 0u;
+    if (m_canaryState == CanaryState::Unused)
+      m_canaryState = CanaryState::Armed;
+    uint64_t offset = uint64_t(slot) * 8u;
+    if (unlikely(canaryTestFault()) && ++m_canaryArmed == canaryTestFault()) {
+      Logger::warn(str::format("D9MT-GPU-LOST test: command buffer ", m_currentSerial, " faults on purpose"));
+      offset = 1ull << 40;
+    }
+    s = { m_currentSerial, m_attFrame, reason, offset };
+    return offset;
+  }
+
+  // At submit: the command buffer's canary fill, unless the present copy into the drawable
+  // (the usual last work of a frame's command buffer) already has it in its own encoder.
+  // Otherwise an encoder of its own, the last one, without a barrier: a queue barrier holds
+  // every later encoder too, so the next command buffer could only start once this one is
+  // done (+12 % in a GPU-bound 4K bench). The fill can therefore run before this command
+  // buffer's other work ends. Such an encoder costs GPU time of its own (bindbench without
+  // presents, two submits a frame: +2 %), so only every kCanaryEvery-th of these command
+  // buffers gets one: a fault still shows, as the command buffers queued after it are
+  // discarded too and the next present's copy has its canary.
+  void MtlContextImpl::armCanary() {
+    const char* reason = m_submitReason ? m_submitReason : "flush";
+    m_submitReason = nullptr;
+    if (!canaryEnabled() || (m_canaryBuffer && m_canarySlots[m_currentSerial % kCanarySlots].serial == m_currentSerial))
+      return;
+    if (m_canaryOwn++ % kCanaryEvery != 0u)
+      return;
+    const uint64_t offset = canarySlot(reason);
+    if (offset == ~0ull)
+      return;
+    obj_handle_t enc = MTL4CommandBuffer_computeCommandEncoder(m_cmdbuf.handle());
+    MTL4ComputeCommandEncoder_fillBuffer(enc, m_canaryBuffer.handle(), offset, 8u, 0xa5u);
+    MTLCommandEncoder_endEncoding(enc);
+    NSObject_release(enc);
+  }
+
+  void MtlContextImpl::checkCanaries(uint64_t completed) {
+    if (!m_canaryCpu || completed <= m_canaryChecked)
+      return;
+    const uint64_t first = std::max(m_canaryChecked + 1u,
+      completed >= kCanarySlots ? completed - kCanarySlots + 1u : 1u);
+    for (uint64_t serial = first; serial <= completed; serial++) {
+      CanarySlot& s = m_canarySlots[serial % kCanarySlots];
+      if (s.serial != serial)
+        continue;
+      if (m_canaryCpu[serial % kCanarySlots] == kCanaryFilled) {
+        // the first mark that arrived: the canary works in this build and on this Mac
+        if (m_canaryState == CanaryState::Armed) {
+          m_canaryState = CanaryState::On;
+          Logger::warn(str::format("D9MT-GPU-CANARY: on (command buffer ", serial, "'s mark arrived)"));
+        }
+        continue;
+      }
+      // The first 20 one by one; after that (a freeze discards every command buffer) a summary
+      // at most every 10 s
+      m_canaryLost++;
+      if (m_canaryLost <= 20u) {
+        Logger::err(str::format("D9MT-GPU-LOST: command buffer ", serial, " (frame ", s.frame, ", ", s.reason,
+          ") did not run to its end: the GPU discarded it, after a GPU fault in it or in one before it",
+          " (macOS logs IOGPUMetalError then); ", m_canaryLost, " this session"));
+        m_canaryLostAt = std::chrono::steady_clock::now();
+      } else {
+        m_canaryLostUnlogged++;
+      }
+    }
+    if (m_canaryLostUnlogged) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - m_canaryLostAt >= std::chrono::seconds(10)) {
+        Logger::err(str::format("D9MT-GPU-LOST: ", m_canaryLostUnlogged, " more command buffers did not run to their end in the last ",
+          std::chrono::duration_cast<std::chrono::seconds>(now - m_canaryLostAt).count(), " s; ", m_canaryLost, " this session"));
+        m_canaryLostUnlogged = 0u;
+        m_canaryLostAt = now;
+      }
+    }
+    // armed for a while and not one mark arrived: off, said so
+    if (m_canaryState == CanaryState::Armed && m_canaryLost >= 64u) {
+      m_canaryState = CanaryState::Failed;
+      Logger::warn("D9MT-GPU-CANARY: off: no mark of 64 command buffers arrived (the canary doesn't work here; its LOST lines are not GPU faults)");
+    }
+    m_canaryChecked = completed;
   }
 
   void MtlContextImpl::flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable) {
@@ -425,6 +568,7 @@ namespace dxvk::backend {
       }
       return;
     }
+    m_submitReason = reason;
     submit(false);
     beginRecording();
     if (status) {
@@ -445,6 +589,7 @@ namespace dxvk::backend {
       m_device->residency().serialRetired(completed);
       m_device->uploadRing().onComplete(completed);
       m_device->uploadRing().onFrame();
+      checkCanaries(completed);
     }
     prof::onFrameEnd();
     if (unlikely(prof::g_profEnabled)) {
@@ -491,6 +636,7 @@ namespace dxvk::backend {
     ensureCommandBuffer();
 
     MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
+    m_submitReason = "present";
     submit(false);
 
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
