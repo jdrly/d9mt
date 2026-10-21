@@ -361,9 +361,10 @@ done
 # sha1.c — the C SHA-1 core backing Sha1Hash (referenced by config.cpp). Compiled
 # with the C compiler and folded into the archive so the link resolves it.
 SHA1C_OBJ="$OBJ/util_sha1_sha1.c.o"
-if [ ! -f "$SHA1C_OBJ" ] || [ "$DRV/util/sha1/sha1.c" -nt "$SHA1C_OBJ" ]; then
+if stale "$SHA1C_OBJ" "$DRV/util/sha1/sha1.c"; then
   echo "[cc] util/sha1/sha1.c"
-  "${MINGW/g++/gcc}" -std=c11 -O2 -g -ffile-prefix-map="$V2"=. -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
+  "${MINGW/g++/gcc}" -std=c11 -O2 -g -ffile-prefix-map="$V2"=. -MMD -MP -MF "$SHA1C_OBJ.d" \
+    -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
 fi
 OBJS+=("$SHA1C_OBJ")
 
