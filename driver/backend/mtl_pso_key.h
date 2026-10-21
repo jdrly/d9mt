@@ -10,6 +10,56 @@
 
 namespace dxvk::backend {
 
+  namespace psokey {
+
+    // xxHash64's round, lane merge and avalanche (seed 0) over whole 8-byte words: the PSO
+    // key's hash (docs/pso-key-hash.md). Four independent lanes, so a 320-byte key is ~10
+    // multiplies deep instead of the 320 dependent steps of a byte-wise FNV. Little-endian
+    // memcpy loads (no alignment assumption); only has to be consistent within a process.
+    constexpr uint64_t P1 = 0x9e3779b185ebca87ull;
+    constexpr uint64_t P2 = 0xc2b2ae3d27d4eb4full;
+    constexpr uint64_t P3 = 0x165667b19e3779f9ull;
+    constexpr uint64_t P4 = 0x85ebca77c2b2ae63ull;
+    constexpr uint64_t P5 = 0x27d4eb2f165667c5ull;
+
+    inline uint64_t rotl(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
+    inline uint64_t mixRound(uint64_t acc, uint64_t in) { return rotl(acc + in * P2, 31) * P1; }
+    inline uint64_t mergeLane(uint64_t h, uint64_t v) { return (h ^ mixRound(0u, v)) * P1 + P4; }
+
+    inline uint64_t word(const uint8_t* p) {
+      uint64_t w;
+      std::memcpy(&w, p, sizeof(w));
+      return w;
+    }
+
+    /// size: a multiple of 8.
+    inline uint64_t hashWords(const uint8_t* p, size_t size) {
+      uint64_t h = P5;
+      size_t i = 0u;
+      if (size >= 32u) {
+        uint64_t v1 = P1 + P2, v2 = P2, v3 = 0u, v4 = 0u - P1;
+        for (; i + 32u <= size; i += 32u) {
+          v1 = mixRound(v1, word(p + i));
+          v2 = mixRound(v2, word(p + i + 8u));
+          v3 = mixRound(v3, word(p + i + 16u));
+          v4 = mixRound(v4, word(p + i + 24u));
+        }
+        h = rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18);
+        h = mergeLane(mergeLane(mergeLane(mergeLane(h, v1), v2), v3), v4);
+      }
+      h += uint64_t(size);
+      for (; i + 8u <= size; i += 8u)
+        h = rotl(h ^ mixRound(0u, word(p + i)), 27) * P1 + P4;
+      h ^= h >> 33;
+      h *= P2;
+      h ^= h >> 29;
+      h *= P3;
+      h ^= h >> 32;
+      return h;
+    }
+
+  }
+
   struct PsoVertexAttr {
     uint32_t format = 0u;
     uint16_t offset = 0u;
@@ -67,12 +117,11 @@ namespace dxvk::backend {
     uint32_t depthFormat = 0u;
     uint32_t stencilFormat = 0u;
 
+    // The containers' hash (RenderPsoCache::KeyHash; in memory only, not in any file or
+    // signature): whole 8-byte words, docs/pso-key-hash.md.
     size_t hash() const {
-      const uint8_t* p = reinterpret_cast<const uint8_t*>(this);
-      uint64_t h = 0xcbf29ce484222325ull;
-      for (size_t i = 0u; i < sizeof(*this); i++)
-        h = (h ^ p[i]) * 0x100000001b3ull;
-      return size_t(h ^ (h >> 32));
+      const uint64_t h = psokey::hashWords(reinterpret_cast<const uint8_t*>(this), sizeof(*this));
+      return sizeof(size_t) == 8u ? size_t(h) : size_t(h ^ (h >> 32));
     }
 
     bool operator == (const RenderPsoKey& other) const {
@@ -94,6 +143,8 @@ namespace dxvk::backend {
 
   static_assert(std::has_unique_object_representations_v<RenderPsoKey>,
     "RenderPsoKey is hashed and compared as raw bytes: no padding");
+  static_assert(sizeof(RenderPsoKey) % 8u == 0u,
+    "RenderPsoKey::hash() reads whole 8-byte words: a key that grows by a non-multiple of 8 needs a tail");
 
   /// Bump in the same commit as any change to what the key's derived bytes
   /// mean, so stale state cache entries are dropped instead of prewarmed:
