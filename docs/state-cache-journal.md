@@ -2,7 +2,7 @@
 
 Status: implemented (n013-perf, 2026-10-21, `feat/state-cache-journal` on 2a1bc00), with the
 tests of §7 in `test/native/state_cache_test.cpp` (`testJournalFormat`,
-`testJournalSessions`, `testJournalOpen`, `testJournalConcurrentAppend`,
+`testJournalSessions`, `testJournalOpen`, `testJournalConcurrentAppend`, `testJournalLock`,
 `testJournalTwoProcesses`); `scripts/test-state-cache.sh` passes plain and under
 ThreadSanitizer. No file-format change to the main file and no key-signature bump.
 Where the implementation differs from the design below:
@@ -34,8 +34,22 @@ Where the implementation differs from the design below:
     check matches. The origin bytes (`entryValid`) rule out almost every wrong offset before the
     check is computed. A wrong record would need a 64-bit check collision. `corrupt=` counts the
     skipped stretches, `torn=` the bytes after the last good record.
-  - Not a lock: an advisory lock under Wine is `LockFileEx`, held by the wineserver, so two
-    clients in different prefixes (CrossOver bottles) wouldn't see each other's lock.
+  - **And a lock around each append** (measured, n013-perf `scripts/journal-wine.sh`, two
+    clients appending at once through the driver's own path). Wine writes a `FILE_APPEND_DATA`
+    handle at an end it read before, not atomically, so one client's batch overwrote the
+    other's whole batch:
+    - 0.8% and 1.25% of the records lost with two prefixes (two wineservers);
+    - **12% in one prefix**, which is how two clients in one bottle run;
+    - never a wrong record (resync accepted none).
+
+    With an exclusive `LockFileEx` around each append: 0 lost in both. Wine passes the lock on
+    to the other wineserver too, which corrects this doc's earlier "a lock wouldn't reach
+    another prefix". The lock is one byte at 2^62 (`JournalLockOffset`, never over data),
+    tried with `LOCKFILE_FAIL_IMMEDIATELY` for up to `JournalLockWaitMs` (20 ms) of 1 ms
+    retries. If it's still taken (another client appending, or frozen while holding it):
+    Busy, and the records wait for the next intake. The writer thread never waits longer, and
+    a dead process's lock goes with it. POSIX: `flock(LOCK_EX | LOCK_NB)`, the same rule.
+  - Resync stays: a kill in the middle of an append still leaves a torn tail.
   - The journal format stays version 1 (the same bytes; only the reader is more tolerant).
 
 ## 1. What is already crash-safe, and what isn't
@@ -89,9 +103,8 @@ Records: StateCacheEntry, exactly the main file's entry encoding, with its own `
   per entry per session, so ~350 records (~134 KB) for a SWTOR session.
   - Entries seen again in the same session are not appended again.
 - **One `WriteFile` per intake** with all its records, opened with `FILE_APPEND_DATA`
-  (POSIX path: `O_APPEND`) and closed again. Under Wine that is `write(2)` on an
-  `O_APPEND` fd, so two processes' appends don't interleave inside a record (whole
-  `write`s, local filesystem).
+  (POSIX path: `O_APPEND`) and closed again, under the journal lock (see the status: Wine's
+  append is not atomic across processes, measured).
 - **No `FlushFileBuffers`**: the journal only has to outlive the *process*. After a kill or
   `ExitProcess`, the data is in the OS page cache. Power loss is out of scope, as it is for the
   marker file.

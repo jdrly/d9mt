@@ -129,6 +129,19 @@ namespace dxvk::statecache {
     Failed,   // an IO error
   };
 
+  /// Result of one append (MtlStateCache::appendJournalRecords).
+  enum class JournalAppend {
+    Ok,
+    Busy,     // another client holds the journal lock: try at the next intake
+    Gone,     // the file is gone (another process's write removed it): open it again
+    Failed,   // an IO error
+  };
+
+  /// The appends' lock: one byte far past any record, so it never covers data, held exclusively
+  /// around each append, never waited for longer than JournalLockWaitMs.
+  constexpr uint64_t JournalLockOffset = 1ull << 62;
+  constexpr uint32_t JournalLockWaitMs = 20u;
+
   /// Marks one use in `session` (once per session) and keeps the earliest first use.
   void noteUse(Entry& e, uint32_t session, uint32_t firstUseMs);
 

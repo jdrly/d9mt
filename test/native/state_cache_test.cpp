@@ -25,6 +25,8 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -2012,7 +2014,7 @@ static void testJournalOpen() {
   CHECK(readFile(path) == newer);
 
   unlink(path.c_str());
-  CHECK(MtlStateCache::appendJournalRecords(path, t) == false);   // appends never create it
+  CHECK(MtlStateCache::appendJournalRecords(path, t) == JournalAppend::Gone);   // appends never create it
   CHECK(!exists(path));
 }
 
@@ -2039,7 +2041,7 @@ static void testJournalConcurrentAppend() {
           es.push_back(makeEntry((w + 1u) * 100000u + seq++));
         std::vector<uint8_t> bytes;
         appendRecords(bytes, es);
-        if (MtlStateCache::appendJournalRecords(path, bytes))
+        if (MtlStateCache::appendJournalRecords(path, bytes) == JournalAppend::Ok)
           written += uint32_t(es.size());
         else
           failed++;
@@ -2066,6 +2068,53 @@ static void testJournalConcurrentAppend() {
     const Entry want = makeEntry(e.firstUseMs);
     CHECK(!std::memcmp(&e, &want, sizeof(Entry)));   // exactly a written record
     CHECK(seen.insert(identityHash(e)).second);               // once
+  }
+}
+
+// The journal lock: another client holding it (or frozen while holding it, SIGSTOP style)
+// makes an append Busy within ~JournalLockWaitMs, never a long wait; the cache keeps those
+// records pending and journals them once the lock is free, none lost.
+static void testJournalLock() {
+  const std::string dir = tempDir();
+  const MtlStateCacheConfig cfg = configFor(dir, 0u);
+  const std::string path = cfg.file + ".journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+
+  const int holder = ::open(path.c_str(), O_RDONLY);
+  CHECK(holder >= 0 && !::flock(holder, LOCK_EX));
+
+  std::vector<uint8_t> bytes;
+  appendRecords(bytes, { makeEntry(7u) });
+  auto t0 = std::chrono::steady_clock::now();
+  CHECK(MtlStateCache::appendJournalRecords(path, bytes) == JournalAppend::Busy);
+  const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("journal lock: Busy after %lld ms (bound %u ms)\n", (long long)waitedMs, JournalLockWaitMs);
+  // At least the lock's time bound; the upper bound allows for timer coalescing (a background-QoS
+  // process, as scripts/test-state-cache.sh under taskpolicy -b, sleeps 1 ms as ~3 ms: ~60 ms
+  // measured, ~21 ms at normal priority). The writer thread's real wait is measured under Wine
+  // (n013-perf scripts/journal-wine.sh FROZEN=1, at THREAD_PRIORITY_LOWEST).
+  CHECK(waitedMs >= JournalLockWaitMs && waitedMs < JournalLockWaitMs + 100);
+
+  // A cache whose intakes all find the lock held: the records wait, nothing is dropped.
+  Workload w(4u, 20u, 30u, 31u);
+  {
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    w.render(sc.ptr(), be);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));   // ~4 intakes, all Busy
+    CHECK(sc->stats().journaled == 0u);
+    ::flock(holder, LOCK_UN);
+    ::close(holder);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 30u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 30u);
+    std::vector<Entry> recs;
+    const std::vector<uint8_t> data = readFile(path);
+    const JournalParseResult r = parseJournal(data.data(), data.size(), Sig, recs);
+    CHECK(r.status == ParseStatus::Ok && r.records == 30u && r.corrupt == 0u);
+    sc->shutdown();
   }
 }
 
@@ -2165,6 +2214,7 @@ int main(int argc, char** argv) {
   testJournalSessions();
   testJournalOpen();
   testJournalConcurrentAppend();
+  testJournalLock();
   testJournalTwoProcesses();
 
   if (g_failures) {

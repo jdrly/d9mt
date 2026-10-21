@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <ctime>
@@ -361,18 +362,42 @@ namespace dxvk {
       return JournalOpen::Busy;
     }
 
-    /// Appends at the end of an existing file (an append-only handle: two processes' appends
-    /// don't overwrite each other). False if the file is gone (another process's write removed
-    /// it): the caller prepares it again, so records never land in a file without the header.
-    bool appendFile(const std::string& path, const std::vector<uint8_t>& data) {
-      HANDLE h = ::CreateFileW(widen(path).c_str(), FILE_APPEND_DATA,
+    /// Appends at the end of an existing file, holding an exclusive lock on one byte far past
+    /// the end (JournalLockOffset). Without it two clients' appends can land at the same end:
+    /// Wine writes a FILE_APPEND_DATA handle at an end it read before, so one batch overwrote
+    /// the other (n013-perf journal-wine: 0.8% of the records lost across two wineservers,
+    /// 12% in one, 0 with the lock in both). Never waits long: up to JournalLockWaitMs of 1 ms
+    /// retries, then Busy (the caller keeps the records for the next intake). Gone if the file
+    /// is gone (another process's write removed it): the caller opens it again, so records
+    /// never land in a file without the header.
+    statecache::JournalAppend appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+      using statecache::JournalAppend;
+      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ | FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (h == INVALID_HANDLE_VALUE)
-        return false;
+        return ::GetLastError() == ERROR_FILE_NOT_FOUND ? JournalAppend::Gone : JournalAppend::Failed;
+
+      OVERLAPPED ov = { };
+      ov.Offset     = DWORD(statecache::JournalLockOffset);
+      ov.OffsetHigh = DWORD(statecache::JournalLockOffset >> 32);
+      const ULONGLONG deadline = ::GetTickCount64() + statecache::JournalLockWaitMs;
+      bool locked = false;
+      while (!(locked = ::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0u, 1u, 0u, &ov))) {
+        const DWORD err = ::GetLastError();
+        if ((err != ERROR_LOCK_VIOLATION && err != ERROR_IO_PENDING) || ::GetTickCount64() >= deadline)
+          break;
+        ::Sleep(1);
+      }
+      if (!locked) {
+        ::CloseHandle(h);
+        return JournalAppend::Busy;
+      }
+
       DWORD n = 0u;
       const bool ok = ::WriteFile(h, data.data(), DWORD(data.size()), &n, nullptr) && n == data.size();
+      ::UnlockFileEx(h, 0u, 1u, 0u, &ov);
       ::CloseHandle(h);
-      return ok;
+      return ok ? JournalAppend::Ok : JournalAppend::Failed;
     }
 
     void* openCurrentThread() {
@@ -549,12 +574,29 @@ namespace dxvk {
       return JournalOpen::Busy;
     }
 
-    bool appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+    // As the Win32 appendFile, with flock (a native O_APPEND write is atomic anyway; the lock
+    // keeps the two paths' rules the same, Busy included).
+    statecache::JournalAppend appendFile(const std::string& path, const std::vector<uint8_t>& data) {
+      using statecache::JournalAppend;
       const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND);
       if (fd < 0)
-        return false;
+        return errno == ENOENT ? JournalAppend::Gone : JournalAppend::Failed;
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(statecache::JournalLockWaitMs);
+      bool locked = false;
+      while (!(locked = !::flock(fd, LOCK_EX | LOCK_NB))) {
+        if (errno != EWOULDBLOCK || std::chrono::steady_clock::now() >= deadline)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!locked) {
+        ::close(fd);
+        return JournalAppend::Busy;
+      }
+
       const bool ok = ::write(fd, data.data(), data.size()) == ssize_t(data.size());
-      return !::close(fd) && ok;
+      ::flock(fd, LOCK_UN);
+      return !::close(fd) && ok ? JournalAppend::Ok : JournalAppend::Failed;
     }
 
     // Thread priorities are Win32 (Wine) only; natively the boost is counted.
@@ -1203,7 +1245,7 @@ namespace dxvk {
   }
 
 
-  bool MtlStateCache::appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes) {
+  statecache::JournalAppend MtlStateCache::appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes) {
     return appendFile(path, bytes);
   }
 
@@ -1235,9 +1277,14 @@ namespace dxvk {
         }
         m_journalReady = true;
       }
-      ok = appendJournalRecords(journalPath(), bytes);
+      const statecache::JournalAppend a = appendJournalRecords(journalPath(), bytes);
+      if (a == statecache::JournalAppend::Busy)
+        return;   // another client holds the lock (or is frozen holding it): next intake
+      ok = a == statecache::JournalAppend::Ok;
       // Gone (another process's write removed it): open it again, then retry once.
       m_journalReady = ok;
+      if (a == statecache::JournalAppend::Failed)
+        break;
     }
 
     if (ok)
