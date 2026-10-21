@@ -15,13 +15,17 @@
 //        still hit and render the same pixels (MTL4Archive must not reopen the URL lazily).
 //   clang -arch x86_64 -O1 bridge/tests/archfirst_test.m -framework Metal -framework Foundation -o archfirst_test
 //   (add -g -fsanitize=thread for the race check)
+//   mem <direct|compiler|probe>, peak <chunk>, archload: memory of live PSOs by path, a
+//   consolidation's peak footprint by chunk size, the startup cost per archive (see below).
 //   time (needs a quiet window): hit cost via MTL4Archive vs via a compiler with
 //     lookupArchives, and the miss cost with 1, 8 and 64 archives loaded.
 #import <Metal/Metal.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <mach/mach.h>
 
 static double now_ms(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e6; }
 static int g_fail;
@@ -258,12 +262,186 @@ static void timing(NSString *dir) {
   [opt release]; [c release];
 }
 
+/* phys_footprint: what macOS memory pressure counts for this process */
+static double footprint_mb(void) {
+  task_vm_info_data_t vi;
+  mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) != KERN_SUCCESS)
+    return -1.0;
+  return (double)vi.phys_footprint / 1048576.0;
+}
+
+/* mem <direct|compiler|probe> <workdir>: the memory of 800 live PSOs whose pipelines are all in one
+ * archive (bridge bundle, the psoab RSS question). A large fragment function (unrolled ALU), so
+ * per-PSO copies of the binaries would show:
+ *   direct    [MTL4Archive newRenderPipelineStateWithDescriptor:] (archive first's hit)
+ *   compiler  a serializer-less compiler with lookupArchives = the archive (the base path)
+ *   probe     the direct lookup as a probe, its PSO released at once, then the compiler (option B)
+ * One mode per process; the first call only builds the archive. Prints the footprint before and
+ * after creating the PSOs, and the delta per PSO. */
+static const char *kBigSrcHead =
+  "#include <metal_stdlib>\nusing namespace metal;\n"
+  "vertex float4 vs(uint id [[vertex_id]]) { float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0.5, 1); }\n"
+  "fragment float4 fs(float4 pos [[position]]) { float4 a = pos * 0.001; float4 b = a.yzwx;\n";
+
+static bool big_library(void) {
+  NSMutableString *src = [NSMutableString stringWithUTF8String:kBigSrcHead];
+  for (int i = 0; i < 300; i++)
+    [src appendFormat:@"  a = fma(a, b, float4(%d.5)); b = sin(a) * %d.25 + b.wzyx;\n", i % 97, i % 13];
+  [src appendString:@"  return a * 0.0001 + b * 0.0001; }\n"];
+  NSError *err = nil;
+  [g_lib release];
+  g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
+  if (!g_lib) { printf("FAIL big library: %s\n", err.localizedDescription.UTF8String); g_fail++; }
+  return g_lib != nil;
+}
+
+/* peak <chunk> <workdir>: a consolidation's memory peak. The 800 PSOs of the mem archive are
+ * rebuilt through a serializer-attached compiler with lookupArchives = that archive (lookups,
+ * as pso_consolidate does), flushing the serializer every <chunk> PSOs (0: once, at the end).
+ * A thread samples phys_footprint every 5 ms; prints the peak above the start, the time and the
+ * files written. */
+static _Atomic int g_sampling;
+static double g_peak_mb;
+static void *sampler(void *arg) {
+  (void)arg;
+  while (atomic_load(&g_sampling)) {
+    const double f = footprint_mb();
+    if (f > g_peak_mb) g_peak_mb = f;
+    usleep(5000);
+  }
+  return NULL;
+}
+
+static void peak(int chunk, NSString *dir) {
+  const int N = 800;
+  if (!big_library()) return;
+  NSError *err = nil;
+  NSString *path = [dir stringByAppendingPathComponent:@"mem.mtl4archive"];
+  id<MTL4Archive> ar = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+  if (!ar) { printf("FAIL no %s (run mem once first)\n", path.UTF8String); g_fail++; return; }
+  MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
+  opt.lookupArchives = @[ar];
+  id<MTL4PipelineDataSetSerializer> ser = serializer();
+  id<MTL4Compiler> c = compiler(ser);
+  const double f0 = footprint_mb();
+  g_peak_mb = f0;
+  atomic_store(&g_sampling, 1);
+  pthread_t th;
+  pthread_create(&th, NULL, sampler, NULL);
+  const double t0 = now_ms();
+  int files = 0;
+  for (int n = 0; n < N; n++) {
+    @autoreleasepool {
+      MTL4RenderPipelineDescriptor *d = desc(n);
+      [[c newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil] release];
+      [d release];
+      if ((chunk && (n + 1) % chunk == 0) || n + 1 == N) {
+        NSString *out = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"c%d-%03d.mtl4archive", chunk, files++]];
+        if (![ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:out] error:&err]) {
+          printf("FAIL serialize %s: %s\n", out.UTF8String, err.localizedDescription.UTF8String); g_fail++;
+        }
+      }
+    }
+  }
+  const double t1 = now_ms();
+  atomic_store(&g_sampling, 0);
+  pthread_join(th, NULL);
+  printf("PEAK chunk %d: %d files, %.0f ms, footprint start %.1f MB, peak +%.1f MB\n",
+         chunk, files, t1 - t0, f0, g_peak_mb - f0);
+  [opt release]; [c release]; [ser release]; [ar release];
+}
+
+/* archload <workdir>: the startup cost per archive: newArchiveWithURL of every c<chunk>-*.mtl4archive
+ * there and one lookup in each. */
+static void archload(NSString *dir) {
+  if (!big_library()) return;
+  NSArray *names = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]
+    filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"SELF BEGINSWITH 'c' AND SELF ENDSWITH '.mtl4archive'"]];
+  NSMutableArray *ars = [NSMutableArray array];
+  const double t0 = now_ms();
+  for (NSString *n in names) {
+    id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:n]] error:nil];
+    if (a) { [ars addObject:a]; [a release]; }
+  }
+  const double t1 = now_ms();
+  MTL4RenderPipelineDescriptor *d = desc(0);
+  for (id<MTL4Archive> a in ars) [[a newRenderPipelineStateWithDescriptor:d error:nil] release];
+  [d release];
+  printf("ARCHLOAD %lu archives: open %.2f ms each, one lookup each %.2f ms\n", (unsigned long)ars.count,
+         ars.count ? (t1 - t0) / ars.count : 0.0, ars.count ? (now_ms() - t1) / ars.count : 0.0);
+}
+
+static void mem(const char *mode, NSString *dir) {
+  const int N = 800;
+  if (!big_library()) return;
+  NSError *err = nil;
+  NSString *path = [dir stringByAppendingPathComponent:@"mem.mtl4archive"];
+  if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    /* First call: only build the archive (its compiles would weigh on this process's footprint) */
+    id<MTL4Archive> built = make_archive(path, 0, N);
+    printf("MEM archive of %d PSOs built: %s\n", N, built ? path.UTF8String : "FAILED");
+    if (!built) g_fail++;
+    [built release];
+    return;
+  }
+  id<MTL4Archive> ar = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+  if (!ar) { printf("FAIL archive\n"); g_fail++; return; }
+  NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+  MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
+  opt.lookupArchives = @[ar];
+  id<MTL4Compiler> c = compiler(nil);
+  const double f0 = footprint_mb();
+  NSMutableArray *live = [NSMutableArray arrayWithCapacity:N];
+  int hits = 0;
+  for (int n = 0; n < N; n++) {
+    @autoreleasepool {
+      MTL4RenderPipelineDescriptor *d = desc(n);
+      id<MTLRenderPipelineState> p = nil;
+      if (!strcmp(mode, "direct")) {
+        p = [ar newRenderPipelineStateWithDescriptor:d error:nil];
+      } else {
+        if (!strcmp(mode, "probe")) {
+          id<MTLRenderPipelineState> q = [ar newRenderPipelineStateWithDescriptor:d error:nil];
+          hits += q != nil;
+          [q release];
+        }
+        p = [c newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
+      }
+      if (p) { [live addObject:p]; [p release]; }
+      [d release];
+    }
+  }
+  const double f1 = footprint_mb();
+  printf("MEM %s: archive %.1f MB, %lu live PSOs (%d probe hits), footprint %.1f -> %.1f MB, +%.1f KB per PSO\n",
+         mode, [at[NSFileSize] doubleValue] / 1048576.0, (unsigned long)live.count, hits, f0, f1,
+         (f1 - f0) * 1024.0 / (live.count ? live.count : 1));
+  CHECK(live.count == (NSUInteger)N, "%s: %lu of %d PSOs", mode, (unsigned long)live.count, N);
+  [opt release]; [c release]; [ar release];
+}
+
 int main(int argc, char **argv) {
   @autoreleasepool {
-    if (argc < 3) { fprintf(stderr, "usage: archfirst <check|time> <workdir>\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: archfirst <check|time|mem MODE> <workdir>\n"); return 2; }
     g_dev = MTLCreateSystemDefaultDevice();
     NSError *err = nil;
     g_lib = [g_dev newLibraryWithSource:[NSString stringWithUTF8String:kSrc] options:nil error:&err];
+    if (!strcmp(argv[1], "peak")) {
+      if (argc < 4) { fprintf(stderr, "usage: archfirst peak <chunk|0> <workdir>\n"); return 2; }
+      peak(atoi(argv[2]), [NSString stringWithUTF8String:argv[3]]);
+      printf("archfirst peak %s: %s (%d failures)\n", argv[2], g_fail ? "FAIL" : "ok", g_fail);
+      return g_fail ? 1 : 0;
+    }
+    if (!strcmp(argv[1], "archload")) {
+      archload([NSString stringWithUTF8String:argv[2]]);
+      return g_fail ? 1 : 0;
+    }
+    if (!strcmp(argv[1], "mem")) {
+      if (argc < 4) { fprintf(stderr, "usage: archfirst mem <direct|compiler|probe> <workdir>\n"); return 2; }
+      mem(argv[2], [NSString stringWithUTF8String:argv[3]]);
+      printf("archfirst mem %s: %s (%d failures)\n", argv[2], g_fail ? "FAIL" : "ok", g_fail);
+      return g_fail ? 1 : 0;
+    }
     NSString *dir = [NSString stringWithUTF8String:argv[2]];
     if (!strcmp(argv[1], "check")) check(dir); else timing(dir);
     printf("archfirst %s: %s (%d failures)\n", argv[1], g_fail ? "FAIL" : "ok", g_fail);

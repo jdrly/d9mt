@@ -314,6 +314,37 @@ Known limit: a partly corrupt state cache file blocks `complete` for that sessio
   - the skew cases: that d3d9.dll with the shipping bridge, and base d3d9.dll with this bridge (bias ignored, no crash);
   - the hash suite with base d3d9.dll and this bridge (no stray bias).
 
+### 6. Proposal: consolidation at pauses, chunked serialization (after the quiet window, 2026-10-21)
+
+**What the quiet window and batch-rss showed** (n013-issues/results/qw-psoab.txt, rss-summary.txt, psobench 350 4 5000 on a 9-session seed):
+- **New-PSO phase:** the bundle is far ahead of base: worst frame 1501 → 418 ms, −2.45 s, 0/6 worse.
+- **Steady phase:** avg +0.001 ms in 4/6 pairs, with ~5% fewer frames in 3. In every bundle run a **consolidation** ran inside it, starting 12.0-12.4 s (coverage at 9.0-10.7 s, then the 2 s idle): it rebuilds all 945 descriptors and serializes ~70 MB. Besides it, the flush of the session's 143 misses (11 MB, serialize 165-493 ms + sync/sum ~60 ms).
+- **No consolidation completed:** psobench exits ~1.5 s after the consolidation starts, and it needs ≈2.7 s (af0's flush of 945 PSOs: serialize 2326 ms + sync/sum 341 ms). The cut-off consolidation leaves Metal's intermediate `.metallib` (removed at the next start since 64b28e1).
+- **Memory: a transient peak, not a per-PSO cost.**
+  - The footprint at 11 s, before the consolidation, is at base level: 327-433 MB vs 394 MB.
+  - max RSS 561 MB comes during the consolidation, whose serializer holds the whole working set again plus serialization buffers, ≈ 2-3× the archive size.
+  - With archive first off (af0), the one 945-PSO flush peaks at 489 MB for the same reason.
+  - The floor without archives is 234 MB.
+  - GPU memory for the pipelines (IOAccelerator) is 151-153 MB in every bundle variant (archive first on or off) vs 92 MB on base: a separate, smaller question (archfirst_test mem).
+
+**Proposal:**
+1. **Consolidation only at a real pause:** the window hidden or minimised, or a device Reset (the pause hint). Not after 120 s of idle in gameplay. It's the bundle's only heavy job, and its peak is ≈ 2-3× the working-set archive.
+2. **Fallback for players who never pause** (SWTOR players can play for hours without minimising): when no consolidation has completed for 8 sessions and the deltas exceed K files or X MB, consolidate **chunked** after 120 s idle at BACKGROUND QoS.
+   - At most 256 descriptors per serializer, each chunk flushed to its own `c-<time>-<pid>-<n>` archive before the next one starts.
+   - The peak is then one chunk, not the working set.
+   - The startup then loads a few consolidated archives (archload: ≈ 1-2 ms each; the lookup cap counts them as consolidated, not deltas).
+   - The session count since the last completed consolidation goes in a small file next to the archives.
+3. **Skip when it isn't worth it** (kept): nothing new and at most one archive; and, new, at most N small deltas (the lookup cap already bounds a miss's cost).
+4. **Chunked capture flushes:**
+   - Today a cold session holds every capture in the serializer until the idle/pause flush (af0: 945 PSOs, 72 MB, one flush, +185 MB over the floor).
+   - Proposed: once `D9MT_PSO_FLUSH_EVERY` (256) are pending, flush as soon as the lock is free (trywrlock between builds, as now), not only at idle or pause or after the 60 s backstop.
+   - The serializer then never holds more than ~256 PSOs.
+   - Cost: a flush may land in gameplay (UTILITY QoS, ~20 MB per chunk). Builds during it go to the fallback compiler (M9, captured the next time).
+5. **Numbers before code** (native, archfirst_test):
+   - the transient peak footprint for chunk sizes 128 / 256 / whole, and the time per chunk;
+   - the startup cost per extra consolidated archive;
+   - for the steady phase: the psoab re-run in a quiet window after the change (with a consolidation completing at a pause).
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).
