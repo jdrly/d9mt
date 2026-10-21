@@ -327,7 +327,35 @@ echo "=== [driver] CORE compile (${#CORE[@]} TUs) ==="
 OBJS=(); PIDS=(); RC=0
 compile_one() {
   local src="$1" obj="$2"; shift 2
-  "$MINGW" "${FLAGS[@]}" "$@" -c "$src" -o "$obj"
+  "$MINGW" "${FLAGS[@]}" "$@" -MMD -MP -MF "$obj.d" -c "$src" -o "$obj"
+}
+# The compile flags are a dependency too (-D switches such as STATE_CACHE_TESTING, -O, the
+# compiler): a hash of them in $OBJ/.flags; when it changes, every object is stale. Written
+# once all objects compiled, so a failed build with new flags stays all-stale.
+FLAGS_HASH=$(printf '%s\n' "$MINGW" "${FLAGS[@]}" | shasum -a 256 | cut -c1-16)
+FLAGS_STALE=0
+[ "$(cat "$OBJ/.flags" 2>/dev/null)" = "$FLAGS_HASH" ] || FLAGS_STALE=1
+[ "$FLAGS_STALE" = 1 ] && [ -f "$OBJ/.flags" ] && echo "=== [driver] compile flags changed: rebuilding every object ==="
+# stale <obj> <src>: rebuild when the flags changed, the object is missing or older than its
+# source or than any file its dependency file (-MMD, <obj>.d) lists, one of those files is
+# gone (a header moved or deleted), or the object has no dependency file.
+stale() {
+  local obj="$1" src="$2" d f
+  [ "$FLAGS_STALE" = 0 ] && [ -f "$obj" ] && [ -f "$obj.d" ] && [ ! "$src" -nt "$obj" ] || return 0
+  # "obj: dep dep \" with continuation lines and -MP's "dep:" lines; "\ " is a space in a path
+  d=$(<"$obj.d")
+  d=${d//\\$'\n'/ }
+  d=${d#*:}
+  d=${d//\\ /$'\001'}
+  local -a deps
+  IFS=$' \t\n' read -r -d '' -a deps <<< "$d" || true
+  for f in "${deps[@]}"; do
+    case "$f" in *:) continue ;; esac
+    f=${f//$'\001'/ }
+    [ -e "$f" ] || return 0
+    [ "$f" -nt "$obj" ] && return 0
+  done
+  return 1
 }
 for src in "${CORE[@]}"; do
   psuffix=""; pflag=""
@@ -338,7 +366,7 @@ for src in "${CORE[@]}"; do
   fi
   obj="$OBJ/$(echo "${src#$DRV/}" | tr '/' '_')$psuffix.o"
   OBJS+=("$obj")
-  if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+  if stale "$obj" "$src"; then
     echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
     compile_one "$src" "$obj" $pflag & PIDS+=($!)
     if [ "${#PIDS[@]}" -ge 12 ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
@@ -350,9 +378,10 @@ done
 # sha1.c — the C SHA-1 core backing Sha1Hash (referenced by config.cpp). Compiled
 # with the C compiler and folded into the archive so the link resolves it.
 SHA1C_OBJ="$OBJ/util_sha1_sha1.c.o"
-if [ ! -f "$SHA1C_OBJ" ] || [ "$DRV/util/sha1/sha1.c" -nt "$SHA1C_OBJ" ]; then
+if stale "$SHA1C_OBJ" "$DRV/util/sha1/sha1.c"; then
   echo "[cc] util/sha1/sha1.c"
-  "${MINGW/g++/gcc}" -std=c11 -O2 -g -ffile-prefix-map="$V2"=. -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
+  "${MINGW/g++/gcc}" -std=c11 -O2 -g -ffile-prefix-map="$V2"=. -MMD -MP -MF "$SHA1C_OBJ.d" \
+    -c "$DRV/util/sha1/sha1.c" -o "$SHA1C_OBJ"
 fi
 OBJS+=("$SHA1C_OBJ")
 
@@ -432,13 +461,14 @@ SM3_OBJS=(); SM3_PIDS=(); SM3_RC=0
 while IFS= read -r f; do
   o="$DXBCSM3_OBJ/$(echo "${f#$DXBC/}" | tr '/' '_').o"
   SM3_OBJS+=("$o")
-  if [ ! -f "$o" ] || [ "$f" -nt "$o" ]; then
-    "$MINGW" "${FLAGS[@]}" -c "$f" -o "$o" & SM3_PIDS+=($!)
+  if stale "$o" "$f"; then
+    "$MINGW" "${FLAGS[@]}" -MMD -MP -MF "$o.d" -c "$f" -o "$o" & SM3_PIDS+=($!)
     if [ "${#SM3_PIDS[@]}" -ge 12 ]; then wait "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
   fi
 done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
 [ "${#SM3_PIDS[@]}" -gt 0 ] && { wait "${SM3_PIDS[@]}" || SM3_RC=1; }
 [ "$SM3_RC" -eq 0 ] || { echo "FATAL: libdxbcsm3 compile failed" >&2; exit 1; }
+printf '%s\n' "$FLAGS_HASH" > "$OBJ/.flags"
 rm -f "$DXBCSM3_LIB"
 "$MINGW_PREFIX-ar" rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
@@ -452,7 +482,9 @@ WMIMP="$BUILD/libwinemetal.a"
 # d3d9.def: DXVK's export list (zlib, committed; undecorated, fits x86 and x64).
 D3D9DEF="${D3D9DEF:-$DRV/d3d9/d3d9.def}"
 if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
-  "$MINGW_PREFIX-dlltool" -d "$WMDEF" -l "$WMIMP" --dllname winemetal.dll 2>/dev/null \
+  # From inside $BUILD with relative names: dlltool names the import library's symbols after
+  # its -l path, which would put the build directory into the DLL.
+  (cd "$BUILD" && "$MINGW_PREFIX-dlltool" -d "${WMDEF##*/}" -l "${WMIMP##*/}" --dllname winemetal.dll) 2>/dev/null \
     && echo "  winemetal import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
