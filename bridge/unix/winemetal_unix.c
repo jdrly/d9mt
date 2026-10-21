@@ -6213,6 +6213,71 @@ pso_set_chunks(NSString *dir, NSString *marker) {
   return n && chunks.count == n ? chunks : nil;
 }
 
+/* Metal converts a compiler's lookupArchives at their first compile. An MTL4Archive whose file was
+ * deleted before that makes every compile with it throw (NSInvalidArgumentException in
+ * convertBinaryArchives: n013-issues/tools/unlink-lookup.m), and an uncaught exception ends the
+ * game. A consolidation deletes the archives it replaces (this process's or another's), and with
+ * archive first the game's compiler may not have compiled anything by then. So right after
+ * loading, one tiny pipeline is compiled with them as lookupArchives (pso_convert_lookups: a miss,
+ * it only makes Metal convert them; after that a deleted file is harmless), and every compile
+ * with lookupArchives goes through pso_compile, which catches that exception and builds without
+ * them from then on. */
+static _Atomic bool g_pso_lookup_gone;
+static _Atomic bool g_pso_lookups_converted = true;   /* false while pso_convert_lookups runs */
+
+static id<MTLRenderPipelineState>
+pso_compile(id<MTL4Compiler> compiler, MTL4RenderPipelineDescriptor *d, MTL4CompilerTaskOptions *opt, NSError **err) {
+  if (opt && !atomic_load(&g_pso_lookup_gone)) {
+    @try {
+      return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:err];
+    } @catch (NSException *e) {
+      if (!atomic_exchange(&g_pso_lookup_gone, true))
+        fprintf(stderr, "d9mt: PSO archives: a lookup archive's file is gone before its first use (%s); "
+                "building without lookup archives from now on\n", e.reason.UTF8String);
+    }
+  }
+  return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:err];
+}
+
+static void
+pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
+  atomic_store(&g_pso_lookups_converted, false);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    @autoreleasepool {
+      const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      NSError *err = nil;
+      id<MTLLibrary> lib = [device newLibraryWithSource:
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 d9mt_convert_vs(uint id [[vertex_id]]) { return float4(float(id), 0, 0, 1); }\n"
+        "fragment float4 d9mt_convert_fs() { return float4(0.25, 0.5, 0.75, 1); }\n" options:nil error:&err];
+      MTL4RenderPipelineDescriptor *d = [[MTL4RenderPipelineDescriptor alloc] init];
+      MTL4LibraryFunctionDescriptor *vf = [[MTL4LibraryFunctionDescriptor alloc] init];
+      MTL4LibraryFunctionDescriptor *ff = [[MTL4LibraryFunctionDescriptor alloc] init];
+      vf.library = lib;
+      vf.name = @"d9mt_convert_vs";
+      ff.library = lib;
+      ff.name = @"d9mt_convert_fs";
+      d.vertexFunctionDescriptor = vf;
+      d.fragmentFunctionDescriptor = ff;
+      d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
+      id<MTL4Compiler> c = lib ? [device newCompilerWithDescriptor:cd error:&err] : nil;
+      id<MTLRenderPipelineState> pso = c ? pso_compile(c, d, opt, &err) : nil;
+      PSO_EVENT("%lu lookup archive(s) converted in %llu ms (%s)", (unsigned long)opt.lookupArchives.count,
+                (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000000ull),
+                pso ? "ok" : "no pipeline");
+      [pso release];
+      [c release];
+      [cd release];
+      [vf release];
+      [ff release];
+      [d release];
+      [lib release];
+    }
+    atomic_store(&g_pso_lookups_converted, true);
+  });
+}
+
 /* Caller holds g_pso_lock exclusively. */
 static void
 pso_flush_locked(void) {
@@ -6396,6 +6461,9 @@ pso_consolidate(const char *why) {
     PSO_EVENT("consolidation skipped: another process holds .consolidate");
     return;
   }
+  /* Nothing is deleted before Metal has converted the loaded archives (pso_compile). */
+  for (int t = 0; t < 100 && !atomic_load(&g_pso_lookups_converted); t++)
+    usleep(50000);
   /* This session's captures first (at the startup window they are still in the game's
    * serializer, not in an archive the rebuild could look up): a flush now, through the flush
    * thread, waited for up to 5 s. */
@@ -6475,8 +6543,9 @@ pso_consolidate(const char *why) {
       }
       if (i == requested.count)
         break;
-      /* the game is requesting PSOs (a world entry): wait for a quiet gap, don't compete */
-      for (;;) {
+      /* the game is requesting PSOs (a world entry): wait for a quiet gap, don't compete;
+       * after 10 minutes of waiting in all, go on regardless (requests that never stop) */
+      while (yields < 6000u) {
         const uint64_t last = atomic_load(&g_pso_last_request);
         if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - last >= 500000000ull)
           break;
@@ -6511,7 +6580,12 @@ pso_consolidate(const char *why) {
           break;
         }
       }
-      id<MTLRenderPipelineState> pso = [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
+      id<MTLRenderPipelineState> pso = pso_compile(compiler, d, opt, nil);
+      if (atomic_load(&g_pso_lookup_gone)) {   /* would be backend compiles now: stop, keep the parts */
+        [pso release];
+        ok = false;
+        break;
+      }
       if (pso) {
         built++;
         inChunk++;
@@ -6537,11 +6611,12 @@ pso_consolidate(const char *why) {
       unlink(mtmp.fileSystemRepresentation);
   }
   if (ok && chunks) {
+    /* the old set's marker before its chunks: never a marker listing deleted chunks */
+    if (g_pso_set_marker)
+      unlink(g_pso_set_marker.fileSystemRepresentation);
     for (NSString *part in parts)
       if (!pso_owner_alive(part.lastPathComponent))
         pso_remove_archive(part);
-    if (g_pso_set_marker)
-      unlink(g_pso_set_marker.fileSystemRepresentation);
     NSString *since = [g_pso_dir stringByAppendingPathComponent:@".sessions"];
     [@"0\n" writeToFile:since atomically:YES encoding:NSUTF8StringEncoding error:nil];
     fprintf(stderr, "d9mt: PSO archives consolidated (%s): %u builds into %s (%u chunk(s)), %lu replaced, "
@@ -7011,6 +7086,7 @@ pso_archive_init(id<MTLDevice> device) {
   if (archives.count) {
     g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
     g_pso_task_options.lookupArchives = archives;
+    pso_convert_lookups(device, g_pso_task_options);
   }
   if (g_pso_archive_first) {
     /* A miss asks every archive in g_pso_lookup before the compiler, so only the
@@ -7582,9 +7658,7 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   /* A flush holds the lock: build through the serializer-less compiler instead of
    * waiting for it (M9); that PSO isn't captured, it is the next time it misses. */
   if (g_pso_fallback && pthread_rwlock_tryrdlock(&g_pso_lock)) {
-    params->ret_pso = (obj_handle_t)[g_pso_fallback newRenderPipelineStateWithDescriptor:descriptor
-                                                                   compilerTaskOptions:g_pso_task_options
-                                                                                 error:&err];
+    params->ret_pso = (obj_handle_t)pso_compile(g_pso_fallback, descriptor, g_pso_task_options, &err);
     params->ret_error = (obj_handle_t)[err retain];
     if (params->ret_pso)
       atomic_fetch_add(&g_pso_uncaptured, 1u);
@@ -7593,9 +7667,7 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   }
   if (!g_pso_fallback)
     pthread_rwlock_rdlock(&g_pso_lock);
-  params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
-                                                                                     compilerTaskOptions:g_pso_task_options
-                                                                                                   error:&err];
+  params->ret_pso = (obj_handle_t)pso_compile((id<MTL4Compiler>)params->compiler, descriptor, g_pso_task_options, &err);
   /* Counted before the lock is released (S-1): otherwise a flush could serialize
    * this build in between, and the late count would make the next flush write a
    * drained serializer. Only atomics and a signal. */

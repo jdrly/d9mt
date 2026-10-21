@@ -27,7 +27,9 @@
 #            chunks + marker (the next start loads the set); an exit between chunks (no marker:
 #            the old archives serve, the chunks go only once old and ownerless); a second process
 #            while one consolidates (neither loads nor deletes its chunks); yields to requests;
-#            the capture flush at FLUSH_EVERY after a quiet gap
+#            the capture flush at FLUSH_EVERY after a quiet gap; a warm start whose consolidation
+#            deletes the loaded parts, then misses (Metal throws for a deleted lookup archive it
+#            never converted: pso_convert_lookups; unlink_lookup_test shows both)
 #   TSan     the cold, warm, part 5 and part 6 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
@@ -191,9 +193,46 @@ suite() { # <label>
   if [ "${y:-0}" -gt 0 ] && [ "$(markers "$N6-y")" = 1 ]; then echo "  burst: yielded $y time(s), then completed: ok"
   else echo "  burst: FAIL (yields '${y:-}', $(markers "$N6-y") markers)"; fails=$((fails + 1)); fi
   # FLUSH_EVERY (5 here) pending: flushed at a quiet gap, with the idle flush out of reach
-  run "$N6-f" "$1-p6-f" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 -- "${SET_A[@]}"
+  run "$N6-f" "$1-p6-f" MT_COVERAGE=0 D9MT_PSO_FLUSH_IDLE_MS=600000 MT_SETTLE_MS=2000 -- "${SET_A[@]}"
   if [ "$(grep -c 'flush starts (chunk' "$OUT/$1-p6-f.log")" -gt 0 ]; then echo "  capture flush at FLUSH_EVERY after a quiet gap: ok"
   else echo "  capture flush at FLUSH_EVERY: FAIL"; fails=$((fails + 1)); fi
+
+  # a warm start (only archive hits: the game's compiler unused) whose startup-window consolidation
+  # deletes the loaded parts, then new PSOs (misses, compiled with those lookupArchives): Metal threw
+  # in convertBinaryArchives before pso_convert_lookups; no crash, all built, no fallback
+  # More deltas than archive first asks (8): the consolidation's own compiles convert only the
+  # archives it looks up (the newest 8 and the session's), and deletes all of them; the older
+  # ones are only the game compiler's lookupArchives. SET_A newest, so the warm run hits only.
+  local NU="$OUT/$1-p6-unlink" i
+  mkdir -p "$NU/pso"
+  local more=($(ls "$B"/ps_*.bin | grep -v -e ps_show -e ps_pp))
+  for i in "${!more[@]}"; do
+    [ "$(deltas "$NU")" -ge 10 ] && break
+    mkdir -p "$NU-$i"; ln -sfn "$NU/pso" "$NU-$i/pso"
+    run "$NU-$i" "$1-p6-u0-$i" MT_COVERAGE=0 -- "$B/vs_mvp.bin" "${more[$i]}"
+  done
+  sleep 1
+  run "$NU" "$1-p6-u1" MT_COVERAGE=0 -- "${SET_A[@]}"
+  local parts; parts=$(deltas "$NU")
+  run "$NU" "$1-p6-u3" MT_LATE_PSOS=1500 MT_WAIT_CONSOLIDATED=30 -- "${SET_A[@]}"
+  check "warm consolidation, then misses: all hits first (the compiler unused)" "$(stat_line "$1-p6-u3" | sed 's/^\([0-9]*\) hits.*/\1/')" "$(grep -o 'psos: [0-9]* ok' "$OUT/$1-p6-u3.log" | grep -o '[0-9]*' | head -1)"
+  check "warm consolidation, then misses: it replaced every loaded delta ($parts)" "$(sed -n 's/.*builds into .* chunk(s)), \([0-9]*\) replaced.*/\1/p' "$OUT/$1-p6-u3.log")" "$parts"
+  check "warm consolidation, then misses: consolidated" "$(grep -c 'PSO archives consolidated' "$OUT/$1-p6-u3.log")" 1
+  # (a crash is counted by run(); the late builds compiled after the deletion:)
+  local lok; lok=$(sed -n 's/^late psos: \([0-9]*\) ok.*/\1/p' "$OUT/$1-p6-u3.log")
+  [ "${lok:-0}" -gt 0 ] && echo "  warm consolidation, then misses: $lok late PSOs built after the deletion: ok" \
+    || { echo "  warm consolidation, then misses: FAIL (no late PSO built)"; fails=$((fails + 1)); }
+  check "warm consolidation, then misses: no lookup archive gone" "$(grep -c "lookup archive's file is gone" "$OUT/$1-p6-u3.log")" 0
+  check "warm consolidation, then misses: converted at load" "$(grep -c 'lookup archive(s) converted in .* (ok)' "$OUT/$1-p6-u3.log")" 1
+  if [ "$1" = plain ]; then
+    clang -arch x86_64 -O1 -fobjc-arc -fobjc-arc-exceptions "$BR/tests/unlink_lookup_test.m" -framework Metal -framework Foundation \
+      -o "$OUT/unlink_lookup_test" || { echo "FATAL: unlink_lookup_test does not build" >&2; exit 1; }
+    mkdir -p "$OUT/unlink"
+    check "Metal: a deleted lookup archive the compiler never used throws" \
+      "$("$OUT/unlink_lookup_test" "$OUT/unlink" unused 2>&1 | grep -c 'EXCEPTION after unlink')" 1
+    check "Metal: converted before the deletion (the bridge's fix), no exception" \
+      "$("$OUT/unlink_lookup_test" "$OUT/unlink" warmup 2>&1 | grep -c 'EXCEPTION')" 0
+  fi
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"
