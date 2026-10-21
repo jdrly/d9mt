@@ -1,5 +1,7 @@
 #include "mtl_submission.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <thread>
@@ -12,7 +14,8 @@
 
 namespace dxvk::backend {
 
-SubmissionTracker::SubmissionTracker(obj_handle_t device) {
+SubmissionTracker::SubmissionTracker(obj_handle_t device)
+: m_failFast(env::getEnvVar("D9MT_GPU_HUNG") != "continue") {
   m_event = WmtSharedEvent::adopt(MTLDevice_newSharedEvent(device));
   m_pump = dxvk::thread([this] { pumpThread(); });
 }
@@ -210,7 +213,7 @@ void SubmissionTracker::pumpThread() {
 }
 
 void SubmissionTracker::waitFor(uint64_t serial) {
-  if (isComplete(serial))
+  if (isComplete(serial) || gpuHung())
     return;
   // D9MT_PROFILE: a wait that starts on a serial nobody submitted yet, timed until it returns.
   struct UnsubmittedWait {
@@ -223,9 +226,10 @@ void SubmissionTracker::waitFor(uint64_t serial) {
           std::chrono::steady_clock::now() - t0).count()), serial);
     }
   } unsubmitted = { std::chrono::steady_clock::now(), serial, prof::g_profEnabled && serial >= nextSerial() };
-  // Bounded blocking wait, not a spin, so a never-signalled command buffer degrades to a logged stall instead of a hang.
+  // Bounded blocking wait, not a spin: a never-signalled command buffer ends in D9MT-GPU-HUNG (or, with
+  // D9MT_GPU_HUNG=continue, a logged stall) instead of a hang.
   for (int i = 0; i < 5; i++) {
-    if (MTLSharedEvent_waitUntilSignaledValue(m_event.handle(), serial, 2000u)) {
+    if (MTLSharedEvent_waitUntilSignaledValue(m_event.handle(), serial, s_sliceMs)) {
       completedSerial();
       return;
     }
@@ -238,12 +242,34 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     // the CS thread only up to the resource's last use) and ends within the first slice.
     if (serial >= nextSerial())
       Logger::warn(str::format("SubmissionTracker: waiting on serial ", serial,
-        ", still not submitted yet after ", (i + 1) * 2, " s (next ", nextSerial(), ")"));
+        ", still not submitted yet after ", (i + 1) * s_sliceMs / 1000u, " s (next ", nextSerial(), ")"));
     Logger::warn(str::format("SubmissionTracker: GPU stall waiting serial ",
       serial, " (completed ", completedSerial(), ") — slice ", i + 1));
   }
+  const uint64_t completed = completedSerial();
+  if (m_failFast && serial < nextSerial()) {
+    onHung(serial, completed);
+    return;
+  }
   Logger::err(str::format("SubmissionTracker: GPU never signalled serial ",
-    serial, " (completed ", completedSerial(), ") — abandoning wait"));
+    serial, " (completed ", completed, ") — abandoning wait"));
+}
+
+// The GPU stopped: rendering on (as before) leaves the game frozen, its dead GPU context
+// alive, and the process running past a logout, one rejected commit every 10 s. The first
+// thread to see it says so and ends the process; the line is out before it ends
+// (__wine_dbg_output writes it at once).
+void SubmissionTracker::onHung(uint64_t serial, uint64_t completed) {
+  if (m_gpuHung.exchange(true, std::memory_order_acq_rel))
+    return;
+  Logger::err(str::format("D9MT-GPU-HUNG: serial ", serial, " not signalled after ", 5u * s_sliceMs / 1000u,
+    " s (completed ", completed, ", submitted ", lastSubmittedSerial(), "): the GPU stopped and its queue",
+    " won't recover; ending the game (exit code ", kGpuHungExitCode, "; D9MT_GPU_HUNG=continue keeps it running)"));
+  if (s_onHung) {
+    s_onHung(serial, completed);
+    return;
+  }
+  TerminateProcess(GetCurrentProcess(), kGpuHungExitCode);
 }
 
 }

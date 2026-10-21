@@ -49,7 +49,10 @@ namespace dxvk {
   void Logger::info(const std::string&) { }
   void Logger::warn(const std::string&) { }
   void Logger::err(const std::string&) { }
-  namespace env { void setThreadName(const std::string&) { } }
+  namespace env {
+    void setThreadName(const std::string&) { }
+    std::string getEnvVar(const char*) { return std::string(); }
+  }
 }
 
 static bool waitReleased(int want, int ms) {

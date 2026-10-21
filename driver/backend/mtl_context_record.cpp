@@ -325,6 +325,10 @@ namespace dxvk::backend {
     }
     cbs[cbCount++] = m_cmdbuf.handle();
 
+    // The GPU stopped (D9MT-GPU-HUNG): the process is ending, nothing more goes to the dead queue
+    if (unlikely(m_device->submissions().gpuHung()))
+      return;
+
     m_device->residency().beforeSubmit();
 
     gpuCaptureBeforeCommit(m_device->wmtDevice());

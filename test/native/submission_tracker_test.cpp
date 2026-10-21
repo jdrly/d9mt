@@ -11,6 +11,9 @@
 //  - random submit/complete/process from three threads: nothing runs early, everything runs,
 //    and a fence every batch signals never goes backwards (the pump and the CS thread both run
 //    retirements; sync::Fence stores whatever value it is given).
+//  - a submitted serial the GPU never signals: one D9MT-GPU-HUNG (the hang handler, instead of
+//    ending the process), gpuHung() set, later waits return at once; a serial nobody submitted
+//    and D9MT_GPU_HUNG=continue give up the wait as before, without it.
 // The tracker uses dxvk::thread and the driver's util, so this is a mingw exe run under Wine
 // (no window). RetireBatch::run is the driver's minus the buffer recycling, which needs the device.
 //   x86_64-w64-mingw32-g++ -std=c++17 -O1 -DWINEMETAL_API='extern "C"' -I driver/backend \
@@ -18,6 +21,8 @@
 //     build/driver-x64/obj/util_{log_log,thread,util_env,util_string}.cpp.o ... -o stt.exe
 #include "mtl_submission.h"
 #include "mtl_profiler.h"
+
+#include <windows.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -358,6 +363,65 @@ static void unsubmittedWait() {
   CHECK(prof::g_unsubWaits.load() == before + 1u);
 }
 
+static std::atomic<int> g_hung = { 0 };
+static uint64_t g_hungSerial = 0u, g_hungCompleted = 0u;
+
+static void onHung(uint64_t serial, uint64_t completed) {
+  g_hung++;
+  g_hungSerial = serial;
+  g_hungCompleted = completed;
+}
+
+static int64_t msSince(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static void gpuHung() {
+  SubmissionTracker::s_sliceMs = 20u;
+  SubmissionTracker::s_onHung = onHung;
+  { // a submitted serial never signalled: the GPU stopped
+    g_signaled = 0u;
+    SubmissionTracker t(0x1u);
+    uint64_t s1 = t.onSubmit(0x2u);
+    gpuComplete(s1);
+    uint64_t s2 = t.onSubmit(0x2u);
+    uint64_t s3 = t.onSubmit(0x2u);
+    auto t0 = std::chrono::steady_clock::now();
+    t.waitFor(s2);
+    CHECK(msSince(t0) >= 90);   // the whole wait: 5 slices of 20 ms
+    CHECK(g_hung.load() == 1);
+    CHECK(g_hungSerial == s2);
+    CHECK(g_hungCompleted == s1);
+    CHECK(t.gpuHung());
+    // reported once; later waits (another thread, the next frame, the drain) don't wait again
+    t0 = std::chrono::steady_clock::now();
+    t.waitFor(s3);
+    CHECK(msSince(t0) < 20);
+    CHECK(g_hung.load() == 1);
+  }
+  CHECK(g_hung.load() == 1);   // nor does the destructor's drain
+  { // a serial nobody submitted: whoever waits should have flushed, not the GPU's fault
+    g_signaled = 0u;
+    SubmissionTracker t(0x1u);
+    t.waitFor(t.nextSerial());
+    CHECK(g_hung.load() == 1);
+    CHECK(!t.gpuHung());
+  }
+  { // D9MT_GPU_HUNG=continue: the wait is given up, the game renders on (as before)
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    g_signaled = 0u;
+    SubmissionTracker t(0x1u);
+    uint64_t s = t.onSubmit(0x2u);
+    t.waitFor(s);
+    CHECK(g_hung.load() == 1);
+    CHECK(!t.gpuHung());
+    gpuComplete(s);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+  }
+  SubmissionTracker::s_sliceMs = 2000u;
+  SubmissionTracker::s_onHung = nullptr;
+}
+
 int main() {
   basics();
   unsubmittedWait();
@@ -365,6 +429,7 @@ int main() {
   manyDue();
   drain();
   stress();
+  gpuHung();
   std::printf("%s submission_tracker_test (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail.load());
   return g_fail ? 1 : 0;
 }
