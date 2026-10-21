@@ -65,8 +65,16 @@ namespace dxvk::backend {
 
     ~MtlPresenterImpl() {
       stopAcquirer();
-      if (m_backend && m_layer)
-        m_backend->residency().detachLayer(m_layer);
+      // Frames that wrote this layer's drawables can still be on the GPU: the queue keeps
+      // the layer's residency set until they have retired (the set is retained, the view
+      // and layer can go now).
+      if (m_backend && m_layer) {
+        if (obj_handle_t set = m_backend->residency().detachLayer(m_layer)) {
+          MtlResidencyTracker* residency = &m_backend->residency();
+          SubmissionTracker& st = m_backend->submissions();
+          st.retireAfter(st.nextSerial(), [residency, set] () { residency->removeLayerSet(set); });
+        }
+      }
       if (m_view)
         ReleaseMetalView(m_view);
     }
@@ -161,8 +169,12 @@ namespace dxvk::backend {
       image.sync.drawable = drawable;
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
+      tex->drawable    = true;
       obj_handle_t drawableTex = MetalDrawable_texture(drawable);
       lifetime::markDrawable(drawableTex);
+      // A reference of the wrapper's own: copyTexture keeps the wrapper until the command
+      // buffer that writes the drawable has retired, not only Core Animation's reference.
+      tex->owned       = WmtTexture::retain(drawableTex);
       tex->texture.tex = drawableTex;
       tex->format      = desc.imageFormat;
       uint32_t dw = uint32_t(MTLTexture_width(drawableTex));
@@ -177,8 +189,9 @@ namespace dxvk::backend {
       tex->m_info.sampleCount = 1u;
       tex->m_info.usage       = MtlTextureUsageRenderTarget;
 
+      // (no reference of its own: the view holds the wrapper, whose reference lives until the
+      // command buffer that writes the drawable has retired)
       Rc<MtlTextureViewImpl> view = new MtlTextureViewImpl();
-      view->owned      = WmtTexture::retain(drawableTex);
       view->view.tex   = drawableTex;
       view->image      = tex.ptr();
       view->key.format = desc.imageFormat;
@@ -258,6 +271,7 @@ namespace dxvk::backend {
     obj_handle_t     m_view      = 0u;
     obj_handle_t     m_layer     = 0u;
     bool             m_layerResidencyAttached = false;
+    bool             m_layerAttachWarned      = false;
     uint64_t         m_lastPresented = 0u;
     uint64_t         m_completedFrame = 0u;
 
@@ -301,6 +315,10 @@ namespace dxvk::backend {
       if (m_layerResidencyAttached || !m_backend || !m_layer)
         return;
       m_layerResidencyAttached = m_backend->residency().attachLayer(m_layer);
+      if (!m_layerResidencyAttached && !m_layerAttachWarned) {
+        m_layerAttachWarned = true;
+        Logger::warn("MtlPresenterImpl: the layer's residency set could not be attached to the queue: its drawables may not be resident when frames are copied into them");
+      }
     }
 
     void logLayer(const std::string& msg) {

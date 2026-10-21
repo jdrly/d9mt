@@ -67,6 +67,8 @@ namespace dxvk::backend {
     // The context's m_vtxEpoch when a pass that ended with the narrowed
     // barrier last rendered to it (MtlContextImpl::markVertexHazards).
     uint64_t           vtxEpoch = 0u;
+    // A CAMetalLayer drawable's texture (the presenter's wrapper, MtlPresenterImpl)
+    bool               drawable = false;
     ~MtlTextureImpl();
   };
 

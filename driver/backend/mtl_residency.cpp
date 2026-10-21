@@ -30,8 +30,10 @@ namespace dxvk::backend {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_set)
       MTL4CommandQueue_removeResidencySet(m_queue, m_set.handle());
-    for (obj_handle_t set : m_attachedLayerSets)
+    for (obj_handle_t set : m_attachedLayerSets) {
       MTL4CommandQueue_removeResidencySet(m_queue, set);
+      NSObject_release(set);
+    }
     m_attachedLayerSets.clear();
   }
 
@@ -154,27 +156,36 @@ namespace dxvk::backend {
       if (s == set)
         return true;
     }
+    // (the layer owns it: retained, so it outlives the layer until the queue lets go of it)
+    NSObject_retain(set);
     MTL4CommandQueue_addResidencySet(m_queue, set);
     m_attachedLayerSets.push_back(set);
     return true;
   }
 
-  void MtlResidencyTracker::detachLayer(obj_handle_t layer) {
+  obj_handle_t MtlResidencyTracker::detachLayer(obj_handle_t layer) {
     if (!layer)
-      return;
+      return 0u;
 
     obj_handle_t set = MetalLayer_residencySet(layer);
     if (!set)
-      return;
+      return 0u;
 
     std::lock_guard<std::mutex> lock(m_mutex);
     for (size_t i = 0u; i < m_attachedLayerSets.size(); i++) {
       if (m_attachedLayerSets[i] == set) {
-        MTL4CommandQueue_removeResidencySet(m_queue, set);
         m_attachedLayerSets.erase(m_attachedLayerSets.begin() + i);
-        return;
+        return set;
       }
     }
+    return 0u;
+  }
+
+  void MtlResidencyTracker::removeLayerSet(obj_handle_t set) {
+    if (!set)
+      return;
+    MTL4CommandQueue_removeResidencySet(m_queue, set);
+    NSObject_release(set);
   }
 
 }
