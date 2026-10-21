@@ -20,9 +20,9 @@ and what a release candidate is checked for. What isn't in this repository yet i
   alignment against the previous release (§6). A slowdown there that is layout gets a layout fix
   (an alignment flag, function order), each measured on its own, **not a revert** of the commit
   that happened to move it.
-- The one exception so far was the maintainer's decision: the PSO MRU change (#40) was about 3 %
-  slower in a synthetic worst case and much faster where SWTOR is; it was approved after review,
-  and a later change (#33) removed that worst case.
+- There is no exception. The PSO MRU change (#40), for example, merged once the cause of its
+  synthetic worst case (psobench `topo`) was gone with #33, merged before it, and what remained
+  flipped sign with alignment, so it was layout (#40).
 
 ## 2. How to measure
 
@@ -51,31 +51,32 @@ and what a release candidate is checked for. What isn't in this repository yet i
 ### 2.3 Controls
 
 - **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant.
-  It shows the harness's bias and the window's noise floor, typically within ±1.5 %. A delta
-  smaller than the A/A spread of that window is noise.
+  It shows the harness's bias and the window's noise floor. A delta smaller than the A/A spread
+  of that window is noise.
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
-  `-falign-functions=64`. If the gap disappears there, it is layout, not the change. (Checked:
-  base-a64 equals base for the PSO benchmarks, and the PSO key normalisation's +0.4 % became
-  +0.2 %, 11/20, under a64.)
+  `-falign-functions=64`. If the gap disappears there, it is layout, not the change. Check that
+  the flag alone doesn't move base (base-a64 against base).
 - **Identical-size placebo**: a64 can't neutralise a change that alters the size of its
   translation unit's code, because everything after it moves. Then build a placebo with exactly the
-  change's code size and no behaviour change, and compare the change against the placebo (the
-  topology change #33: topo −1.4 %, placebo −1.1 %, topo vs placebo −0.4 %, 8/20: layout).
+  change's code size and no behaviour change, and compare the change against the placebo. If the
+  change reads like the placebo, it is layout.
 
 ### 2.4 Bimodal benchmarks
 
-Some benchmarks land in two modes: bindbench runs at about **1.33 ms or about 1.41 ms**, run by
-run, and the same pair of variants read +5.4 % in one window and −4.1 % in the next. **Look at the
-per-run values for two clusters before reading a median**; differences under about 6 % on
-bindbench need many more rounds.
+Some benchmarks land in two modes: bindbench settles into one of two frame times per run, so the
+same pair of variants can read faster in one window and slower in the next. **Look at the per-run
+values for two clusters before reading a median**; small differences on a bimodal benchmark need
+many more rounds.
+
+_The maintainer's measurements behind §2.3 and §2.4 are not public._
 
 ### 2.5 The virtual display
 
 Benchmarks that run unattended on a virtual display see a window that AppKit reports as
-**occluded** (`occlusionState` 0x2000), so d9mt **skips the presents**: the numbers are CPU time
-plus GPU work without the present copy. A **locked session** hides the window too. On the virtual
-display `nextDrawable` takes **18–80 ms**, so it can't answer present-path questions (drawable
-waits, vsync pacing): those are measured **in a game on a real display**, with the Metal HUD.
+**occluded**, so d9mt **skips the presents**: the numbers are CPU time plus GPU work without the
+present copy. A **locked session** hides the window too. On a virtual display `nextDrawable` takes
+much longer than a frame, so it can't answer present-path questions (drawable waits, vsync
+pacing): those are measured **in a game on a real display**, with the Metal HUD.
 
 ## 3. Benchmarks
 
@@ -151,9 +152,11 @@ plus `D9MT_PROFILE_INSTRUMENT=1`).
 **Lifetime and GPU faults**: `D9MT_LIFETIME_CHECK=1` aborts at the first texture released before
 the GPU is past the command buffer that uses it (`D9MT-LIFETIME`), `=log` only logs; drawables are
 logged as `D9MT-LIFETIME drawable` and never abort (`driver/backend/mtl_lifetime.h`). The GPU
-canary (on by default) logs `D9MT-GPU-CANARY: on` once it works and `D9MT-GPU-LOST` for every
-command buffer the GPU discarded after a page fault; macOS itself only logs `IOGPUMetalError` in
-its unified log. Use both for any change to lifetimes or submission.
+canary (on by default) marks the present copy and every fourth other command buffer, logs
+`D9MT-GPU-CANARY: on` once it works, and `D9MT-GPU-LOST` for a marked command buffer the GPU
+discarded after a page fault (the first 20, then a summary at most every 10 s), so it samples
+rather than sees every loss; macOS itself only logs `IOGPUMetalError` in its unified log. Use both
+for any change to lifetimes or submission.
 
 **Live flags and captures**: `D9MT_DEBUG_FILE` (flags polled once a second, for example
 `no_attach_opt` for a live A/B, `att_trace`, `dump`) and `D9MT_GPUCAPTURE` (an Xcode GPU trace);
@@ -170,14 +173,22 @@ doesn't apply.
    `driver/backend/mtl_submission.h`).
 2. **Avoid unix calls on the hot path.** Reading the shared event is a unix call; use
    `completedSerialCached()` where a stale answer will do, and check `serial >= nextSerial()`
-   before asking the event. #31 took `bench_4k` from 31 to 8 event reads a frame.
-3. **Retire on the retire thread, not on the CS thread.** Releasing on the CS thread was 1.3–1.5 %
-   slower in churnbench (ADR-0001).
-4. **The render thread never waits on a lock a utility thread holds.** When a pipeline-archive
-   flush holds the archive lock, a pipeline build falls back to a compiler without the serializer
-   instead of waiting; the pipeline is captured next session. _Open:_ that fallback is part of the
-   bridge bundle (`bundle/bridge-s1-pso`), not on `main` yet. In the driver, the PSO cache never
-   blocks, and the pipeline wait budget caps compile waits.
+   before asking the event (#31, “fewer shared-event reads”). `evRead` in the `PROF` line counts
+   them.
+3. **Hand releases to the retire queue; don't release on the CS thread at the call site.**
+   Releasing texture views on the CS thread (`ac70a8c`) was 1.3–1.5 % slower in churnbench; #24
+   hands them to the retire queue instead (ADR-0001). Today the queue runs on the `d9mt-retire`
+   pump or, at the end of a frame, on the CS thread (`endFrame` → `processRetirements`), and
+   `retireAfter` releases inline when the serial is already complete. _Open:_ moving all of it to
+   the retire thread, with one owner of GPU lifetimes, is not done (ADR-0001).
+4. **Keep waits off the render thread, and bound the ones that remain.** `RenderPsoCache::get`
+   looks up or starts a build without waiting for it. The limits today: a PSO miss and the
+   prewarm take the registry's mutex; `getSync` waits for its build without a limit; a draw
+   waits for a pending compile as long as it takes unless `d9mt.pipelineWaitBudgetMs` is set
+   (off by default, ignored without compile workers) (`driver/backend/mtl_pso_cache.h`; README,
+   *Pipeline wait budget*). _Open:_ when a pipeline-archive flush holds the archive lock, a
+   build on the bridge bundle (`bundle/bridge-s1-pso`) falls back to a compiler without the
+   serializer instead of waiting; that is not on `main` yet.
 5. **Hash word by word, not byte by byte.** The PSO key hash went from a byte-wise FNV-1a over the
    whole key (about 314 ns a lookup) to xxHash64's round over 8-byte words in four lanes (49 ns):
    psobench blend −47 %, with the a64 control at −47 % too (#34; [docs/pso-key-hash.md](docs/pso-key-hash.md)).
