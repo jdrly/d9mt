@@ -91,6 +91,57 @@ namespace dxvk::statecache {
   std::vector<uint8_t> serialize(const std::vector<Entry>& entries,
                                  uint64_t keySignature, uint32_t session);
 
+  /// The journal, <file>.journal (docs/state-cache-journal.md): records made since the last
+  /// write of the main file, so a session that ends without that write (a crash, a kill, or
+  /// SWTOR's ExitProcess) keeps them. A 32-byte header tied to the key signature, then the
+  /// main file's entry records (an 8-byte check + Entry), appended, never rewritten or cut:
+  /// another process may be appending (two clients), so a torn tail stays and the parser
+  /// resyncs past it.
+  constexpr uint32_t JournalVersion    = 1u;
+  constexpr uint32_t JournalHeaderSize = 32u;
+
+  std::vector<uint8_t> journalHeader(uint64_t keySignature);
+
+  /// Appends `entries` as records (the main file's encoding) to `out`.
+  void appendRecords(std::vector<uint8_t>& out, const std::vector<Entry>& entries);
+
+  struct JournalParseResult {
+    ParseStatus status     = ParseStatus::Empty;   // Ok, Empty, BadHeader, Older/NewerVersion, KeyMismatch
+    uint32_t    records    = 0u;   // good records (check and content), kept
+    uint32_t    corrupt    = 0u;   // stretches between good records that were skipped: a damaged
+                                   // record, a torn append that later appends follow, an overlap
+    uint32_t    tornBytes  = 0u;   // bytes after the last good record (an append cut short)
+    uint32_t    maxSession = 0u;   // highest lastSession of the good records
+  };
+
+  /// Every record with a good check and content is kept, wherever it starts: after a stretch
+  /// that isn't one, the parser scans byte by byte for the next offset whose check matches
+  /// (a cheap content test first, so a scan costs little). A wrong record would need a 64-bit
+  /// check collision.
+  JournalParseResult parseJournal(const uint8_t* data, size_t size, uint64_t keySignature,
+                                  std::vector<Entry>& out);
+
+  /// Result of opening the journal for appends (MtlStateCache::openJournal).
+  enum class JournalOpen {
+    Ready,    // our header: append
+    Newer,    // a newer d9mt's journal: left alone, this session doesn't journal
+    Busy,     // another process is creating it, or won the race to: try at the next intake
+    Failed,   // an IO error
+  };
+
+  /// Result of one append (MtlStateCache::appendJournalRecords).
+  enum class JournalAppend {
+    Ok,
+    Busy,     // another client holds the journal lock: try at the next intake
+    Gone,     // the file is gone (another process's write removed it): open it again
+    Failed,   // an IO error
+  };
+
+  /// The appends' lock: one byte far past any record, so it never covers data, held exclusively
+  /// around each append, never waited for longer than JournalLockWaitMs.
+  constexpr uint64_t JournalLockOffset = 1ull << 62;
+  constexpr uint32_t JournalLockWaitMs = 20u;
+
   /// Marks one use in `session` (once per session) and keeps the earliest first use.
   void noteUse(Entry& e, uint32_t session, uint32_t firstUseMs);
 
@@ -111,6 +162,9 @@ namespace dxvk::statecache {
     bool use(const Entry& e, uint32_t session);
 
     bool erase(const Entry& e);
+
+    /// The stored entry with e's identity (merged counters), or null.
+    const Entry* get(const Entry& e) const;
 
     /// Erases e unless it was used in `session` (a draw built it then,
     /// which proves it fine). True if erased.
