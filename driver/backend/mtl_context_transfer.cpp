@@ -382,7 +382,7 @@ namespace dxvk::backend {
     for (uint32_t i : bit::BitMask(streamMask)) {
       VertexStream& s = m_vertexStreams[i];
       if (!s.slice.defined() || s.slice.storage() == nullptr) {
-        appendTableAddress(shadow, table, 0u, kVertexBufferBaseIndex + i);
+        appendTableAddress(shadow, table, m_nullAddress, kVertexBufferBaseIndex + i);
         continue;
       }
       if (unlikely(s.slice.storage() != s.slice.buffer()->storage()))
@@ -505,7 +505,7 @@ namespace dxvk::backend {
 
         if (!cbv.slice.defined() || cbv.slice.storage() == nullptr
          || uintptr_t(cbv.slice.storage().ptr()) < 0x10000u) {
-          appendTableAddress(shadow, table, 0u, uint32_t(airSlot));
+          appendTableAddress(shadow, table, m_nullAddress, uint32_t(airSlot));
           continue;
         }
         if (unlikely(cbv.slice.storage() != cbv.slice.buffer()->storage()))
@@ -517,7 +517,7 @@ namespace dxvk::backend {
       for (uint32_t slot : bit::BitMask(texMask)) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr) {
-          appendTableTexture(shadow, table, 0u, slot);
+          appendTableTexture(shadow, table, nullTextureId(st, slot), slot);
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
@@ -527,7 +527,7 @@ namespace dxvk::backend {
       for (uint32_t slot : bit::BitMask(smpMask)) {
         const Rc<MtlSamplerState>& sampler = b.samplers[slot];
         if (sampler == nullptr) {
-          appendTableSampler(shadow, table, 0u, slot);
+          appendTableSampler(shadow, table, m_nullSamplerId, slot);
           continue;
         }
         auto* sp = static_cast<MtlSamplerStateImpl*>(sampler.ptr());

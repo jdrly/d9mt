@@ -83,6 +83,42 @@ namespace dxvk::backend {
 
     obj_handle_t dev = m_device->wmtDevice();
 
+    { MtlBufferCreateInfo bi;
+      /* The null stream is per instance (16 bytes each, 4096 instances) and the FF
+       * constant blocks fit. A stream left unbound under a per-vertex layout reads
+       * stride x index past its end, as it read past address 0 before. */
+      bi.size      = 64u << 10;
+      bi.usage     = MtlUsage::VertexBuffer | MtlUsage::UniformBuffer;
+      bi.cpuAccess = MtlCpuAccess::Write;
+      m_nullBuffer = m_device->createBuffer(bi);
+      if (m_nullBuffer != nullptr) {
+        std::memset(m_nullBuffer->mapPtr(0), 0, size_t(bi.size));
+        m_nullAddress = MtlBufferSlice(m_nullBuffer, 0u, bi.size).gpuAddress();
+      }
+      MtlImageCreateInfo ii;
+      ii.format = MtlFormat::RGBA8Unorm;
+      ii.extent = { 1u, 1u, 1u };
+      ii.usage  = MtlUsage::Sampled;
+      m_nullImage2D = m_device->createImage(ii);
+      ii.arrayLayers = 6u;
+      ii.cube        = true;
+      m_nullImageCube = m_device->createImage(ii);
+      MtlImageViewKey vk;
+      vk.format = MtlFormat::RGBA8Unorm;
+      if (m_nullImage2D != nullptr)
+        m_nullView2D = m_device->createImageView(m_nullImage2D, vk);
+      vk.layerCount = 6u;
+      vk.viewType   = MtlTextureViewType::eCube;
+      if (m_nullImageCube != nullptr)
+        m_nullViewCube = m_device->createImageView(m_nullImageCube, vk);
+      if (m_nullView2D != nullptr)
+        m_null2DId = static_cast<MtlTextureViewImpl*>(m_nullView2D.ptr())->gpuResourceId;
+      if (m_nullViewCube != nullptr)
+        m_nullCubeId = static_cast<MtlTextureViewImpl*>(m_nullViewCube.ptr())->gpuResourceId;
+      m_nullSampler = m_device->createSampler(MtlSamplerKey());
+      if (m_nullSampler != nullptr)
+        m_nullSamplerId = static_cast<MtlSamplerStateImpl*>(m_nullSampler.ptr())->gpuResourceId; }
+
     WMTArgTableInfo ati = {};
     ati.max_buffers                = 31u;
     ati.max_textures               = 16u;
@@ -92,12 +128,28 @@ namespace dxvk::backend {
     ArgTablePair pair;
     pair.table[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
     pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(dev, &ati));
+    initNullBindings(pair);
     m_argTables.push_back(std::move(pair));
 
     m_allocators.push_back(WmtAllocator::adopt(MTLDevice_newCommandAllocator(dev)));
     m_initAllocators.emplace_back();
     m_allocatorSerial.push_back(0u);
     m_allocator     = m_allocators[0].handle();
+
+    /* The null textures are sampled: the FF shader's TEXTURE_TYPE_NULL stage reads
+     * its slot. Private storage starts undefined (and may be compressed with garbage
+     * metadata): zero them from the null buffer once, as slot 0 read before. */
+    if (m_nullBuffer != nullptr) {
+      for (uint32_t layer = 0u; layer < 7u; layer++) {
+        const Rc<MtlTexture>& img = layer == 0u ? m_nullImage2D : m_nullImageCube;
+        if (img == nullptr)
+          continue;
+        MtlSubresourceLayers sub;
+        sub.baseLayer = layer == 0u ? 0u : layer - 1u;
+        copyBufferToTexture(img, sub, MtlOrigin { 0, 0, 0 }, MtlSize { 1u, 1u, 1u },
+          m_nullBuffer, 0u, 0u, 0u, MtlFormat::RGBA8Unorm);
+      }
+    }
   }
 
   MtlContextImpl::~MtlContextImpl() {
@@ -117,6 +169,11 @@ namespace dxvk::backend {
       m_device->residency().allocDestroyed(m_visBuffer.detach(), m_visCpu,
         m_device->submissions().nextSerial(), uint64_t(kVisSlots) * 8u);
     }
+    /* Every argument table holds the null resources: keep them until the GPU is
+     * past everything this context submitted, whatever the device's teardown order. */
+    m_device->submissions().retireAfter(m_device->submissions().nextSerial(),
+      [buf = std::move(m_nullBuffer), i2 = std::move(m_nullImage2D), ic = std::move(m_nullImageCube),
+       v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube), smp = std::move(m_nullSampler)]() { });
   }
 
 
@@ -712,7 +769,38 @@ namespace dxvk::backend {
     ArgTablePair pair;
     pair.table[0] = WmtArgTable::adopt(MTLDevice_newArgumentTable(m_device->wmtDevice(), &ati));
     pair.table[1] = WmtArgTable::adopt(MTLDevice_newArgumentTable(m_device->wmtDevice(), &ati));
+    initNullBindings(pair);
     return pair;
+  }
+
+  /* Once per argument table, before it is first used: every slot holds a null
+   * resource, and the shadow knows it (an unbound slot then costs nothing). */
+  void MtlContextImpl::initNullBindings(ArgTablePair& pair) const {
+    for (uint32_t st = 0u; st < 2u; st++) {
+      obj_handle_t    table  = pair.table[st].handle();
+      ArgTableShadow& shadow = pair.shadow[st];
+      if (!table)
+        continue;
+      if (m_nullAddress) {
+        for (uint32_t i = 0u; i < shadow.bufferGpuAddress.size(); i++) {
+          MTL4ArgumentTable_setAddress(table, m_nullAddress, i);
+          shadow.bufferGpuAddress[i] = m_nullAddress;
+        }
+      }
+      for (uint32_t i = 0u; i < shadow.textureId.size(); i++) {
+        const uint64_t id = nullTextureId(st, i);
+        if (!id)
+          continue;
+        MTL4ArgumentTable_setTexture(table, id, i);
+        shadow.textureId[i] = id;
+      }
+      if (m_nullSamplerId) {
+        for (uint32_t i = 0u; i < shadow.samplerId.size(); i++) {
+          MTL4ArgumentTable_setSamplerState(table, m_nullSamplerId, i);
+          shadow.samplerId[i] = m_nullSamplerId;
+        }
+      }
+    }
   }
 
   void MtlContextImpl::selectArgumentTablesForPass() {
