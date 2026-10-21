@@ -80,6 +80,39 @@ namespace dxvk::backend::prof {
     while (ns > max && !g_unsubWaitMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) { }
   }
 
+  // The drawable acquirer (MtlPresenterImpl), unlike the presenter's log lines (20 per 10 s) not
+  // rate-limited, so the PROF line can compare builds: nextDrawable calls and their time on the
+  // acquirer thread, the CS thread's waits for a drawable in takeDrawable, and the presents
+  // skipped because none came in time. Any thread.
+  inline std::atomic<uint64_t> g_acquires         = { 0u };
+  inline std::atomic<uint64_t> g_acquireNs        = { 0u };
+  inline std::atomic<uint64_t> g_acquireMaxNs     = { 0u };
+  inline std::atomic<uint64_t> g_drawableWaits    = { 0u };
+  inline std::atomic<uint64_t> g_drawableWaitNs   = { 0u };
+  inline std::atomic<uint64_t> g_drawableWaitMaxNs = { 0u };
+  inline std::atomic<uint64_t> g_drawableMisses   = { 0u };
+
+  inline void atomicMax(std::atomic<uint64_t>& m, uint64_t v) {
+    uint64_t cur = m.load(std::memory_order_relaxed);
+    while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) { }
+  }
+
+  inline void noteAcquire(uint64_t ns) {
+    if (!g_profEnabled) return;
+    g_acquires.fetch_add(1u, std::memory_order_relaxed);
+    g_acquireNs.fetch_add(ns, std::memory_order_relaxed);
+    atomicMax(g_acquireMaxNs, ns);
+  }
+
+  inline void noteDrawableWait(uint64_t ns, bool got) {
+    if (!g_profEnabled) return;
+    g_drawableWaits.fetch_add(1u, std::memory_order_relaxed);
+    g_drawableWaitNs.fetch_add(ns, std::memory_order_relaxed);
+    atomicMax(g_drawableWaitMaxNs, ns);
+    if (!got)
+      g_drawableMisses.fetch_add(1u, std::memory_order_relaxed);
+  }
+
   struct Scope {
     std::chrono::steady_clock::time_point t0;
     uint32_t bucket;
@@ -147,6 +180,17 @@ namespace dxvk::backend::prof {
     const uint64_t unsubMaxNs = g_unsubWaitMaxNs.exchange(0u, std::memory_order_relaxed);
     line += str::format(" unsubWait=", unsubWaits, "(", double(unsubWaits) / kFrames, "/f)",
       " unsubWaitUs=", unsubNs / 1000u, "(max ", unsubMaxNs / 1000u, ")");
+    const uint64_t acq    = g_acquires.exchange(0u, std::memory_order_relaxed);
+    const uint64_t acqNs  = g_acquireNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t acqMax = g_acquireMaxNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t dw     = g_drawableWaits.exchange(0u, std::memory_order_relaxed);
+    const uint64_t dwNs   = g_drawableWaitNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t dwMax  = g_drawableWaitMaxNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t miss   = g_drawableMisses.exchange(0u, std::memory_order_relaxed);
+    line += str::format(" | nextDrawable=", acq, " ms(avg/max)=", acq ? double(acqNs) * 1e-6 / double(acq) : 0.0,
+      "/", double(acqMax) * 1e-6,
+      " drawableWait=", dw, " ms(avg/max)=", dw ? double(dwNs) * 1e-6 / double(dw) : 0.0, "/", double(dwMax) * 1e-6,
+      " noDrawable=", miss);
     for (uint32_t i = 0u; i < CounterCount; i++)
       g_counts[i] = 0u;
 

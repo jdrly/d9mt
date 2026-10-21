@@ -1,6 +1,7 @@
 #include "mtl_presenter_impl.h"
 
 #include "mtl_device_impl.h"
+#include "mtl_profiler.h"
 
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
@@ -372,6 +373,7 @@ namespace dxvk::backend {
         obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
         auto t1 = Clock::now();
         int64_t ms = msSince(t0, t1);
+        prof::noteAcquire(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
 
         if (unlikely(ms >= kSlowAcquireLogMs)) {
           uint32_t dropped = 0u;
@@ -434,6 +436,7 @@ namespace dxvk::backend {
       }
 
       auto t1 = Clock::now();
+      prof::noteDrawableWait(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()), drawable != 0u);
 
       if (drawable) {
         if (unlikely(m_stalled)) {
