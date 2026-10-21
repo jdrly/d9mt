@@ -364,17 +364,9 @@ Not started: SWTOR itself on arm64 Wine + FEX, and presented frame times.
 Both need Jan, who decides when.
 
 Requirements:
-- **Game files in an arm64 prefix.** Jan's installs stay untouched; a copy
-  he makes or approves (an APFS clone `cp -c` of the game directory costs no
-  disk space and leaves the original unchanged) or a fresh download.
-- **Launcher and login**, under his account-safety rules. SWTOR's client is
-  started by its launcher with a session; options:
-  1. launcher and login on Rosetta (CX26, as today), then hand the started
-     client over to the arm64 prefix — needs working out how the launcher
-     starts the client and whether that can point at another Wine;
-  2. the launcher on arm64 Wine + FEX too, if it is x64 (if it is 32-bit,
-     this Wine can't run it: no i386);
-  3. whatever route Jan prefers for his account; no login automation.
+- **Game files and login**: decided 2026-10-21, see "Game files and login: the
+  defaults" below (the existing game install through the wrapper, as on x86;
+  an arm64 prefix of its own).
 - **The display awake** and Jan at the machine (presented frame times;
   d9mt throttles hidden windows), the game running nowhere else.
 - d9mt's caches for the test pointed outside Jan's caches, as for the tests.
@@ -440,12 +432,55 @@ digest), unpacked under `~/Development/personal/swtor-mac-proper/arm-engines/`:
    tests pass (keys by position with Czech/German/US layouts; the input
    thread in 64-bit and WoW64 processes); the raw mouse moves need real
    input in the game.
-4. **Game files** in an arm64 prefix without touching Jan's installs (an APFS
-   clone he makes or approves, or a fresh download).
-5. **Launcher and login** under Jan's account-safety rules: Broadsword's
-   launcher is Intel-only (stays on Rosetta); how the started client gets
-   into the arm64 prefix, or a launcher under FEX if it is x64 (athei's Wine
-   has WoW64 for 32-bit too).
+4. **Game files: the existing install, no second copy** (decided 2026-10-21,
+   below). Its own Wine prefix, though: an APFS clone made like the x86 one.
+5. **Launcher and login: as on x86 today** (decided 2026-10-21, below): the
+   official launcher under Rosetta, our wrapper in Broadsword's Wine folder,
+   which runs the game on the arm64 engine instead of the x86 one.
 6. Then, per configuration and with the display awake: presented frame
    times, `FEX_HARDWARE_TSO=1` vs software TSO, correctness by eye, exit
    behaviour (the #11 exit-flush fix is not in ac70a8c).
+
+### Game files and login: the defaults (decided 2026-10-21)
+
+Jan left these to the sensible default: the same game install and the same login path as SWTOR
+on Mac on x86 today. Checked against how that works (swtor-on-mac README, "What it changes",
+"How it works"; Broadsword's folders only read):
+
+- **Game files: shared, as they are.** The game (`…/com.broadsword.swtor/Star Wars - The Old
+  Republic/game`, 62 GB) is not in any Wine prefix: the prefixes reach it by its macOS path
+  through `z: → /`. An arm64 prefix reaches the same files the same way; nothing is copied, and
+  the launcher's updates of the game apply to both. Only one game runs at a time either way.
+- **The prefix: one of its own (the one exception).** A Wine prefix belongs to one engine: its
+  `wineboot -u` rewrites the prefix's Windows system files and registry for that engine's
+  version and architecture. Sharing SWTOR on Mac's x86 prefix (CrossOver 26 / Wine 11.0, x86_64)
+  with athei's arm64 Wine 11.19 would update it on every switch (about a minute), and 11.0 can't
+  run a prefix 11.19 has updated. The next-cheapest: a second prefix made the way the x86
+  installer makes its own (`som.sh install_prefix`: an APFS clone of Broadsword's prefix,
+  `drive_c`, `dosdevices`, the registry files; no disk space until it diverges), updated by the
+  arm64 engine's `wineboot -u`, the same registry settings, the game settings taken over once.
+  The two prefixes' game settings then diverge; linking the game's settings folder from one
+  to the other is possible later if that matters.
+- **Login: unchanged.** The official launcher (Intel-only, under Rosetta) starts every Wine
+  process through `bin/wine64` in Broadsword's Wine folder, whose preloader SWTOR on Mac's
+  wrapper replaces; the wrapper runs the command on SWTOR on Mac's engine and prefix. For arm64
+  it runs them on the arm64 engine and its prefix: the launcher, the login and the session are
+  untouched, and no hand-off between Wines is needed (the launcher never runs on the arm64
+  Wine itself; the commands it starts do, the game among them, with the session arguments as
+  they are). The wrapper is a shell script, so a Rosetta parent can start the arm64 engine
+  (an arm64-only executable runs natively); `hold-launcher` and `setsid-exec` are universal.
+- **Game Mode and the entitlement come with the loader app.** athei's ntdll starts every Wine
+  process through `lib/wine/aarch64-unix/wine`, linked to `wine.app`, whose `Info.plist` has the
+  games category and `LSSupportsGameMode` and whose signature (re-signed for Jan, bundle ID
+  `cz.jandrly.swtoronmac.game`) carries the cross-architecture entitlement: the game process
+  is `wine.app`'s main executable, as hardware TSO needs (`arm-tso/README.md`). The x86
+  wrapper's Game Mode link (`gamemode/SWTOR.app`, CrossOver's `winetemp-…` names) is not
+  needed on arm64.
+
+What the wrapper and installer need for it (not done; no game run, nothing of Jan's install
+changed): the arm64 engine and prefix as a second target (`env`: the engine path, the prefix,
+`FEX_HARDWARE_TSO=1` for the game), the session start (`hold-launcher --start-session`) and the
+leftover-process search for the arm64 engine's loader and wineserver, d9mt's ARM64EC/arm64
+files installed into it (item 1), the patched Mac driver (item 3), and the prefix created as
+above. To verify in the first run with Jan: that the launcher's own Wine calls (not only the
+game) work on the arm64 engine, and that the game starts with its session.
