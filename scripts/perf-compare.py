@@ -52,6 +52,12 @@ def load(paths, metric):
     return vals, skipped, metric, keys_seen
 
 
+def pct(x, width=0):
+    """A signed percentage, or n/a (the reference's median is 0: e.g. sd=0)."""
+    s = "n/a" if x is None else f"{x * 100:+.1f}%"
+    return f"{s:>{width}}" if width else s
+
+
 def bimodal(xs):
     """Two clusters: a gap between sorted values wider than 2.5% of the median, with at least 20%
     of the runs on each side."""
@@ -117,10 +123,11 @@ def main():
             tag = " [control]"
         elif noise and noise[0] <= pd <= noise[1]:
             tag = " ~ noise"
-        print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {(med / bmed - 1) * 100:+7.1f}% "
-              f"{pd:+11.4f} ({pd / bmed * 100:+5.1f}%) {slower:>4}/{len(diffs):<3}{tag}{flag}")
+        print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {pct(med / bmed - 1 if bmed else None):>8} "
+              f"{pd:+11.4f} ({pct(pd / bmed if bmed else None, 5)}) {slower:>4}/{len(diffs):<3}{tag}{flag}")
     if noise:
-        print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f} ({noise[0] / bmed * 100:+.1f}% .. {noise[1] / bmed * 100:+.1f}%)")
+        rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
+        print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
 
 
 if __name__ == "__main__":

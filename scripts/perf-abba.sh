@@ -53,12 +53,13 @@ while [ $# -gt 0 ]; do
                NAMES+=("${2%%=*}"); DLLS+=("${2#*=}"); shift 2 ;;
     --env) [ $# -ge 2 ] || die "--env needs <name>:<VAR>=<value>"; ENVS+=("$2"); shift 2 ;;
     --native) NATIVE=1; shift ;;
-    --rounds) ROUNDS="${2:-}"; shift 2 ;;
-    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
-    --tag) TAG="${2:-}"; shift 2 ;;
-    --ref) REF="${2:-}"; shift 2 ;;
-    --control) CONTROL="${2:-}"; shift 2 ;;
-    --metric) METRIC="${2:-}"; shift 2 ;;
+    --rounds|--timeout|--tag|--ref|--control|--metric)
+      [ $# -ge 2 ] || die "$1 needs a value"
+      case "$1" in
+        --rounds) ROUNDS="$2" ;; --timeout) TIMEOUT="$2" ;; --tag) TAG="$2" ;;
+        --ref) REF="$2" ;; --control) CONTROL="$2" ;; --metric) METRIC="$2" ;;
+      esac
+      shift 2 ;;
     --) shift; break ;;
     -*) die "unknown option $1" ;;
     *) break ;;
@@ -111,11 +112,34 @@ mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs
 OUT="$WORK/results/$TAG-$(date +%Y%m%d-%H%M%S)-$$.txt"
 [ -e "$OUT" ] && die "$OUT exists"
 
+# Wine servers on this machine (any engine, any prefix).
+servers() { [ "${DIRTY_CHECK:-1}" = 0 ] && { echo 0; return; }; ps -axo comm= | grep -cE '(^|/)wineserver$'; }
+stop_own() { [ "$NATIVE" = 1 ] || { "$WINESERVER" -k >/dev/null 2>&1; "$WINESERVER" -w >/dev/null 2>&1; }; }
+
+# Cleanup on INT/TERM, installed before the first launch (wineboot included): the owned child and
+# every process below it (a RUN_WRAPPER may fork the program), then, under Wine, only this WORK
+# prefix's server. Children run in the background and are waited for, so a signal is handled at once.
+CHILD=""
+subtree() { local c; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do subtree "$c"; done; }
+cleanup() {
+  if [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null; then
+    local pids; pids=$(subtree "$CHILD")
+    kill -TERM $pids 2>/dev/null; sleep 1; kill -KILL $pids 2>/dev/null
+    wait "$CHILD" 2>/dev/null
+  fi
+  CHILD=""
+  stop_own
+}
+trap 'cleanup; echo "perf-abba: interrupted" >&2; exit 130' INT
+trap 'cleanup; echo "perf-abba: terminated" >&2; exit 143' TERM
+
 if [ "$NATIVE" = 0 ]; then
   export WINEPREFIX="$WORK/prefix" WINEDEBUG=-all WINEMSYNC=1
   export DYLD_FALLBACK_LIBRARY_PATH="${FRAMEWORKS:+$FRAMEWORKS:}/usr/lib"
   if [ ! -f "$WINEPREFIX/system.reg" ]; then
-    "$WINE" wineboot -i >"$WORK/wineboot.log" 2>&1 || die "wineboot failed ($WORK/wineboot.log)"
+    "$WINE" wineboot -i >"$WORK/wineboot.log" 2>&1 & CHILD=$!
+    wait "$CHILD" || die "wineboot failed ($WORK/wineboot.log)"
+    CHILD=""
     "$WINESERVER" -w
   fi
   for i in "${!NAMES[@]}"; do
@@ -124,26 +148,6 @@ if [ "$NATIVE" = 0 ]; then
     cp "${DLLS[$i]}" "$d/d3d9.dll" && cp "$EXE" "$d/" || die "can't copy into $d"
   done
 fi
-
-# Wine servers on this machine (any engine, any prefix).
-servers() { [ "${DIRTY_CHECK:-1}" = 0 ] && { echo 0; return; }; ps -axo comm= | grep -cE '(^|/)wineserver$'; }
-stop_own() { [ "$NATIVE" = 1 ] || { "$WINESERVER" -k >/dev/null 2>&1; "$WINESERVER" -w >/dev/null 2>&1; }; }
-
-CHILD=""
-cleanup() {
-  if [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null; then
-    if [ "$NATIVE" = 1 ]; then
-      kill -TERM "$CHILD" 2>/dev/null; sleep 1; kill -KILL "$CHILD" 2>/dev/null
-    else
-      "$WINESERVER" -k >/dev/null 2>&1   # this WORK prefix's server and its processes only
-    fi
-    wait "$CHILD" 2>/dev/null
-  fi
-  CHILD=""
-  stop_own
-}
-trap 'cleanup; echo "perf-abba: interrupted" >&2; exit 130' INT
-trap 'cleanup; echo "perf-abba: terminated" >&2; exit 143' TERM
 
 echo "# $WHAT $* rounds=$ROUNDS variants=${NAMES[*]} ref=$REF${CONTROL:+ control=$CONTROL} $(date '+%F %T')" > "$OUT" || die "can't write $OUT"
 for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16))" >> "$OUT"; done
