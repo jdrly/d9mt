@@ -47,6 +47,8 @@ namespace dxvk::backend {
       WmtRenderPso  m_pso;
     };
 
+    // Not noexcept on purpose: libstdc++ then keeps each node's hash, so a rehash or a bucket
+    // walk never hashes a key again.
     struct KeyHash {
       size_t operator () (const RenderPsoKey& k) const { return k.hash(); }
     };
