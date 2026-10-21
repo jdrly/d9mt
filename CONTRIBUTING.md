@@ -32,7 +32,10 @@ review.
    `g1-early-commit.md`, `gpu-4k.md`, `pso-key-hash.md`, …): the design and the measurements of
    a feature. `docs/dev-notes/` is neo773's historical material from v2's development, not
    maintained and not a specification.
-5. **The code and its tests**: `test/` (D3D9 test programs) and `test/native/` (unit tests).
+5. **[PERFORMANCE.md](PERFORMANCE.md)**: the binding performance guide: the rule, how to
+   measure, the benchmarks, the diagnostics, the hot-path design rules and the release
+   candidate's health pass.
+6. **The code and its tests**: `test/` (D3D9 test programs) and `test/native/` (unit tests).
 
 If two sources conflict, report the conflict instead of silently choosing one.
 
@@ -138,7 +141,8 @@ A change is done only when all of these hold:
       built with `-falign-functions=64`; if the gap disappears, it is layout. When the change
       alters the size of its translation unit's code, a64 can't separate it, and the control is
       a placebo of identical size. The release candidate's whole-build comparison at default
-      alignment is the binding check; a slowdown there gets a layout fix, not a revert.
+      alignment is the binding check; a slowdown there gets a layout fix, not a revert. The full
+      method, the benchmarks and the diagnostics are in [PERFORMANCE.md](PERFORMANCE.md).
 - [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
       byte-identical to `main`'s. A change to the bridge changes its LC_UUID, the key of every
       player's AIR cache, so every player recompiles their shaders once: the PR says so, and

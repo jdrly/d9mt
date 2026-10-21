@@ -196,6 +196,13 @@ finish within the timeout:
 ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
 ```
 
+### Performance
+
+Nothing measurably slower merges. [PERFORMANCE.md](PERFORMANCE.md) is the binding guide: how to
+measure (quiet window, uncapped, paired rounds, layout controls), the benchmarks, the `D9MT_PROFILE`
+diagnostics and the design rules for the hot path. How to contribute:
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Install & run
 
 > **Use a dedicated Wine engine copy.** d9mt's `winemetal` replaces the

@@ -1,0 +1,225 @@
+# Performance guide
+
+d9mt exists to make games faster. This guide is **binding**: the Definition of Done in
+[CONTRIBUTING.md](CONTRIBUTING.md) refers to it, and the decision behind it is
+[ADR-0002](docs/adr/0002-nothing-measurably-slower.md). It says what the rule is, how to measure
+against it, which benchmarks and diagnostics exist, which design rules keep the hot path fast,
+and what a release candidate is checked for. What isn't in this repository yet is marked _Open_.
+
+## 1. The rule
+
+- **Nothing measurably slower merges**, in any scenario. The per-draw and per-bind paths are the
+  most sensitive; a gain in one scenario doesn't offset a loss in another (ADR-0002).
+- **A cost that can't be removed waits until it can.** Measuring a regression is not enough; it
+  has to be solved (ADR-0002).
+- **A layout effect is not a cost of the change.** Under Rosetta, a rebuild alone moves a
+  microbenchmark by up to ±3 % because the linker moves hot code; every later merge moves it
+  again, and its sign is as likely to flip as to stay. A delta that disappears under the layout
+  controls (§2.3) isn't attributed to the commit.
+- **The binding check is the release candidate as shipped**: the whole build at default
+  alignment against the previous release (§6). A slowdown there that is layout gets a layout fix
+  (an alignment flag, function order), each measured on its own, **not a revert** of the commit
+  that happened to move it.
+- The one exception so far was the maintainer's decision: the PSO MRU change (#40) was about 3 %
+  slower in a synthetic worst case and much faster where SWTOR is; it was approved after review,
+  and a later change (#33) removed that worst case.
+
+## 2. How to measure
+
+### 2.1 Conditions
+
+- **A quiet window**: the benchmark runs alone on the Mac. No game, no other Wine process, no
+  build, no other benchmark. A run that another Wine process overlaps is **DIRTY** and doesn't
+  count. Never measure while a game runs.
+- **Uncapped**: `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`, so neither the background frame cap nor the
+  stall pacing limits the frame rate.
+- **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
+  `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
+  on that. Record each variant's source commit next to its binary.
+
+### 2.2 Rounds and what to report
+
+- Run **paired rounds**: each round runs every variant once, with the order rotated by one per
+  round (so each variant is in each position equally often; for two variants that is ABBA). Every
+  round pairs each variant with base.
+- Report per variant the **median** of its runs, the **paired difference** to base (per round,
+  then the median), and **how many rounds it was slower**, for example
+  `paired -0.3250 ms (-3.2%)  slower 0/10`.
+- A difference within the ±3 % a rebuild can cause counts only if it repeats across windows,
+  with a control next to it (§2.3).
+
+### 2.3 Controls
+
+- **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant.
+  It shows the harness's bias and the window's noise floor, typically within ±1.5 %. A delta
+  smaller than the A/A spread of that window is noise.
+- **a64 pair**: for a single commit's small delta, build base and the branch both with
+  `-falign-functions=64`. If the gap disappears there, it is layout, not the change. (Checked:
+  base-a64 equals base for the PSO benchmarks, and the PSO key normalisation's +0.4 % became
+  +0.2 %, 11/20, under a64.)
+- **Identical-size placebo**: a64 can't neutralise a change that alters the size of its
+  translation unit's code, because everything after it moves. Then build a placebo with exactly the
+  change's code size and no behaviour change, and compare the change against the placebo (the
+  topology change #33: topo −1.4 %, placebo −1.1 %, topo vs placebo −0.4 %, 8/20: layout).
+
+### 2.4 Bimodal benchmarks
+
+Some benchmarks land in two modes: bindbench runs at about **1.33 ms or about 1.41 ms**, run by
+run, and the same pair of variants read +5.4 % in one window and −4.1 % in the next. **Look at the
+per-run values for two clusters before reading a median**; differences under about 6 % on
+bindbench need many more rounds.
+
+### 2.5 The virtual display
+
+Benchmarks that run unattended on a virtual display see a window that AppKit reports as
+**occluded** (`occlusionState` 0x2000), so d9mt **skips the presents**: the numbers are CPU time
+plus GPU work without the present copy. A **locked session** hides the window too. On the virtual
+display `nextDrawable` takes **18–80 ms**, so it can't answer present-path questions (drawable
+waits, vsync pacing): those are measured **in a game on a real display**, with the Metal HUD.
+
+## 3. Benchmarks
+
+| Benchmark | What it measures | Use it for | Where |
+|---|---|---|---|
+| `bench_4k` | 2048² shadow map with 4 cascades, a 3840x2160 main pass and 4 post passes, ~2,200 draws a frame; GPU-bound | GPU work, render passes, pass splits | `test/bench_4k.c` |
+| state cache bench | A synthetic SWTOR-like session with many pipelines (200 pixel shaders, 400 pipelines): world-phase frame times, compile waits, `STATECACHE` counters | Cold start, prewarm, the pipeline state cache | `test/code_statecache.c`, `scripts/run-statecache-bench.sh` |
+| state cache record cost | The render thread's cost of recording | Changes to recording | `test/native/state_cache_test.cpp` via `scripts/test-state-cache.sh` |
+| `bindbench` | 320x240, no vsync, 5000 tiny draws a frame, each with another of 64 textures; **bimodal** (§2.4) | The per-bind CPU path | _Open:_ not in the repository yet |
+| `churnbench` | 3000 rebinds of 64 textures plus 125 new 64² textures a frame | Texture creation and release, view lifetime | _Open_ |
+| `psobench` | 3000 draws a frame from one vertex buffer, each switching between two pipelines; modes `topo`, `blend`, `none`, and `blend2`/`blendop`/`blend4` (other key sets, so a result that depends on where two keys land shows as a sign flip). (blend − topo) / 3000 is the cost of one MRU miss | PSO key, cache and MRU | _Open_ |
+| `bench_4kw` (`wait`) | `bench_4k` with an event query polled with `D3DGETDATA_FLUSH`: the GPU idles between frames | Submission when the game waits every frame (G1 doesn't carry) | _Open_ |
+| `bench_4kw` (`8`, "balanced") | `bench_4k` plus 8 ms of CPU before Present, so G1's backlog gate flips | G1 and the submission path | _Open_ |
+| `bench_getdata` | A 4K pass of 1500 draws with an occlusion query around the first 500, polled the next frame (as SWTOR does, #22) | Queries, `GetData` flushes | _Open_ |
+| `bench_upload` | A 4K pass of 600 draws, each from a `Lock(DISCARD)` vertex buffer, plus 24 managed 256² textures rewritten a frame (run with `D9MT_MEMSTATS=16`) | Uploads, staging, the upload ring | _Open_ |
+| `bench_draws` | Many small draws a frame, each with a VS and a PS constant update and a render-state change; modes `present`, `flush`, `spinflush`; reports ns per draw and frame times | The per-draw CPU path; `present` mode is layout-sensitive and also depends on drawable availability | _Open:_ only on the branch `arm64ec` |
+| `bench_fps_cap` | Frame pacing with vsync on or off, a set CPU time per frame and optional jitter; reports fps, percentiles and `long` (frames over 1.5x the median) | Present-path and pacing changes | _Open:_ only on the branches `feat/fps-limiter`, `diag/fps-bgsleep-dxvk` |
+| `archfirst` | Native Metal 4, no Wine: `check` for correctness, `time` for the hit cost through an `MTL4Archive` vs a compiler with `lookupArchives`, and the miss cost with 1, 8 and 64 archives | Bridge PSO-archive changes | _Open:_ only on the branch `bundle/bridge-s1-pso` |
+
+The guards a change to the submission path runs are listed in
+[docs/g1-early-commit.md](docs/g1-early-commit.md). _Open:_ the benchmarks marked above, and the
+harness that rotates rounds and computes the paired statistics, are added to the repository
+separately; until then they run from the maintainer's workspace.
+
+## 4. Diagnostics
+
+`D9MT_PROFILE` (any value) turns on the `STATS`, `PACE`, `HITCH`, `COMPILE`, `RESTORE`, `XFER` and
+`PROF` lines. Unset, they cost one predictable branch per scope. Set `DXVK_LOG_PATH=<dir>` to get
+them in `<game>_d3d9.log`.
+
+**`STATS`**, once a second (fields in `driver/d3d9/d3d9_stats.h`):
+- `fps`, `ms=avg/p99/max` (Present to Present), `slow33`/`slow50` (frames over 33.4 and 50 ms);
+- per frame: `rp` render encoders, `skip` passes that needed none, `cb` command buffers (G1 prefix
+  commits included), `draws`;
+- attachments: `ld`/`clr`/`ldDc` loads, `st`/`stDc` stores, `rsv` resolves folded into a store,
+  `restore`, `savedMiB` (traffic avoided), `clrFold`/`clrPass`, `attMs` (render-thread time in the
+  attachment optimization, ms per second);
+- compiles: `sh`, `pso`, `wait=count/ms` (render-thread compile waits);
+- `split`, `splitSubmit`, `splitXfer`, `splitClear`, `splitMiB`: pass splits
+  ([docs/gpu-4k.md](docs/gpu-4k.md)); `carried`, `carryRefused`, `carryCap`: G1;
+- `allocMiB` (Metal's allocated size), `att` (`on`, `off`, `live-off`).
+- **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
+  (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for
+  every present-path change.
+
+**`PACE`**, once a second (`driver/d3d9/d3d9_pace.h`): `present=min/avg/max` and `sd` (the
+interval between the game's Present calls; even pacing is 16.7 ms with an `sd` near 0),
+`d9mt=min/avg/max` (time inside d9mt per frame), `wait` (the blocked part of it), `game` (the rest
+of the frame), `cpu`, `d9mtBusy`, `gameCpu`.
+
+**`HITCH`**, per frame of at least `D9MT_HITCH_MS` (default 50) (`driver/d3d9/d3d9_hitch.h`):
+`inD9mtMs` close to `dtMs` means driver work; a small `inD9mtMs` means the game's own (disk
+streaming, its threads). The categories (present, latencyWait, texCreate, texLock, texUpload,
+bufCreate, bufLock, shaderCreate, csSync, gpuWait, throttle, query, bgSleep) nest: read a nested
+one as a breakdown, not as additive.
+
+**`COMPILE`** (`driver/mtl/mtl_compile.h`): shaders, pipelines and render-thread waits of a frame
+that compiled something or took 33.4 ms or more; `skipped` (draws dropped by the wait budget or
+`D9MT_ASYNC_SKIP`), `budgetHit`.
+
+**`PROF`**, every 256 frames (`driver/backend/mtl_profiler.h`): wall time per bucket
+(beginRecording, prepareDraw, resolvePso, flushVB, flushRes, flushDyn, encodeDraw, flushChunk,
+submit, syncWsi, endFrame; they nest) and counters: `psoMiss`, `psoKeyBuild`, `argRotate`,
+`abRebuild`, `chunkFlush`, `passClose` by cause, `evRead` (shared-event reads, each a unix call),
+`unsubWait` (waits on a serial not yet submitted, also as `PROF-UNSUB` lines).
+
+**Others**: `RESTORE`/`RESTORE-SUMMARY` (attachment re-clears by image, aspect and reason;
+`driver/mtl/mtl_restore_stats.h`), `XFER` (StretchRect and ColorFill by path), `STATECACHE`
+(`hits`, `late`, `misses`, `boosts`; [docs/state-cache.md](docs/state-cache.md) §7),
+`DIAG MEM` (`D9MT_MEMSTATS`), and a per-function profiler (`PROFILE_INSTRUMENT=1` at build time
+plus `D9MT_PROFILE_INSTRUMENT=1`).
+
+**Lifetime and GPU faults**: `D9MT_LIFETIME_CHECK=1` aborts at the first texture released before
+the GPU is past the command buffer that uses it (`D9MT-LIFETIME`), `=log` only logs; drawables are
+logged as `D9MT-LIFETIME drawable` and never abort (`driver/backend/mtl_lifetime.h`). The GPU
+canary (on by default) logs `D9MT-GPU-CANARY: on` once it works and `D9MT-GPU-LOST` for every
+command buffer the GPU discarded after a page fault; macOS itself only logs `IOGPUMetalError` in
+its unified log. Use both for any change to lifetimes or submission.
+
+**Live flags and captures**: `D9MT_DEBUG_FILE` (flags polled once a second, for example
+`no_attach_opt` for a live A/B, `att_trace`, `dump`) and `D9MT_GPUCAPTURE` (an Xcode GPU trace);
+see the README's *Developer and diagnostic switches*.
+
+## 5. Design rules for the hot path
+
+Each rule comes from a measurement or a bug; break one only with a measurement that shows it
+doesn't apply.
+
+1. **No allocation and no `std::function` per draw, per bind or per command buffer.** Retirements
+   are batched per command buffer (`RetireBatch`: no `std::function`, no allocation per entry, one
+   lock and at most one pump wake per command buffer; batches keep their capacity) (#31;
+   `driver/backend/mtl_submission.h`).
+2. **Avoid unix calls on the hot path.** Reading the shared event is a unix call; use
+   `completedSerialCached()` where a stale answer will do, and check `serial >= nextSerial()`
+   before asking the event. #31 took `bench_4k` from 31 to 8 event reads a frame.
+3. **Retire on the retire thread, not on the CS thread.** Releasing on the CS thread was 1.3–1.5 %
+   slower in churnbench (ADR-0001).
+4. **The render thread never waits on a lock a utility thread holds.** When a pipeline-archive
+   flush holds the archive lock, a pipeline build falls back to a compiler without the serializer
+   instead of waiting; the pipeline is captured next session. _Open:_ that fallback is part of the
+   bridge bundle (`bundle/bridge-s1-pso`), not on `main` yet. In the driver, the PSO cache never
+   blocks, and the pipeline wait budget caps compile waits.
+5. **Hash word by word, not byte by byte.** The PSO key hash went from a byte-wise FNV-1a over the
+   whole key (about 314 ns a lookup) to xxHash64's round over 8-byte words in four lanes (49 ns):
+   psobench blend −47 %, with the a64 control at −47 % too (#34; [docs/pso-key-hash.md](docs/pso-key-hash.md)).
+6. **Anything compared or hashed as raw bytes has explicit padding and a
+   `std::has_unique_object_representations` assert.** `= {}` with default member initializers
+   doesn't zero implicit padding, and the front-end leaves struct padding uninitialised: equal
+   states compared unequal and missed the caches (#30, #32, #40; `driver/backend/mtl_pso_key.h`,
+   `MtlVertexLayout` in `driver/mtl/mtl_context.h`).
+7. **Mark the pipeline dirty only when the pipeline really changes.** Setters return early on
+   equal state, and a topology change alone doesn't dirty the pipeline, so it skips `resolvePso`
+   and the resource flush: psobench topo −24 %, 0/20 slower (#33).
+8. **Metal 4 doesn't retain resources: everything a command buffer uses lives until its serial
+   retires** (ADR-0001). Pushing references per bind instead was 6.6 % slower on the bind path.
+   Drawables never enter the residency set (it would stall `nextDrawable`), and an upload ring
+   slice is valid only for the command buffer it was allocated in (`driver/backend/mtl_residency.h`,
+   `driver/backend/mtl_ring.h`).
+9. **G1 carries only through its gates** ([docs/g1-early-commit.md](docs/g1-early-commit.md)
+   §4.2–4.3): the backlog gate (only while the GPU is behind the frame's last serial, re-checked at
+   every carry, so a game that waits every frame never carries), the cost gate (attachments of at
+   least `D9MT_EARLY_COMMIT_MIN_MIB`, default 8 MiB), at most two carries per serial, completion when
+   the carried pass closes, and the completing submit before the pass-ending command records,
+   stamps or allocates anything. Not carrying costs typically under 2 µs a frame.
+10. **The PSO MRU compares content-addressed generations**, so returning to earlier state hits
+    again (#40; `driver/backend/mtl_pso_gen.h`).
+
+## 6. The release candidate's health pass
+
+Before a stable release of an app that ships d9mt, all changes since the last release are built
+into **one release candidate** at default alignment, and exactly that build is released. It is
+compared with the previous release (and a basecopy) in at least five paired rounds per benchmark,
+with no foreign Wine load:
+
+- the hash suite;
+- `bench_4k`, `bindbench` (uncapped; many rounds, it is bimodal), `churnbench`;
+- `psobench` `blend` and `topo`, and `bench_draws` `present`: the binding check for the commits
+  whose deltas were judged as layout;
+- `bench_fps_cap` with vsync on, about 20 rounds, with counters for the drawable wait (time,
+  timeouts); the present-path question behind it (#26: −2.0 % fps with vsync on, not shown to be
+  significant) is also checked in a game on a real display (§2.5).
+
+A measured regression blocks the release. If it is layout, the release candidate gets a layout
+fix, each measured on its own; it is never fixed by reverting the commit that moved it.
+
+_Open:_ the drawable-wait counters are on the branch `diag/drawable-wait-stats`, not on `main`
+yet.
