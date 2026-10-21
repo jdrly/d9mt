@@ -34,6 +34,7 @@ namespace dxvk::backend {
 
     MtlGpuQueryStatus getData(MtlQueryData& out) override;
     void waitData() override;
+    bool unsubmitted() const override { return tracker && serial && serial >= tracker->nextSerial(); }
   };
 
   class MtlBackendEvent : public MtlEvent {
@@ -42,6 +43,7 @@ namespace dxvk::backend {
     SubmissionTracker* tracker = nullptr;
 
     MtlGpuEventStatus test() override;
+    bool unsubmitted() const override { return tracker && serial && serial >= tracker->nextSerial(); }
   };
 
   enum ContextDirtyBit : uint32_t {
@@ -68,7 +70,7 @@ namespace dxvk::backend {
 
     void beginRecording() override;
     void endFrame() override;
-    void flushCommandList(const char* reason, MtlSubmitStatus* status) override;
+    void flushCommandList(const char* reason, MtlSubmitStatus* status, bool deferrable = false) override;
     void synchronizeWsi(MtlPresenterSync sync) override;
 
     void bindShader(MtlShaderStage stage, Rc<MtlShaderFunction>&& fn) override;
@@ -343,6 +345,14 @@ namespace dxvk::backend {
 
     std::vector<Rc<MtlResource>> m_keepAlive;
 
+    // Releases recorded for the open command buffer; handed to the tracker at submit.
+    std::unique_ptr<RetireBatch> m_retire;
+    RetireBatch& retireBatch() {
+      if (unlikely(m_retire == nullptr))
+        m_retire = std::make_unique<RetireBatch>();
+      return *m_retire;
+    }
+
     uint64_t m_currentSerial = 0;
 
     static constexpr uint32_t kVisSlots = 65536u;
@@ -480,6 +490,23 @@ namespace dxvk::backend {
     void flushResources();
     void flushDynamicState();
     void submit(bool waitCompleted);
+    // A2, commit != complete: commitRecorded() ends and commits the recorded command buffers
+    // with no serial; submit() adds the serial and its bookkeeping; commitPrefix() begins the
+    // next command buffer under the same serial (G1, carryOpenPass).
+    void commitRecorded();
+    void commitPrefix();
+    bool carryOpenPass();
+    void completeCarry();
+    static constexpr uint32_t kMaxCarriesPerSerial = 2u;
+    bool     m_earlyCommit         = false;       // D9MT_EARLY_COMMIT (default on with attOpt)
+    bool     m_earlyCommitAlways   = false;       // =always: no backlog gate (tests)
+    uint64_t m_earlyCommitMinBytes = 8ull << 20;  // D9MT_EARLY_COMMIT_MIN_MIB
+    uint32_t m_carries             = 0u;          // carries of the open serial
+    bool     m_completePending     = false;       // a carried flush completes when its pass closes
+    bool     m_frameEnding         = false;       // endFrame ran: the next submit is the frame's last
+    uint64_t m_frameLastSerial     = 0u;          // that submit's serial (the backlog gate)
+    bool     m_prefixWork          = false;       // the command buffer holds encoded work
+    bool     m_serialPrefixCommitted = false;     // commitPrefix() ran for the open serial
 
     void         ensureVisBuffer();
     void         armVisibility();

@@ -1027,7 +1027,23 @@ namespace dxvk {
     void SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits);
     void SetPixelBoolBitfield (uint32_t idx, uint32_t mask, uint32_t bits);
 
-    void ConsiderFlush(GpuFlushType FlushType);
+    /* AllowDefer: a pure heuristic flush (CS chunk full, render target / depth change,
+     * EndScene) that nothing waits on. The backend may then commit the work recorded before
+     * the open pass and keep the pass open (docs/g1-early-commit.md, D9MT_EARLY_COMMIT=0
+     * turns that off); the next flush that isn't deferrable completes it. */
+    void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);
+
+    /* Before a blocking wait on GPU progress (the staging throttle): the last flush was
+     * deferrable and the CS thread either hasn't run it yet or carried it (the backend kept a
+     * pass open under its submission), so submit for real first (docs/g1-early-commit.md §4.5). */
+    void FlushIfCarried() {
+      if (m_flushDeferPending.load(std::memory_order_acquire)
+       && (m_csThread.lastSequenceNumber() < m_flushSeqNum || m_dxvkDevice->carryOpen()))
+        ExecuteFlush(false);
+    }
+
+    /* The backend keeps a pass open under a carried flush (G1). */
+    bool CarryOpen() const { return m_dxvkDevice->carryOpen(); }
 
     bool ChangeReportedMemory(int64_t delta) {
       if (IsExtended())
@@ -1147,7 +1163,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
         m_csChunk->push(command);
       }
@@ -1163,7 +1179,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
         m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
       }
@@ -1184,7 +1200,7 @@ namespace dxvk {
       return m_resetCtr;
     }
 
-    void ExecuteFlush(bool Synchronize9On12);
+    void ExecuteFlush(bool Synchronize9On12, bool Deferrable = false);
 
     void        DebugInitPath();
     void        DebugPoll();
@@ -1567,6 +1583,7 @@ namespace dxvk {
     MtlSubmitStatus                 m_submitStatus;
 
     uint64_t                        m_flushSeqNum = 0ull;
+    std::atomic<bool>               m_flushDeferPending = { false };
     GpuFlushTracker                 m_flushTracker;
 
     std::atomic<int64_t>            m_availableMemory = { 0 };

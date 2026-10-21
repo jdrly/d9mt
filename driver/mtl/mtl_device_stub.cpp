@@ -101,6 +101,10 @@ namespace dxvk {
     return 0u;
   }
 
+  bool MtlDevice::isSerialComplete(uint64_t serial) {
+    return serial <= getCompletedSerial();
+  }
+
   uint64_t MtlDevice::getNextSerial() {
     return 1u;
   }

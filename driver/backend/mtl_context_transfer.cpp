@@ -879,7 +879,7 @@ namespace dxvk::backend {
             lru = i;
         obj_handle_t old = lru->second.scaler;
         m_fxScalers.erase(lru);
-        m_device->submissions().retireAfter(m_currentSerial, [old]() { NSObject_release(old); });
+        retireBatch().objects.push_back(old);
       }
       m_fxScalers.emplace(key, FxScaler { scaler, m_currentSerial });
     }
@@ -1452,15 +1452,19 @@ namespace dxvk::backend {
   }
 
   obj_handle_t MtlContextImpl::selectBlitArgTable() {
-    const uint64_t completed = m_device->submissions().completedSerial();
-    const size_t   n         = m_blitArgTables.size();
+    const size_t n = m_blitArgTables.size();
 
-    for (size_t scan = 0u; scan < n; ++scan) {
-      const size_t idx = (m_blitArgCursor + scan) % n;
-      if (m_blitArgTables[idx].serial <= completed) {
-        m_blitArgCursor              = uint32_t(idx + 1u);
-        m_blitArgTables[idx].serial  = m_currentSerial;
-        return m_blitArgTables[idx].table.handle();
+    for (int fresh = 0; fresh < 2; fresh++) {
+      const uint64_t completed = fresh
+        ? m_device->submissions().completedSerial()
+        : m_device->submissions().completedSerialCached();
+      for (size_t scan = 0u; scan < n; ++scan) {
+        const size_t idx = (m_blitArgCursor + scan) % n;
+        if (m_blitArgTables[idx].serial <= completed) {
+          m_blitArgCursor              = uint32_t(idx + 1u);
+          m_blitArgTables[idx].serial  = m_currentSerial;
+          return m_blitArgTables[idx].table.handle();
+        }
       }
     }
 
@@ -1714,7 +1718,7 @@ namespace dxvk::backend {
 
     /* The tracking serial answers "is the GPU still using what the CPU maps":
      * after a rename that is the new backing, which nothing recorded so far
-     * uses (the old one is kept alive by retireAfter below). Every later use
+     * uses (the old one is kept alive by the retire batch below). Every later use
      * re-stamps it: refreshed vertex streams are flagged dirty, the index
      * buffer is stamped per draw. So a non-DISCARD lock after a DISCARD no
      * longer waits for the old backing. */
@@ -1742,14 +1746,7 @@ namespace dxvk::backend {
       }
     }
 
-    Rc<MtlBuffer> owner = buffer;
-    Rc<MtlAllocation> keep = std::move(slice);
-    m_device->submissions().retireAfter(m_currentSerial, [owner, keep]() mutable {
-      if (owner != nullptr)
-        static_cast<MtlBufferImpl*>(owner.ptr())->recycleStorage(std::move(keep));
-      owner = nullptr;
-      keep  = nullptr;
-    });
+    retireBatch().recycles.emplace_back(buffer, std::move(slice));
   }
 
   bool MtlContextImpl::ensureTextureUsage(const Rc<MtlTexture>&, MtlTextureUsage) {
@@ -1862,9 +1859,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::signal(const Rc<MtlSignal>& signal, uint64_t value) {
     ensureCommandBuffer();
-    Rc<MtlSignal> keep = signal;
-    m_device->submissions().retireAfter(m_currentSerial,
-      [keep, value]() { keep->signal(value); });
+    retireBatch().signals.emplace_back(signal, value);
   }
 
   void MtlContextImpl::signalGpuEvent(const Rc<MtlEvent>& event) {
