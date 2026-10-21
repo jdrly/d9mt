@@ -477,7 +477,7 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Later, d9mt side:** a unixcall for the last error code, so that `D9MT-GPU-HUNG` / `D9MT-GPU-LOST` name the cause. That is an ABI addition (a new call number, check-abi-mix, the skew case of a new d3d9 on an old bridge), so it is a separate step.
 
 **Cost per commit.** Our block costs nothing when there's no error. On the committing thread: one `MTL4CommitOptions` alloc/init, `addFeedbackHandler:` (a retain of the shared block) and a release. The larger unknown is Metal's: with a feedback handler, Metal has to deliver a completion callback for every commit, on its own thread. Without one, an MTL4 commit probably needs no host-side completion at all, since d9mt tracks completion with its shared events. This is unverified, and the A/B decides. At ~60–600 commits/s that is that many callbacks a second, off the render thread but not free under Rosetta.
-- **Gate (hard rule):** window A2, `n013-issues/scripts/qw-cfb.sh`: on / on2 (the A-A control) / off, bindbench 3060 and bench_4k 600, 10 rounds each with the order rotated, d3d9 = main 58f3d5d. on − off must be within the on − on2 spread.
+- **Gate (hard rule):** window A2, `n013-issues/scripts/qw-cfb.sh`: on / on2 (the A-A control) / off, bindbench 3060 and bench_4k 600, 10 rounds each with the order rotated, d3d9 = the shipped/pinned main a779f54. on − off must be within the on − on2 spread.
 - If it measures worse, it ships off by default and on under `D9MT_WSILOG` / Collect Logs.
 
 **ABI and LC_UUID.**
