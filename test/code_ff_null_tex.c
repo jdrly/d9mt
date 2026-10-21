@@ -3,14 +3,17 @@
  * multiplies stage 1's CURRENT by stage 1's texture value, which for a null texture must
  * not change it: the quad stays green. The FF shader returned (0, 0, 0, 0) for a null
  * texture (an AMD quirk upstream reverted after Commandos 3 broke), and d9mt sampled the
- * empty texture slot instead. */
+ * empty texture slot instead. A second quad with a colour that isn't a channel extreme
+ * (0x806040) shows the multiplication is by (1, 1, 1, 1): the colour comes out unchanged. */
 #include "t_xfer.h"
 
 struct V { float x, y, z, rhw; DWORD c; };
 
 static void frame(int n) {
-  struct V q[4] = {{160, 120, 0.5f, 1, 0xff00ff00u}, {480, 120, 0.5f, 1, 0xff00ff00u},
-                   {160, 360, 0.5f, 1, 0xff00ff00u}, {480, 360, 0.5f, 1, 0xff00ff00u}};
+  struct V q[4] = {{160, 120, 0.5f, 1, 0xff00ff00u}, {300, 120, 0.5f, 1, 0xff00ff00u},
+                   {160, 360, 0.5f, 1, 0xff00ff00u}, {300, 360, 0.5f, 1, 0xff00ff00u}};
+  struct V m[4] = {{340, 120, 0.5f, 1, 0xff806040u}, {480, 120, 0.5f, 1, 0xff806040u},
+                   {340, 360, 0.5f, 1, 0xff806040u}, {480, 360, 0.5f, 1, 0xff806040u}};
   IDirect3DDevice9_SetRenderTarget(x_dev, 0, x_backBuffer);
   IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000080u, 1.0f, 0);
   IDirect3DDevice9_SetVertexShader(x_dev, NULL);
@@ -29,10 +32,12 @@ static void frame(int n) {
   IDirect3DDevice9_SetTextureStageState(x_dev, 2, D3DTSS_COLOROP, D3DTOP_DISABLE);
   IDirect3DDevice9_BeginScene(x_dev);
   IDirect3DDevice9_DrawPrimitiveUP(x_dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+  IDirect3DDevice9_DrawPrimitiveUP(x_dev, D3DPT_TRIANGLESTRIP, 2, m, sizeof(m[0]));
   IDirect3DDevice9_EndScene(x_dev);
   if (n == 1) {
     XReadback r = x_read(x_backBuffer);
-    x_expect("PREMODULATE onto a stage without a texture", &r, 320, 240, 0xff00ff00u, 0x00ffffffu);
+    x_expect("PREMODULATE onto a stage without a texture", &r, 230, 240, 0xff00ff00u, 0x00ffffffu);
+    x_expect("PREMODULATE of 0x806040 onto a stage without a texture: unchanged", &r, 410, 240, 0xff806040u, 0x00ffffffu);
     x_expect("outside the quad", &r, 40, 40, 0xff000080u, 0x00ffffffu);
     x_done(&r);
     x_report("code_ff_null_tex");
