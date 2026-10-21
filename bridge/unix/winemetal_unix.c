@@ -7771,6 +7771,9 @@ _MTL4CommandQueue_commit(void *obj) {
     fprintf(stderr, "D9MT-WSI[unix] queue_commit #%lu count=%lu\n", k, (unsigned long)count);
   MTL4CommitFeedbackHandler handler = commit_feedback_handler();
   if (handler) {
+    /* One options object per commit, on purpose: a reused MTL4CommitOptions runs its handlers
+     * for its first commit only (measured, not in the SDK), so a shared one would report the
+     * session's first commit and stay silent on every later fault. Don't hoist this. */
     MTL4CommitOptions *options = [[MTL4CommitOptions alloc] init];
     [options addFeedbackHandler:handler];
     [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count
