@@ -116,8 +116,9 @@ A change is done only when all of these hold:
 - [ ] **Clean builds.** `scripts/build-bridge.sh` and `scripts/build-driver.sh` for `ARCH=x64` and
       `ARCH=x86` build from scratch without new warnings. The driver and the bridge are built,
       tested and shipped together: there is no version handshake between them.
-- [ ] **Hash suite equals base.** Every program of the hash suite (the D3D9 test programs in
-      `test/`, 33 today, five frames each) renders frames identical to the base commit's. It
+- [ ] **Hash suite equals base.** Every program of the hash suite (the D3D9 test programs
+      `test/code_*.c`, except `code_sm3_ref` and `code_statecache`, which have harnesses of their
+      own; five frames each) renders frames identical to the base commit's. It
       also runs with `MTL_DEBUG_LAYER=1` (no new Metal API validation messages),
       `D9MT_NO_ATTACHMENT_OPT=1` and `d3d9.reproducibleCommandStream=True`, and, for a change to
       the submission path, with `D9MT_EARLY_COMMIT=always`. `D9MT_LIFETIME_CHECK=1` finds no

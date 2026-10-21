@@ -63,8 +63,8 @@ body:
     attributes:
       label: Game
       options:
-        - Star Wars: The Old Republic (64-bit)
-        - Star Wars Galaxies: Legends (32-bit)
+        - "Star Wars: The Old Republic (64-bit)"
+        - "Star Wars Galaxies: Legends (32-bit)"
         - GTA IV (32-bit)
         - A test program from test/
         - Another game (name it below)

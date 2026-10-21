@@ -21,7 +21,8 @@ display power event point there (#26).
 
 - Nothing a recorded or committed command buffer refers to is released before the GPU is past
   that command buffer's serial. Releases are deferred with `retireAfter(nextSerial())` and run in
-  serial order on the `d9mt-retire` thread (#24; `driver/backend/mtl_submission.h`).
+  serial order on the `d9mt-retire` thread or at the end of a frame on the CS thread, never both at
+  once (#24; `driver/backend/mtl_submission.h`).
 - Texture views follow that pattern (#24); so do the drawable, d9mt's reference to it, the layer's
   residency set and MetalFX scalers at teardown (#26).
 - `D9MT_LIFETIME_CHECK` checks the rule deterministically, on any Mac, without needing the GPU to
@@ -42,8 +43,9 @@ display power event point there (#26).
 
 - **Keep views alive with a push per bind**: rejected, about 6.6 % slower on the bind path, which
   violates ADR-0002.
-- **Release on the CS thread instead of the retire thread**: rejected, 1.3–1.5 % slower in
-  churnbench.
+- **Release the views on the CS thread** (an earlier variant, `ac70a8c`, through the residency
+  path): rejected, 1.3–1.5 % slower in churnbench; #24 hands them to the retire queue instead and
+  was neutral.
 - **Rely on Metal's validation layer to find the bug**: it doesn't catch it (#25), hence the
   lifetime check.
 

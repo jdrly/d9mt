@@ -20,7 +20,7 @@ records work through the CS thread into the seam (README, *How it works*).
 
 **CS thread**
 DXVK's command-stream thread: the game's D3D9 calls are recorded on the game's thread and
-executed on it (README, *How it works*). The backend's single submitter.
+executed on the CS thread (README, *How it works*). The backend's single submitter.
 
 **Seam**
 The interface in `driver/mtl` between the front-end and the backend (README, *How it works*).
@@ -55,10 +55,12 @@ and one submitter (the CS thread), so serials complete in submission order
 (`driver/backend/mtl_submission.h`).
 
 **Retire**
-To release what a command buffer used once the GPU is past its serial. Retirements are handed
-over in serial order and run on the `d9mt-retire` pump thread, which observes GPU completion
-independently of the CS thread (`driver/backend/mtl_submission.h`). A **retired** serial is one
-the GPU has completed.
+To release what a command buffer used once the GPU is past its serial. Retirements run in serial
+order, either on the `d9mt-retire` pump thread, which observes GPU completion independently of the
+CS thread, or at the end of a frame on the CS thread (`endFrame` → `processRetirements`), never
+both at once. `retireAfter` releases at once (inline) when the serial is already complete or the
+device has drained (`driver/backend/mtl_submission.h`, `mtl_submission.cpp`,
+`mtl_context_record.cpp`). A **retired** serial is one the GPU has completed.
 _Avoid_: “free” or “release” for this deferred step.
 
 **Lifetime rule**
@@ -73,17 +75,19 @@ without needing the GPU to fault (`driver/backend/mtl_lifetime.h`; README).
 
 **Drawable**
 The `CAMetalLayer` image d9mt acquires for each present and copies the frame into. It is kept
-until the present's command buffer retires (#26). Drawables never enter a residency set
-(`driver/backend/mtl_residency.h`).
+until the present's command buffer retires (#26). Drawables never enter d9mt's own residency set;
+they are in the layer's (`driver/backend/mtl_residency.h`).
 
 **Residency set**
 The Metal 4 set that makes resources resident for the GPU; removals wait until the GPU retires
 the referencing serial (`driver/backend/mtl_residency.h`).
 
 **GPU canary**
-`D9MT_GPU_CANARY`, on by default: encoders mark each command buffer's slot in a small buffer; a
-command buffer that completes without its mark was discarded by the GPU (after a page fault),
-which logs `D9MT-GPU-LOST` (README, *Environment variables*; #27).
+`D9MT_GPU_CANARY`, on by default: the present copy's encoder, and an encoder of its own in every
+fourth other command buffer, marks the command buffer's slot in a small buffer; a marked command
+buffer that completes without its mark was discarded by the GPU (after a page fault), which logs
+`D9MT-GPU-LOST` (the first 20, then a summary at most every 10 s) (README, *Environment
+variables*; #27).
 
 **Pass split**
 A submit in the middle of a render pass: the pass ends, so its attachments are stored and loaded
@@ -168,8 +172,8 @@ A frame longer than `D9MT_HITCH_MS` (default 50 ms), attributed to d9mt or to th
 `HITCH` line under `D9MT_PROFILE` (`driver/d3d9/d3d9_hitch.h`).
 
 **Hash suite**
-The D3D9 test programs in `test/` (33 today), five frames each, whose frame hashes are compared
-with the base commit's; the correctness gate of every PR (CONTRIBUTING, *Definition of Done*).
+The D3D9 test programs `test/code_*.c` (except `code_sm3_ref` and `code_statecache`, which have
+harnesses of their own), five frames each, whose frame hashes are compared with the base commit's; the correctness gate of every PR (CONTRIBUTING, *Definition of Done*).
 _Open:_ its runner is on the branch `chore/test-runner`, not on `main` yet.
 
 **Base, basecopy**

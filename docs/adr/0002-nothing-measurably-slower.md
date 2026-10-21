@@ -40,8 +40,9 @@ layout.
 - **Judge each commit by its raw delta**: rejected; layout moves microbenchmarks by up to ±3 %, so
   it would block changes for effects that aren't theirs and flip with the next merge.
 - **Accept small regressions for correctness or features**: rejected by the maintainer (“we're
-  aiming to improve, not regress”). One exception was a maintainer's decision: the PSO MRU change
-  (#40) was slower in a synthetic worst case and approved after review.
+  aiming to improve, not regress”). The PSO MRU change (#40) is no exception: the cause of its
+  synthetic worst case (psobench topo) was gone with #33, merged before it, and what remained
+  flipped sign with alignment, so it was layout (#40).
 
 ## Open questions
 
