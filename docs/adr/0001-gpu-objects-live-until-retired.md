@@ -21,8 +21,8 @@ display power event point there (#26).
 
 - Nothing a recorded or committed command buffer refers to is released before the GPU is past
   that command buffer's serial. Releases are deferred with `retireAfter(nextSerial())` and run in
-  serial order on the `d9mt-retire` thread or at the end of a frame on the CS thread, never both at
-  once (#24; `driver/backend/mtl_submission.h`).
+  serial order on the `d9mt-retire` pump plus serialised drains on the calling thread (`submit`,
+  `endFrame`, allocation recovery), never two at once (#24; `driver/backend/mtl_submission.h`).
 - Texture views follow that pattern (#24); so do the drawable, d9mt's reference to it, the layer's
   residency set and MetalFX scalers at teardown (#26).
 - `D9MT_LIFETIME_CHECK` checks the rule deterministically, on any Mac, without needing the GPU to

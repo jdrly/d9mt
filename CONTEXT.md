@@ -56,11 +56,12 @@ and one submitter (the CS thread), so serials complete in submission order
 
 **Retire**
 To release what a command buffer used once the GPU is past its serial. Retirements run in serial
-order, either on the `d9mt-retire` pump thread, which observes GPU completion independently of the
-CS thread, or at the end of a frame on the CS thread (`endFrame` → `processRetirements`), never
-both at once. `retireAfter` releases at once (inline) when the serial is already complete or the
-device has drained (`driver/backend/mtl_submission.h`, `mtl_submission.cpp`,
-`mtl_context_record.cpp`). A **retired** serial is one the GPU has completed.
+order: on the `d9mt-retire` pump thread, which observes GPU completion independently of the CS
+thread, plus serialised drains on the calling thread (in `submit` and `endFrame` on the CS thread,
+and in the recovery from a failed host allocation), never two at once. `retireAfter` releases at
+once (inline) when the serial is already complete or the device has drained
+(`driver/backend/mtl_submission.h`, `mtl_submission.cpp`, `mtl_context_record.cpp`,
+`mtl_device_impl.cpp`). A **retired** serial is one the GPU has completed.
 _Avoid_: “free” or “release” for this deferred step.
 
 **Lifetime rule**
