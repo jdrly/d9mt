@@ -14,11 +14,13 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <crt_externs.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fstream>
 #include <functional>
@@ -27,6 +29,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "../winemetal.h"
@@ -189,7 +192,7 @@ static obj_handle_t buildPso(obj_handle_t compiler, obj_handle_t vs, obj_handle_
   info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
   for (uint32_t i = 0; i < 2; i++) {
     info.colors[i].pixel_format = formats[(variant + i) % 3];
-    info.colors[i].write_mask = 0xf;
+    info.colors[i].write_mask = variant >= 8u ? 0x3 : variant >= 4u ? 0x7 : 0xf;   // 4..7, 8..11: the late PSOs
     info.colors[i].blending_enabled = (variant >> 1) & 1;
     info.colors[i].rgb_blend_operation = WMTBlendOperationAdd;
     info.colors[i].alpha_blend_operation = WMTBlendOperationAdd;
@@ -231,11 +234,21 @@ int main(int argc, char** argv) {
   }
   const std::string work = argv[2];
   const unsigned nThreads = getenv("MT_THREADS") ? unsigned(atoi(getenv("MT_THREADS"))) : 6u;
+  printf("pid: %d\n", int(getpid()));
+
+  // MT_EXE: the argv[0] the bridge sees; its PSO directory is <workdir>/pso/<exe>/os-...
+  // Wine's form by default. Empty: the harness's own (not an .exe: the flat layout).
+  static std::string exe = getenv("MT_EXE") ? getenv("MT_EXE") : "C:\\games\\mt.exe";
+  if (!exe.empty())
+    (*_NSGetArgv())[0] = &exe[0];
 
   // Bridge reads these on first use.
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
   setenv("D9MT_PSO_ARCHIVE_DIR", (work + "/pso").c_str(), 1);
-  setenv("D9MT_PSO_FLUSH_EVERY", "5", 1);
+  setenv("D9MT_PSO_FLUSH_EVERY", getenv("MT_FLUSH_EVERY") ? getenv("MT_FLUSH_EVERY") : "5", 1);
+  // Nothing is flushed at exit (bundle part 5): a short idle, and MT_SETTLE_MS before exit.
+  setenv("D9MT_PSO_FLUSH_IDLE_MS", "200", 0);
+  setenv("D9MT_PSO_STATS", "1", 0);
 
   void* bridge = dlopen(argv[1], RTLD_NOW);
   if (!bridge) { fprintf(stderr, "FAIL: dlopen: %s\n", dlerror()); return 1; }
@@ -323,10 +336,16 @@ int main(int argc, char** argv) {
       results[s.name] = h.str();
     }
     printf("shaders: %u/%zu compiled\n", okShaders, shaders.size());
+    if (getenv("MT_PRINT_LIBS"))   // the MTLLibrary of each shader (bridge diagnostics name libraries by pointer)
+      for (auto& s : shaders)
+        printf("lib %s %p\n", s.name.c_str(), (void*)uintptr_t(s.library));
 
     // PSOs: every VS x PS pair in 4 state variants, all in flight at once.
+    // MT_REPEAT=<n>: the whole set n times (the same descriptors requested again).
     std::vector<std::unique_ptr<Job>> psos;
     std::atomic<unsigned> psoOk = { 0 }, psoFail = { 0 };
+    const unsigned reps = getenv("MT_REPEAT") ? unsigned(std::max(1, atoi(getenv("MT_REPEAT")))) : 1u;
+    for (unsigned rep = 0; rep < reps; rep++)
     for (auto& vs : shaders) {
       if (vs.isPs || !vs.ok) continue;
       for (auto& ps : shaders) {
@@ -352,6 +371,107 @@ int main(int argc, char** argv) {
   const double ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
+
+  // MT_COVERAGE=1|0: what the state cache reports once its prewarm has handled every
+  // entry (D9MTPsoArchiveCoverage, unix call 213): 1 lets the bridge consolidate.
+  if (const char* c = getenv("MT_COVERAGE")) {
+    struct unixcall_generic_obj_noret cov = {};
+    cov.handle = obj_handle_t(atoi(c) ? 1 : 0);
+    g_funcs[213](&cov);
+  }
+
+  // MT_BURST_MS=<ms>: for that long, request the main set's PSOs again every ~20 ms (archive hits:
+  // requests that keep a consolidation waiting for a quiet gap, like a world entry)
+  if (const char* bm = getenv("MT_BURST_MS")) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(atoi(bm));
+    unsigned n = 0;
+    while (std::chrono::steady_clock::now() < end) {
+      for (auto& vs : shaders) {
+        if (vs.isPs || !vs.ok) continue;
+        for (auto& ps : shaders) {
+          if (!ps.isPs || !ps.ok) continue;
+          buildPso(compiler, vs.library, ps.library, 0);
+          n++;
+          break;
+        }
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    printf("burst: %u requests\n", n);
+  }
+
+  // MT_LATE_PSOS=<ms>: that much later, 4 new state variants of every pair (misses, flushed
+  // into deltas while a consolidation started by the coverage signal may still run)
+  if (const char* l = getenv("MT_LATE_PSOS")) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(l)));
+    unsigned ok = 0, fail = 0;
+    for (auto& vs : shaders) {
+      if (vs.isPs || !vs.ok) continue;
+      for (auto& ps : shaders) {
+        if (!ps.isPs || !ps.ok) continue;
+        for (uint32_t v = 4; v < 8; v++)
+          (buildPso(compiler, vs.library, ps.library, v) ? ok : fail)++;
+      }
+    }
+    printf("late psos: %u ok, %u failed\n", ok, fail);
+  }
+  // MT_LATE2_PSOS=<ms>: that much later again, variants 8..11 (the same functions)
+  if (const char* l = getenv("MT_LATE2_PSOS")) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(l)));
+    unsigned ok = 0, fail = 0;
+    for (auto& vs : shaders) {
+      if (vs.isPs || !vs.ok) continue;
+      for (auto& ps : shaders) {
+        if (!ps.isPs || !ps.ok) continue;
+        for (uint32_t v = 8; v < 12; v++)
+          (buildPso(compiler, vs.library, ps.library, v) ? ok : fail)++;
+      }
+    }
+    printf("late2 psos: %u ok, %u failed\n", ok, fail);
+  }
+
+  // MT_HINT=1: the PE side's pause hint (a device Reset: D9MTPsoPauseHint, unix call 214)
+  if (getenv("MT_HINT") && atoi(getenv("MT_HINT"))) {
+    struct unixcall_generic_obj_noret hint = {};
+    g_funcs[214](&hint);
+  }
+
+  // MT_WAIT_CONSOLIDATED=<s>: stay until this session's consolidated set is complete (its marker
+  // "c-<time>-<pid>.set", written after its last chunk).
+  if (const char* w = getenv("MT_WAIT_CONSOLIDATED")) {
+    const auto t0w = std::chrono::steady_clock::now();
+    const std::string tag = "-" + std::to_string(getpid()) + ".set";
+    bool found = false;
+    while (!found && std::chrono::steady_clock::now() - t0w < std::chrono::seconds(atoi(w))) {
+      // <pso>/os-* (flat) and <pso>/<exe>/os-*
+      std::function<void(const std::string&, int)> scan = [&](const std::string& dir, int depth) {
+        DIR* base = opendir(dir.c_str());
+        if (!base) return;
+        while (dirent* d = readdir(base)) {
+          const std::string n = d->d_name;
+          if (n == "." || n == "..") continue;
+          if (!n.compare(0, 3, "os-")) {
+            if (DIR* sub = opendir((dir + "/" + n).c_str())) {
+              while (dirent* f = readdir(sub)) {
+                const std::string a = f->d_name;
+                if (!a.compare(0, 2, "c-") && a.size() > tag.size() && !a.compare(a.size() - tag.size(), tag.size(), tag))
+                  found = true;
+              }
+              closedir(sub);
+            }
+          } else if (depth == 0 && d->d_type == DT_DIR) {
+            scan(dir + "/" + n, 1);
+          }
+        }
+        closedir(base);
+      };
+      scan(work + "/pso", 0);
+      if (!found)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    printf("consolidated archive: %s\n", found ? "written" : "none");
+  }
 
   // Compare with the first run on this workdir: metallibs must be
   // byte-identical (AIR cache hits included) and no PSO that built before
@@ -385,6 +505,13 @@ int main(int argc, char** argv) {
     for (auto& r : results) out << r.first << " = " << r.second << "\n";
     printf("results recorded to %s\n", resPath.c_str());
   }
+
+  // MT_SETTLE_MS (700): time for the flush thread (idle 200 ms) before exit
+  std::this_thread::sleep_for(std::chrono::milliseconds(getenv("MT_SETTLE_MS") ? atoi(getenv("MT_SETTLE_MS")) : 700));
+
+  // MT_EXIT_DELAY_MS=<ms>: exit that much later (a quit while the bridge consolidates)
+  if (const char* x = getenv("MT_EXIT_DELAY_MS"))
+    std::this_thread::sleep_for(std::chrono::milliseconds(atoi(x)));
 
   if (g_failures) {
     fprintf(stderr, "%d failure(s)\n", g_failures.load());

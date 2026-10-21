@@ -1046,6 +1046,7 @@ dxmt_apitrace_sampler_descriptor_json(const struct WMTSamplerInfo *info, obj_han
     @"lod_average" : @(info->lod_average),
     @"normalized_coordinates" : @(info->normalized_coords),
     @"support_argument_buffers" : @(info->support_argument_buffers),
+    @"lod_bias" : @(info->lod_bias_present ? info->lod_bias : 0.0f),
   });
 }
 
@@ -1817,6 +1818,10 @@ _MTLDevice_newSamplerState(void *obj) {
   sampler_desc.lodAverage = info->lod_average;
   sampler_desc.normalizedCoordinates = info->normalized_coords;
   sampler_desc.supportArgumentBuffers = info->support_argument_buffers;
+  /* Only with the flag (M-1): a caller built before lod_bias passes a zeroed 32-byte
+   * struct, 0 at offset 23 and nothing of its own at 32. */
+  if (info->lod_bias_present)
+    sampler_desc.lodBias = info->lod_bias;
 
   id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_desc];
   info->gpu_resource_id = info->support_argument_buffers ? [sampler gpuResourceID]._impl : 0;
@@ -5805,9 +5810,15 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 #endif
 #include "../../airlib/d9mtair.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <mach-o/loader.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <crt_externs.h>
+#include <ctype.h>
+#include <strings.h>
 
 struct d9mt_air_version_params;
 struct d9mt_air_compile_params;
@@ -5821,207 +5832,13 @@ thunk_D9MTAirVersion(void *args) {
   return d9mtair_version(args) == 0 ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
-/* Persistent AIR metallib cache. The SM3->AIR codegen (LLVM, Rosetta-
- * translated) otherwise reruns for every shader and every VS/PS linkage on
- * every launch. Key = SHA-256(build identity, ABI, flags, spec data, entry,
- * IR bytes); store = the DXMT-derived sqlite cache (cache.c), one table per
- * build of this .so (tables of other builds are dropped on open, so a rebuild
- * never reads stale metallibs and the file does not grow without bound).
- * Every failure degrades to a plain compile.
- *   D9MT_AIR_CACHE=0            disable
- *   D9MT_AIR_CACHE=<unix path>  database file (relative = under the macOS
- *                               user cache dir, default d9mt/air-cache.sqlite3) */
-@interface CacheReader : NSObject
-- (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
-- (dispatch_data_t)get:(NSData *)key;
-@end
-@interface CacheWriter : NSObject
-- (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
-- (void)set:(NSData *)key value:(dispatch_data_t)value;
-@end
-void d9mt_cache_drop_other_versions(NSString *path, uint64_t version);
-
-#define D9MT_AIR_CACHE_MAGIC   0x414d3944u
-#define D9MT_AIR_CACHE_HDR     12u
-
-static pthread_mutex_t g_air_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int             g_air_cache_state;
-static CacheReader    *g_air_cache_reader;
-static CacheWriter    *g_air_cache_writer;
-static uint8_t         g_air_build_id[16];
-
-/* LC_UUID of the image holding the AIR codegen (this .so): ld64 derives it
- * from the linked contents, so every rebuild changes it. Falls back to the
- * file's inode/size/mtime. */
-static bool
-air_build_identity(uint8_t out[16]) {
-  Dl_info dl;
-  if (!dladdr((const void *)d9mtair_compile, &dl) || !dl.dli_fbase)
-    return false;
-  const struct mach_header_64 *mh = (const struct mach_header_64 *)dl.dli_fbase;
-  if (mh->magic == MH_MAGIC_64) {
-    const uint8_t *cmd = (const uint8_t *)(mh + 1);
-    for (uint32_t i = 0u; i < mh->ncmds; i++) {
-      const struct load_command *lc = (const struct load_command *)cmd;
-      if (lc->cmd == LC_UUID) {
-        memcpy(out, ((const struct uuid_command *)lc)->uuid, 16u);
-        return true;
-      }
-      cmd += lc->cmdsize;
-    }
-  }
-  struct stat st;
-  if (!dl.dli_fname || stat(dl.dli_fname, &st))
-    return false;
-  const uint64_t id[2] = { (uint64_t)st.st_ino ^ ((uint64_t)st.st_size << 32),
-                           (uint64_t)st.st_mtimespec.tv_sec * 1000000000ull + (uint64_t)st.st_mtimespec.tv_nsec };
-  memcpy(out, id, 16u);
-  return true;
-}
-
-static void
-air_cache_init(void) {
-  const char *env = getenv("D9MT_AIR_CACHE");
-  g_air_cache_state = -1;
-  if (env && (!*env || !strcmp(env, "0")))
-    return;
-  if (!air_build_identity(g_air_build_id)) {
-    fprintf(stderr, "d9mt: AIR cache disabled (no build identity)\n");
-    return; /* never risk stale metallibs */
-  }
-
-  uint64_t version;
-  memcpy(&version, g_air_build_id, sizeof(version));
-  version = (version ^ ((uint64_t)D9MT_AIR_ABI_VERSION << 56)) & 0x7fffffffffffffffull;
-
-  NSString *path = env ? [NSString stringWithUTF8String:env] : @"d9mt/air-cache.sqlite3";
-  if (!path)
-    return;
-  d9mt_cache_drop_other_versions(path, version);
-  g_air_cache_writer = [[CacheWriter alloc] initWithPath:path version:version];
-  if (g_air_cache_writer)
-    g_air_cache_reader = [[CacheReader alloc] initWithPath:path version:version];
-  if (g_air_cache_writer && g_air_cache_reader) {
-    g_air_cache_state = 1;
-    fprintf(stderr, "d9mt: AIR cache %s (table cache_%llu)\n", path.UTF8String, (unsigned long long)version);
-  } else {
-    [g_air_cache_writer release];
-    [g_air_cache_reader release];
-    g_air_cache_writer = nil;
-    g_air_cache_reader = nil;
-    fprintf(stderr, "d9mt: AIR cache disabled (could not open %s)\n", path.UTF8String);
-  }
-}
-
-static void
-air_cache_key(const struct d9mt_air_compile_params *p, unsigned char out[CC_SHA256_DIGEST_LENGTH]) {
-  CC_SHA256_CTX c;
-  CC_SHA256_Init(&c);
-  CC_SHA256_Update(&c, g_air_build_id, sizeof(g_air_build_id));
-  const uint64_t hdr[2] = { D9MT_AIR_ABI_VERSION, ((uint64_t)p->flags << 32) | p->spec_count };
-  CC_SHA256_Update(&c, hdr, sizeof(hdr));
-  if (p->spec_count && p->spec_data)
-    CC_SHA256_Update(&c, (const void *)(uintptr_t)p->spec_data, (CC_LONG)(p->spec_count * 2u * sizeof(uint32_t)));
-  const char *entry = p->entry_name ? (const char *)(uintptr_t)p->entry_name : "main";
-  CC_SHA256_Update(&c, entry, (CC_LONG)strlen(entry) + 1u);
-  CC_SHA256_Update(&c, (const void *)(uintptr_t)p->ir_data, (CC_LONG)p->ir_size);
-  CC_SHA256_Final(out, &c);
-}
-
-static bool
-air_cache_unpack(struct d9mt_air_compile_params *p, const uint8_t *b, size_t len) {
-  uint32_t hdr[3];
-  if (!b || len < D9MT_AIR_CACHE_HDR)
-    return false;
-  memcpy(hdr, b, sizeof(hdr));
-  if (hdr[0] != D9MT_AIR_CACHE_MAGIC || D9MT_AIR_CACHE_HDR + (size_t)hdr[1] + hdr[2] != len || !hdr[1])
-    return false;
-  const uint8_t *ml = b + D9MT_AIR_CACHE_HDR, *rf = ml + hdr[1];
-  if (p->pe_metallib_buffer || p->pe_reflection_buffer) {
-    if (hdr[1] > p->pe_metallib_capacity || hdr[2] > p->pe_reflection_capacity)
-      return false; /* let the real compile report BUFFER_TOO_SMALL */
-    memcpy((void *)(uintptr_t)p->pe_metallib_buffer, ml, hdr[1]);
-    if (hdr[2])
-      memcpy((void *)(uintptr_t)p->pe_reflection_buffer, rf, hdr[2]);
-    p->out_metallib = 0u;
-    p->out_reflection = 0u;
-  } else {
-    /* d9mtair_free() is plain free(), so malloc'd outputs are compatible. */
-    void *m = malloc(hdr[1]), *r = malloc(hdr[2] ? hdr[2] : 1u);
-    if (!m || !r) {
-      free(m);
-      free(r);
-      return false;
-    }
-    memcpy(m, ml, hdr[1]);
-    memcpy(r, rf, hdr[2]);
-    p->out_metallib = (uint64_t)(uintptr_t)m;
-    p->out_reflection = (uint64_t)(uintptr_t)r;
-  }
-  p->out_size = hdr[1];
-  p->out_reflection_size = hdr[2];
-  p->ret_status = D9MT_AIR_OK;
-  return true;
-}
+/* The AIR metallib cache lives in air_cache.c: everything there is part of the
+ * cache's build identity (S1, docs/bridge-bundle.md), nothing in this file is. */
+extern int d9mt_air_cache_compile(void *args);
 
 static NTSTATUS
 thunk_D9MTAirCompile(void *args) {
-  struct d9mt_air_compile_params *p = args;
-  unsigned char key[CC_SHA256_DIGEST_LENGTH];
-  NSData *k = nil;
-
-  pthread_mutex_lock(&g_air_cache_mutex);
-  if (!g_air_cache_state)
-    air_cache_init();
-  const bool cache = g_air_cache_state > 0;
-  pthread_mutex_unlock(&g_air_cache_mutex);
-
-  if (cache && p->ir_data && p->ir_size) {
-    air_cache_key(p, key);
-    k = [[NSData alloc] initWithBytesNoCopy:key length:sizeof(key) freeWhenDone:NO];
-    pthread_mutex_lock(&g_air_cache_mutex);
-    dispatch_data_t hit = [g_air_cache_reader get:k];
-    pthread_mutex_unlock(&g_air_cache_mutex);
-    if (hit) {
-      const void *bytes = NULL;
-      size_t len = 0u;
-      dispatch_data_t flat = dispatch_data_create_map(hit, &bytes, &len);
-      const bool ok = air_cache_unpack(p, bytes, len);
-      dispatch_release(flat);
-      dispatch_release(hit);
-      if (ok) {
-        [k release];
-        return STATUS_SUCCESS;
-      }
-    }
-  }
-
-  d9mtair_compile(args);
-
-  if (k && p->ret_status == D9MT_AIR_OK && p->out_size
-   && p->out_size <= 0xffffffffu && p->out_reflection_size <= 0xffffffffu) {
-    const bool pe = p->pe_metallib_buffer || p->pe_reflection_buffer;
-    const void *ml = (const void *)(uintptr_t)(pe ? p->pe_metallib_buffer : p->out_metallib);
-    const void *rf = (const void *)(uintptr_t)(pe ? p->pe_reflection_buffer : p->out_reflection);
-    const size_t total = D9MT_AIR_CACHE_HDR + p->out_size + p->out_reflection_size;
-    uint8_t *blob = malloc(total);
-    if (blob && ml && (rf || !p->out_reflection_size)) {
-      const uint32_t hdr[3] = { D9MT_AIR_CACHE_MAGIC, (uint32_t)p->out_size, (uint32_t)p->out_reflection_size };
-      memcpy(blob, hdr, sizeof(hdr));
-      memcpy(blob + D9MT_AIR_CACHE_HDR, ml, p->out_size);
-      if (p->out_reflection_size)
-        memcpy(blob + D9MT_AIR_CACHE_HDR + p->out_size, rf, p->out_reflection_size);
-      dispatch_data_t v = dispatch_data_create(blob, total, NULL, DISPATCH_DATA_DESTRUCTOR_FREE);
-      pthread_mutex_lock(&g_air_cache_mutex);
-      [g_air_cache_writer set:k value:v];
-      pthread_mutex_unlock(&g_air_cache_mutex);
-      dispatch_release(v);
-    } else {
-      free(blob);
-    }
-  }
-  [k release];
-  return STATUS_SUCCESS;
+  return d9mt_air_cache_compile(args);
 }
 
 static NTSTATUS
@@ -6080,29 +5897,116 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    goes to its own file (<unix-time>-<pid>-<seq>.mtl4archive);
  *  - flushing while another thread compiles through the same compiler
  *    crashes, so compiles hold g_pso_lock shared and flushes hold it
- *    exclusively; flushes run on the compiling (render) thread every
- *    D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if uncontended);
+ *    exclusively. Flushes run on a thread of their own (bundle part 5): at a
+ *    pause (the window known not visible, or a device Reset), after
+ *    D9MT_PSO_FLUSH_IDLE_MS (10 s) without a build, or once
+ *    D9MT_PSO_FLUSH_EVERY new PSOs have waited 60 s for either. It takes the
+ *    lock with trywrlock, so it never queues ahead of a build, and a build
+ *    that finds it held goes to a serializer-less compiler instead of
+ *    waiting (not captured this session). Nothing is flushed at exit or at
+ *    device destruction (exiting threads may hold Metal/objc locks: #11);
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
- *    truncated one, so every archive carries a .sum (size + SHA-256) written
- *    after it and is only loaded when that matches; anything else is deleted.
+ *    truncated one, so every archive carries a .sum written after it:
+ *    "2 <size> <mtime ns> <SHA-256>". At load, size and mtime must match and
+ *    the file must have the shape Metal writes (pso_archive_check.c); a file of
+ *    another shape is checked against the SHA-256 instead (a future format
+ *    costs the hash, not the cache), and anything that doesn't match is
+ *    deleted. Hashing every archive at every start cost 1.2 s for 430 MB in
+ *    this Rosetta-translated process. D9MT_PSO_VERIFY=1 always checks the
+ *    SHA-256. Archive and sum are fsynced before they are renamed into place,
+ *    so a power loss can't leave a renamed file whose data never reached the
+ *    disk. A v1 sum ("<size> <SHA-256>", bridges before the bundle) is checked
+ *    against the SHA-256 once and rewritten as v2 (the archives stay valid
+ *    across an AIR cache key change). An older bridge deletes v2-summed
+ *    archives: just cold, never a crash.
  * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>/; other
- * os-* directories (OS or GPU change) are removed. The newest
- * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
- * it used, hits included).
+ * os-* directories (OS or GPU change) are removed.
+ * Archive first (bundle parts 3 and 4, docs/bridge-bundle.md): a render PSO
+ * is first asked of the loaded archives ([MTL4Archive
+ * newRenderPipelineStateWithDescriptor:], nil without compiling on a miss),
+ * which neither compiles nor goes through the serializer; only a miss is
+ * built by the compiler and captured. So a session's own archives ("deltas")
+ * hold only PSOs no loaded archive had, and flushes stay small. Every
+ * requested descriptor is recorded; once the session has been idle for
+ * D9MT_PSO_CONSOLIDATE_IDLE_MS (120 s) or at a pause, and once the state cache
+ * has reported that its prewarm covered the archives, a BACKGROUND-QoS thread rebuilds them
+ * through its own compiler and serializer (archive lookups, so mostly cheap)
+ * into one consolidated archive "c-<unix-time>-<pid>.mtl4archive", and then
+ * deletes the archives it replaces: the ones loaded at this start and this
+ * session's deltas flushed before it began (an flock on .consolidate keeps
+ * two processes from doing it at once). Kept at startup: the newest
+ * consolidated archive and every delta newer than it, looked up in that
+ * order. With the state cache prewarm, the recorded set is the whole working
+ * set. Without it (D9MT_STATE_CACHE=0) archive first and consolidation are
+ * off and everything is captured as before: the newest D9MT_PSO_KEEP_SESSIONS
+ * sessions are kept (a session's files hold every PSO it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
+ *   D9MT_PSO_ARCHIVE_FIRST=0       archive first and consolidation off
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
- *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256) */
+ *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs pending before the 60 s backstop counts (default 256)
+ *   D9MT_PSO_FLUSH_IDLE_MS=<ms>     flush after this long without a build (default 10000)
+ *   D9MT_PSO_STATS=1                hit/miss/uncaptured counts at exit (tests) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
 #define D9MT_PSO_FLUSH_DEFAULT 256u
 
 static id<MTL4PipelineDataSetSerializer> g_pso_serializer;
+static id<MTL4Compiler>                  g_pso_fallback;     /* no serializer: builds while a flush runs */
+static pthread_mutex_t                   g_pso_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t                    g_pso_flush_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t                  g_pso_last_build;   /* CLOCK_UPTIME_RAW ns of the last captured build */
+static _Atomic uint64_t                  g_pso_due_since;    /* when FLUSH_EVERY were first pending, 0 = not */
+static _Atomic bool                      g_pso_pause_hint;   /* a device Reset (D9MTPsoPauseHint) */
+static _Atomic uint64_t                  g_pso_uncaptured;   /* builds through g_pso_fallback */
+static _Atomic unsigned                  g_pso_flushes;      /* flushes finished (or failed) */
+static uint64_t                          g_pso_flush_idle_ns = 10000000000ull;
+static uint64_t                          g_pso_flush_backstop_ns = 60000000000ull;
+static unsigned                          g_pso_note_delay_ms;  /* tests: every other build, before its count */
+static _Atomic unsigned                  g_pso_note_delay_n;
+static unsigned                          g_pso_flush_hold_ms;  /* tests: the first flush, inside the write lock */
+static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: event lines, counts at exit */
+static uint64_t                          g_pso_t0;             /* CLOCK_UPTIME_RAW ns at init, for the lines */
+
+/* D9MT_PSO_STATS=1 (tests, diagnostics): one line per flush, coverage signal and
+ * consolidation, with ms since the archives were set up. */
+#define PSO_EVENT(...) do { if (g_pso_stats) { \
+    fprintf(stderr, "d9mt: PSO t=%llu ms: ", \
+            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - g_pso_t0) / 1000000ull)); \
+    fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 static MTL4CompilerTaskOptions          *g_pso_task_options;
 static NSString                         *g_pso_dir;
 static NSString                         *g_pso_session;
 static unsigned                          g_pso_seq;
 static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
 static _Atomic unsigned                  g_pso_pending;
+static bool                              g_pso_verify;
+static bool                              g_pso_archive_first;
+static NSArray<id<MTL4Archive>>         *g_pso_lookup;       /* consolidated first, then deltas newest first */
+static NSMutableArray<NSString *>       *g_pso_parts;        /* files a consolidation replaces */
+static NSMutableArray                   *g_pso_requested;    /* descriptors requested this session */
+static pthread_mutex_t                   g_pso_record_mutex = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t                  g_pso_last_request; /* CLOCK_UPTIME_RAW ns */
+static _Atomic uint64_t                  g_pso_hits, g_pso_misses;
+static uint64_t                          g_pso_consolidate_idle_ns = 120000000000ull;
+static unsigned                          g_pso_archive_first_max = 8u;   /* deltas asked first */
+static unsigned                          g_pso_consolidate_delay_ms;      /* tests: after the snapshot */
+static unsigned                          g_pso_chunk = 256u;              /* descriptors per consolidated chunk */
+static bool                              g_pso_chunk_fresh;               /* a new compiler per chunk (no lower peak: native-mem2) */
+static unsigned                          g_pso_chunk_hold_ms;             /* tests: after every chunk but the last */
+static uint64_t                          g_pso_startup_window_ns = 30000000000ull;
+static _Atomic uint64_t                  g_pso_coverage_ns;               /* when the coverage signal came */
+static pthread_mutex_t                   g_pso_cons_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t                    g_pso_cons_cond = PTHREAD_COND_INITIALIZER;   /* the signal came */
+static NSString                         *g_pso_set_marker;                /* the loaded set's marker, replaced too */
+static unsigned                          g_pso_sessions_since;            /* since the last complete set */
+static unsigned                          g_pso_delta_files;               /* deltas loaded at start */
+static uint64_t                          g_pso_delta_bytes;
+static id<MTLDevice>                     g_pso_device;
+static NSMutableArray<NSString *>       *g_pso_session_parts; /* this session's deltas */
+static bool                              g_pso_recording;     /* until the consolidation */
+static bool                              g_pso_pause_vis = true;
+static _Atomic int                       g_pso_coverage;      /* 1 = the prewarm replayed everything */
+#define D9MT_PSO_MAX_MB 512u
 
 static NSString *
 pso_sum_text(NSString *path) {
@@ -6118,14 +6022,127 @@ pso_sum_text(NSString *path) {
   return s;
 }
 
+/* Data to the device before the file is renamed into place. */
+static void
+pso_sync_file(NSString *path) {
+  const int fd = open(path.fileSystemRepresentation, O_RDONLY);
+  if (fd < 0)
+    return;
+  if (fcntl(fd, F_BARRIERFSYNC) == -1)
+    fsync(fd);
+  close(fd);
+}
+
+static uint64_t
+pso_mtime_ns(const struct stat *st) {
+  return (uint64_t)st->st_mtimespec.tv_sec * 1000000000ull + (uint64_t)st->st_mtimespec.tv_nsec;
+}
+
+/* Writes the v2 sum of the archive described by st and by its v1 text
+ * ("<size> <SHA-256>") to file, synced. */
 static bool
-pso_archive_valid(NSString *path) {
-  NSString *want = [NSString stringWithContentsOfFile:[path stringByAppendingString:@".sum"]
-                                             encoding:NSUTF8StringEncoding error:nil];
-  if (!want)
+pso_write_sum(NSString *file, NSString *v1, const struct stat *st) {
+  NSArray<NSString *> *parts = [v1 componentsSeparatedByString:@" "];
+  if (parts.count != 2u)
     return false;
+  NSString *v2 = [NSString stringWithFormat:@"2 %@ %llu %@", parts[0], (unsigned long long)pso_mtime_ns(st), parts[1]];
+  if (![v2 writeToFile:file atomically:NO encoding:NSUTF8StringEncoding error:nil])
+    return false;
+  pso_sync_file(file);
+  return true;
+}
+
+/* bridge/unix/pso_archive_check.c (pure C, unit-tested by bridge/tests/pso_archive_check_test.c) */
+int d9mt_pso_archive_shape(const char *path, uint64_t size);
+bool d9mt_pso_sum_parse_v2(const char *text, uint64_t *size, uint64_t *mtime_ns, char sha[65]);
+
+/* Several processes share the directory (two clients; a client starting
+ * while another consolidates). Every file is written as .tmp and renamed into
+ * place, archive first, then its .sum: between the two renames an archive has
+ * no sum yet, and another process's file may disappear at any time. So the
+ * verdict on a file has three outcomes, and a file is only deleted for proof
+ * of damage or by the retention rule, never because it vanished or is young. */
+enum { PSO_SKIP = -1, PSO_BAD = 0, PSO_OK = 1 };
+#define D9MT_PSO_YOUNG_S 600
+
+static bool
+pso_gone(NSString *path) {
+  struct stat st;
+  return stat(path.fileSystemRepresentation, &st) && errno == ENOENT;
+}
+
+/* Whether an archive may be passed to newArchiveWithURL (PSO_OK), must be
+ * deleted (PSO_BAD), or is to be left alone (PSO_SKIP: gone, or written by
+ * another process just now). */
+static int
+pso_archive_judge(NSString *path) {
+  struct stat st;
+  if (stat(path.fileSystemRepresentation, &st))
+    return errno == ENOENT ? PSO_SKIP : PSO_BAD;
+  NSString *sumPath = [path stringByAppendingString:@".sum"];
+  NSString *want = [NSString stringWithContentsOfFile:sumPath encoding:NSUTF8StringEncoding error:nil];
+  if (!want) {
+    /* between another process's two renames, or a writer that died right there */
+    if (pso_gone(path))
+      return PSO_SKIP;
+    return time(NULL) - st.st_mtime < D9MT_PSO_YOUNG_S ? PSO_SKIP : PSO_BAD;
+  }
+  uint64_t size, mtime;
+  char sha[65];
+  if (d9mt_pso_sum_parse_v2(want.UTF8String, &size, &mtime, sha)) {
+    if (size != (uint64_t)st.st_size)
+      return PSO_BAD;
+    if (mtime != pso_mtime_ns(&st)) {
+      /* the same size with another time: a copy or restore that didn't keep times;
+       * the SHA-256 decides, and the sum is rewritten for the new time */
+      NSString *have = pso_sum_text(path);
+      if (!have)
+        return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+      if (![have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]])
+        return PSO_BAD;
+      NSString *tmp = [sumPath stringByAppendingString:@".tmp"];
+      if (pso_write_sum(tmp, have, &st))
+        rename(tmp.fileSystemRepresentation, sumPath.fileSystemRepresentation);
+      else
+        unlink(tmp.fileSystemRepresentation);
+      return PSO_OK;
+    }
+    const int shape = g_pso_verify ? -1 : d9mt_pso_archive_shape(path.fileSystemRepresentation, size);
+    if (shape == -2)
+      return PSO_SKIP;
+    if (shape >= 0)
+      return shape == 1 ? PSO_OK : PSO_BAD;
+    NSString *have = pso_sum_text(path);
+    if (!have)
+      return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+    return [have isEqualToString:[NSString stringWithFormat:@"%llu %s", (unsigned long long)size, sha]] ? PSO_OK : PSO_BAD;
+  }
+  /* v1 */
   NSString *have = pso_sum_text(path);
-  return have && [have isEqualToString:want];
+  if (!have)
+    return pso_gone(path) ? PSO_SKIP : PSO_BAD;
+  if (![have isEqualToString:want])
+    return PSO_BAD;
+  NSString *tmp = [sumPath stringByAppendingString:@".tmp"];
+  if (pso_write_sum(tmp, have, &st))
+    rename(tmp.fileSystemRepresentation, sumPath.fileSystemRepresentation);
+  else
+    unlink(tmp.fileSystemRepresentation);
+  return PSO_OK;
+}
+
+/* The session in the name ("<time>-<pid>-<seq>" or "c-<time>-<pid>") belongs to
+ * another process that still runs: the retention rule leaves its files. */
+static bool
+pso_owner_alive(NSString *name) {
+  NSArray<NSString *> *p = [([name hasPrefix:@"c-"] ? [name substringFromIndex:2u] : name)
+                            componentsSeparatedByString:@"-"];
+  if (p.count < 2u)
+    return false;
+  const int pid = [p[1] intValue];
+  if (pid <= 0 || pid == getpid())
+    return false;
+  return !kill(pid, 0) || errno == EPERM;
 }
 
 static void
@@ -6134,12 +6151,76 @@ pso_remove_archive(NSString *path) {
   unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
 }
 
+/* Consolidated archives (bundle part 6): a set of chunks "c-<stamp>-<pid>-<n>.mtl4archive",
+ * each with its sum, made complete by the marker "c-<stamp>-<pid>.set" written last. A single
+ * "c-<stamp>-<pid>.mtl4archive" (bundle builds before part 6) is a complete set of one.
+ * Returns the kind and fills stamp and the set's base name ("c-<stamp>-<pid>"). */
+enum { PSO_C_NONE, PSO_C_SINGLE, PSO_C_CHUNK, PSO_C_MARKER };
+static int
+pso_c_name(NSString *name, time_t *stamp, NSString **base) {
+  if (![name hasPrefix:@"c-"])
+    return PSO_C_NONE;
+  const bool marker = [name hasSuffix:@".set"];
+  if (!marker && ![name hasSuffix:@".mtl4archive"])
+    return PSO_C_NONE;
+  NSString *stem = [name substringToIndex:name.length - (marker ? 4u : 12u)];
+  NSArray<NSString *> *p = [[stem substringFromIndex:2u] componentsSeparatedByString:@"-"];
+  if (p.count < 2u || p.count > 3u || p[0].length != 10u)
+    return PSO_C_NONE;
+  if (stamp)
+    *stamp = (time_t)strtoll(p[0].UTF8String, NULL, 10);
+  if (base)
+    *base = [NSString stringWithFormat:@"c-%@-%@", p[0], p[1]];
+  if (marker)
+    return p.count == 2u ? PSO_C_MARKER : PSO_C_NONE;
+  return p.count == 2u ? PSO_C_SINGLE : PSO_C_CHUNK;
+}
+
+/* A set's marker: "set 1 <n>" then one line per chunk, "<name> <its v2 sum>". The chunk names
+ * of a complete set, every chunk present with exactly the recorded sum; nil otherwise (being
+ * written, interrupted, or a chunk damaged or gone). */
+static NSArray<NSString *> *
+pso_set_chunks(NSString *dir, NSString *marker) {
+  NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:marker]
+                                             encoding:NSUTF8StringEncoding error:nil];
+  NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+  if (lines.count < 2u)
+    return nil;
+  NSArray<NSString *> *head = [lines[0] componentsSeparatedByString:@" "];
+  if (head.count != 3u || ![head[0] isEqualToString:@"set"] || ![head[1] isEqualToString:@"1"])
+    return nil;
+  const NSUInteger n = (NSUInteger)[head[2] integerValue];
+  NSMutableArray<NSString *> *chunks = [NSMutableArray array];
+  for (NSUInteger i = 1; i < lines.count && chunks.count < n; i++) {
+    NSRange sp = [lines[i] rangeOfString:@" "];
+    if (sp.location == NSNotFound)
+      return nil;
+    NSString *chunk = [lines[i] substringToIndex:sp.location];
+    NSString *sum = [lines[i] substringFromIndex:sp.location + 1u];
+    /* judged first (a restored copy gets its sum rewritten for the new time); then the same
+     * size and SHA-256 as when the set was written */
+    if (pso_archive_judge([dir stringByAppendingPathComponent:chunk]) != PSO_OK)
+      return nil;
+    NSString *have = [NSString stringWithContentsOfFile:[[dir stringByAppendingPathComponent:chunk]
+                       stringByAppendingString:@".sum"] encoding:NSUTF8StringEncoding error:nil];
+    uint64_t s0, s1, m;
+    char h0[65], h1[65];
+    if (!d9mt_pso_sum_parse_v2(sum.UTF8String, &s0, &m, h0) || !d9mt_pso_sum_parse_v2(have.UTF8String, &s1, &m, h1)
+     || s0 != s1 || strcmp(h0, h1))
+      return nil;
+    [chunks addObject:chunk];
+  }
+  return n && chunks.count == n ? chunks : nil;
+}
+
 /* Caller holds g_pso_lock exclusively. */
 static void
 pso_flush_locked(void) {
   if (!g_pso_serializer || !atomic_load(&g_pso_pending))
     return;
-  atomic_store(&g_pso_pending, 0u);
+  const unsigned flushed = atomic_exchange(&g_pso_pending, 0u);
+  atomic_store(&g_pso_due_since, 0u);
+  const uint64_t f0 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
     [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
   NSString *tmp = [path stringByAppendingString:@".tmp"];
@@ -6151,27 +6232,426 @@ pso_flush_locked(void) {
     unlink(tmp.fileSystemRepresentation);
     return;
   }
+  const uint64_t f1 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
+  pso_sync_file(tmp);
   NSString *sum = pso_sum_text(tmp);
-  if (!sum || ![sum writeToFile:sumTmp atomically:NO encoding:NSUTF8StringEncoding error:nil]
+  struct stat st;
+  if (!sum || stat(tmp.fileSystemRepresentation, &st) || !pso_write_sum(sumTmp, sum, &st)
    || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
    || rename(sumTmp.fileSystemRepresentation, [path stringByAppendingString:@".sum"].fileSystemRepresentation)) {
     unlink(tmp.fileSystemRepresentation);
     unlink(sumTmp.fileSystemRepresentation);
     pso_remove_archive(path);
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+    return;
+  }
+  PSO_EVENT("flushed %u PSOs into %s: %lld bytes, serialize %llu ms, sync+sum %llu ms", flushed,
+            path.lastPathComponent.UTF8String, (long long)st.st_size, (unsigned long long)((f1 - f0) / 1000000ull),
+            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - f1) / 1000000ull));
+  if (g_pso_archive_first) {
+    pthread_mutex_lock(&g_pso_record_mutex);
+    [g_pso_parts addObject:path];
+    [g_pso_session_parts addObject:path];
+    pthread_mutex_unlock(&g_pso_record_mutex);
   }
 }
 
+/* D9MT_PSO_STATS=1 (tests): the session's counts at exit. Nothing else runs at
+ * exit: no flush (#11, part 5). */
 static void
-pso_flush_atexit(void) {
-  /* Another thread may still be compiling (or died holding the lock while
-   * the process tears down): never block exit on it. */
-  if (pthread_rwlock_trywrlock(&g_pso_lock))
-    return;
-  @autoreleasepool {
-    pso_flush_locked();
+pso_stats_atexit(void) {
+  fprintf(stderr, "d9mt: PSO archive first: %llu hits, %llu misses\n",
+          (unsigned long long)atomic_load(&g_pso_hits), (unsigned long long)atomic_load(&g_pso_misses));
+  fprintf(stderr, "d9mt: PSO builds not captured (a flush held the lock): %llu\n",
+          (unsigned long long)atomic_load(&g_pso_uncaptured));
+}
+
+static bool pso_paused(void);
+
+/* Bundle part 5: the flush thread. Flushes whatever is pending at a device Reset
+ * (D9MTPsoPauseHint), while the window is known not visible (pso_paused, R2) and
+ * no build came for 500 ms (a hidden window still compiles in bursts: one delta
+ * per burst, not per PSO), after g_pso_flush_idle_ns without a captured build,
+ * or once FLUSH_EVERY have been pending for g_pso_flush_backstop_ns. UTILITY QoS: safe because a build
+ * never waits for it (M9). The lock is taken with trywrlock, retried every
+ * 50 ms, so a waiting flush never blocks new builds behind it. */
+static void *
+pso_flush_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-flush");
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+  for (;;) {
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    const unsigned seen = atomic_load(&g_pso_pending);
+    uint64_t wait = 1000000000ull;
+    if (seen) {
+      const uint64_t idle = now - atomic_load(&g_pso_last_build);
+      const uint64_t due = atomic_load(&g_pso_due_since);
+      const bool hint = atomic_exchange(&g_pso_pause_hint, false);
+      /* FLUSH_EVERY pending: flush at the next quiet gap, so the serializer never holds much
+       * more than that (a cold session's whole capture made a 72 MB flush: part 6) */
+      const bool chunk = atomic_load(&g_pso_pending) >= g_pso_flush_every && idle >= 500000000ull;
+      if (hint || chunk || (idle >= 500000000ull && pso_paused()) || idle >= g_pso_flush_idle_ns
+       || (due && now - due >= g_pso_flush_backstop_ns)) {
+        PSO_EVENT("flush starts (%s, %u pending)", hint ? "Reset hint" : chunk ? "chunk" : idle >= g_pso_flush_idle_ns ? "idle"
+                  : (due && now - due >= g_pso_flush_backstop_ns) ? "backstop" : "pause", atomic_load(&g_pso_pending));
+        while (pthread_rwlock_trywrlock(&g_pso_lock)) {
+          struct timespec ts = { 0, 50000000 };
+          nanosleep(&ts, NULL);
+        }
+        if (g_pso_flush_hold_ms) {   /* the first flush only */
+          usleep(g_pso_flush_hold_ms * 1000u);
+          g_pso_flush_hold_ms = 0u;
+        }
+        @autoreleasepool {
+          pso_flush_locked();
+        }
+        pthread_rwlock_unlock(&g_pso_lock);
+        atomic_fetch_add(&g_pso_flushes, 1u);   /* the consolidation waits on it */
+        continue;
+      }
+      /* pending: look again within 250 ms (a pause starts without a wake) */
+      wait = 250000000ull;
+      if (g_pso_flush_idle_ns - idle < wait)
+        wait = g_pso_flush_idle_ns - idle;
+      if (due && g_pso_flush_backstop_ns - (now - due) < wait)
+        wait = g_pso_flush_backstop_ns - (now - due);
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    const uint64_t at = (uint64_t)ts.tv_nsec + wait;
+    ts.tv_sec += (time_t)(at / 1000000000ull);
+    ts.tv_nsec = (long)(at % 1000000000ull);
+    /* a wake that came since the look above (the first pending PSO, FLUSH_EVERY reached, the
+     * hint) isn't lost: decided under the mutex pso_flush_wake signals with */
+    pthread_mutex_lock(&g_pso_flush_mutex);
+    const unsigned pending = atomic_load(&g_pso_pending);
+    if (!atomic_load(&g_pso_pause_hint) && !(seen == 0u && pending)
+     && !(seen < g_pso_flush_every && pending >= g_pso_flush_every))
+      pthread_cond_timedwait(&g_pso_flush_cond, &g_pso_flush_mutex, &ts);
+    pthread_mutex_unlock(&g_pso_flush_mutex);
   }
-  pthread_rwlock_unlock(&g_pso_lock);
+  return NULL;
+}
+
+static void
+pso_flush_wake(void) {
+  pthread_mutex_lock(&g_pso_flush_mutex);
+  pthread_cond_signal(&g_pso_flush_cond);
+  pthread_mutex_unlock(&g_pso_flush_mutex);
+}
+
+/* PE side at a device Reset: a pause, flush now (edge: one flush per call). */
+static NTSTATUS
+_D9MTPsoPauseHint(void *obj) {
+  (void)obj;
+  if (g_pso_serializer) {
+    atomic_store(&g_pso_pause_hint, true);
+    pso_flush_wake();
+  }
+  return STATUS_SUCCESS;
+}
+
+/* Writes one finished archive of the consolidation: tmp, fsync, sum, both renamed. Returns
+ * its v2 sum text, nil on failure (nothing left behind). */
+static NSString *
+pso_write_chunk(id<MTL4PipelineDataSetSerializer> ser, NSString *path, NSError **err) {
+  NSString *tmp = [path stringByAppendingString:@".tmp"];
+  NSString *sumPath = [path stringByAppendingString:@".sum"];
+  NSString *sumTmp = [sumPath stringByAppendingString:@".tmp"];
+  if (![ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:err]) {
+    unlink(tmp.fileSystemRepresentation);
+    return nil;
+  }
+  pso_sync_file(tmp);
+  NSString *sum = pso_sum_text(tmp);
+  struct stat st;
+  if (!sum || stat(tmp.fileSystemRepresentation, &st) || !pso_write_sum(sumTmp, sum, &st)
+   || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
+   || rename(sumTmp.fileSystemRepresentation, sumPath.fileSystemRepresentation)) {
+    unlink(tmp.fileSystemRepresentation);
+    unlink(sumTmp.fileSystemRepresentation);
+    pso_remove_archive(path);
+    return nil;
+  }
+  return [NSString stringWithContentsOfFile:sumPath encoding:NSUTF8StringEncoding error:nil];
+}
+
+/* Bundle parts 4 and 6: rebuild every descriptor requested this session through a compiler of
+ * its own (its own serializer; the loaded archives and this session's deltas as lookupArchives,
+ * so lookups) into a consolidated set: chunks of at most g_pso_chunk descriptors (the
+ * serializer's share of the peak is one chunk), each flushed to "c-<stamp>-<pid>-<n>", then the
+ * marker "c-<stamp>-<pid>.set" written last. Only then are the files it replaces deleted. An
+ * exit before the marker leaves chunks that anchor nothing (removed later) and every part in
+ * place. Never a backend compile: a descriptor no archive holds is left to a later delta. While
+ * the game requests PSOs (a world entry), it waits for 500 ms without one between descriptors.
+ * Once per session, BACKGROUND QoS, no lock the game takes. */
+static void
+pso_consolidate(const char *why) {
+  NSString *lockPath = [g_pso_dir stringByAppendingPathComponent:@".consolidate"];
+  const int lockFd = open(lockPath.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+  if (lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB)) {
+    if (lockFd >= 0)
+      close(lockFd);
+    PSO_EVENT("consolidation skipped: another process holds .consolidate");
+    return;
+  }
+  /* This session's captures first (at the startup window they are still in the game's
+   * serializer, not in an archive the rebuild could look up): a flush now, through the flush
+   * thread, waited for up to 5 s. */
+  if (g_pso_serializer && atomic_load(&g_pso_pending)) {
+    const unsigned before = atomic_load(&g_pso_flushes);
+    atomic_store(&g_pso_pause_hint, true);
+    pso_flush_wake();
+    for (int t = 0; t < 100 && atomic_load(&g_pso_flushes) == before; t++)
+      usleep(50000);
+    PSO_EVENT("consolidation: the session's captures %s", atomic_load(&g_pso_flushes) != before ? "flushed first" : "not flushed within 5 s");
+  }
+  /* The record is final from here: recording stops, and its memory (it retains
+   * every MTLLibrary the session used) goes once the rebuild is done. */
+  /* The name's time is taken with the snapshot (F-1): a delta flushed while the
+   * rebuild runs is newer than it and so kept at the next start. */
+  const time_t stamp = time(NULL);
+  pthread_mutex_lock(&g_pso_record_mutex);
+  NSArray *requested = [g_pso_requested autorelease];
+  g_pso_requested = nil;
+  g_pso_recording = false;
+  NSArray<NSString *> *parts = [[g_pso_parts copy] autorelease];
+  NSArray<NSString *> *sessionParts = [[g_pso_session_parts copy] autorelease];
+  pthread_mutex_unlock(&g_pso_record_mutex);
+  if (g_pso_consolidate_delay_ms)
+    usleep(g_pso_consolidate_delay_ms * 1000u);
+  /* Nothing new and at most one archive: rebuilding would only drop what this
+   * session didn't use. */
+  if (parts.count <= 1u && !atomic_load(&g_pso_misses)) {
+    flock(lockFd, LOCK_UN);
+    close(lockFd);
+    PSO_EVENT("consolidation skipped: nothing new, %lu archive(s)", (unsigned long)parts.count);
+    return;
+  }
+
+  /* The archives loaded at start are already in g_pso_lookup: load only this
+   * session's deltas. */
+  NSMutableArray *lookup = [NSMutableArray arrayWithArray:g_pso_lookup ?: @[]];
+  for (NSString *path in sessionParts) {
+    if ([lookup count] >= D9MT_PSO_MAX_ARCHIVES)
+      break;
+    id<MTL4Archive> a = [g_pso_device newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
+    if (a) {
+      [lookup addObject:a];
+      [a release];
+    }
+  }
+  MTL4CompilerTaskOptions *opt = [[MTL4CompilerTaskOptions alloc] init];
+  opt.lookupArchives = lookup;
+  NSString *base = [NSString stringWithFormat:@"c-%010llu-%d", (unsigned long long)stamp, (int)getpid()];
+  NSMutableString *marker = [NSMutableString string];
+  id<MTL4PipelineDataSetSerializer> ser = nil;
+  id<MTL4Compiler> compiler = nil;
+  NSError *err = nil;
+  unsigned built = 0u, notArchived = 0u, inChunk = 0u, chunks = 0u, yields = 0u;
+  bool ok = true;
+  for (NSUInteger i = 0; ok && i <= requested.count; i++) {
+    @autoreleasepool {
+      /* a chunk is full, or the last one: flush it */
+      if (inChunk && (inChunk == g_pso_chunk || i == requested.count)) {
+        NSString *name = [NSString stringWithFormat:@"%@-%03u.mtl4archive", base, chunks];
+        NSString *sum = pso_write_chunk(ser, [g_pso_dir stringByAppendingPathComponent:name], &err);
+        if (!sum) {
+          ok = false;
+          break;
+        }
+        [marker appendFormat:@"%@ %@\n", name, sum];
+        chunks++;
+        inChunk = 0u;
+        if (g_pso_chunk_fresh) {
+          [compiler release];
+          [ser release];
+          compiler = nil;
+          ser = nil;
+        }
+        if (g_pso_chunk_hold_ms && i < requested.count)
+          usleep(g_pso_chunk_hold_ms * 1000u);
+      }
+      if (i == requested.count)
+        break;
+      /* the game is requesting PSOs (a world entry): wait for a quiet gap, don't compete */
+      for (;;) {
+        const uint64_t last = atomic_load(&g_pso_last_request);
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - last >= 500000000ull)
+          break;
+        yields++;
+        usleep(100000);
+      }
+      MTL4RenderPipelineDescriptor *d = requested[i];
+      bool held = false;
+      for (id<MTL4Archive> a in lookup) {
+        id<MTLRenderPipelineState> probe = [a newRenderPipelineStateWithDescriptor:d error:nil];
+        if (probe) {
+          [probe release];
+          held = true;
+          break;
+        }
+      }
+      if (!held) {
+        notArchived++;
+        continue;
+      }
+      if (!compiler) {
+        MTL4PipelineDataSetSerializerDescriptor *sd = [[MTL4PipelineDataSetSerializerDescriptor alloc] init];
+        sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+        ser = [g_pso_device newPipelineDataSetSerializerWithDescriptor:sd];
+        [sd release];
+        MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
+        cd.pipelineDataSetSerializer = ser;
+        compiler = ser ? [g_pso_device newCompilerWithDescriptor:cd error:&err] : nil;
+        [cd release];
+        if (!compiler) {
+          ok = false;
+          break;
+        }
+      }
+      id<MTLRenderPipelineState> pso = [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:nil];
+      if (pso) {
+        built++;
+        inChunk++;
+        [pso release];
+      }
+    }
+  }
+  [opt release];
+  [compiler release];
+  [ser release];
+
+  /* The marker last: only now is the set complete, and only then are its parts deleted. */
+  if (ok && chunks) {
+    NSString *mpath = [g_pso_dir stringByAppendingPathComponent:[base stringByAppendingString:@".set"]];
+    NSString *mtmp = [mpath stringByAppendingString:@".tmp"];
+    NSString *text = [NSString stringWithFormat:@"set 1 %u\n%@", chunks, marker];
+    ok = [text writeToFile:mtmp atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    if (ok) {
+      pso_sync_file(mtmp);
+      ok = !rename(mtmp.fileSystemRepresentation, mpath.fileSystemRepresentation);
+    }
+    if (!ok)
+      unlink(mtmp.fileSystemRepresentation);
+  }
+  if (ok && chunks) {
+    for (NSString *part in parts)
+      if (!pso_owner_alive(part.lastPathComponent))
+        pso_remove_archive(part);
+    if (g_pso_set_marker)
+      unlink(g_pso_set_marker.fileSystemRepresentation);
+    NSString *since = [g_pso_dir stringByAppendingPathComponent:@".sessions"];
+    [@"0\n" writeToFile:since atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    fprintf(stderr, "d9mt: PSO archives consolidated (%s): %u builds into %s (%u chunk(s)), %lu replaced, "
+            "%u not archived yet, %u yield(s)\n", why, built, base.UTF8String, chunks,
+            (unsigned long)parts.count, notArchived, yields);
+  } else if (!ok) {
+    for (unsigned k = 0; k < chunks; k++)
+      pso_remove_archive([g_pso_dir stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@-%03u.mtl4archive", base, k]]);
+    fprintf(stderr, "d9mt: PSO archive consolidation failed: %s\n",
+            err ? err.localizedDescription.UTF8String : "(write)");
+  } else {
+    PSO_EVENT("consolidation wrote nothing: 0 of %lu requested descriptors archived yet",
+              (unsigned long)requested.count);
+  }
+  flock(lockFd, LOCK_UN);
+  close(lockFd);
+}
+
+/* The game window is known not to be visible: a pause. Not before AppKit has
+ * been asked once (R2): g_vis_flags starts at 0. */
+static bool
+pso_paused(void) {
+  return g_pso_pause_vis && atomic_load(&g_vis_observing)
+      && !(atomic_load(&g_vis_flags) & WMT_VISIBILITY_VISIBLE);
+}
+
+/* Consolidation runs once, and only after the state cache reported that its prewarm replayed
+ * every recorded pipeline (C-1: otherwise deleting the parts would drop PSOs of content this
+ * session didn't draw). When (part 6), in this order:
+ *   startup window  the coverage signal came within D9MT_PSO_STARTUP_WINDOW_S (30 s) of the
+ *                   start: at once (login, character select: the peak lands there);
+ *   pause           the window known not visible (R2);
+ *   fallback        no complete set for 8 sessions and the deltas over 16 files or 64 MB:
+ *                   after D9MT_PSO_CONSOLIDATE_IDLE_MS (120 s) without a PSO request.
+ * One line says which, so field reports show it. */
+#define D9MT_PSO_FALLBACK_SESSIONS 8u
+#define D9MT_PSO_FALLBACK_FILES    16u
+#define D9MT_PSO_FALLBACK_MB       64u
+static void *
+pso_consolidate_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-consolidate");
+  pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+  bool told = false;
+  uint64_t seen = 0u;   /* the coverage signal's time at the last look */
+  const bool fallback = g_pso_sessions_since >= D9MT_PSO_FALLBACK_SESSIONS
+    && (g_pso_delta_files > D9MT_PSO_FALLBACK_FILES || g_pso_delta_bytes > (uint64_t)D9MT_PSO_FALLBACK_MB << 20);
+  for (;;) {
+    const uint64_t last = atomic_load(&g_pso_last_request);
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    const uint64_t cov = atomic_load(&g_pso_coverage_ns);
+    seen = cov;
+    if (atomic_load(&g_pso_coverage) == 1 && cov) {
+      const bool startup = cov - g_pso_t0 <= g_pso_startup_window_ns;
+      const char *why = startup ? "startup window" : pso_paused() ? "pause"
+        : (fallback && last && now - last >= g_pso_consolidate_idle_ns) ? "fallback" : NULL;
+      if (!told) {
+        told = true;
+        fprintf(stderr, "d9mt: PSO archives: coverage at %.1f s; %s\n", (double)(cov - g_pso_t0) / 1e9,
+                startup ? "consolidating now (startup window)"
+                : fallback ? "outside the startup window: at a pause, or after 120 s idle (fallback)"
+                : "outside the startup window: at a pause");
+      }
+      if (why) {
+        PSO_EVENT("consolidation starts (%s)", why);
+        @autoreleasepool {
+          pso_consolidate(why);
+        }
+        return NULL;
+      }
+    }
+    uint64_t wait = 1000000000ull;
+    if (fallback && last && now - last < g_pso_consolidate_idle_ns && g_pso_consolidate_idle_ns - (now - last) < wait)
+      wait = g_pso_consolidate_idle_ns - (now - last);
+    /* woken at once by the coverage signal (the startup window starts there) */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    const uint64_t at = (uint64_t)ts.tv_nsec + wait;
+    ts.tv_sec += (time_t)(at / 1000000000ull);
+    ts.tv_nsec = (long)(at % 1000000000ull);
+    pthread_mutex_lock(&g_pso_cons_mutex);
+    if (atomic_load(&g_pso_coverage_ns) == seen)
+      pthread_cond_timedwait(&g_pso_cons_cond, &g_pso_cons_mutex, &ts);
+    pthread_mutex_unlock(&g_pso_cons_mutex);
+  }
+}
+
+/* PE side (the state cache) once its prewarm has handled every prewarmable entry:
+ * handle = 1 if that replayed what the archives were built from (the file loaded
+ * whole under its key for CoverageMinSessions sessions, nothing rejected), else 0. */
+static NTSTATUS
+_D9MTPsoArchiveCoverage(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  atomic_store(&g_pso_coverage, params->handle ? 1 : -1);
+  pthread_mutex_lock(&g_pso_cons_mutex);
+  atomic_store(&g_pso_coverage_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+  pthread_cond_signal(&g_pso_cons_cond);
+  pthread_mutex_unlock(&g_pso_cons_mutex);
+  PSO_EVENT("coverage signal, complete=%d", params->handle ? 1 : 0);
+  return STATUS_SUCCESS;
+}
+
+static void
+pso_consolidate_start(void) {
+  if (!g_pso_archive_first)
+    return;
+  pthread_t thread;
+  if (!pthread_create(&thread, NULL, pso_consolidate_thread, NULL))
+    pthread_detach(thread);
 }
 
 static NSString *
@@ -6187,6 +6667,60 @@ pso_sanitize(NSString *s) {
   return [NSString stringWithUTF8String:out];
 }
 
+/* The game's executable, a directory of its own under the PSO base: consolidation
+ * deletes what the state cache of one executable doesn't replay, so two games (or a
+ * game and its launcher) must not share archives. Under Wine argv[0] is the Windows
+ * path ("C:\...\swtor.exe"). Lowercase, [a-z0-9._-], at most 64 characters, never
+ * "os-..." (the cleanup's prefix); nil if it isn't an .exe. */
+static NSString *
+pso_exe_component(void) {
+  char **argv = *_NSGetArgv();
+  const char *a = argv ? argv[0] : NULL;
+  if (!a)
+    return nil;
+  for (const char *p = a; *p; p++)
+    if (*p == '/' || *p == '\\')
+      a = p + 1;
+  const size_t len = strlen(a);
+  if (len <= 4u || strcasecmp(a + len - 4u, ".exe"))
+    return nil;
+  char out[65];
+  size_t n = 0u;
+  for (; n < len && n < 64u; n++) {
+    const char c = (char)tolower((unsigned char)a[n]);
+    out[n] = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '.' || c == '-' ? c : '_';
+  }
+  out[n] = '\0';
+  if (!strncmp(out, "os-", 3u))
+    out[2] = '_';
+  return [NSString stringWithUTF8String:out];
+}
+
+/* The first executable to start after the update takes the flat directory of earlier
+ * releases (<base>/os-<leaf>, every executable's PSOs together) as its own, with one
+ * atomic rename under an flock on <base>/.migrate; the others start cold. */
+static void
+pso_migrate_flat(NSString *base, NSString *root, NSString *leaf) {
+  NSString *flat = [base stringByAppendingPathComponent:leaf];
+  NSString *mine = [root stringByAppendingPathComponent:leaf];
+  struct stat st;
+  if (!stat(mine.fileSystemRepresentation, &st) || stat(flat.fileSystemRepresentation, &st))
+    return;
+  const int fd = open([base stringByAppendingPathComponent:@".migrate"].fileSystemRepresentation,
+                      O_RDWR | O_CREAT, 0644);
+  if (fd < 0)
+    return;
+  if (!flock(fd, LOCK_EX)) {
+    if (stat(mine.fileSystemRepresentation, &st) && !stat(flat.fileSystemRepresentation, &st)
+     && (!mkdir(root.fileSystemRepresentation, 0755) || errno == EEXIST)) {
+      if (!rename(flat.fileSystemRepresentation, mine.fileSystemRepresentation))
+        fprintf(stderr, "d9mt: PSO archives of earlier releases now %s's\n", root.lastPathComponent.UTF8String);
+    }
+    flock(fd, LOCK_UN);
+  }
+  close(fd);
+}
+
 static void
 pso_archive_init(id<MTLDevice> device) {
   const char *off = getenv("D9MT_PSO_ARCHIVE");
@@ -6195,9 +6729,54 @@ pso_archive_init(id<MTLDevice> device) {
   const char *env = getenv("D9MT_PSO_ARCHIVE_DIR");
   if (env && (!*env || !strcmp(env, "0")))
     return;
+  const char *verify = getenv("D9MT_PSO_VERIFY");
+  g_pso_verify = verify && !strcmp(verify, "1");
   const char *every = getenv("D9MT_PSO_FLUSH_EVERY");
   if (every && atoi(every) > 0)
     g_pso_flush_every = (unsigned)atoi(every);
+  /* Archive first needs the consolidation, which covers the working set only
+   * with the state cache's prewarm: off together with the state cache (R1). */
+  const char *sc = getenv("D9MT_STATE_CACHE"), *af = getenv("D9MT_PSO_ARCHIVE_FIRST");
+  g_pso_archive_first = !(sc && !strcmp(sc, "0")) && !(af && !strcmp(af, "0"));
+  const char *afm = getenv("D9MT_PSO_ARCHIVE_FIRST_MAX");
+  if (afm && *afm)
+    g_pso_archive_first_max = (unsigned)strtoul(afm, NULL, 10);
+  const char *fidle = getenv("D9MT_PSO_FLUSH_IDLE_MS");
+  if (fidle && *fidle)
+    g_pso_flush_idle_ns = (uint64_t)strtoull(fidle, NULL, 10) * 1000000ull;
+  const char *fback = getenv("D9MT_PSO_FLUSH_BACKSTOP_MS");
+  if (fback && *fback)
+    g_pso_flush_backstop_ns = (uint64_t)strtoull(fback, NULL, 10) * 1000000ull;
+  const char *ndelay = getenv("D9MT_PSO_NOTE_DELAY_MS");
+  if (ndelay && *ndelay)
+    g_pso_note_delay_ms = (unsigned)strtoul(ndelay, NULL, 10);
+  const char *fhold = getenv("D9MT_PSO_FLUSH_HOLD_MS");
+  if (fhold && *fhold)
+    g_pso_flush_hold_ms = (unsigned)strtoul(fhold, NULL, 10);
+  const char *stats = getenv("D9MT_PSO_STATS");
+  g_pso_stats = stats && !strcmp(stats, "1");
+  g_pso_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const char *win = getenv("D9MT_PSO_STARTUP_WINDOW_S");
+  if (win && *win)
+    g_pso_startup_window_ns = (uint64_t)strtoull(win, NULL, 10) * 1000000000ull;
+  const char *chunk = getenv("D9MT_PSO_CONSOLIDATE_CHUNK");
+  if (chunk && atoi(chunk) > 0)
+    g_pso_chunk = (unsigned)atoi(chunk);
+  const char *fresh = getenv("D9MT_PSO_CHUNK_FRESH");
+  if (fresh && *fresh)
+    g_pso_chunk_fresh = strcmp(fresh, "0") != 0;
+  const char *chold = getenv("D9MT_PSO_CHUNK_HOLD_MS");
+  if (chold && *chold)
+    g_pso_chunk_hold_ms = (unsigned)strtoul(chold, NULL, 10);
+  const char *delay = getenv("D9MT_PSO_CONSOLIDATE_DELAY_MS");
+  if (delay && *delay)
+    g_pso_consolidate_delay_ms = (unsigned)strtoul(delay, NULL, 10);
+  const char *idle = getenv("D9MT_PSO_CONSOLIDATE_IDLE_MS");
+  if (idle && *idle)
+    g_pso_consolidate_idle_ns = (uint64_t)strtoull(idle, NULL, 10) * 1000000ull;
+  /* M12: benchmarks on an occluded virtual display turn the pause trigger off */
+  const char *pv = getenv("D9MT_PSO_PAUSE_VIS");
+  g_pso_pause_vis = !(pv && !strcmp(pv, "0"));
 
   NSString *base;
   if (env) {
@@ -6218,48 +6797,202 @@ pso_archive_init(id<MTLDevice> device) {
   NSString *leaf = [NSString stringWithFormat:@"os-%@-%@",
     pso_sanitize([NSString stringWithUTF8String:osbuild] ?: @"unknown"),
     pso_sanitize(device.name ?: @"gpu")];
-  NSString *dir = [base stringByAppendingPathComponent:leaf];
+  /* <base>/<exe>/os-<leaf>. Not an .exe: the flat <base>/os-<leaf> of earlier
+   * releases, shared, so as there: archive first and consolidation off. */
+  NSString *exe = pso_exe_component();
+  NSString *root = exe ? [base stringByAppendingPathComponent:exe] : base;
+  NSString *dir = [root stringByAppendingPathComponent:leaf];
+  if (!exe)
+    g_pso_archive_first = false;
 
   NSFileManager *fm = [NSFileManager defaultManager];
+  if (exe && [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil])
+    pso_migrate_flat(base, root, leaf);
   if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) {
     fprintf(stderr, "d9mt: PSO archives disabled (cannot create %s)\n", dir.UTF8String);
     return;
   }
-  for (NSString *name in [fm contentsOfDirectoryAtPath:base error:nil]) {
-    if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
-      [fm removeItemAtPath:[base stringByAppendingPathComponent:name] error:nil];
+  /* Archives of another macOS build or GPU: in this executable's directory and,
+   * left by earlier releases, in the flat one (never the flat os-<leaf> itself,
+   * which an earlier release may still use; an executable's directory has no
+   * "os-" prefix). */
+  for (NSString *r in exe ? @[ root, base ] : @[ base ]) {
+    for (NSString *name in [fm contentsOfDirectoryAtPath:r error:nil]) {
+      if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
+        [fm removeItemAtPath:[r stringByAppendingPathComponent:name] error:nil];
+    }
   }
 
   /* Collect archives, drop leftovers of interrupted writes and orphans. */
   NSMutableArray<NSString *> *names = [NSMutableArray array];
+  NSMutableArray<NSString *> *markers = [NSMutableArray array];
   const time_t now = time(NULL);
   for (NSString *name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
     NSString *path = [dir stringByAppendingPathComponent:name];
-    if ([name hasSuffix:@".mtl4archive"]) {
+    if ([name hasSuffix:@".set"]) {
+      [markers addObject:name];
+    } else if ([name hasSuffix:@".mtl4archive"]) {
       [names addObject:name];
-    } else if ([name hasSuffix:@".tmp"]) {
+    } else if ([name hasSuffix:@".tmp"] || [name hasSuffix:@".metallib"]) {
+      /* .metallib: serializeAsArchiveAndFlushToURL's intermediate file (a UUID name in
+       * the archive's directory), left behind when the process exits during a flush
+       * (the flush thread, part 5): 60 MB and more each. Not ours to read; old enough,
+       * no process can still be writing it. */
       struct stat st;
-      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > 600)
+      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
         unlink(path.fileSystemRepresentation);
     } else if ([name hasSuffix:@".mtl4archive.sum"]) {
-      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]])
+      struct stat st;
+      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]]
+       && !stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
         unlink(path.fileSystemRepresentation);
     }
   }
-  /* "<unix-time>-<pid>-<seq>": lexical order == age; newest first. */
+  /* "<unix-time>-<pid>-<seq>" (deltas) and "c-<unix-time>-<pid>" (consolidated):
+   * lexical order == age; newest first. */
   [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [b compare:a]; }];
 
   NSMutableArray *archives = [NSMutableArray array];
+  NSMutableArray<NSString *> *parts = [NSMutableArray array];
+  NSUInteger consolidatedLoaded = 0u;
+  if (g_pso_archive_first) {
+    /* The newest consolidated archive, then every delta written after it (by
+     * file time: C-3), newest first, up to D9MT_PSO_MAX_ARCHIVES files and
+     * D9MT_PSO_MAX_MB. While another process consolidates (it holds the flock),
+     * this start deletes only proven damage. */
+    const int lockFd = open([dir stringByAppendingPathComponent:@".consolidate"].fileSystemRepresentation,
+                            O_RDWR | O_CREAT, 0644);
+    const bool ruleDeletes = lockFd >= 0 && !flock(lockFd, LOCK_EX | LOCK_NB);
+    /* The newest complete consolidated set (part 6): its chunks are kept and asked first,
+     * and its time anchors the delta rule. Older sets go by the retention rule. A chunk of
+     * no complete set anchors nothing and isn't loaded; it is removed only once it is older
+     * than D9MT_PSO_YOUNG_S and its owner has ended (that process may be writing the set
+     * right now: M-1). */
+    NSMutableArray<NSString *> *cands = [NSMutableArray arrayWithArray:markers];
+    for (NSString *name in names)
+      if (pso_c_name(name, NULL, NULL) == PSO_C_SINGLE)
+        [cands addObject:name];
+    [cands sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [b compare:a]; }];
+    NSString *setBase = nil;
+    NSArray<NSString *> *setChunks = nil;
+    NSMutableSet<NSString *> *otherSets = [NSMutableSet set];
+    time_t since = 0;
+    for (NSString *cand in cands) {
+      time_t stamp = 0;
+      NSString *base = nil;
+      const int kind = pso_c_name(cand, &stamp, &base);
+      NSString *path = [dir stringByAppendingPathComponent:cand];
+      NSArray<NSString *> *chunks = nil;
+      if (kind == PSO_C_MARKER) {
+        chunks = pso_set_chunks(dir, cand);
+      } else {
+        const int v = pso_archive_judge(path);
+        if (v == PSO_SKIP)
+          continue;
+        if (v == PSO_OK)
+          chunks = @[cand];
+        else
+          pso_remove_archive(path);
+      }
+      if (chunks && !setBase) {
+        setBase = base;
+        setChunks = chunks;
+        since = stamp;
+        continue;
+      }
+      /* an older set, or a marker whose chunks don't check out */
+      if (ruleDeletes && !pso_owner_alive(cand)) {
+        [otherSets addObject:base];
+        if (kind == PSO_C_MARKER)
+          unlink(path.fileSystemRepresentation);
+        else
+          pso_remove_archive(path);
+      }
+    }
+    NSMutableArray<NSString *> *keep = [NSMutableArray arrayWithArray:setChunks ?: @[]];
+    for (NSString *name in names) {
+      NSString *base = nil;
+      if (pso_c_name(name, NULL, &base) != PSO_C_CHUNK || [setChunks containsObject:name])
+        continue;
+      NSString *path = [dir stringByAppendingPathComponent:name];
+      struct stat st;
+      if ([otherSets containsObject:base]
+       || (ruleDeletes && !pso_owner_alive(name) && !stat(path.fileSystemRepresentation, &st)
+           && now - st.st_mtime > D9MT_PSO_YOUNG_S))
+        pso_remove_archive(path);
+    }
+    uint64_t bytes = 0u;
+    for (NSString *name in names) {
+      if ([name hasPrefix:@"c-"])
+        continue;
+      NSString *path = [dir stringByAppendingPathComponent:name];
+      struct stat st;
+      const bool have = !stat(path.fileSystemRepresentation, &st);
+      if (have && ((since && st.st_mtime < since) || keep.count >= D9MT_PSO_MAX_ARCHIVES
+                   || bytes + (uint64_t)st.st_size > (uint64_t)D9MT_PSO_MAX_MB << 20)) {
+        if (ruleDeletes && !pso_owner_alive(name))
+          pso_remove_archive(path);
+        continue;
+      }
+      const int v = pso_archive_judge(path);
+      if (v == PSO_BAD)
+        pso_remove_archive(path);
+      if (v == PSO_OK) {
+        [keep addObject:name];
+        bytes += have ? (uint64_t)st.st_size : 0u;
+      }
+    }
+    if (lockFd >= 0) {
+      if (ruleDeletes)
+        flock(lockFd, LOCK_UN);
+      close(lockFd);
+    }
+    /* for the consolidation: the marker it replaces, the deltas and sessions since the
+     * last complete set (the fallback's condition) */
+    if (setBase && ![setChunks.firstObject isEqualToString:[setBase stringByAppendingString:@".mtl4archive"]])
+      g_pso_set_marker = [[dir stringByAppendingPathComponent:[setBase stringByAppendingString:@".set"]] retain];
+    g_pso_delta_files = (unsigned)(keep.count - setChunks.count);
+    g_pso_delta_bytes = bytes;
+    NSString *sessions = [dir stringByAppendingPathComponent:@".sessions"];
+    g_pso_sessions_since = (unsigned)[[NSString stringWithContentsOfFile:sessions encoding:NSUTF8StringEncoding
+                                                                    error:nil] integerValue] + 1u;
+    [[NSString stringWithFormat:@"%u\n", g_pso_sessions_since] writeToFile:sessions atomically:YES
+                                                                   encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *name in keep) {
+      NSString *path = [dir stringByAppendingPathComponent:name];
+      NSError *err = nil;
+      id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+      if (a) {
+        if ([name hasPrefix:@"c-"])
+          consolidatedLoaded++;
+        [archives addObject:a];
+        [parts addObject:path];
+        [a release];
+      } else {
+        if (!pso_gone(path)) {
+          fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+                  err ? err.localizedDescription.UTF8String : "(no error)");
+          pso_remove_archive(path);
+        }
+      }
+    }
+  }
   NSMutableSet<NSString *> *sessions = [NSMutableSet set];
-  for (NSString *name in names) {
+  for (NSString *name in g_pso_archive_first ? @[] : names) {
     NSString *path = [dir stringByAppendingPathComponent:name];
     NSArray<NSString *> *parts = [name componentsSeparatedByString:@"-"];
     NSString *session = parts.count >= 3u ? [NSString stringWithFormat:@"%@-%@", parts[0], parts[1]] : nil;
     if (session && ![sessions containsObject:session] && sessions.count < D9MT_PSO_KEEP_SESSIONS)
       [sessions addObject:session];
-    if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES
-     || !pso_archive_valid(path)) {
-      pso_remove_archive(path);
+    if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES) {
+      if (!pso_owner_alive(name))
+        pso_remove_archive(path);
+      continue;
+    }
+    const int v = pso_archive_judge(path);
+    if (v != PSO_OK) {
+      if (v == PSO_BAD)
+        pso_remove_archive(path);
       continue;
     }
     NSError *err = nil;
@@ -6268,14 +7001,29 @@ pso_archive_init(id<MTLDevice> device) {
       [archives addObject:a];
       [a release];
     } else {
-      fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
-              err ? err.localizedDescription.UTF8String : "(no error)");
-      pso_remove_archive(path);
+      if (!pso_gone(path)) {
+        fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
+                err ? err.localizedDescription.UTF8String : "(no error)");
+        pso_remove_archive(path);
+      }
     }
   }
   if (archives.count) {
     g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
     g_pso_task_options.lookupArchives = archives;
+  }
+  if (g_pso_archive_first) {
+    /* A miss asks every archive in g_pso_lookup before the compiler, so only the
+     * consolidated set's chunks and the newest D9MT_PSO_ARCHIVE_FIRST_MAX deltas are
+     * asked first; older deltas are still lookupArchives of the compiler (a hit
+     * there is captured into a new delta, so the old one can age out). */
+    const NSUInteger first = consolidatedLoaded + g_pso_archive_first_max;
+    g_pso_lookup = [[archives subarrayWithRange:NSMakeRange(0u, MIN(first, archives.count))] copy];
+    g_pso_parts = [parts retain];
+    g_pso_session_parts = [[NSMutableArray alloc] init];
+    g_pso_requested = [[NSMutableArray alloc] init];
+    g_pso_recording = true;
+    g_pso_device = [device retain];
   }
 
   MTL4PipelineDataSetSerializerDescriptor *sd = [[MTL4PipelineDataSetSerializerDescriptor alloc] init];
@@ -6285,11 +7033,20 @@ pso_archive_init(id<MTLDevice> device) {
   if (g_pso_serializer) {
     g_pso_dir = [dir retain];
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
-    atexit(pso_flush_atexit);
+    /* One device per process (d9mt makes one): the fallback is this device's (R3). */
+    MTL4CompilerDescriptor *plain = [[MTL4CompilerDescriptor alloc] init];
+    g_pso_fallback = [device newCompilerWithDescriptor:plain error:nil];
+    [plain release];
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, pso_flush_thread, NULL))
+      pthread_detach(thread);
+    if (g_pso_stats)
+      atexit(pso_stats_atexit);
+    pso_consolidate_start();
   }
-  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
+  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u), archive first %s\n",
           (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
-          g_pso_flush_every);
+          g_pso_flush_every, g_pso_archive_first ? "on" : "off");
 }
 
 static void
@@ -6308,15 +7065,22 @@ pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
     desc.pipelineDataSetSerializer = g_pso_serializer;
 }
 
+/* A captured build: the flush thread decides when to write it (part 5). It
+ * only needs waking for the first pending PSO (it sleeps up to 1 s otherwise)
+ * and when FLUSH_EVERY are pending (the backstop's clock starts). */
 static void
 pso_note_compiled(void) {
   if (!g_pso_serializer)
     return;
-  if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
-    return;
-  pthread_rwlock_wrlock(&g_pso_lock);
-  pso_flush_locked();
-  pthread_rwlock_unlock(&g_pso_lock);
+  const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  atomic_store(&g_pso_last_build, now);
+  const unsigned n = atomic_fetch_add(&g_pso_pending, 1u) + 1u;
+  if (n == g_pso_flush_every) {
+    uint64_t zero = 0u;
+    atomic_compare_exchange_strong(&g_pso_due_since, &zero, now);
+  }
+  if (n == 1u || n == g_pso_flush_every)
+    pso_flush_wake();
 }
 
 static NTSTATUS
@@ -6793,15 +7557,55 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   descriptor.rasterizationEnabled = info->rasterization_enabled ? YES : NO;
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
 
+  /* Archive first (bundle part 3): a hit neither compiles nor is captured, and
+   * takes neither g_pso_lock nor a pso_note_compiled() count (M6). */
+  if (g_pso_archive_first) {
+    pthread_mutex_lock(&g_pso_record_mutex);
+    if (g_pso_recording)
+      [g_pso_requested addObject:descriptor];
+    pthread_mutex_unlock(&g_pso_record_mutex);
+    atomic_store(&g_pso_last_request, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    for (id<MTL4Archive> a in g_pso_lookup) {
+      id<MTLRenderPipelineState> hit = [a newRenderPipelineStateWithDescriptor:descriptor error:nil];
+      if (hit) {
+        atomic_fetch_add(&g_pso_hits, 1u);
+        params->ret_pso = (obj_handle_t)hit;
+        params->ret_error = 0;
+        [descriptor release];
+        return STATUS_SUCCESS;
+      }
+    }
+    atomic_fetch_add(&g_pso_misses, 1u);
+  }
+
   NSError *err = NULL;
-  pthread_rwlock_rdlock(&g_pso_lock);
+  /* A flush holds the lock: build through the serializer-less compiler instead of
+   * waiting for it (M9); that PSO isn't captured, it is the next time it misses. */
+  if (g_pso_fallback && pthread_rwlock_tryrdlock(&g_pso_lock)) {
+    params->ret_pso = (obj_handle_t)[g_pso_fallback newRenderPipelineStateWithDescriptor:descriptor
+                                                                   compilerTaskOptions:g_pso_task_options
+                                                                                 error:&err];
+    params->ret_error = (obj_handle_t)[err retain];
+    if (params->ret_pso)
+      atomic_fetch_add(&g_pso_uncaptured, 1u);
+    [descriptor release];
+    return STATUS_SUCCESS;
+  }
+  if (!g_pso_fallback)
+    pthread_rwlock_rdlock(&g_pso_lock);
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:g_pso_task_options
                                                                                                    error:&err];
+  /* Counted before the lock is released (S-1): otherwise a flush could serialize
+   * this build in between, and the late count would make the next flush write a
+   * drained serializer. Only atomics and a signal. */
+  if (params->ret_pso) {
+    if (g_pso_note_delay_ms && (atomic_fetch_add(&g_pso_note_delay_n, 1u) & 1u))
+      usleep(g_pso_note_delay_ms * 1000u);
+    pso_note_compiled();
+  }
   pthread_rwlock_unlock(&g_pso_lock);
   params->ret_error = (obj_handle_t)[err retain];
-  if (params->ret_pso)
-    pso_note_compiled();
   [descriptor release];
   return STATUS_SUCCESS;
 }
@@ -7239,6 +8043,8 @@ D9MT_POOLED(thunk_AirconvUnsupportedGetArgumentsInfo)
 D9MT_POOLED(thunk_AirconvUnsupportedInitialize)
 D9MT_POOLED(thunk_D9MTAirCompile)
 D9MT_POOLED(thunk_D9MTAirFree)
+D9MT_POOLED(_D9MTPsoArchiveCoverage)
+D9MT_POOLED(_D9MTPsoPauseHint)
 D9MT_POOLED(thunk_D9MTAirVersion)
 D9MT_POOLED(thunk_DXSOCompile)
 D9MT_POOLED(thunk_DXSODestroy)
@@ -7474,6 +8280,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_D9MTPsoArchiveCoverage_pooled,
+    &_D9MTPsoPauseHint_pooled,
 
 };
 
@@ -7694,6 +8502,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_D9MTPsoArchiveCoverage_pooled,
+    &_D9MTPsoPauseHint_pooled,
 
 };
 #endif

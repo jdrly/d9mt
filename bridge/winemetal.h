@@ -279,10 +279,16 @@ struct WMTSamplerInfo {
   bool normalized_coords;
   bool lod_average;
   bool support_argument_buffers;
+  /* 1: lod_bias is set (MTLSamplerDescriptor.lodBias, macOS 26). Was padding: a caller built
+     before lod_bias zeroes it (callers must zero the whole struct), so its 32-byte struct is
+     never read past gpu_resource_id. */
+  uint8_t lod_bias_present;
   uint64_t gpu_resource_id;
+  float lod_bias;              /* S4.6 in Metal: [-16, 15.984], 1/64 steps */
+  uint32_t padding;
 };
 
-STATIC_ASSERT(sizeof(WMTSamplerInfo) == 32);
+STATIC_ASSERT(sizeof(WMTSamplerInfo) == 40);
 
 WINEMETAL_API obj_handle_t MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info);
 
@@ -2244,6 +2250,14 @@ WINEMETAL_API void MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawab
 #define WMT_VISIBILITY_MINIATURIZED    0x4u
 
 WINEMETAL_API uint64_t MetalView_visibility(obj_handle_t view);
+
+/* d9mt PSO archives: the state cache's prewarm has handled every loaded entry;
+ * complete = it replayed everything the archives were built from, so the
+ * bridge may consolidate them and delete the parts. */
+WINEMETAL_API void D9MTPsoArchiveCoverage(bool complete);
+
+/* d9mt PSO archives: a pause (device Reset); the bridge flushes pending PSOs now. */
+WINEMETAL_API void D9MTPsoPauseHint(void);
 
 WINEMETAL_API void MTL4RenderCommandEncoder_setVisibilityResultMode(
     obj_handle_t encoder, uint32_t mode, uint64_t offset);

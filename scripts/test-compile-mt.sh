@@ -22,13 +22,15 @@ DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 # MT_BINS="a.bin b.bin" limits the shader set (all of air/tests/bin by default)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
 
+# nothing is flushed at exit (bundle part 5): time for the cold run's big flush
+export MT_SETTLE_MS="${MT_SETTLE_MS:-5000}"
 run_pair() { # <harness> <winemetal.so> <workdir>
   rm -rf "$3"; mkdir -p "$3"
   echo "--- $(basename "$1"): cold"
   "$1" "$2" "$3" "${BINS[@]}"
   echo "--- $(basename "$1"): warm"
   "$1" "$2" "$3" "${BINS[@]}"
-  ls "$3/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  ls "$3/pso"/mt.exe/os-*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
 }
 
 # Needs DXVK's native Windows headers (include/native/{windows,directx} of a
@@ -52,7 +54,7 @@ run_pair "$OUT/compile_mt_test" "$V2/build/bridge/winemetal.so" "$OUT/work"
 echo "[compile-mt] ThreadSanitizer build of the unix side"
 TS=(-fsanitize=thread -g -O1)
 CFLAGS_UNIX=(-ObjC -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" "$BR/unix/pso_archive_check.c"; do
   clang "${CFLAGS_UNIX[@]}" "${TS[@]}" -c "$src" -o "$OUT/$(basename "$src").tsan.o"
 done
 clang++ "${INC[@]}" "${TS[@]}" -fvisibility=hidden \
@@ -64,7 +66,7 @@ printf '%s\n' ___wine_unix_call_funcs ___wine_unix_call_wow64_funcs _d9mtair_ver
 # AirBuilder/LLVM/dxbc-spirv stay uninstrumented (prebuilt): TSan still sees
 # every lock and shared access in the bridge code that drives them.
 clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
-  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT/airlib_unix.tsan.o" \
+  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/air_cache.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT"/pso_archive_check.c.tsan.o "$OUT/airlib_unix.tsan.o" \
   "$AIRLIB_OBJ"/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OBJ"/third_party_dxbc-spirv_util_*.o \
   "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" \
   "$LLVM"/lib/libLLVM*.a \

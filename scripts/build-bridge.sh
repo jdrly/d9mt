@@ -32,11 +32,6 @@ LLVM="$V2/toolchains/llvm-x86_64"
 # link a stale air_builder.o into winemetal.so.
 bash "$V2/scripts/build-d9mtair.sh"
 
-CORE_OBJS=("$OBJ"/../../airlib/obj/third_party_dxbc-spirv_ir_*.o \
-           "$OBJ"/../../airlib/obj/third_party_dxbc-spirv_util_*.o \
-           "$OBJ"/../../airlib/obj/air_air_builder.cpp.o \
-           "$OBJ"/../../airlib/obj/air_air_metallib.cpp.o)
-
 CXXFLAGS_UNIX=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
                -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
                -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
@@ -52,7 +47,8 @@ clang++ "${CXXFLAGS_UNIX[@]}" \
   -c "$V2/airlib/unix.cpp" -o "$OBJ/airlib_unix_renamed.o"
 
 echo "[bridge] unix winemetal.so"
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/air_cache.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" \
+           "$BR/unix/pso_archive_check.c"; do
   obj="$OBJ/$(basename "$src").o"
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
     echo "[cc] ${src#$BR/}"
@@ -69,14 +65,31 @@ _d9mtair_compile
 _d9mtair_free
 EOF
 
+# The AIR cache's build identity (S1, docs/bridge-bundle.md): one list of everything that
+# decides the bytes an AIR compile returns: the codegen (AirBuilder, metallib writer, IR
+# core, the d9mtair compile thunk, LLVM) and the cache in front of it (air_cache.c, the
+# sqlite store cache.c). The link takes exactly this list; the Metal thunks
+# (winemetal_unix.c) aren't in it, so changing them keeps every user's AIR cache. The
+# objects are path-free (-ffile-prefix-map) and reproducible, so the hash changes when
+# their contents do (also with a new clang/Xcode or LLVM build: a cold cache, never a
+# stale one). Release builds are clean builds: build-d9mtair.sh rebuilds by .cpp mtime,
+# so an edit to an air/ header alone isn't compiled in (nor hashed).
+shopt -s nullglob
+CODEGEN_OBJS=("$AIRLIB_OUT"/obj/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OUT"/obj/third_party_dxbc-spirv_util_*.o
+              "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o"
+              "$OBJ/airlib_unix_renamed.o" "$OBJ/air_cache.c.o" "$OBJ/cache.c.o"
+              "${LLVM_LIBS[@]}")
+shopt -u nullglob
+codegen_id="$(cat "${CODEGEN_OBJS[@]}" | shasum -a 256 | cut -c1-64)"
+# Regenerated, compiled and linked on every run (never a stale object: M1).
+printf 'const char d9mt_air_codegen_id[] = "D9MT-AIR-CODEGEN-ID %s";\n' "$codegen_id" > "$OBJ/air_codegen_id.c"
+clang -O2 -arch x86_64 -c "$OBJ/air_codegen_id.c" -o "$OBJ/air_codegen_id.c.o"
+echo "[bridge] AIR codegen identity ${codegen_id:0:32} (${#CODEGEN_OBJS[@]} inputs)"
+
 clang++ -arch x86_64 -dynamiclib \
   -o "$OUT/winemetal.so" \
-  "$OBJ/winemetal_unix.c.o" "$OBJ/cache.c.o" "$OBJ/dxso_stubs.c.o" \
-  "$OBJ/airlib_unix_renamed.o" \
-  $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_ir_*.o) \
-  $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_util_*.o 2>/dev/null || true) \
-  "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
-  "${LLVM_LIBS[@]}" \
+  "$OBJ/winemetal_unix.c.o" "$OBJ/dxso_stubs.c.o" "$OBJ/pso_archive_check.c.o" "$OBJ/air_codegen_id.c.o" \
+  "${CODEGEN_OBJS[@]}" \
   -install_name @rpath/winemetal.so \
   -Wl,-exported_symbols_list,"$OUT/exports.list" \
   -Wl,-U,_NtSetEvent -Wl,-U,_macdrv_get_metal_layer \
@@ -87,6 +100,12 @@ clang++ -arch x86_64 -dynamiclib \
   -framework MetalFX \
   -lsqlite3 -lm -lpthread
 echo "  -> $OUT/winemetal.so ($(wc -c < "$OUT/winemetal.so") bytes)"
+# The identity in the .so must be the one of the objects just linked.
+linked_id="$(strings -a "$OUT/winemetal.so" | sed -n 's/^D9MT-AIR-CODEGEN-ID \([0-9a-f]\{64\}\)$/\1/p')"
+if [ "$linked_id" != "$codegen_id" ]; then
+  echo "FATAL: winemetal.so carries AIR codegen identity '${linked_id:-none}', the objects hash to $codegen_id" >&2
+  exit 1
+fi
 
 echo "[bridge] ntdll import libs"
 cat > "$OUT/ntdll-cx32.def" <<'EOF'

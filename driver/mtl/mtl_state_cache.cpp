@@ -1187,7 +1187,12 @@ namespace dxvk {
 
     // A session that never wrote the file has the same number as this one would: count
     // past its journal records, so they don't count as used in this session.
-    m_session = std::max(r.session, jr.maxSession) + 1u;
+    // A file whose entries were dropped (another key signature, header or version) starts
+    // its session count over: the count then also says how many sessions the entries
+    // have been recorded under this key (psoArchiveCoverage).
+    const bool restarted = r.status == ParseStatus::KeyMismatch || r.status == ParseStatus::BadHeader
+                        || r.status == ParseStatus::OlderVersion;
+    m_session = restarted ? 1u : std::max(r.session, jr.maxSession) + 1u;
     const uint32_t capped = m_db.applyCap(m_config.maxEntries);
     m_dirty |= capped != 0u;
     m_entries.store(m_db.size());
@@ -1203,7 +1208,18 @@ namespace dxvk {
       m_indexBuilt = true;
       indexed = m_index.indexedCount();
       ready   = m_index.readyCount();
+      m_coverageEntries = indexed;
     }
+
+    // The prewarm replays what the PSO archives were built from when the file loaded whole
+    // under this key for CoverageMinSessions sessions (so it holds more than one session's
+    // draws) and nothing was rejected. Entries outside the prewarm window (unused for 32
+    // sessions) and those over the cap are the state cache's own decision, like today's
+    // archive retention; entries whose shader doesn't compile here can't match an archived
+    // PSO (psoArchiveCoverage).
+    m_coverageAtLoad.store(r.status == ParseStatus::Ok && !r.corrupt && !r.truncated && !invalid
+      && !m_suspects.load() && !m_prewarmOff.load() && !m_fileDropped.load()
+      && indexed && m_session >= statecache::CoverageMinSessions);
 
     m_loaded.store(true, std::memory_order_release);
     m_prewarmCond.notify_all();
@@ -1520,6 +1536,8 @@ namespace dxvk {
 
       // One line each time the queue drains (start-up, then rarely).
       const uint64_t done = m_built.load() + m_dup.load() + m_failedCount.load() + m_skipped.load();
+      if (drained && m_coverageEntries && done >= m_coverageEntries && !m_coverageSent.exchange(true))
+        m_backend->psoArchiveCoverage(m_coverageAtLoad.load());
       if (drained && m_prewarmLogged.exchange(done) != done) {
         Logger::info(str::format("STATECACHE prewarm t=", seconds(), "s built=", m_built.load(),
           " dup=", m_dup.load(), " failed=", m_failedCount.load(), " skipped=", m_skipped.load(),

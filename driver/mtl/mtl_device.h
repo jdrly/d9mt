@@ -140,6 +140,9 @@ namespace dxvk {
 
     virtual MtlStageMask getShaderStages() const;
 
+    // A pause the game makes (device Reset): the bridge writes pending PSO archives now.
+    virtual void psoPauseHint() { }
+
     bool isResourceInUse(const MtlResource& resource) {
       return !isSerialComplete(resource.trackingSerial());
     }
