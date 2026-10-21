@@ -182,7 +182,8 @@ namespace dxvk::backend {
        v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube), smp = std::move(m_nullSampler)]() { });
     if (m_canaryLost)
       Logger::err(str::format("D9MT-GPU-LOST: ", m_canaryLost, " command buffers of this session did not run to their end",
-        m_canaryState == CanaryState::On ? "" : " (the canary's own marks never arrived: not GPU faults)"));
+        m_canaryState == CanaryState::On ? "" : " (no mark of the canary ever arrived: either it doesn't work on this Mac, or the GPU discarded"
+        " everything from the start; check IOGPUMetalError in the unified log)"));
     if (m_canaryBuffer) {
       m_device->residency().allocDestroyed(m_canaryBuffer.detach(), m_canaryCpu,
         m_device->submissions().nextSerial(), std::max<uint64_t>(uint64_t(kCanarySlots) * 8u, 16384u));
@@ -555,7 +556,8 @@ namespace dxvk::backend {
     // armed for a while and not one mark arrived: off, said so
     if (m_canaryState == CanaryState::Armed && m_canaryLost >= 64u) {
       m_canaryState = CanaryState::Failed;
-      Logger::warn("D9MT-GPU-CANARY: off: no mark of 64 command buffers arrived (the canary doesn't work here; its LOST lines are not GPU faults)");
+      Logger::warn("D9MT-GPU-CANARY: off: no mark of 64 command buffers arrived: either the canary doesn't work on this Mac,"
+        " or the GPU discarded everything from the start (check IOGPUMetalError in the unified log)");
     }
     m_canaryChecked = completed;
   }
