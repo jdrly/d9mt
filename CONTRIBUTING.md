@@ -79,15 +79,19 @@ If two sources conflict, report the conflict instead of silently choosing one.
 - Keep the PR a **draft** until it meets the Definition of Done.
 - One change per PR: don't mix a fix with unrelated refactoring, and don't bundle independent
   optimizations; each is measured on its own.
-- Merge with **squash**; the squash commit's subject is the PR title and its body the PR's
-  description. A rebase onto a changed `main` says how conflicts were resolved.
+- **Review and merge.** Every PR gets an **independent agent review** (preferably GPT-6.1-Sol)
+  by an agent that didn't write the change; its verdict goes into the PR, as a comment or in the
+  description. The PR is **squash-merged**, with the PR title as the commit subject and the PR's
+  description as its body, once that verdict has no open `Blocker` or `High` **and** the
+  repository's checks are green (d9mt has no CI workflow: its checks are the Definition of Done's
+  evidence in the PR). The maintainer doesn't review code by hand. A rebase onto a changed `main`
+  says how conflicts were resolved.
 
 ## Code review
 
 - Read the issue and its UAT before the diff.
-- Every PR gets an **independent review** by a reviewer, person or agent, that didn't write the
-  change. Its verdict is `MERGE` or `FIX FIRST`, often with a condition (“MERGE after the
-  ABBA”); the PR links it.
+- The independent agent review (see *Pull requests*) ends in the verdict `MERGE` or `FIX FIRST`,
+  often with a condition (“MERGE after the ABBA”).
 - Classify every finding by severity. `Blocker` and `High` prevent the merge; `Medium` and
   `Low` may merge with a follow-up issue.
 
@@ -144,7 +148,8 @@ A change is done only when all of these hold:
       a design that needs explaining has its document in `docs/`.
 - [ ] Terms follow `CONTEXT.md`; a new term is added in the same PR.
 - [ ] A changed decision has an ADR in the same PR, or links an existing `accepted` ADR.
-- [ ] The independent review found no open `Blocker` or `High`.
+- [ ] The independent agent review (preferably GPT-6.1-Sol) has no open `Blocker` or `High`, and
+      its verdict is in the PR.
 - [ ] The issue's UAT scenario has been played through and ticked off in the issue.
 
 _Open:_ the hash suite's runner (`scripts/run-hash-tests.sh`, `scripts/run-native-tests.sh`,
