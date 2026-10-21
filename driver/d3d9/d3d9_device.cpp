@@ -5764,6 +5764,12 @@ namespace dxvk {
   }
 
 
+  // PLACEBO (tmp/44-placebo, never merged): code of the size #44 adds to this TU, never called,
+  // so the layout matches feat/44-fps-limiter's (PERFORMANCE.md, identical-size placebo).
+  extern "C" __attribute__((used, noinline)) void d9mt_placebo44_device() {
+    asm volatile(".fill " "127" ", 1, 0x90");
+  }
+
   void D3D9DeviceEx::HitchFrameEnd() {
     hitch::Profiler::CompileTotals compile;
     compile.shaders   = compile_stats::g_shaders.totalN.load(std::memory_order_relaxed);

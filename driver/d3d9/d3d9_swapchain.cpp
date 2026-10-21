@@ -16,6 +16,12 @@
 
 namespace dxvk {
 
+  // PLACEBO (tmp/44-placebo, never merged): code of the size #44 adds to this TU, never called,
+  // so the layout matches feat/44-fps-limiter's (PERFORMANCE.md, identical-size placebo).
+  extern "C" __attribute__((used, noinline)) void d9mt_placebo44_swapchain() {
+    asm volatile(".fill " "7359" ", 1, 0x90");
+  }
+
   static void DumpBackbufferIfRequested(
           MtlContext*          ctx,
     const Rc<MtlDevice>&       device,
