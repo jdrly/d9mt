@@ -85,8 +85,8 @@ namespace dxvk::backend {
     uint8_t  alphaBlendOp = 0u;
   };
 
-  // Packed POD, hashed bytewise — must be zero-initialized before filling so
-  // padding bytes don't leak into the hash.
+  // Packed POD, hashed and compared as raw bytes — must be zero-initialized before
+  // filling so padding bytes don't leak into the hash.
   struct RenderPsoKey {
     uint64_t vsCookie = 0u;
     uint64_t fsCookie = 0u;
