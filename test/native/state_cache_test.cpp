@@ -2116,6 +2116,47 @@ static void testJournalLock() {
     CHECK(r.status == ParseStatus::Ok && r.records == 30u && r.corrupt == 0u);
     sc->shutdown();
   }
+
+  // write() while another client holds the lock: the file is written and the journal kept
+  // (only removed under the lock, so never with an append in flight).
+  {
+    Workload w2(4u, 20u, 10u, 32u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w2.announceAll(sc.ptr());
+    w2.render(sc.ptr(), be);
+    for (int i = 0; i < 5000 && sc->stats().journaled < 10u; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(sc->stats().journaled == 10u);
+    const int h = ::open(path.c_str(), O_RDONLY);
+    CHECK(h >= 0 && !::flock(h, LOCK_EX));
+    sc->shutdown();
+    CHECK(sc->stats().writes >= 1u && exists(path));
+    ::flock(h, LOCK_UN);
+    ::close(h);
+  }
+
+  // An append that opened the journal before a write() removed it, waiting for the lock: it
+  // must not land in the removed file (Gone; Busy if its wait ran out first).
+  {
+    const std::string p2 = dir + "/r.d9mtstate.journal";
+    CHECK(MtlStateCache::openJournal(p2, Sig) == JournalOpen::Ready);
+    const int h = ::open(p2.c_str(), O_RDONLY);
+    CHECK(h >= 0 && !::flock(h, LOCK_EX));
+    std::atomic<int> res = { -1 };
+    std::thread t([&] { res = int(MtlStateCache::appendJournalRecords(p2, bytes)); });
+    // A spin, not a sleep: under taskpolicy -b a 5 ms sleep can outlast the append's 20 ms.
+    for (auto t0 = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(3); ) { }
+    ::unlink(p2.c_str());
+    ::flock(h, LOCK_UN);
+    t.join();
+    struct stat st;
+    CHECK(!::fstat(h, &st) && st.st_size == off_t(JournalHeaderSize));
+    CHECK(res.load() == int(JournalAppend::Gone));
+    std::printf("journal lock: append into a removed journal -> %s\n", res.load() == int(JournalAppend::Gone) ? "Gone" : "Busy");
+    ::close(h);
+  }
 }
 
 // Two processes on one cache: one's journal survives the other's write (it merges it first).
