@@ -477,10 +477,8 @@ namespace dxvk::backend {
   }
 
   Rc<MtlSamplerState> MtlDeviceImpl::createSampler(const MtlSamplerKey& key) {
-    size_t hash = key.hash();
-
     { std::lock_guard<std::mutex> lock(m_samplerMutex);
-      auto entry = m_samplerCache.find(hash);
+      auto entry = m_samplerCache.find(key);
       if (entry != m_samplerCache.end())
         return entry->second;
     }
@@ -515,7 +513,7 @@ namespace dxvk::backend {
     sampler->gpuResourceId = samplerInfo.gpu_resource_id;
 
     std::lock_guard<std::mutex> lock(m_samplerMutex);
-    return m_samplerCache.emplace(hash, sampler).first->second;
+    return m_samplerCache.emplace(key, sampler).first->second;
   }
 
   Rc<MtlAllocation> MtlDeviceImpl::renameBuffer(MtlBuffer* buffer) {
@@ -610,17 +608,41 @@ namespace dxvk::backend {
     return new MtlBackendEvent();
   }
 
-  obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {
-    size_t hash;
-    { const uint8_t* p = reinterpret_cast<const uint8_t*>(&ds);
-      uint64_t h = 0xcbf29ce484222325ull;
-      for (size_t i = 0u; i < sizeof(ds); i++)
-        h = (h ^ p[i]) * 0x100000001b3ull;
-      hash = size_t(h ^ (h >> 32));
+  // Field by field: the padding after the bools isn't initialized by the frontend.
+  static void dssWords(const MtlDepthStencilState& ds, uint32_t (&w)[16]) {
+    const MtlStencilState* s[2] = { &ds.front, &ds.back };
+    w[0] = uint32_t(ds.depthCompareOp);
+    w[1] = uint32_t(ds.depthTest) | uint32_t(ds.depthWrite) << 1 | uint32_t(ds.stencilEnable) << 2;
+    for (uint32_t i = 0u; i < 2u; i++) {
+      w[2 + 6 * i] = uint32_t(s[i]->failOp);
+      w[3 + 6 * i] = uint32_t(s[i]->depthFailOp);
+      w[4 + 6 * i] = uint32_t(s[i]->passOp);
+      w[5 + 6 * i] = uint32_t(s[i]->compareOp);
+      w[6 + 6 * i] = s[i]->readMask;
+      w[7 + 6 * i] = s[i]->writeMask;
     }
+    w[14] = w[15] = 0u;
+  }
 
+  size_t MtlDeviceImpl::DssHash::operator () (const MtlDepthStencilState& ds) const {
+    uint32_t w[16];
+    dssWords(ds, w);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t x : w)
+      h = (h ^ x) * 0x100000001b3ull;
+    return size_t(h ^ (h >> 32));
+  }
+
+  bool MtlDeviceImpl::DssEq::operator () (const MtlDepthStencilState& a, const MtlDepthStencilState& b) const {
+    uint32_t wa[16], wb[16];
+    dssWords(a, wa);
+    dssWords(b, wb);
+    return !std::memcmp(wa, wb, sizeof(wa));
+  }
+
+  obj_handle_t MtlDeviceImpl::getDepthStencilState(const MtlDepthStencilState& ds) {
     { std::lock_guard<std::mutex> lock(m_dssoMutex);
-      auto entry = m_dssoCache.find(hash);
+      auto entry = m_dssoCache.find(ds);
       if (entry != m_dssoCache.end())
         return entry->second.handle();
     }
@@ -654,7 +676,7 @@ namespace dxvk::backend {
     obj_handle_t handle = MTLDevice_newDepthStencilState(m_device.handle(), &info);
 
     std::lock_guard<std::mutex> lock(m_dssoMutex);
-    return m_dssoCache.emplace(hash, WmtDepthStencil::adopt(handle)).first->second.handle();
+    return m_dssoCache.emplace(ds, WmtDepthStencil::adopt(handle)).first->second.handle();
   }
 
   uint64_t MtlDeviceImpl::getCompletedSerial() {
