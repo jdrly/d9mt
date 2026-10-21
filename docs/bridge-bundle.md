@@ -452,6 +452,39 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Cost:** one more serializer-attached compiler (≈0 MB without content: `attr`). The code is about part 5's size.
 - **Gate:** the cold-session peak, uncaptured = 0, and psoab's new phase.
 
+### 7. Planned: MTL4 commit feedback errors as a log line (after #11's psoab gate)
+
+**Why.** Jan's Cartel Market freeze on 2026-10-21 was a real GPU hang, followed by the WindowServer watchdog and a logout (field-reports/20261021-jan-freeze/ANALYSIS.md). Nothing in wine.log could tell a timeout from a page fault. The unified log only had `IOGPUMetalError: <private>`, so the hang was inferred from timing. Metal 4 gives the cause to whoever asks. The proposal is field-reports/20261021-jan-freeze/BRIDGE-COMMIT-FEEDBACK.md.
+
+**The API, checked against the macOS 26 SDK** (MTL4CommandQueue.h, MTL4CommitFeedback.h, MTLCommandBuffer.h):
+- `[MTL4CommandQueue commit:count:options:]` takes an `MTL4CommitOptions`, and `addFeedbackHandler:` registers a `^(id<MTL4CommitFeedback>)` block.
+- The feedback has `error` (`MTLCommandBufferErrorDomain`: Internal 1, **Timeout 2, PageFault 3**, AccessRevoked 4, NotPermitted 7, OutOfMemory 8, **InvalidResource 9**) and `GPUStartTime` / `GPUEndTime`.
+- `MTL4CommitOptions` is "not thread-safe if modified from several threads". The bridge builds one, adds the handler once under `dispatch_once`, and only passes it from then on.
+
+**Design (unix side only):**
+- `_MTL4CommandQueue_commit` passes the long-lived options to `commit:count:options:`.
+- The block returns at once when `error == nil`. On an error it writes, in an `@autoreleasepool`: `D9MT-GPU-ERROR: <name> (<code>) <localizedDescription> gpu=<start>-<end> commits=<n>`.
+  - The first 20 errors get a line each, then one count line per 10 s. The counters are atomics; no lock, no allocation outside the error path.
+  - After a hang the dead channel rejects every later commit (one every 10 s in Jan's log), so the rate limit matters.
+- **Not the commit's number:** one shared options object means one block for every commit, and the feedback carries no commit identity. A per-commit options object or block would allocate on every commit. The line therefore carries the GPU times and the count of commits submitted so far (an atomic counter that is always on), which places the error in time next to the SubmissionTracker / HITCH lines.
+- In the same change, cache `getenv("D9MT_WSILOG")` in a static. Today it runs on every commit.
+- **Dropped from the proposal:** `MTLCommandBufferErrorOptionEncoderExecutionStatus` is an `MTLCommandBufferDescriptor` option (Metal 3). `MTL4CommandBufferOptions` has only `logState`, so it doesn't exist for d9mt's MTL4 command buffers.
+- **Later, d9mt side:** a unixcall for the last error code, so that `D9MT-GPU-HUNG` / `D9MT-GPU-LOST` name the cause. That is an ABI addition (a new call number, check-abi-mix, the skew case of a new d3d9 on an old bridge), so it is a separate step.
+
+**Cost per commit.** Our block costs nothing when there's no error. The real cost is Metal's: with a feedback handler, Metal has to deliver a completion callback for every commit, on its own thread. Without one, an MTL4 commit probably needs no host-side completion at all, since d9mt tracks completion with its shared events. This is unverified, and the A/B decides. At ~60–600 commits/s that is that many callbacks a second, off the render thread but not free under Rosetta.
+- **Gate (hard rule):** an env A/B (`D9MT_COMMIT_FEEDBACK=0/1`) in a quiet window on bindbench and bench_4k, ABBA, nothing measurably slower (the noise floor is ±1.5 %). Also the CPU time of Metal's completion thread from a sample.
+- If it measures worse, it ships off by default and on under `D9MT_WSILOG` / Collect Logs.
+
+**ABI and LC_UUID.**
+- PE side: no change. No new unixcall, and winemetal.dll (32/64) stays byte-identical. check-abi-mix is unaffected.
+- winemetal.so gets a new LC_UUID; that is the next engine/bridge drop. The AIR cache is keyed on the codegen identity (part 1, S1), which doesn't include winemetal_unix.c, so every user's AIR cache stays warm.
+- PSO archives (`os-<leaf>`, OS build + GPU) and the state cache don't depend on the bridge build, so no cold start.
+
+**Tests:**
+- unix-side unit test: a forced GPU timeout (an endless-loop compute kernel) or, if it can be made reliable natively, a page fault (a read through the GPU address of a released buffer) on an MTL4 queue. The test checks one `D9MT-GPU-ERROR: Timeout (2)` / `PageFault (3)` line and the rate limit (50 failing commits → 20 lines + a count).
+- No-error path: the hash suite stays identical and no line appears.
+- TSan on the handler counters.
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).
