@@ -169,6 +169,7 @@ namespace dxvk::backend {
       image.sync.drawable = drawable;
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
+      tex->drawable    = true;
       obj_handle_t drawableTex = MetalDrawable_texture(drawable);
       lifetime::markDrawable(drawableTex);
       // A reference of the wrapper's own: copyTexture keeps the wrapper until the command
