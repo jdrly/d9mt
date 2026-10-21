@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Playing through SWTOR on Mac
+    url: https://github.com/jdrly/swtor-on-mac/issues/new/choose
+    about: Report it there first, with the Collect Logs zip; it comes here when it turns out to be d9mt's.
+  - name: Playing through SWGL on Mac
+    url: https://github.com/jdrly/swgl-on-mac/issues/new/choose
+    about: Report it there first, with the Collect Logs zip; it comes here when it turns out to be d9mt's.
+  - name: Ask Pharaphobia on Discord
+    url: https://discord.gg/AnV3fZWz2b
+    about: Questions about d9mt and the two apps that use it.

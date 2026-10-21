@@ -1,0 +1,182 @@
+name: Bug report
+description: d9mt renders something wrong, hangs, crashes, stutters or doesn't build.
+title: ""
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! If you play through **SWTOR on Mac** or **SWGL on Mac**, report
+        there first, with that app's Collect Logs zip: it records the engine and d9mt build for
+        you. This form is for problems you have narrowed down to d9mt, or for your own Wine
+        setup.
+
+        Write the title as `Context: What goes wrong`, for example
+        `Present path: The GPU faults at the first presents after start`.
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happens
+      description: >-
+        What you see (screenshot or video), and every d9mt line about it: `D9MT-GPU-LOST`,
+        `D9MT-LIFETIME`, `HITCH`, warnings. A message word for word.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What it looks or behaves like elsewhere (Windows, wined3d, an earlier d9mt).
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Where in the game, which settings, how often (every time, 1 in N starts).
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - GPU hang, freeze or crash (the game stops)
+        - Wrong rendering (missing, corrupt or flickering)
+        - Stutter or a lower frame rate
+        - Doesn't start or a black screen
+        - The build fails
+        - Minor
+    validations:
+      required: true
+
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game
+      options:
+        - "Star Wars: The Old Republic (64-bit)"
+        - "Star Wars Galaxies: Legends (32-bit)"
+        - GTA IV (32-bit)
+        - A test program from test/
+        - Another game (name it below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: How does the game run?
+      options:
+        - SWTOR on Mac
+        - SWGL on Mac
+        - My own Wine or CrossOver setup
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: d9mt commit
+      description: >-
+        The commit the `d3d9.dll` was built from, and the app's version if you use one. SWTOR on
+        Mac names it in the first line of `wine.log` and in the session report; in your own
+        build, `git rev-parse --short HEAD`.
+      placeholder: "2a1bc00 (SWTOR on Mac 0.1.3)"
+    validations:
+      required: true
+
+  - type: input
+    id: engine
+    attributes:
+      label: Wine engine
+      placeholder: "CrossOver 26.3 (Wine 11), athei/wine-build cx-26.3.0-8"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: macos
+    attributes:
+      label: macOS
+      options:
+        - macOS 26
+        - macOS 27
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - M1 (any)
+        - M2 (any)
+        - M3 (any)
+        - M4 (any)
+        - M5 (any)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: memory
+    attributes:
+      label: Memory (RAM)
+      description: d9mt's memory profile follows it.
+      options:
+        - 8 GB
+        - 16 GB
+        - 18 to 24 GB
+        - 32 GB or more
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Environment flags and dxvk.conf
+      description: >-
+        Every `D9MT_*`, `DXVK_*` and `MTL_*` variable the game runs with, and your `dxvk.conf`
+        (the apps write theirs into the Collect Logs zip).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log or trace
+      description: >-
+        The Collect Logs zip, or the log from `DXVK_LOG_PATH=<dir>` (`<game>_d3d9.log`), ideally
+        with `D9MT_PROFILE=1`; for a hang or a GPU fault, also `D9MT_LIFETIME_CHECK=log` and the
+        `IOGPUMetalError` lines of the unified log. When a test program shows it, an apitrace
+        (`scripts/run-apitrace.sh`).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Did it work with an earlier d9mt?
+      description: If yes, name the last good commit or app version under "Anything else".
+      options:
+        - I don't know
+        - "Yes, an earlier commit worked"
+        - "No, it never worked"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Display setup (external monitor, refresh rate, Retina), the last good commit, a GPU capture.
