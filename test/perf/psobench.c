@@ -21,6 +21,7 @@ struct V { float x, y, z, rhw; DWORD c; };
 
 int main(int argc, char **argv) {
   int frames = argc > 1 ? atoi(argv[1]) : 1060;
+  if (frames <= 60) { printf("RESULT FAIL usage: frames must be more than the 60 warm-up frames\n"); return 2; }
   const char *mode = argc > 2 ? argv[2] : "blend";
   int topo = !strcmp(mode, "topo"), blend = !strcmp(mode, "blend");
   int blend2 = !strcmp(mode, "blend2"), blendop = !strcmp(mode, "blendop"), blend4 = !strcmp(mode, "blend4");
@@ -77,7 +78,7 @@ int main(int argc, char **argv) {
         IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, q * 4, 2);
     }
     IDirect3DDevice9_EndScene(dev);
-    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+    if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
   printf("RESULT psobench mode=%s frames=%d avg_ms=%.4f\n", mode, frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));

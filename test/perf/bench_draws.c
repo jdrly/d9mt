@@ -60,6 +60,7 @@ static ULONGLONG process_cpu_100ns(void) {
 int main(int argc, char **argv) {
   int draws = argc > 1 ? atoi(argv[1]) : 1000;
   int frames = argc > 2 ? atoi(argv[2]) : 600;
+  if (draws < 1 || frames < 1) { printf("RESULT FAIL usage: draws and frames must be positive\n"); return 2; }
   int flush = argc > 3 && !strcmp(argv[3], "flush");
   int spinflush = argc > 3 && !strcmp(argv[3], "spinflush");
   const int warmup = 60;
@@ -149,16 +150,19 @@ int main(int argc, char **argv) {
     IDirect3DDevice9_EndScene(dev);
     QueryPerformanceCounter(&tl);
     if (flush || spinflush) {
-      IDirect3DQuery9_Issue(query, D3DISSUE_END);
-      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+      if (FAILED(IDirect3DQuery9_Issue(query, D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", f); return 1; }
+      HRESULT hr;
+      while ((hr = IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH)) == S_FALSE) {
         if (!spinflush) {  /* pace the polls: 20 us */
           LARGE_INTEGER p0, p1;
           QueryPerformanceCounter(&p0);
           do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < freq.QuadPart);
         }
       }
+      /* Only S_OK means the GPU is done: an error (e.g. D3DERR_DEVICELOST) is a failed run. */
+      if (hr != S_OK) { printf("RESULT FAIL getdata hr=0x%08lx frame=%d\n", (unsigned long)hr, f); return 1; }
     } else {
-      IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+      if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", f); return 1; }
     }
     QueryPerformanceCounter(&t1);
     if (f >= warmup) {

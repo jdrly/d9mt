@@ -23,26 +23,33 @@ METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
 
 
 def load(paths, metric):
-    vals, skipped = {}, {"dirty": 0, "fail": 0}
+    vals, skipped, seen, keys_seen = {}, {"dirty": 0, "fail": 0}, set(), set()
     for path in paths:
-        for line in open(path):
-            if not re.match(r"(DIRTY )?(round|pair|block)=", line):
+        for n, line in enumerate(open(path), 1):
+            m = re.match(r"(DIRTY )?(?:round|pair|block)=(\d+) v=(\S+)", line)
+            if not m:
                 continue
-            if line.startswith("DIRTY"):
+            # One sample per (file, round, variant): a second one means two runs were mixed into
+            # one file (perf-abba.sh writes a fresh file per call), and pairing would be wrong.
+            ident = (path, int(m.group(2)), m.group(3))
+            if ident in seen:
+                sys.exit(f"{path}:{n}: a second sample for round {ident[1]}, variant {ident[2]}: "
+                         "results of different runs mixed in one file")
+            seen.add(ident)
+            if m.group(1):
                 skipped["dirty"] += 1
                 continue
             if "RESULT FAIL" in line:
                 skipped["fail"] += 1
                 continue
-            m = re.match(r"(?:round|pair|block)=(\d+) v=(\S+)", line)
-            keys = [metric] if metric else METRICS
-            for k in keys:
+            keys_seen.update(re.findall(r"(?:^|\s)([A-Za-z_][\w/]*)=[0-9.]+", line))
+            for k in ([metric] if metric else METRICS):
                 mv = re.search(r"(?:^|\s)" + re.escape(k) + r"=([0-9.]+)", line)
                 if mv:
-                    vals.setdefault(m.group(2), {})[(path, int(m.group(1)))] = float(mv.group(1))
+                    vals.setdefault(m.group(3), {})[ident[:2]] = float(mv.group(1))
                     metric = metric or k
                     break
-    return vals, skipped, metric
+    return vals, skipped, metric, keys_seen
 
 
 def bimodal(xs):
@@ -65,9 +72,12 @@ def main():
     ap.add_argument("--metric")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
-    vals, skipped, metric = load(a.files, a.metric)
+    vals, skipped, metric, keys_seen = load(a.files, a.metric)
     if not vals:
-        sys.exit("no results")
+        avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load")))
+        sys.exit(f"no results for metric {a.metric or ' / '.join(METRICS)}"
+                 f" (skipped {skipped['dirty']} DIRTY, {skipped['fail']} FAIL)"
+                 + (f"; keys present: {avail} (--metric)" if avail else ""))
     ref = a.ref or next(iter(vals))
     if ref not in vals:
         sys.exit(f"no results for the reference {ref}")

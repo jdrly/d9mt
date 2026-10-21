@@ -10,6 +10,7 @@ struct V { float x, y, z, rhw, u, v; };
 
 int main(int argc, char **argv) {
   int frames = argc > 1 ? atoi(argv[1]) : 1060;
+  if (frames <= 60) { printf("RESULT FAIL usage: frames must be more than the 60 warm-up frames\n"); return 2; }
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "bb";
   RegisterClassA(&wc);
   HWND hwnd = CreateWindowA("bb", "bb", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 340, 280, NULL, NULL, wc.hInstance, NULL);
@@ -45,7 +46,7 @@ int main(int argc, char **argv) {
       IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
     }
     IDirect3DDevice9_EndScene(dev);
-    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+    if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
   printf("RESULT bindbench frames=%d avg_ms=%.4f\n", frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));

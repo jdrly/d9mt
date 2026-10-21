@@ -163,6 +163,7 @@ static void frame(int n) {
 
 int main(int argc, char **argv) {
   const int frames = argc > 1 ? atoi(argv[1]) : 300, warm = 60;
+  if (frames < 1) { printf("RESULT FAIL usage: frames must be positive\n"); return 2; }
   if (argc > 2)
     postPasses = (atoi(argv[2]) + 1) & ~1;
   if (argc > 3 && atoi(argv[3]) > 0)
@@ -222,14 +223,17 @@ int main(int argc, char **argv) {
       QueryPerformanceCounter(&b0);
       do QueryPerformanceCounter(&b1); while ((double)(b1.QuadPart - b0.QuadPart) * 1000.0 < cpuMs * (double)f.QuadPart);
     }
-    IDirect3DDevice9_Present(t_dev, NULL, NULL, NULL, NULL);
+    if (FAILED(IDirect3DDevice9_Present(t_dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", i); return 1; }
     if (waitMode) {
-      IDirect3DQuery9_Issue(query, D3DISSUE_END);
-      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+      if (FAILED(IDirect3DQuery9_Issue(query, D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", i); return 1; }
+      HRESULT hr;
+      while ((hr = IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH)) == S_FALSE) {
         LARGE_INTEGER p0, p1;
         QueryPerformanceCounter(&p0);
         do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < f.QuadPart);
       }
+      /* Only S_OK means the GPU is done: an error (e.g. D3DERR_DEVICELOST) is a failed run. */
+      if (hr != S_OK) { printf("RESULT FAIL getdata hr=0x%08lx frame=%d\n", (unsigned long)hr, i); return 1; }
     }
   }
   QueryPerformanceCounter(&t1);

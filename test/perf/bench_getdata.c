@@ -25,6 +25,7 @@ static void quads(IDirect3DDevice9 *dev, int n, int seed) {
 
 int main(int argc, char **argv) {
   int frames = argc > 1 ? atoi(argv[1]) : 330;
+  if (frames <= 30) { printf("RESULT FAIL usage: frames must be more than the 30 warm-up frames\n"); return 2; }
   int flush = !(argc > 2 && !strcmp(argv[2], "noflush"));
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "bgd";
   RegisterClassA(&wc);
@@ -57,24 +58,27 @@ int main(int argc, char **argv) {
     if (n > 1) {
       DWORD samples = 0;
       LARGE_INTEGER p0, p1; QueryPerformanceCounter(&p0);
-      while (IDirect3DQuery9_GetData(occ[(n - 1) & 1], &samples, sizeof(samples), flush ? D3DGETDATA_FLUSH : 0) == S_FALSE) {
+      HRESULT hr;
+      while ((hr = IDirect3DQuery9_GetData(occ[(n - 1) & 1], &samples, sizeof(samples), flush ? D3DGETDATA_FLUSH : 0)) == S_FALSE) {
         polls++;
         QueryPerformanceCounter(&p1);
         if ((p1.QuadPart - p0.QuadPart) > f.QuadPart * 5) { printf("RESULT FAIL getdata timeout frame=%d\n", n); return 1; }
       }
+      /* Only S_OK is a result: an error (e.g. D3DERR_DEVICELOST) must not count as the GPU done. */
+      if (hr != S_OK) { printf("RESULT FAIL getdata hr=0x%08lx frame=%d\n", (unsigned long)hr, n); return 1; }
     }
     IDirect3DDevice9_SetRenderTarget(dev, 0, rt);
     IDirect3DDevice9_SetDepthStencilSurface(dev, ds);
     IDirect3DDevice9_BeginScene(dev);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xff101010, 1.0f, 0);
-    IDirect3DQuery9_Issue(occ[n & 1], D3DISSUE_BEGIN);
+    if (FAILED(IDirect3DQuery9_Issue(occ[n & 1], D3DISSUE_BEGIN))) { printf("RESULT FAIL issue frame=%d\n", n); return 1; }
     quads(dev, 500, n);
-    IDirect3DQuery9_Issue(occ[n & 1], D3DISSUE_END);
+    if (FAILED(IDirect3DQuery9_Issue(occ[n & 1], D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", n); return 1; }
     quads(dev, 1000, n + 7);
     IDirect3DDevice9_EndScene(dev);
     IDirect3DDevice9_SetRenderTarget(dev, 0, bb);
     IDirect3DDevice9_SetDepthStencilSurface(dev, bds);
-    IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL);
+    if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
   printf("RESULT bench_getdata mode=%s frames=%d polls_per_frame=%.1f avg_ms=%.4f\n", flush ? "flush" : "noflush",

@@ -64,6 +64,7 @@ int main(int argc, char **argv) {
   const double jitter = argc > 4 ? atof(argv[4]) : 0.0;
   const int quads = argc > 5 ? atoi(argv[5]) : 8;
   const double gameCap = argc > 6 ? atof(argv[6]) : 0.0;
+  if (seconds <= 0.0 || quads < 0) { printf("RESULT FAIL usage: seconds must be positive, quads not negative\n"); return 2; }
 
   t_present_interval = vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
   t_init("bench_fps_cap", 640, 360);
@@ -101,7 +102,7 @@ int main(int argc, char **argv) {
         Sleep(1);
     }
     frameStart = qpcMs();
-    IDirect3DDevice9_Present(t_dev, NULL, NULL, NULL, NULL);
+    if (FAILED(IDirect3DDevice9_Present(t_dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
     const double now = qpcMs();
 
     if (!measuring && now - t0 >= 2000.0) {
@@ -134,9 +135,12 @@ int main(int argc, char **argv) {
   for (int i = 0; i < n; i++)
     if (dt[i] > 1.5 * p50) longFrames++;
 
-  printf("RESULT n=%d fps=%.2f p1=%.2f p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f sd=%.3f long=%d"
+  if (!n) { printf("RESULT FAIL no measured frames\n"); return 1; }
+  /* avg_ms: the mean frame time, lower is better (scripts/perf-compare.py's default metric); for
+   * pacing compare p99= or sd= with --metric. */
+  printf("RESULT n=%d fps=%.2f avg_ms=%.4f p1=%.2f p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f sd=%.3f long=%d"
          " cpuProc=%.0f cpuMain=%.0f vsync=%d cpuWork=%.1f jitter=%.1f quads=%d gameCap=%.0f\n",
-         n, n ? 1000.0 / mean : 0.0, n ? pct(s, n, 1.0) : 0.0, p50, n ? pct(s, n, 95.0) : 0.0,
+         n, 1000.0 / mean, mean, n ? pct(s, n, 1.0) : 0.0, p50, n ? pct(s, n, 95.0) : 0.0,
          n ? pct(s, n, 99.0) : 0.0, n ? s[0] : 0.0, n ? s[n - 1] : 0.0, sd, longFrames, cpuP, cpuM,
          vsync, cpuWork, jitter, quads, gameCap);
 
