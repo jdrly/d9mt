@@ -368,7 +368,7 @@ passes have their own load/store rules).
 | `D9MT_NO_ATTACHMENT_OPT` | off | `1` turns the attachment load/store optimization off (see `d9mt.attachmentOpt`) |
 | `D9MT_FPS_CAP` | off | frame rate cap with even frame times (`20`–`1000`), for heat and battery: with vsync and a cap that divides the refresh rate (30 at 60 Hz; 30, 40, 60 at 120 Hz) every frame stays on screen for the same number of refreshes (`presentAfterMinimumDuration`); otherwise (40, 45 at 60 Hz, or vsync off) an exact timer, frames then shown for uneven numbers of refreshes at 60 Hz; at or above the refresh rate with vsync, nothing (vsync caps already). Logs a `frame cap` line. Takes over from `d3d9.maxFrameRate` while it caps ([`driver/d3d9/d3d9_frame_cap.h`](driver/d3d9/d3d9_frame_cap.h)) |
 | `D9MT_FPS_CAP_ALIGN` / `D9MT_FPS_CAP_SPIN_US` | on / `200` | `0`: the cap's timer only, no vsync alignment; the least time the cap's and the background throttle's sleep spin before the deadline (more while the system's sleep oversleeps, at most 4 ms) |
-| `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | frame cap while the window is hidden / minimized; `0` turns it off |
+| `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | the background throttle: the rate Present sleeps to while the window is hidden / minimized; `0` turns it off |
 | `D9MT_DRAWABLE_TIMEOUT_MS` | max(3 frames, 50 ms) | longest wait for a drawable before a present is skipped |
 | `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
 | `D9MT_METALFX` | off | MetalFX spatial upscaling at present. **Currently broken** (selector bug; fix pending) |
