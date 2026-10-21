@@ -1,5 +1,5 @@
 /* churnbench: texture churn like the Cartel Market opening (review of the view keep-alive fix).
- * 320x240, no vsync. Per frame: 128 new 64x64 textures (created, uploaded, drawn, released at
+ * 320x240, no vsync. Per frame: 125 new 64x64 textures (created, uploaded, drawn, released at
  * once), and 3000 draws that rebind one of 64 persistent textures. Views of the released
  * textures now die when their command buffer retires (fix) instead of at the rebind (base).
  * Prints the average CPU frame time over frames 61..frames. */
