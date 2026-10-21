@@ -11,6 +11,9 @@
 #   migrate  [MIGRATIONS] rounds: two executables start at once on a flat directory of an
 #            earlier release: exactly one takes it, the other starts cold, no crash; a flat
 #            start afterwards doesn't touch either executable's directory
+#   quit     [QUITS] runs that exit while a consolidation or flush runs: no crash, no hang;
+#            the next start finds sound archives and removes stray .metallib files older
+#            than 600 s (Metal's intermediate of an interrupted flush), keeping a young one
 #   stress   [RUNS] rounds of two processes on one archive directory: one consolidates
 #            (idle 200 ms) while the other starts, checks and builds. No crash, no FAIL line,
 #            no "dropping PSO archive" (a file passed to newArchiveWithURL that wasn't
@@ -155,8 +158,20 @@ for i in $(seq "${QUITS:-20}"); do
 done
 check "hangs at exit" "$hangs" 0
 check "crashes at exit" "$(grep -l CRASH "$OUT"/q*.log 2>/dev/null | wc -l | tr -d ' ')" 0
+# an exit during a flush can leave serializeAsArchiveAndFlushToURL's intermediate file (a
+# UUID .metallib, as large as the archive): the next start removes those older than
+# D9MT_PSO_YOUNG_S (600 s) and leaves a young one (a flush of another process) alone
+D=$(dirof)
+strays=$(ls "$D" | grep -c '\.metallib$')
+echo "  stray .metallib after the quit runs: $strays (aged 700 s for the next start)"
+printf 'old' > "$D/11111111-1111-1111-1111-111111111111.metallib"   # one for certain
+for f in "$D"/*.metallib; do [ -e "$f" ] && ages 700 "$f"; done
+printf 'young' > "$D/00000000-0000-0000-0000-000000000000.metallib"
 run "$OUT/q-after" q-after
 check "next start: dropped archives" "$(grep -c 'dropping PSO archive' "$OUT/q-after.log")" 0
+check "next start: old stray .metallib left" "$(ls "$D" | grep -v '^00000000-' | grep -c '\.metallib$')" 0
+check "next start: a young .metallib kept" "$([ -e "$D/00000000-0000-0000-0000-000000000000.metallib" ] && echo kept || echo deleted)" kept
+rm -f "$D/00000000-0000-0000-0000-000000000000.metallib"
 D=$(dirof); "$OUT/pso_archive_check_test" "$D" | grep -E 'archives have the shape|FAIL real'
 "$OUT/pso_archive_check_test" "$D" > /dev/null || fails=$((fails + 1))
 echo "  consolidations finished before exit: $(cat "$OUT"/q*.log | grep -c 'PSO archives consolidated') of ${QUITS:-20} (the rest were cut by the exit)"

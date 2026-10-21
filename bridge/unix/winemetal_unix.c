@@ -5963,7 +5963,15 @@ static uint64_t                          g_pso_flush_backstop_ns = 60000000000ul
 static unsigned                          g_pso_note_delay_ms;  /* tests: every other build, before its count */
 static _Atomic unsigned                  g_pso_note_delay_n;
 static unsigned                          g_pso_flush_hold_ms;  /* tests: the first flush, inside the write lock */
-static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: a line at exit */
+static bool                              g_pso_stats;          /* D9MT_PSO_STATS=1: event lines, counts at exit */
+static uint64_t                          g_pso_t0;             /* CLOCK_UPTIME_RAW ns at init, for the lines */
+
+/* D9MT_PSO_STATS=1 (tests, diagnostics): one line per flush, coverage signal and
+ * consolidation, with ms since the archives were set up. */
+#define PSO_EVENT(...) do { if (g_pso_stats) { \
+    fprintf(stderr, "d9mt: PSO t=%llu ms: ", \
+            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - g_pso_t0) / 1000000ull)); \
+    fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 static MTL4CompilerTaskOptions          *g_pso_task_options;
 static NSString                         *g_pso_dir;
 static NSString                         *g_pso_session;
@@ -6136,8 +6144,9 @@ static void
 pso_flush_locked(void) {
   if (!g_pso_serializer || !atomic_load(&g_pso_pending))
     return;
-  atomic_store(&g_pso_pending, 0u);
+  const unsigned flushed = atomic_exchange(&g_pso_pending, 0u);
   atomic_store(&g_pso_due_since, 0u);
+  const uint64_t f0 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
     [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
   NSString *tmp = [path stringByAppendingString:@".tmp"];
@@ -6149,6 +6158,7 @@ pso_flush_locked(void) {
     unlink(tmp.fileSystemRepresentation);
     return;
   }
+  const uint64_t f1 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
   pso_sync_file(tmp);
   NSString *sum = pso_sum_text(tmp);
   struct stat st;
@@ -6161,6 +6171,9 @@ pso_flush_locked(void) {
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
     return;
   }
+  PSO_EVENT("flushed %u PSOs into %s: %lld bytes, serialize %llu ms, sync+sum %llu ms", flushed,
+            path.lastPathComponent.UTF8String, (long long)st.st_size, (unsigned long long)((f1 - f0) / 1000000ull),
+            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - f1) / 1000000ull));
   if (g_pso_archive_first) {
     pthread_mutex_lock(&g_pso_record_mutex);
     [g_pso_parts addObject:path];
@@ -6202,6 +6215,8 @@ pso_flush_thread(void *arg) {
       const bool hint = atomic_exchange(&g_pso_pause_hint, false);
       if (hint || (idle >= 500000000ull && pso_paused()) || idle >= g_pso_flush_idle_ns
        || (due && now - due >= g_pso_flush_backstop_ns)) {
+        PSO_EVENT("flush starts (%s, %u pending)", hint ? "Reset hint" : idle >= g_pso_flush_idle_ns ? "idle"
+                  : (due && now - due >= g_pso_flush_backstop_ns) ? "backstop" : "pause", atomic_load(&g_pso_pending));
         while (pthread_rwlock_trywrlock(&g_pso_lock)) {
           struct timespec ts = { 0, 50000000 };
           nanosleep(&ts, NULL);
@@ -6267,6 +6282,7 @@ pso_consolidate(void) {
   if (lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB)) {
     if (lockFd >= 0)
       close(lockFd);
+    PSO_EVENT("consolidation skipped: another process holds .consolidate");
     return;
   }
   /* The record is final from here: recording stops, and its memory (it retains
@@ -6288,6 +6304,7 @@ pso_consolidate(void) {
   if (parts.count <= 1u && !atomic_load(&g_pso_misses)) {
     flock(lockFd, LOCK_UN);
     close(lockFd);
+    PSO_EVENT("consolidation skipped: nothing new, %lu archive(s)", (unsigned long)parts.count);
     return;
   }
 
@@ -6370,6 +6387,9 @@ pso_consolidate(void) {
     if (built)
       fprintf(stderr, "d9mt: PSO archive consolidation failed: %s\n",
               err ? err.localizedDescription.UTF8String : "(write)");
+    else
+      PSO_EVENT("consolidation wrote nothing: 0 of %lu requested descriptors archived yet",
+                (unsigned long)requested.count);
   }
   [compiler release];
   [ser release];
@@ -6399,6 +6419,8 @@ pso_consolidate_thread(void *arg) {
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (atomic_load(&g_pso_coverage) == 1 && last
      && (pso_paused() || now - last >= g_pso_consolidate_idle_ns)) {
+      PSO_EVENT("consolidation starts (%s, idle %llu ms)", pso_paused() ? "pause" : "idle",
+                (unsigned long long)((now - last) / 1000000ull));
       @autoreleasepool {
         pso_consolidate();
       }
@@ -6419,6 +6441,7 @@ static NTSTATUS
 _D9MTPsoArchiveCoverage(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
   atomic_store(&g_pso_coverage, params->handle ? 1 : -1);
+  PSO_EVENT("coverage signal, complete=%d", params->handle ? 1 : 0);
   return STATUS_SUCCESS;
 }
 
@@ -6532,6 +6555,7 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_flush_hold_ms = (unsigned)strtoul(fhold, NULL, 10);
   const char *stats = getenv("D9MT_PSO_STATS");
   g_pso_stats = stats && !strcmp(stats, "1");
+  g_pso_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   const char *delay = getenv("D9MT_PSO_CONSOLIDATE_DELAY_MS");
   if (delay && *delay)
     g_pso_consolidate_delay_ms = (unsigned)strtoul(delay, NULL, 10);
@@ -6594,9 +6618,13 @@ pso_archive_init(id<MTLDevice> device) {
     NSString *path = [dir stringByAppendingPathComponent:name];
     if ([name hasSuffix:@".mtl4archive"]) {
       [names addObject:name];
-    } else if ([name hasSuffix:@".tmp"]) {
+    } else if ([name hasSuffix:@".tmp"] || [name hasSuffix:@".metallib"]) {
+      /* .metallib: serializeAsArchiveAndFlushToURL's intermediate file (a UUID name in
+       * the archive's directory), left behind when the process exits during a flush
+       * (the flush thread, part 5): 60 MB and more each. Not ours to read; old enough,
+       * no process can still be writing it. */
       struct stat st;
-      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > 600)
+      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
         unlink(path.fileSystemRepresentation);
     } else if ([name hasSuffix:@".mtl4archive.sum"]) {
       struct stat st;
