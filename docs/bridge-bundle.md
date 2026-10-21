@@ -360,6 +360,50 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
    - `attr`: point 6.
    - Then the psoab re-run in a quiet window with the changes.
 
+#### 6 as implemented (0bc955b) and its numbers
+
+**Implemented as proposed (points 1-5), with two changes the tests forced:**
+- The consolidation thread is woken by the coverage signal: a condition variable instead of a 1 s sleep. Before, the startup-window consolidation started up to 1 s late.
+- Before its snapshot, the consolidation flushes the session's own captures through the flush thread (the Reset-hint path, waited for up to 5 s). At the coverage signal this session's misses are still in the game's serializer. Without that flush the set left them out, and a cold session wrote no set at all.
+- Fixed on the way (part 5): a wake of the flush thread that came between its look at the pending count and its wait was lost, so the first pending PSO could wait up to 1 s. The wait is now decided under the mutex the wake signals with.
+
+**Native numbers** (archfirst_test, n013-issues/results/native-mem.txt, native-mem2.txt; 800 PSOs with a large fragment function, each mode in its own process, two runs):
+
+| question | result |
+|---|---|
+| live PSO memory by path (`mem`) | MTL4Archive direct 105.7 KB/PSO, compiler + lookupArchives 107.5, probe + compiler 106.9. With a large vertex function too: 106.0 vs 108.1. Archive first costs nothing extra. |
+| where GPU memory comes from (`attr`) | Compilers (game, fallback, consolidation) ±0, archives (1, 8) ±0 GPU (≈0.8 MB footprint each); live PSOs ≈ 80-95 KB each, by either path. |
+| a consolidation's peak (`peak`), above its start | whole set +185 / +256 MB; chunks of 256 +139 to +151; chunks of 128 +131 to +139. A fresh compiler per chunk doesn't lower it (+130 to +154) and costs 0.2-0.4 ms in all. The floor (≈ 2× the archive) is the binaries the lookups load, not the compiler. **Chunks of 256, one compiler.** |
+| startup cost per extra consolidated archive (`archload`) | open 2.8 ms + one lookup 1.9 ms |
+
+**The GPU-memory gate (point 6): resolved.**
+- `footprint --sample 1` over whole psobench runs (n013-issues/results/ioacc2-summary.txt).
+- Maximum dirty IOAccelerator (graphics): base d3d9 + shipping bridge 135-144 MB; every combination with a bundle component 151 MB, including bundle d3d9 + the shipping bridge.
+- The earlier 92 vs 151 MB came from single 11 s snapshots taken in different phases of the runs. No bridge-specific regression.
+
+**The total peak:**
+- Maximum footprint: base + shipping 454-465 MB; bundle d3d9 + shipping 469-470; the bundle bridge with archive first off 603-604.
+- The +140 MB with archive first off: that mode captures every build, like base. Base flushes inline every 256 (a bounded serializer, at the cost of the old stalls). The bundle flushes only at a quiet gap, an idle or a pause, so a continuous build burst (psobench's new phase) accumulates every capture.
+- With archive first on only misses are captured, except in a cold first session, where everything misses. The cold-session numbers with the quiet-gap rule are the next measurement.
+
+**Tried and dropped: flushes inside a burst at a minimum interval.**
+- A burst flush has to wait for the compiles in flight before it can take the write lock (it starves otherwise; def1's flush waited 7 s).
+- While it waited, it sent new builds past the lock to the fallback compiler.
+- Measured on a cold run of all 1700 harness PSOs with six compile threads (FLUSH_EVERY 100, minimum interval 200 ms): one burst flush, 826 of ~930 good builds uncaptured, and the warm run missed 1604 (772 that never link + 832).
+- Waiting for in-flight compiles inside a parallel burst costs most of the capture. Not kept.
+
+**Proposal (not built; the reviewer decides): double-buffered capture.**
+- Two serializer-attached compilers A and B, each with its own lock. PSO builds use the active one; the PE's compiler handle isn't needed for that (the bridge made it).
+- A flush flips the active compiler (an atomic) and then waits only for the builds still in flight on the old one. New builds already go to the other compiler and **are captured**.
+- It flushes the old one, and its serializer is empty for the next flip.
+- **What it buys:**
+  - no build ever waits or goes uncaptured for a flush;
+  - the serializer is bounded per buffer;
+  - FLUSH_EVERY flushes are possible inside bursts, without the quiet-gap condition.
+  - The fallback compiler (M9) stays only as a safety net.
+- **Cost:** one more serializer-attached compiler (≈0 MB without content: `attr`). The code is about part 5's size.
+- **Gate:** the cold-session peak, uncaptured = 0, and psoab's new phase.
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).
