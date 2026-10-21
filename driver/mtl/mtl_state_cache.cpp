@@ -14,6 +14,7 @@
 #ifdef _WIN32
 #include "../util/util_env.h"
 #else
+#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -313,42 +314,51 @@ namespace dxvk {
       return ok;
     }
 
-    /// The journal before this session's first append (docs/state-cache-journal.md §3): a
-    /// file without our exact header (none, bad, another key signature) is started over with
-    /// it; a torn tail (an append cut short) is cut back to whole records. Not touched if a
-    /// newer d9mt wrote it (`newer`). False on an IO error.
-    bool prepareJournal(const std::string& path, const std::vector<uint8_t>& header, bool& newer) {
-      newer = false;
-      HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (h == INVALID_HANDLE_VALUE)
-        return false;
+    /// Opens the journal for appends (docs/state-cache-journal.md §3). Our header: Ready.
+    /// Never truncates a file with our header, because another process (a second client) may
+    /// be appending; a torn tail stays and the parser resyncs past it. Missing: created
+    /// exclusively with the header. Shorter than the header: another process is creating it,
+    /// so wait once; still short (its creator died) or foreign (bad header, older format,
+    /// another key signature): removed and created anew. A newer d9mt's: Newer, untouched.
+    statecache::JournalOpen openJournalFile(const std::string& path, const std::vector<uint8_t>& header) {
+      using statecache::JournalOpen;
+      for (int attempt = 0; attempt < 2; attempt++) {
+        HANDLE h = ::CreateFileW(widen(path).c_str(), GENERIC_READ,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+          std::vector<uint8_t> head(header.size(), uint8_t(0u));
+          DWORD n = 0u;
+          const bool read = ::ReadFile(h, head.data(), DWORD(head.size()), &n, nullptr);
+          ::CloseHandle(h);
+          if (!read)
+            return JournalOpen::Failed;
+          if (n == head.size() && head == header)
+            return JournalOpen::Ready;
+          if (n >= 12u && !std::memcmp(head.data(), header.data(), 8u)
+           && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+            return JournalOpen::Newer;
+          if (n < head.size() && !attempt) {
+            ::Sleep(5);
+            continue;
+          }
+          ::DeleteFileW(widen(path).c_str());
+        } else if (::GetLastError() != ERROR_FILE_NOT_FOUND) {
+          return JournalOpen::Failed;
+        }
 
-      LARGE_INTEGER size = { };
-      bool ok = ::GetFileSizeEx(h, &size);
-      std::vector<uint8_t> head(header.size(), uint8_t(0u));
-      DWORD n = 0u;
-      const bool haveHead = ok && uint64_t(size.QuadPart) >= header.size()
-        && ::ReadFile(h, head.data(), DWORD(head.size()), &n, nullptr) && n == head.size();
-
-      uint64_t keep = 0u;
-      if (haveHead && head == header)
-        keep = statecache::journalAlignedSize(size_t(size.QuadPart));
-      else if (haveHead && !std::memcmp(head.data(), header.data(), 8u)
-            && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
-        newer = true;
-
-      // A new or unusable file is cut to 0 and gets the header; ours keeps its whole records.
-      if (ok && !newer && (!keep || keep != uint64_t(size.QuadPart))) {
-        LARGE_INTEGER pos = { };
-        pos.QuadPart = LONGLONG(keep);
-        ok = ::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) && ::SetEndOfFile(h);
-        if (ok && !keep)
-          ok = ::WriteFile(h, header.data(), DWORD(header.size()), &n, nullptr) && n == header.size();
+        h = ::CreateFileW(widen(path).c_str(), GENERIC_WRITE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+          if (::GetLastError() == ERROR_FILE_EXISTS)
+            continue;   // another process created it first: read its header
+          return JournalOpen::Failed;
+        }
+        DWORD n = 0u;
+        const bool ok = ::WriteFile(h, header.data(), DWORD(header.size()), &n, nullptr) && n == header.size();
+        ::CloseHandle(h);
+        return ok ? JournalOpen::Ready : JournalOpen::Failed;
       }
-
-      ::CloseHandle(h);
-      return ok;
+      return JournalOpen::Busy;
     }
 
     /// Appends at the end of an existing file (an append-only handle: two processes' appends
@@ -501,34 +511,42 @@ namespace dxvk {
       return ok;
     }
 
-    bool prepareJournal(const std::string& path, const std::vector<uint8_t>& header, bool& newer) {
-      newer = false;
-      const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
-      if (fd < 0)
-        return false;
+    // As the Win32 openJournalFile.
+    statecache::JournalOpen openJournalFile(const std::string& path, const std::vector<uint8_t>& header) {
+      using statecache::JournalOpen;
+      for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+          std::vector<uint8_t> head(header.size(), uint8_t(0u));
+          const ssize_t n = ::pread(fd, head.data(), head.size(), 0);
+          ::close(fd);
+          if (n < 0)
+            return JournalOpen::Failed;
+          if (size_t(n) == head.size() && head == header)
+            return JournalOpen::Ready;
+          if (n >= 12 && !std::memcmp(head.data(), header.data(), 8u)
+           && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
+            return JournalOpen::Newer;
+          if (size_t(n) < head.size() && !attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+          }
+          ::unlink(path.c_str());
+        } else if (errno != ENOENT) {
+          return JournalOpen::Failed;
+        }
 
-      struct stat st;
-      bool ok = !::fstat(fd, &st);
-      std::vector<uint8_t> head(header.size(), uint8_t(0u));
-      const bool haveHead = ok && size_t(st.st_size) >= header.size()
-        && ::pread(fd, head.data(), head.size(), 0) == ssize_t(head.size());
-
-      off_t keep = 0;
-      if (haveHead && head == header)
-        keep = off_t(statecache::journalAlignedSize(size_t(st.st_size)));
-      else if (haveHead && !std::memcmp(head.data(), header.data(), 8u)
-            && *reinterpret_cast<const uint32_t*>(head.data() + 8u) > statecache::JournalVersion)
-        newer = true;
-
-      // A new or unusable file is cut to 0 and gets the header; ours keeps its whole records.
-      if (ok && !newer && (!keep || keep != st.st_size)) {
-        ok = !::ftruncate(fd, keep);
-        if (ok && !keep)
-          ok = ::pwrite(fd, header.data(), header.size(), 0) == ssize_t(header.size());
+        fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+          if (errno == EEXIST)
+            continue;   // another process created it first: read its header
+          return JournalOpen::Failed;
+        }
+        bool ok = ::write(fd, header.data(), header.size()) == ssize_t(header.size());
+        ok = !::close(fd) && ok;
+        return ok ? JournalOpen::Ready : JournalOpen::Failed;
       }
-
-      ok = !::close(fd) && ok;
-      return ok;
+      return JournalOpen::Busy;
     }
 
     bool appendFile(const std::string& path, const std::vector<uint8_t>& data) {
@@ -1180,6 +1198,16 @@ namespace dxvk {
   }
 
 
+  statecache::JournalOpen MtlStateCache::openJournal(const std::string& path, uint64_t keySignature) {
+    return openJournalFile(path, statecache::journalHeader(keySignature));
+  }
+
+
+  bool MtlStateCache::appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes) {
+    return appendFile(path, bytes);
+  }
+
+
   void MtlStateCache::appendJournal() {
     // Writer thread, once per intake that used new entries: one append, never on the render thread.
     if (!m_journalOn) {
@@ -1193,8 +1221,11 @@ namespace dxvk {
     bool ok = false;
     for (int attempt = 0; attempt < 2 && !ok; attempt++) {
       if (!m_journalReady) {
-        bool newer = false;
-        if (!prepareJournal(journalPath(), statecache::journalHeader(m_config.keySignature), newer) || newer) {
+        const statecache::JournalOpen open = openJournal(journalPath(), m_config.keySignature);
+        if (open == statecache::JournalOpen::Busy)
+          return;   // another process is creating it: the records stay pending for the next intake
+        if (open != statecache::JournalOpen::Ready) {
+          const bool newer = open == statecache::JournalOpen::Newer;
           m_journalOn = false;
           Logger::warn(newer
             ? std::string("STATECACHE journal written by a newer d9mt: not appending")
@@ -1204,8 +1235,8 @@ namespace dxvk {
         }
         m_journalReady = true;
       }
-      ok = appendFile(journalPath(), bytes);
-      // Gone (another process's write removed it): prepare it again, then retry once.
+      ok = appendJournalRecords(journalPath(), bytes);
+      // Gone (another process's write removed it): open it again, then retry once.
       m_journalReady = ok;
     }
 

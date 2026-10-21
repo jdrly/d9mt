@@ -2,8 +2,9 @@
 
 Status: implemented (n013-perf, 2026-10-21, `feat/state-cache-journal` on 2a1bc00), with the
 tests of §7 in `test/native/state_cache_test.cpp` (`testJournalFormat`,
-`testJournalSessions`, `testJournalTwoProcesses`); `scripts/test-state-cache.sh` passes plain
-and under ThreadSanitizer. No file-format change to the main file and no key-signature bump.
+`testJournalSessions`, `testJournalOpen`, `testJournalConcurrentAppend`,
+`testJournalTwoProcesses`); `scripts/test-state-cache.sh` passes plain and under
+ThreadSanitizer. No file-format change to the main file and no key-signature bump.
 Where the implementation differs from the design below:
 - Compaction **removes** the journal after a successful write (§5 step 3 said "truncate to
   its header"). The next append creates it again with a fresh header. A session that never
@@ -18,6 +19,24 @@ Where the implementation differs from the design below:
   lastSession) + 1`. Otherwise the killed session's records would count as used in this one.
 - A journal from a newer d9mt (same magic, newer version) is left alone, and this session
   doesn't journal.
+- **No truncation, ever, of a file with our header; the parser resyncs** (review-014: two
+  clients, e.g. multi-boxing). §3's realignment cut a misaligned file back to whole records,
+  but another client's append could be in flight then, and everything after its record would
+  have been lost. Now (§3, §4 below):
+  - open: our header → append. Missing → created exclusively (`CREATE_NEW` / `O_EXCL`) with
+    the header; a lost race reads the winner's header. Shorter than the header (another
+    process creating it) → wait 5 ms once, then treat it as foreign. Foreign (bad header, older
+    format, another key signature) → removed, then created exclusively. Newer → untouched.
+    If another process is still creating it, the records stay pending for the next intake.
+  - parse: a record is good where its check matches its content, wherever it starts. After a
+    stretch that isn't a record (a torn append later appends follow, a damaged record, two
+    writers' overlapping writes), the parser moves one byte at a time to the next offset whose
+    check matches. The origin bytes (`entryValid`) rule out almost every wrong offset before the
+    check is computed. A wrong record would need a 64-bit check collision. `corrupt=` counts the
+    skipped stretches, `torn=` the bytes after the last good record.
+  - Not a lock: an advisory lock under Wine is `LockFileEx`, held by the wineserver, so two
+    clients in different prefixes (CrossOver bottles) wouldn't see each other's lock.
+  - The journal format stays version 1 (the same bytes; only the reader is more tolerant).
 
 ## 1. What is already crash-safe, and what isn't
 
@@ -76,10 +95,9 @@ Records: StateCacheEntry, exactly the main file's entry encoding, with its own `
 - **No `FlushFileBuffers`**: the journal only has to outlive the *process*. After a kill or
   `ExitProcess`, the data is in the OS page cache. Power loss is out of scope, as it is for the
   marker file.
-- **Alignment after a torn tail**: on open, if `(size - 32) % 384 != 0` (a kill in the middle
-  of an append), truncate to the last whole record (`SetEndOfFile`) before appending.
-  Otherwise every later record would be misaligned. An empty or headerless file gets a
-  fresh header.
+- ~~**Alignment after a torn tail**: on open, if `(size - 32) % 384 != 0` (a kill in the middle
+  of an append), truncate to the last whole record (`SetEndOfFile`) before appending.~~
+  Replaced: the file is never cut and the parser resyncs (see the status above).
 - A failed append is logged once (like `write failed`, `:1078`) and changes nothing else;
   the main file still gets written as today.
 
@@ -98,7 +116,7 @@ After the main file is parsed and merged (`:886-910`):
    - `m_dropped`.
    Then `m_db.merge(e)`: union by key, max `lastSession`, min `firstUseMs`.
 3. A torn tail (a partial record) is ignored. A record with a bad `check` is skipped and
-   counted (`journalBad=`).
+   counted (`journalBad=`). (Implemented with resync: see the status above.)
 4. If the journal added anything, mark the cache dirty: the next regular write folds it into
    the main file.
 5. The `load` line gets `journal=<records>/<merged>/<bad>`.

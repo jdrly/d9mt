@@ -16,6 +16,8 @@
 //     -I<dxvk>/include/native/directx test/native/state_cache_test.cpp \
 //     driver/mtl/mtl_state_cache_core.cpp driver/mtl/mtl_state_cache.cpp -o /tmp/sct
 
+#include <atomic>
+#include <unordered_set>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -1690,14 +1692,13 @@ static void testJournalFormat() {
     std::vector<uint8_t> t(j.begin(), j.end() - std::ptrdiff_t(cut));
     r = parseJournal(t.data(), t.size(), Sig, out);
     CHECK(r.status == ParseStatus::Ok && out.size() == 9u && r.corrupt == 0u && r.tornBytes == EntrySize - cut);
-    CHECK(journalAlignedSize(t.size()) == JournalHeaderSize + 9u * EntrySize);
   }
 
   // A bit flip in the middle record: only that one dropped.
   std::vector<uint8_t> f = j;
   f[JournalHeaderSize + 5u * EntrySize + 100u] ^= 0x10u;
   r = parseJournal(f.data(), f.size(), Sig, out);
-  CHECK(r.status == ParseStatus::Ok && r.records == 10u && r.corrupt == 1u && out.size() == 9u);
+  CHECK(r.status == ParseStatus::Ok && r.records == 9u && r.corrupt == 1u && out.size() == 9u && r.tornBytes == 0u);
   for (const Entry& e : out)
     CHECK(!sameIdentity(e, in[5]));
   // ... also in its check.
@@ -1705,6 +1706,64 @@ static void testJournalFormat() {
   f[JournalHeaderSize + 2u * EntrySize + 3u] ^= 0x01u;
   r = parseJournal(f.data(), f.size(), Sig, out);
   CHECK(r.corrupt == 1u && out.size() == 9u);
+
+  // Resync: the file is never cut, so a torn append can be followed by whole ones (a kill, then
+  // the next session's appends), and two writers' records can overlap. Every good record after
+  // such a stretch is found again.
+  auto rec = [&](uint32_t i) { return std::vector<uint8_t>(j.begin() + JournalHeaderSize + i * EntrySize,
+                                                           j.begin() + JournalHeaderSize + (i + 1u) * EntrySize); };
+  auto cat = [](std::vector<uint8_t>& to, const std::vector<uint8_t>& from, size_t a = 0u, size_t b = SIZE_MAX) {
+    to.insert(to.end(), from.begin() + a, from.begin() + std::min(b, from.size()));
+  };
+  {
+    std::vector<uint8_t> t = journalHeader(Sig);
+    for (uint32_t i = 0u; i < 4u; i++) cat(t, rec(i));
+    cat(t, rec(4u), 0u, 200u);                     // torn
+    for (uint32_t i = 5u; i < 10u; i++) cat(t, rec(i));
+    r = parseJournal(t.data(), t.size(), Sig, out);
+    CHECK(r.status == ParseStatus::Ok && r.records == 9u && out.size() == 9u && r.corrupt == 1u && r.tornBytes == 0u);
+    for (const Entry& e : out)
+      CHECK(!sameIdentity(e, in[4]));
+  }
+  {
+    std::vector<uint8_t> t = journalHeader(Sig);   // record 1 split by record 2 (an overlap)
+    cat(t, rec(0u)); cat(t, rec(1u), 0u, 150u); cat(t, rec(2u)); cat(t, rec(1u), 150u); cat(t, rec(3u));
+    r = parseJournal(t.data(), t.size(), Sig, out);
+    CHECK(r.records == 3u && r.corrupt == 2u && r.tornBytes == 0u);
+    CHECK(out.size() == 3u && !std::memcmp(&out[0], &in[0], sizeof(Entry))
+       && !std::memcmp(&out[1], &in[2], sizeof(Entry)) && !std::memcmp(&out[2], &in[3], sizeof(Entry)));
+  }
+  {
+    // Damage of any kind (overwritten, cut out, inserted, repeated bytes): a record that is
+    // kept is always one that was written, and records away from the damage stay.
+    std::mt19937 rng(1234u);
+    uint32_t kept = 0u;
+    for (int it = 0; it < 400; it++) {
+      std::vector<uint8_t> t = j;
+      const int ops = 1 + int(rng() % 3u);
+      for (int o = 0; o < ops; o++) {
+        const size_t at = JournalHeaderSize + rng() % (t.size() - JournalHeaderSize);
+        const size_t len = 1u + rng() % 500u;
+        switch (rng() % 4u) {
+          case 0: for (size_t k = at; k < std::min(t.size(), at + len); k++) t[k] = uint8_t(rng()); break;
+          case 1: t.erase(t.begin() + at, t.begin() + std::min(t.size(), at + len)); break;
+          case 2: { std::vector<uint8_t> g(len); for (auto& b : g) b = uint8_t(rng()); t.insert(t.begin() + at, g.begin(), g.end()); break; }
+          case 3: { const size_t from = JournalHeaderSize + rng() % (j.size() - JournalHeaderSize);
+                    t.insert(t.begin() + at, j.begin() + from, j.begin() + std::min(j.size(), from + len)); break; }
+        }
+      }
+      r = parseJournal(t.data(), t.size(), Sig, out);
+      CHECK(r.status == ParseStatus::Ok);
+      for (const Entry& e : out) {
+        bool written = false;
+        for (const Entry& w : in)
+          written |= !std::memcmp(&e, &w, sizeof(Entry));
+        CHECK(written);
+      }
+      kept += uint32_t(out.size());
+    }
+    CHECK(kept > 400u * 4u);   // most records survive 1-3 damaged spots
+  }
 
   // Header cases.
   r = parseJournal(nullptr, 0u, Sig, out);
@@ -1799,7 +1858,8 @@ static void testJournalSessions() {
   }
   loadKilled(59u, 59u);
 
-  // The next append after a torn tail realigns: the file stays header + whole records.
+  // The next appends after a torn tail: the file is not cut (another client may be appending),
+  // they follow the fragment, and the parser finds every whole record on both sides of it.
   unlink(kcfg.file.c_str());
   {
     std::vector<uint8_t> t = killedJournal;
@@ -1814,10 +1874,10 @@ static void testJournalSessions() {
     for (int i = 0; i < 5000 && sc->stats().journaled < 70u; i++)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const std::vector<uint8_t> after = readFile(kcfg.file + ".journal");
-    CHECK(after.size() >= JournalHeaderSize && (after.size() - JournalHeaderSize) % EntrySize == 0u);
+    CHECK(after.size() == t.size() + 70u * EntrySize);
     std::vector<Entry> recs;
     const JournalParseResult jr = parseJournal(after.data(), after.size(), Sig, recs);
-    CHECK(jr.status == ParseStatus::Ok && jr.corrupt == 0u && jr.tornBytes == 0u && recs.size() == 59u + 70u);
+    CHECK(jr.status == ParseStatus::Ok && jr.corrupt == 1u && jr.tornBytes == 0u && recs.size() == 59u + 70u);
     sc->shutdown();
   }
 
@@ -1923,6 +1983,92 @@ static void testJournalSessions() {
   }
 }
 
+// Opening the journal: missing, ours (never cut), a creator's short file, foreign, newer.
+static void testJournalOpen() {
+  const std::string dir = tempDir();
+  const std::string path = dir + "/o.d9mtstate.journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  std::vector<uint8_t> t = journalHeader(Sig);
+  appendRecords(t, { makeEntry(1u), makeEntry(2u) });
+  t.resize(t.size() - 50u);   // a torn tail: kept as it is
+  writeFile(path, t);
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == t);
+
+  writeFile(path, std::vector<uint8_t>(10u, uint8_t(0u)));   // a creator killed after the create
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  writeFile(path, journalHeader(Sig ^ 1u));   // another key signature
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+  CHECK(readFile(path) == journalHeader(Sig));
+
+  std::vector<uint8_t> newer = journalHeader(Sig);
+  newer[8] = uint8_t(JournalVersion + 1u);
+  writeFile(path, newer);
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Newer);
+  CHECK(readFile(path) == newer);
+
+  unlink(path.c_str());
+  CHECK(MtlStateCache::appendJournalRecords(path, t) == false);   // appends never create it
+  CHECK(!exists(path));
+}
+
+// Two clients appending to one journal at once, a third opening it over and over (another
+// client's first append of a session): nothing accepted is wrong, and natively (O_APPEND)
+// nothing is lost. n013-perf/scripts/journal-wine.sh runs the same under Wine.
+static void testJournalConcurrentAppend() {
+  const std::string dir = tempDir();
+  const std::string path = dir + "/c.d9mtstate.journal";
+  CHECK(MtlStateCache::openJournal(path, Sig) == JournalOpen::Ready);
+
+  constexpr uint32_t Writers = 2u, Batches = 300u;
+  static const uint32_t sizes[3] = { 1u, 3u, 17u };
+  std::atomic<bool> stop = { false };
+  std::atomic<uint32_t> written = { 0u }, failed = { 0u };
+
+  std::vector<std::thread> threads;
+  for (uint32_t w = 0u; w < Writers; w++) {
+    threads.emplace_back([&, w] {
+      uint32_t seq = 0u;
+      for (uint32_t b = 0u; b < Batches; b++) {
+        std::vector<Entry> es;
+        for (uint32_t k = 0u; k < sizes[(b + w) % 3u]; k++)
+          es.push_back(makeEntry((w + 1u) * 100000u + seq++));
+        std::vector<uint8_t> bytes;
+        appendRecords(bytes, es);
+        if (MtlStateCache::appendJournalRecords(path, bytes))
+          written += uint32_t(es.size());
+        else
+          failed++;
+      }
+    });
+  }
+  std::thread opener([&] {
+    while (!stop.load())
+      if (MtlStateCache::openJournal(path, Sig) != JournalOpen::Ready)
+        failed++;
+  });
+  for (auto& t : threads)
+    t.join();
+  stop = true;
+  opener.join();
+
+  std::vector<Entry> recs;
+  const std::vector<uint8_t> data = readFile(path);
+  const JournalParseResult r = parseJournal(data.data(), data.size(), Sig, recs);
+  CHECK(failed.load() == 0u && r.status == ParseStatus::Ok);
+  CHECK(r.records == written.load() && r.corrupt == 0u && r.tornBytes == 0u);
+  std::unordered_set<uint64_t> seen;
+  for (const Entry& e : recs) {
+    const Entry want = makeEntry(e.firstUseMs);
+    CHECK(!std::memcmp(&e, &want, sizeof(Entry)));   // exactly a written record
+    CHECK(seen.insert(identityHash(e)).second);               // once
+  }
+}
+
 // Two processes on one cache: one's journal survives the other's write (it merges it first).
 static void testJournalTwoProcesses() {
   const std::string dir = tempDir();
@@ -2017,6 +2163,8 @@ int main(int argc, char** argv) {
   testFailedPrewarmNotAdopted();
   testJournalFormat();
   testJournalSessions();
+  testJournalOpen();
+  testJournalConcurrentAppend();
   testJournalTwoProcesses();
 
   if (g_failures) {

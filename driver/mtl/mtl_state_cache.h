@@ -167,6 +167,12 @@ namespace dxvk {
       uint64_t journalReplayed = 0u;   // journal records merged at load (a session that ended without writing)
     };
 
+    /// The journal's file IO (the writer thread's; public for the tests and the Wine append
+    /// test, n013-perf/bench/journal_append.cpp). openJournal never truncates a file with our
+    /// header; appendJournalRecords appends to an existing file only (false if it's gone).
+    static statecache::JournalOpen openJournal(const std::string& path, uint64_t keySignature);
+    static bool appendJournalRecords(const std::string& path, const std::vector<uint8_t>& bytes);
+
     Stats stats();
 
   private:

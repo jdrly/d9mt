@@ -217,24 +217,39 @@ namespace dxvk::statecache {
       return r;
     }
 
-    const size_t n = (size - JournalHeaderSize) / EntrySize;
-    r.records   = uint32_t(n);
-    r.tornBytes = uint32_t((size - JournalHeaderSize) % EntrySize);
-    out.reserve(n);
+    out.reserve((size - JournalHeaderSize) / EntrySize);
 
-    for (size_t i = 0u; i < n; i++) {
-      const uint8_t* p = data + JournalHeaderSize + i * EntrySize;
+    // A record is good where its check matches its content; between good records anything
+    // else is skipped by moving one byte at a time. The origin bytes (entryValid) rule out
+    // almost every wrong offset before the check is computed.
+    size_t pos = JournalHeaderSize;
+    size_t skipFrom = SIZE_MAX;   // start of the stretch being skipped
+    while (pos + EntrySize <= size) {
+      const uint8_t* p = data + pos;
       Entry e;
-      std::memcpy(&e, p + 8u, sizeof(e));
+      std::memcpy(&e, p + 8u, offsetof(Entry, lastSession));
 
-      if (get<uint64_t>(p) != fnv1a(&e, sizeof(e)) || !entryValid(e)) {
-        r.corrupt++;
-        continue;
+      if (entryValid(e)) {
+        std::memcpy(&e, p + 8u, sizeof(e));
+        if (get<uint64_t>(p) == fnv1a(&e, sizeof(e))) {
+          if (skipFrom != SIZE_MAX) {
+            r.corrupt++;
+            skipFrom = SIZE_MAX;
+          }
+          r.records++;
+          r.maxSession = std::max(r.maxSession, e.lastSession);
+          out.push_back(e);
+          pos += EntrySize;
+          continue;
+        }
       }
 
-      r.maxSession = std::max(r.maxSession, e.lastSession);
-      out.push_back(e);
+      if (skipFrom == SIZE_MAX)
+        skipFrom = pos;
+      pos++;
     }
+
+    r.tornBytes = uint32_t(size - std::min(skipFrom, pos));
 
     r.status = ParseStatus::Ok;
     return r;
