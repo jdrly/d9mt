@@ -329,13 +329,30 @@ compile_one() {
   local src="$1" obj="$2"; shift 2
   "$MINGW" "${FLAGS[@]}" "$@" -MMD -MP -MF "$obj.d" -c "$src" -o "$obj"
 }
-# stale <obj> <src>: rebuild when the object is missing or older than its source or than
-# any header its dependency file (-MMD, <obj>.d) lists; an object without one is rebuilt.
+# The compile flags are a dependency too (-D switches such as STATE_CACHE_TESTING, -O, the
+# compiler): a hash of them in $OBJ/.flags; when it changes, every object is stale. Written
+# once all objects compiled, so a failed build with new flags stays all-stale.
+FLAGS_HASH=$(printf '%s\n' "$MINGW" "${FLAGS[@]}" | shasum -a 256 | cut -c1-16)
+FLAGS_STALE=0
+[ "$(cat "$OBJ/.flags" 2>/dev/null)" = "$FLAGS_HASH" ] || FLAGS_STALE=1
+[ "$FLAGS_STALE" = 1 ] && [ -f "$OBJ/.flags" ] && echo "=== [driver] compile flags changed: rebuilding every object ==="
+# stale <obj> <src>: rebuild when the flags changed, the object is missing or older than its
+# source or than any file its dependency file (-MMD, <obj>.d) lists, one of those files is
+# gone (a header moved or deleted), or the object has no dependency file.
 stale() {
-  local obj="$1" src="$2" f
-  [ -f "$obj" ] && [ -f "$obj.d" ] && [ ! "$src" -nt "$obj" ] || return 0
-  for f in $(sed -e 's/\\$//' -e '1s/^[^:]*://' "$obj.d"); do
+  local obj="$1" src="$2" d f
+  [ "$FLAGS_STALE" = 0 ] && [ -f "$obj" ] && [ -f "$obj.d" ] && [ ! "$src" -nt "$obj" ] || return 0
+  # "obj: dep dep \" with continuation lines and -MP's "dep:" lines; "\ " is a space in a path
+  d=$(<"$obj.d")
+  d=${d//\\$'\n'/ }
+  d=${d#*:}
+  d=${d//\\ /$'\001'}
+  local -a deps
+  IFS=$' \t\n' read -r -d '' -a deps <<< "$d" || true
+  for f in "${deps[@]}"; do
     case "$f" in *:) continue ;; esac
+    f=${f//$'\001'/ }
+    [ -e "$f" ] || return 0
     [ "$f" -nt "$obj" ] && return 0
   done
   return 1
@@ -451,6 +468,7 @@ while IFS= read -r f; do
 done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
 [ "${#SM3_PIDS[@]}" -gt 0 ] && { wait "${SM3_PIDS[@]}" || SM3_RC=1; }
 [ "$SM3_RC" -eq 0 ] || { echo "FATAL: libdxbcsm3 compile failed" >&2; exit 1; }
+printf '%s\n' "$FLAGS_HASH" > "$OBJ/.flags"
 rm -f "$DXBCSM3_LIB"
 "$MINGW_PREFIX-ar" rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
