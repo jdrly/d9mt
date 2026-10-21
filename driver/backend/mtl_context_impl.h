@@ -15,6 +15,7 @@
 #include "mtl_cmd_chunk.h"
 #include "mtl_device_impl.h"
 #include "mtl_pso_cache.h"
+#include "mtl_pso_gen.h"
 
 namespace dxvk::backend {
 
@@ -497,6 +498,18 @@ namespace dxvk::backend {
     Rc<RenderPsoCache::Entry> m_psoMruPso[4];
     uint32_t     m_psoMruCursor = 0u;
     uint32_t     m_layoutGen = 0u, m_strideGen = 0u, m_blendGen = 0u;
+    // State changed since the last resolvePso (PsoGen* bits); its generation is interned there.
+    enum : uint32_t { PsoGenBlend = 1u, PsoGenLayout = 2u, PsoGenStride = 4u };
+    uint32_t     m_psoGenDirty = 0u;
+    struct VertexLayoutState {
+      std::vector<MtlVertexAttr>   attrs;
+      std::vector<MtlVertexLayout> layouts;
+    };
+    PsoGenRing<std::array<MtlBlendMode, 4>, 8> m_blendGens;
+    PsoGenRing<VertexLayoutState, 8>           m_layoutGens;
+    PsoGenRing<std::array<uint32_t, 16>, 8>    m_strideGens;
+    // Out of line and cold: resolvePso's MRU-hit path stays as it was.
+    __attribute__((noinline, cold)) void internPsoGens();
     ArgTablePair createArgumentTablePair() const;
     void initNullBindings(ArgTablePair& pair) const;
     uint64_t nullTextureId(uint32_t stage, uint32_t slot) const {

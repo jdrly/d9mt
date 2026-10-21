@@ -138,6 +138,9 @@ namespace dxvk::backend {
       }
     }
 
+    if (unlikely(m_psoGenDirty))
+      internPsoGens();
+
     PsoSnapshot snap = {};
     snap.vs = m_vs.ptr();
     snap.fs = m_fs.ptr();
@@ -229,6 +232,48 @@ namespace dxvk::backend {
     m_psoMruCursor = (m_psoMruCursor + 1u) & 3u;
 
     return emitPso(pso);
+  }
+
+  void MtlContextImpl::internPsoGens() {
+    // Equal generation = equal content, so the MRU snapshot stays exact (mtl_pso_gen.h).
+    if (m_psoGenDirty & PsoGenBlend) {
+      // Field by field: the frontend builds MtlBlendMode on the stack, its padding (after
+      // `enable`) is whatever was there, so equal states can differ in their bytes.
+      m_blendGen = m_blendGens.intern(m_blend,
+        [] (const std::array<MtlBlendMode, 4>& a, const std::array<MtlBlendMode, 4>& b) {
+          for (uint32_t i = 0u; i < 4u; i++) {
+            if (a[i].enable   != b[i].enable   || a[i].writeMask != b[i].writeMask
+             || a[i].colorSrc != b[i].colorSrc || a[i].colorDst  != b[i].colorDst  || a[i].colorOp != b[i].colorOp
+             || a[i].alphaSrc != b[i].alphaSrc || a[i].alphaDst  != b[i].alphaDst  || a[i].alphaOp != b[i].alphaOp)
+              return false;
+          }
+          return true;
+        },
+        [] (std::array<MtlBlendMode, 4>& a, const std::array<MtlBlendMode, 4>& b) { a = b; });
+    }
+    if (m_psoGenDirty & PsoGenLayout) {
+      m_layoutGen = m_layoutGens.intern(*this,
+        [] (const VertexLayoutState& s, const MtlContextImpl& c) {
+          return s.attrs.size() == c.m_vertexAttrs.size() && s.layouts.size() == c.m_vertexLayouts.size()
+              && !std::memcmp(s.attrs.data(), c.m_vertexAttrs.data(), s.attrs.size() * sizeof(MtlVertexAttr))
+              && !std::memcmp(s.layouts.data(), c.m_vertexLayouts.data(), s.layouts.size() * sizeof(MtlVertexLayout));
+        },
+        [] (VertexLayoutState& s, const MtlContextImpl& c) {
+          s.attrs   = c.m_vertexAttrs;
+          s.layouts = c.m_vertexLayouts;
+        });
+    }
+    if (m_psoGenDirty & PsoGenStride) {
+      std::array<uint32_t, 16> strides;
+      for (uint32_t i = 0u; i < 16u; i++)
+        strides[i] = m_vertexStreams[i].stride;
+      m_strideGen = m_strideGens.intern(strides,
+        [] (const std::array<uint32_t, 16>& a, const std::array<uint32_t, 16>& b) {
+          return !std::memcmp(a.data(), b.data(), sizeof(a));
+        },
+        [] (std::array<uint32_t, 16>& a, const std::array<uint32_t, 16>& b) { a = b; });
+    }
+    m_psoGenDirty = 0u;
   }
 
   void MtlContextImpl::boostPendingShaders() {

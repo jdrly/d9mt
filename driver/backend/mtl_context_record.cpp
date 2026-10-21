@@ -1614,7 +1614,7 @@ namespace dxvk::backend {
       return;
     m_vertexAttrs.assign(attrs, attrs + nAttr);
     m_vertexLayouts.assign(layouts, layouts + nLayout);
-    m_layoutGen++;
+    m_psoGenDirty |= PsoGenLayout;
     m_dirty |= DirtyPso;
   }
 
@@ -1662,7 +1662,7 @@ namespace dxvk::backend {
     if (std::memcmp(&m_blend[rt], &blend, sizeof(blend)) == 0)
       return;
     m_blend[rt] = blend;
-    m_blendGen++;
+    m_psoGenDirty |= PsoGenBlend;
     m_dirty |= DirtyPso;
   }
 
@@ -1694,7 +1694,7 @@ namespace dxvk::backend {
   void MtlContextImpl::bindVertexBuffer(uint32_t binding, MtlBufferSlice&& slice, uint32_t stride) {
     auto& stream = m_vertexStreams[binding];
     if (stream.stride != stride) {
-      m_strideGen++;
+      m_psoGenDirty |= PsoGenStride;
       m_dirty |= DirtyPso;
     }
     stream.slice = std::move(slice);
@@ -1708,7 +1708,7 @@ namespace dxvk::backend {
     if (!stream.slice.defined())
       return;
     if (stream.stride != stride) {
-      m_strideGen++;
+      m_psoGenDirty |= PsoGenStride;
       m_dirty |= DirtyPso;
     }
     stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
