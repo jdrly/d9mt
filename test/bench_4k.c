@@ -6,7 +6,15 @@
  * targets (an even number, default 4), and a downscale into a small backbuffer (no 4K window). Vertex-
  * heavy geometry (bench_vs), ~2,200 draws per frame.
  *
- *   bench_4k.exe [frames] [post passes] [depth clears]
+ *   bench_4k.exe [frames] [post passes] [depth clears] [wait | cpu ms]
+ *
+ * The 4th argument (optional; default: Present only):
+ *   wait    ends every frame with an event query polled with D3DGETDATA_FLUSH every 20 us until
+ *           the GPU is done: the GPU idles between frames ("wait every frame", the case where
+ *           postponing a flush starves it).
+ *   <ms>    burns that many ms of CPU per frame before Present. Near the GPU's frame time the
+ *           frame is balanced, so whether the GPU still has an earlier frame queued flips within
+ *           frames (G1's backlog gate, docs/g1-early-commit.md §6).
  *
  * Defaults: 300 frames after 60 warm-up frames, 4 post passes (more: more
  * attachment bandwidth), 1 depth-only Clear (more: the main pass's draws are
@@ -17,6 +25,7 @@
  * a Metal System Trace (test/perf/mst_overlap.py). Not a hash test. */
 #include "t_common.h"
 #include <stdlib.h>
+#include <string.h>
 
 static const unsigned char bench_vs_bytecode[] = {
 #include "bench_vs_bytecode.inc"
@@ -158,6 +167,8 @@ int main(int argc, char **argv) {
     postPasses = (atoi(argv[2]) + 1) & ~1;
   if (argc > 3 && atoi(argv[3]) > 0)
     depthClears = atoi(argv[3]);
+  const int waitMode = argc > 4 && !strcmp(argv[4], "wait");
+  const double cpuMs = argc > 4 && !waitMode ? atof(argv[4]) : 0.0;
   t_present_interval = D3DPRESENT_INTERVAL_IMMEDIATE;
   t_init("d9mt_bench_4k", 640, 360);
   T_CHECK(IDirect3DDevice9_CreateVertexShader(t_dev, (const DWORD *)bench_vs_bytecode, &vsBench));
@@ -191,6 +202,9 @@ int main(int argc, char **argv) {
     IDirect3DDevice9_SetSamplerState(t_dev, s, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
   }
   build_geometry();
+  IDirect3DQuery9 *query = NULL;
+  if (waitMode)
+    T_CHECK(IDirect3DDevice9_CreateQuery(t_dev, D3DQUERYTYPE_EVENT, &query));
 
   LARGE_INTEGER f, t0, t1;
   QueryPerformanceFrequency(&f);
@@ -203,12 +217,25 @@ int main(int argc, char **argv) {
     if (i == warm)
       QueryPerformanceCounter(&t0);
     frame(i);
+    if (cpuMs > 0.0) {
+      LARGE_INTEGER b0, b1;
+      QueryPerformanceCounter(&b0);
+      do QueryPerformanceCounter(&b1); while ((double)(b1.QuadPart - b0.QuadPart) * 1000.0 < cpuMs * (double)f.QuadPart);
+    }
     IDirect3DDevice9_Present(t_dev, NULL, NULL, NULL, NULL);
+    if (waitMode) {
+      IDirect3DQuery9_Issue(query, D3DISSUE_END);
+      while (IDirect3DQuery9_GetData(query, NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+        LARGE_INTEGER p0, p1;
+        QueryPerformanceCounter(&p0);
+        do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < f.QuadPart);
+      }
+    }
   }
   QueryPerformanceCounter(&t1);
   const double ms = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart / frames;
-  printf("BENCH4K frames=%d post=%d clears=%d draws=%d ms/frame=%.3f fps=%.1f\n", frames, postPasses, depthClears,
-         DRAWS + 3 + postPasses, ms, 1000.0 / ms);
+  printf("BENCH4K frames=%d post=%d clears=%d draws=%d ms/frame=%.3f fps=%.1f mode=%s\n", frames, postPasses, depthClears,
+         DRAWS + 3 + postPasses, ms, 1000.0 / ms, waitMode ? "wait" : cpuMs > 0.0 ? "balanced" : "present");
   fflush(stdout);
   return 0;
 }

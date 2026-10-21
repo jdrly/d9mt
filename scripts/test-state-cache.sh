@@ -29,6 +29,6 @@ clang++ -std=c++17 -O1 -g -fsanitize=thread "${INC[@]}" "${SRC[@]}" -o "$OUT/sct
 TSAN_OPTIONS="halt_on_error=1" "$OUT/sct-tsan"
 
 echo "[state-cache] render-thread cost of recording"
-"$OUT/sct" bench
+"$OUT/sct" bench ${BENCH_ROUNDS:-}   # BENCH_ROUNDS=<n>: rounds of 512 misses (default 200)
 
 rm -rf "$OUT" /tmp/d9mt-sct.*
