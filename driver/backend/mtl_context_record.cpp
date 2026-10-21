@@ -1531,10 +1531,11 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::setPrimitiveTopology(MtlPrimitiveTopology topology) {
-    if (m_topology == topology)
-      return;
+    // Not DirtyPso: the pipeline doesn't depend on the topology (RenderPsoKey::topologyClass is
+    // always 0, and build() leaves Metal's input topology unspecified), and each draw encodes
+    // m_topology itself. So a draw that only changes topology skips resolvePso and the
+    // resource flush that DirtyPso also triggers.
     m_topology = topology;
-    m_dirty |= DirtyPso;
   }
 
   void MtlContextImpl::setViewports(uint32_t n, const MtlViewport* viewports) {
