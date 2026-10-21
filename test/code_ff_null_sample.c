@@ -4,7 +4,8 @@
  * unbound slots, the result must not change from base, where the empty slot read as 0.
  * Measured on base (2a1bc00): both quads stay green, i.e. this FF path doesn't use a null
  * stage's texture value for these ops (only D3DTOP_PREMODULATE observes it:
- * port/ff-null-texture's code_ff_null_tex). The test pins that: green, base = fix. */
+ * port/ff-null-texture's code_ff_null_tex). The test pins that: green, base = fix, with or
+ * without that port (which changes the null value to (1, 1, 1, 1)). */
 #include "t_xfer.h"
 
 struct V { float x, y, z, rhw; DWORD c; };
