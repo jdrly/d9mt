@@ -32,8 +32,9 @@ namespace lifetime {
   // 0 off, 1 abort, 2 log: D9MT_LIFETIME_CHECK, read once when the DLL loads, so that with the
   // check off every hook is a load and a branch, not a call (they sit in the per-draw binding
   // path: thousands per frame)
-  int readMode();
-  inline const int g_mode = readMode();
+  // (defined in mtl_lifetime.cpp: a reference is a plain load, and a source that includes this
+  // header without using the check needs nothing of it at link time)
+  extern const int g_mode;
 
   inline int mode() { return g_mode; }
 

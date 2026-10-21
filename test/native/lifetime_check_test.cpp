@@ -48,6 +48,9 @@ extern "C" void NSObject_retain(obj_handle_t) { }
 
 static std::vector<std::string> g_lines;
 
+// RetireBatch::run lives in mtl_device_impl.cpp; nothing here hands the tracker a batch
+namespace dxvk::backend { void RetireBatch::run() { } }
+
 namespace dxvk {
   void Logger::info(const std::string&) { }
   void Logger::warn(const std::string&) { }
@@ -70,12 +73,12 @@ int main() {
   SubmissionTracker st(0u);
   lifetime::attach(&st);
 
-  // 1. Bug A: a view released while the command buffer being recorded samples it
+  // 1. Bug A: a view released while the open serial samples it
   const uint64_t rec = st.nextSerial();
   lifetime::noteUse(0x1000u, rec, lifetime::Use::Sampled);
   lifetime::checkRelease(0x1000u, "texture view");
   CHECK(g_lines.size() == 1u);
-  CHECK(has(0, "D9MT-LIFETIME: texture view 0x1000 released while the command buffer being recorded"));
+  CHECK(has(0, "D9MT-LIFETIME: texture view 0x1000 released while the open serial"));
   CHECK(has(0, "uses it as sampled"));
 
   // 2. committed but not complete: reported; complete: not

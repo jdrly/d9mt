@@ -47,13 +47,15 @@ namespace dxvk::backend::lifetime {
 
   }
 
-  int readMode() {
+  static int readMode() {
     // (at load: no logging here, the logger may not be up yet; attach says it)
     const std::string v = env::getEnvVar("D9MT_LIFETIME_CHECK");
     if (v.empty() || v == "0")
       return 0;
     return v == "log" ? 2 : 1;
   }
+
+  extern const int g_mode = readMode();
 
   void attach(SubmissionTracker* tracker) {
     if (!enabled())
@@ -129,7 +131,7 @@ namespace dxvk::backend::lifetime {
     }
 
     const std::string where = s.serial >= recording
-      ? str::format("the command buffer being recorded (serial ", s.serial, ")")
+      ? str::format("the open serial ", s.serial, " (being recorded, or committed early by G1)")
       : str::format("committed serial ", s.serial, ", not complete");
     const std::string line = str::format("D9MT-LIFETIME", s.drawable ? " drawable" : "", ": ", what,
       " 0x", std::hex, texture, std::dec, " released while ", where, " uses it as ", useName(s.use),
