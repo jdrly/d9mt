@@ -112,9 +112,20 @@ mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs
 OUT="$WORK/results/$TAG-$(date +%Y%m%d-%H%M%S)-$$.txt"
 [ -e "$OUT" ] && die "$OUT exists"
 
+if [ "$NATIVE" = 0 ]; then
+  export WINEPREFIX="$WORK/prefix" WINEDEBUG=-all WINEMSYNC=1
+  export DYLD_FALLBACK_LIBRARY_PATH="${FRAMEWORKS:+$FRAMEWORKS:}/usr/lib"
+fi
+
 # Wine servers on this machine (any engine, any prefix).
 servers() { [ "${DIRTY_CHECK:-1}" = 0 ] && { echo 0; return; }; ps -axo comm= | grep -cE '(^|/)wineserver$'; }
-stop_own() { [ "$NATIVE" = 1 ] || { "$WINESERVER" -k >/dev/null 2>&1; "$WINESERVER" -w >/dev/null 2>&1; }; }
+# This run's own server only: WINEPREFIX is bound on every call, so a signal that arrives before
+# (or after) anything else can never stop another prefix's server.
+stop_own() {
+  [ "$NATIVE" = 1 ] && return 0
+  WINEPREFIX="$WORK/prefix" "$WINESERVER" -k >/dev/null 2>&1
+  WINEPREFIX="$WORK/prefix" "$WINESERVER" -w >/dev/null 2>&1
+}
 
 # Cleanup on INT/TERM, installed before the first launch (wineboot included): the owned child and
 # every process below it (a RUN_WRAPPER may fork the program), then, under Wine, only this WORK
@@ -134,8 +145,6 @@ trap 'cleanup; echo "perf-abba: interrupted" >&2; exit 130' INT
 trap 'cleanup; echo "perf-abba: terminated" >&2; exit 143' TERM
 
 if [ "$NATIVE" = 0 ]; then
-  export WINEPREFIX="$WORK/prefix" WINEDEBUG=-all WINEMSYNC=1
-  export DYLD_FALLBACK_LIBRARY_PATH="${FRAMEWORKS:+$FRAMEWORKS:}/usr/lib"
   if [ ! -f "$WINEPREFIX/system.reg" ]; then
     "$WINE" wineboot -i >"$WORK/wineboot.log" 2>&1 & CHILD=$!
     wait "$CHILD" || die "wineboot failed ($WORK/wineboot.log)"
