@@ -46,7 +46,6 @@ namespace dxvk::backend {
     "psoAttributeFormatProduced() must list attributeFormat()'s outputs");
   static_assert(WMTBlendFactorOneMinusSource1Alpha == 18 && WMTBlendOperationMax == 4,
     "psoStateValid() blend ranges");
-  static_assert(WMTPrimitiveTopologyClassTriangle == 3, "psoStateValid() topology range");
 
   uint64_t RenderPsoKey::signature() {
     // Every field and sub-field offset: a field moving inside the key, or
@@ -56,6 +55,7 @@ namespace dxvk::backend {
       offsetof(RenderPsoKey, vsCookie),    offsetof(RenderPsoKey, fsCookie),
       offsetof(RenderPsoKey, attrs),       offsetof(RenderPsoKey, layouts),
       offsetof(RenderPsoKey, attrCount),   offsetof(RenderPsoKey, layoutCount),
+      offsetof(RenderPsoKey, padding),
       offsetof(RenderPsoKey, colors),      offsetof(RenderPsoKey, colorCount),
       offsetof(RenderPsoKey, sampleCount), offsetof(RenderPsoKey, topologyClass),
       offsetof(RenderPsoKey, alphaToCoverage),
@@ -269,7 +269,6 @@ namespace dxvk::backend {
     info.rasterization_enabled     = 1u;
     info.raster_sample_count       = key.sampleCount ? key.sampleCount : 1u;
     info.alpha_to_coverage_enabled = key.alphaToCoverage != 0u ? 1u : 0u;
-    info.input_primitive_topology  = uint32_t(WMTPrimitiveTopologyClass(key.topologyClass));
 
     // Never past the key's arrays, whatever the counts say (a state cache
     // key is validated before it gets here, a draw's key is built in range).

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <type_traits>
 
 #include "../mtl/mtl_types.h"
 
@@ -47,14 +48,22 @@ namespace dxvk::backend {
     PsoVertexLayout layouts[20] = { };
     uint8_t attrCount = 0u;
     uint8_t layoutCount = 0u;
+    // Explicit, so the key has no padding bytes: it is hashed and compared as raw bytes,
+    // and "= {}" with default member initializers doesn't zero implicit padding.
+    uint8_t padding[2] = { };
 
     PsoColorAttachment colors[4] = { };
     uint8_t colorCount = 0u;
 
     uint8_t sampleCount = 1u;
+    // Always 0: build() gives Metal an unspecified topology class (SM3 vertex shaders declare
+    // a point size, which an explicit class rejects), so the draw's topology must not split
+    // the key: a triangle, line and point draw of the same state is one pipeline.
     uint8_t topologyClass = 0u;
     uint8_t alphaToCoverage = 0u;
 
+    // Always 0: Metal 4 pipeline descriptors have no depth/stencil formats (build() sets
+    // none), so they would only split keys of the same pipeline.
     uint32_t depthFormat = 0u;
     uint32_t stencilFormat = 0u;
 
@@ -83,6 +92,9 @@ namespace dxvk::backend {
     static uint64_t signature();
   };
 
+  static_assert(std::has_unique_object_representations_v<RenderPsoKey>,
+    "RenderPsoKey is hashed and compared as raw bytes: no padding");
+
   /// Bump in the same commit as any change to what the key's derived bytes
   /// mean, so stale state cache entries are dropped instead of prewarmed:
   ///  - attributeFormat() (MtlFormat -> Metal vertex format) and
@@ -97,7 +109,9 @@ namespace dxvk::backend {
   /// 3: #8 (6d625fa) deduplicates repeated semantics in a VS's input
   ///    signature, which changes BindInputLayout()'s attribute list for
   ///    vertex shaders with packed input declarations.
-  constexpr uint32_t kPsoKeyMappingVersion = 3u;
+  /// 4: topologyClass and the depth/stencil formats are always 0 and the padding is explicit:
+  ///    one pipeline was up to three keys (triangles, lines, points) and three entries.
+  constexpr uint32_t kPsoKeyMappingVersion = 4u;
 
   /// Metal buffer indices of vertex streams: kVertexBufferBaseIndex (3) +
   /// stream 0..15, and the null stream (NullStreamIdx = 16) at 19.
@@ -229,8 +243,10 @@ namespace dxvk::backend {
 
     if (k.sampleCount != 1u && k.sampleCount != 2u && k.sampleCount != 4u && k.sampleCount != 8u)
       return fail("sample count");
-    if (k.topologyClass > 3u || k.alphaToCoverage > 1u)
+    if (k.topologyClass != 0u || k.alphaToCoverage > 1u)
       return fail("topology or alpha to coverage");
+    if (k.padding[0] || k.padding[1])
+      return fail("padding");
     if (k.depthFormat || k.stencilFormat)
       return fail("depth/stencil format");
 
