@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <array>
+#include <type_traits>
 #include <vector>
 
 #include "mtl_types.h"
@@ -206,7 +207,15 @@ namespace dxvk {
     uint32_t binding    = 0;
     uint32_t stride     = 0;
     bool     perInstance = false;
+    // Explicit, so the struct has no padding bytes: setVertexLayout and the PSO MRU's layout
+    // generations compare it as raw bytes, and "= {}" with default member initializers
+    // doesn't zero implicit padding (equal layouts would compare unequal).
+    uint8_t  padding[3] = { };
     uint32_t divisor    = 0;
   };
+
+  static_assert(std::has_unique_object_representations_v<MtlVertexAttr>
+             && std::has_unique_object_representations_v<MtlVertexLayout>,
+    "MtlVertexAttr and MtlVertexLayout are compared as raw bytes: no padding");
 
 }
