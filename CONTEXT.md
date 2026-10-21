@@ -1,0 +1,189 @@
+# d9mt domain context
+
+The glossary of d9mt, the Direct3D 9 → Metal 4 driver for Wine on Apple Silicon. Use these terms
+in issues, pull requests, code, comments, log lines and design documents.
+
+This glossary defines **language, not implementation**. ADRs in [`docs/adr/`](docs/adr/index.md)
+own the decisions; the README and the design documents in `docs/` describe the behaviour in
+detail. If a term you need is missing, add it here in the same pull request and say so in the PR
+description. Every definition names its source; what is not decided is marked _Open_.
+
+## Architecture
+
+**Driver**
+`d3d9.dll`, the PE side the game loads: DXVK's D3D9 front-end (`driver/d3d9`) with d9mt's Metal 4
+backend (`driver/backend`) (README, *How it works*).
+
+**Front-end**
+DXVK's D3D9 code in `driver/d3d9`, extracted with Vulkan removed: it tracks all D3D9 state and
+records work through the CS thread into the seam (README, *How it works*).
+
+**CS thread**
+DXVK's command-stream thread: the game's D3D9 calls are recorded on the game's thread and
+executed on it (README, *How it works*). The backend's single submitter.
+
+**Seam**
+The interface in `driver/mtl` between the front-end and the backend (README, *How it works*).
+
+**Backend**
+`driver/backend`: the seam on Metal 4: argument tables, residency sets, MTL4 command buffers and
+allocators, encoders, pipeline compilation, the upload ring, presentation (README).
+
+**Bridge**
+`winemetal`: d9mt's fork of DXMT's bridge, which carries Metal calls across Wine's PE/unix
+boundary. `winemetal.dll` (PE side) and `winemetal.so` (unix side, x86_64, with the AIR
+compiler) (`bridge/`; README). Always built and shipped with the driver from the same build:
+there is no version handshake.
+_Avoid_: “DXMT” for the bridge (DXMT is the upstream project).
+
+**AIR compiler**
+d9mt's own shader compiler on the unix side (`air/`, `airlib/`): it lowers dxbc-spirv's IR of the
+game's SM1–3 bytecode to Apple's AIR (LLVM 15 bitcode) and wraps it in a metallib, so no Metal
+toolchain or MSL is involved at runtime (README).
+_Avoid_: “MSL compiler”, “shader translator”.
+
+**Compat metallib**
+The second build of each embedded metallib (fixed-function shaders, blit), for the minimum macOS
+version: the driver loads the newest Metal language and falls back to Compat where Metal rejects
+it (MSL 4.1 on macOS 26) (README, *Build*).
+
+## Submission and lifetime
+
+**Serial**
+The number of a submitted command buffer, signalled on one `MTLSharedEvent`. There is one queue
+and one submitter (the CS thread), so serials complete in submission order
+(`driver/backend/mtl_submission.h`).
+
+**Retire**
+To release what a command buffer used once the GPU is past its serial. Retirements are handed
+over in serial order and run on the `d9mt-retire` pump thread, which observes GPU completion
+independently of the CS thread (`driver/backend/mtl_submission.h`). A **retired** serial is one
+the GPU has completed.
+_Avoid_: “free” or “release” for this deferred step.
+
+**Lifetime rule**
+Metal 4 command buffers don't retain what they use, so nothing a recorded or committed command
+buffer refers to may be released before its serial retires (ADR-0001;
+`driver/backend/mtl_lifetime.h`).
+
+**Lifetime check**
+`D9MT_LIFETIME_CHECK`: stamps every texture handle put into a command buffer with that command
+buffer's serial and reports (`D9MT-LIFETIME`) a release before the GPU is past it, on any Mac,
+without needing the GPU to fault (`driver/backend/mtl_lifetime.h`; README).
+
+**Drawable**
+The `CAMetalLayer` image d9mt acquires for each present and copies the frame into. It is kept
+until the present's command buffer retires (#26). Drawables never enter a residency set
+(`driver/backend/mtl_residency.h`).
+
+**Residency set**
+The Metal 4 set that makes resources resident for the GPU; removals wait until the GPU retires
+the referencing serial (`driver/backend/mtl_residency.h`).
+
+**GPU canary**
+`D9MT_GPU_CANARY`, on by default: encoders mark each command buffer's slot in a small buffer; a
+command buffer that completes without its mark was discarded by the GPU (after a page fault),
+which logs `D9MT-GPU-LOST` (README, *Environment variables*; #27).
+
+**Pass split**
+A submit in the middle of a render pass: the pass ends, so its attachments are stored and loaded
+again (`docs/gpu-4k.md`, `docs/g1-early-commit.md`).
+
+**G1, carry**
+G1 (“commit early, complete late”): a heuristic flush in the middle of a pass commits the work
+recorded before the open pass, without splitting the pass; that is a **carry**. The serial
+completes when the carried pass closes. Carries are gated and capped at two per serial;
+`D9MT_EARLY_COMMIT` switches it (`docs/g1-early-commit.md`; #31).
+
+**Upload ring**
+Chunks of memory for per-draw uploads; a chunk retires by GPU-completed serial, and a slice is
+valid only for the command buffer it was allocated in (`driver/backend/mtl_ring.h`).
+
+## Pipelines and caches
+
+**PSO**
+A Metal render pipeline state, built from the shaders and the state fixed at pipeline creation;
+its key is `RenderPsoKey` (`docs/state-cache.md` §2, `docs/pso-key-hash.md`).
+_Avoid_: “shader” for the whole pipeline.
+
+**PSO MRU**
+The last four pipeline snapshots, checked before a full key build. Its state generations are
+content-addressed, so returning to earlier state (A → B → A) hits again
+(`driver/backend/mtl_pso_gen.h`; #40).
+
+**AIR cache**
+The persistent cache of compiled shaders, one sqlite file in the user cache folder
+(`air-cache.sqlite3`), shared by all games. Its key includes `winemetal.so`'s LC_UUID, so every
+bridge rebuild invalidates it (README, *Environment variables*; ADR-0004).
+
+**PSO archive**
+The Metal 4 pipeline archives in `<user cache>/d9mt/pso/`, one per session, the last eight kept
+(README, *Environment variables*).
+
+**Pipeline state cache**
+The record of the pipelines a game used (shader identities plus the derived key), rebuilt in the
+background in later sessions as soon as the game has created their shaders; it lives entirely in
+`d3d9.dll` (`docs/state-cache.md`; ADR-0003).
+_Avoid_: “shader cache” (that is the AIR cache).
+
+**Prewarm**
+The state cache's background rebuild, on `d9mt-prewarm` threads at the lowest priority
+(`docs/state-cache.md` §5).
+
+**State cache journal**
+`<file>.journal`: an append-only file of the records since the last write of the state cache, so
+they survive a kill or `ExitProcess` (`docs/state-cache-journal.md`).
+
+**Key signature**
+The state cache file's hash of `RenderPsoKey`'s layout and a mapping version; a mismatch drops the
+file's entries, so a bump resets every player's state cache (`docs/state-cache.md` §2).
+
+**Pipeline wait budget**
+`d9mt.pipelineWaitBudgetMs`: the most the render thread waits per frame for compiles still
+running before it skips the draws that need them (README, *Pipeline wait budget*).
+
+## Memory and render passes
+
+**Memory profile**
+`auto`, `low`, `medium`, `high`, `ultra` or `unlimited`: the reported video memory and pool sizes,
+picked from the Mac's RAM by `auto` (README, *Memory profiles*).
+
+**Attachment optimization**
+The load/store decisions per render pass: a known clear is Clear-loaded, an unwritten attachment's
+store is skipped (README, *Attachment load/store optimization*).
+
+**Restore**
+The re-clear that gives a reader the contents of an attachment whose store was skipped (`restore`
+in `STATS`, `RESTORE` lines) (README).
+
+**Rules B, C, E, F**
+The frame-pass rules of the experimental `D9MT_DEFERRED` mode (`flushFramePasses` in
+`driver/backend/mtl_context_record.cpp`; `D9MT_NO_RULE_{B,C,E,F}` in the README). _Open:_ they are
+defined only in code.
+
+## Diagnostics and measurement
+
+**Hitch**
+A frame longer than `D9MT_HITCH_MS` (default 50 ms), attributed to d9mt or to the game in a
+`HITCH` line under `D9MT_PROFILE` (`driver/d3d9/d3d9_hitch.h`).
+
+**Hash suite**
+The D3D9 test programs in `test/` (33 today), five frames each, whose frame hashes are compared
+with the base commit's; the correctness gate of every PR (CONTRIBUTING, *Definition of Done*).
+_Open:_ its runner is on the branch `chore/test-runner`, not on `main` yet.
+
+**Base, basecopy**
+**Base** is the commit a change is measured and hashed against. **Basecopy** is a byte-identical
+copy of base, run next to the variants as a control for the harness (CONTRIBUTING).
+
+**ABBA**
+Paired benchmark rounds in alternating order (base, branch, branch, base, …), so drift hits both
+sides equally (CONTRIBUTING; ADR-0002).
+
+**a64**
+The layout control: base and branch both built with `-falign-functions=64`; a gap that
+disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0002).
+
+**Quiet window**
+A time slot in which a benchmark runs alone on the Mac: no game, no other build or benchmark
+(ADR-0002).
