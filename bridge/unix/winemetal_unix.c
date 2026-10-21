@@ -7697,18 +7697,84 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* Bundle part 7: the GPU's own error for a failed commit (Timeout, PageFault, InvalidResource,
+ * ...) as a "D9MT-GPU-ERROR" line in wine.log; until now only the unified log had it, as
+ * "IOGPUMetalError: <private>". One options object with one handler for every commit, built
+ * once and then only passed (MTL4CommitOptions isn't thread-safe to modify). The feedback names
+ * no commit, so the line gives the GPU times, the host time now (the same clock) and the
+ * commits so far. Lines go through the diagnostic limit (30 per 10 s): after a hang the dead
+ * channel rejects every later commit.
+ *   D9MT_COMMIT_FEEDBACK=0       no handler: commit:count: as before
+ *   D9MT_COMMIT_FEEDBACK_TEST=n  tests only: every commit's feedback reads as error n */
+static _Atomic unsigned long g_commits;
+static struct d9mt_log_limit g_gpu_error_log;
+
+static const char *
+gpu_error_name(long code) {
+  switch (code) {
+  case MTLCommandBufferErrorInternal: return "Internal";
+  case MTLCommandBufferErrorTimeout: return "Timeout";
+  case MTLCommandBufferErrorPageFault: return "PageFault";
+  case MTLCommandBufferErrorAccessRevoked: return "AccessRevoked";
+  case MTLCommandBufferErrorNotPermitted: return "NotPermitted";
+  case MTLCommandBufferErrorOutOfMemory: return "OutOfMemory";
+  case MTLCommandBufferErrorInvalidResource: return "InvalidResource";
+  case MTLCommandBufferErrorMemoryless: return "Memoryless";
+  case MTLCommandBufferErrorStackOverflow: return "StackOverflow";
+  default: return "unknown";
+  }
+}
+
+static MTL4CommitOptions *
+commit_options(void) {
+  static dispatch_once_t once;
+  static MTL4CommitOptions *options;
+  dispatch_once(&once, ^{
+    const char *on = getenv("D9MT_COMMIT_FEEDBACK");
+    if (on && !strcmp(on, "0"))
+      return;
+    const char *test = getenv("D9MT_COMMIT_FEEDBACK_TEST");
+    const long fake = test ? strtol(test, NULL, 10) : 0;
+    options = [[MTL4CommitOptions alloc] init];
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
+      NSError *err = fb.error;
+      if (!err && !fake)
+        return;
+      const int dropped = d9mt_log_allow(&g_gpu_error_log);
+      if (dropped < 0)
+        return;
+      @autoreleasepool {
+        const long code = err ? (long)err.code : fake;
+        const char *name = !err || [err.domain isEqualToString:MTLCommandBufferErrorDomain]
+                           ? gpu_error_name(code) : err.domain.UTF8String;
+        char ts[16];
+        d9mt_wallstamp(ts);
+        fprintf(stderr, "D9MT-GPU-ERROR %s %s (%ld): %s gpu=%.3f-%.3f now=%.3f commits=%lu",
+                ts, name, code, err ? err.localizedDescription.UTF8String : "(test)", fb.GPUStartTime,
+                fb.GPUEndTime, CACurrentMediaTime(), atomic_load(&g_commits));
+        if (dropped)
+          fprintf(stderr, " [%d earlier lines suppressed]", dropped);
+        fputc('\n', stderr);
+      }
+    }];
+  });
+  return options;
+}
+
 static NTSTATUS
 _MTL4CommandQueue_commit(void *obj) {
   struct unixcall_mtl4_queue_commit *params = obj;
   const obj_handle_t *handles = params->cmdbufs.ptr;
   NSUInteger count = (NSUInteger)params->count;
-  if (getenv("D9MT_WSILOG")) {
-    static _Atomic unsigned n_commit;
-    unsigned k = n_commit++;
-    if (k < 24 || (k % 100) == 0)
-      fprintf(stderr, "D9MT-WSI[unix] queue_commit #%u count=%lu\n", k, (unsigned long)count);
-  }
-  [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
+  const unsigned long k = atomic_fetch_add_explicit(&g_commits, 1, memory_order_relaxed);
+  if (d9mt_wsilog_enabled() && (k < 24 || (k % 100) == 0))
+    fprintf(stderr, "D9MT-WSI[unix] queue_commit #%lu count=%lu\n", k, (unsigned long)count);
+  MTL4CommitOptions *options = commit_options();
+  if (options)
+    [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count
+                                        options:options];
+  else
+    [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
   return STATUS_SUCCESS;
 }
 

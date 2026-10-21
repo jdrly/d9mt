@@ -454,7 +454,7 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Cost:** one more serializer-attached compiler (≈0 MB without content: `attr`). The code is about part 5's size.
 - **Gate:** the cold-session peak, uncaptured = 0, and psoab's new phase.
 
-### 7. Planned: MTL4 commit feedback errors as a log line (after #11's psoab gate)
+### 7. MTL4 commit feedback errors as a log line: code on bridge/commit-feedback (built, not run; after #11's psoab gate)
 
 **Why.** Jan's Cartel Market freeze on 2026-10-21 was a real GPU hang, followed by the WindowServer watchdog and a logout (field-reports/20261021-jan-freeze/ANALYSIS.md). Nothing in wine.log could tell a timeout from a page fault. The unified log only had `IOGPUMetalError: <private>`, so the hang was inferred from timing. Metal 4 gives the cause to whoever asks. The proposal is field-reports/20261021-jan-freeze/BRIDGE-COMMIT-FEEDBACK.md.
 
@@ -465,11 +465,13 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 
 **Design (unix side only):**
 - `_MTL4CommandQueue_commit` passes the long-lived options to `commit:count:options:`.
-- The block returns at once when `error == nil`. On an error it writes, in an `@autoreleasepool`: `D9MT-GPU-ERROR: <name> (<code>) <localizedDescription> gpu=<start>-<end> commits=<n>`.
-  - The first 20 errors get a line each, then one count line per 10 s. The counters are atomics; no lock, no allocation outside the error path.
+- The block returns at once when `error == nil`. On an error it writes, in an `@autoreleasepool`: `D9MT-GPU-ERROR <hh:mm:ss.mmm> <name> (<code>): <localizedDescription> gpu=<start>-<end> now=<host time> commits=<n>`.
+  - The GPU times and `now` are on the same host clock (`CACurrentMediaTime`), so `now - end` is the delay before the report. The wall time matches the `D9MT-WSI` lines and the unified log.
+  - An error from another domain is named by its domain.
+  - The lines go through the bridge's existing diagnostic limit (`d9mt_log_allow`: 30 lines per 10 s, lock-free atomics). The first line of the next window says how many were suppressed, instead of the proposal's 20 lines plus a count line.
   - After a hang the dead channel rejects every later commit (one every 10 s in Jan's log), so the rate limit matters.
 - **Not the commit's number:** one shared options object means one block for every commit, and the feedback carries no commit identity. A per-commit options object or block would allocate on every commit. The line therefore carries the GPU times and the count of commits submitted so far (an atomic counter that is always on), which places the error in time next to the SubmissionTracker / HITCH lines.
-- In the same change, cache `getenv("D9MT_WSILOG")` in a static. Today it runs on every commit.
+- In the same change, the commit's `getenv("D9MT_WSILOG")` (on every commit) becomes `d9mt_wsilog_enabled()`, which is cached. Like every other WSI line, it now needs `D9MT_WSILOG=1`; before, any value turned it on.
 - **Dropped from the proposal:** `MTLCommandBufferErrorOptionEncoderExecutionStatus` is an `MTLCommandBufferDescriptor` option (Metal 3). `MTL4CommandBufferOptions` has only `logState`, so it doesn't exist for d9mt's MTL4 command buffers.
 - **Later, d9mt side:** a unixcall for the last error code, so that `D9MT-GPU-HUNG` / `D9MT-GPU-LOST` name the cause. That is an ABI addition (a new call number, check-abi-mix, the skew case of a new d3d9 on an old bridge), so it is a separate step.
 
@@ -478,14 +480,21 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - If it measures worse, it ships off by default and on under `D9MT_WSILOG` / Collect Logs.
 
 **ABI and LC_UUID.**
-- PE side: no change. No new unixcall, and winemetal.dll (32/64) stays byte-identical. check-abi-mix is unaffected.
-- winemetal.so gets a new LC_UUID; that is the next engine/bridge drop. The AIR cache is keyed on the codegen identity (part 1, S1), which doesn't include winemetal_unix.c, so every user's AIR cache stays warm.
+- PE side: no source change (the diff is winemetal_unix.c only) and no new unixcall, so check-abi-mix is unaffected and the previous drop's winemetal.dll stays valid. (The DLL bytes aren't reproducible across build trees: dlltool's ntdll import library differs from tree to tree, even from the same `.def`. A rebuild in the same tree differs only in the PE timestamp and checksum.)
+- winemetal.so gets a new LC_UUID; that is the next engine/bridge drop. The AIR cache is keyed on the codegen identity (part 1, S1), which doesn't include winemetal_unix.c, so every user's AIR cache stays warm. Built: the identity is cc6bf9c5… on both the bundle tree and this branch.
 - PSO archives (`os-<leaf>`, OS build + GPU) and the state cache don't depend on the bridge build, so no cold start.
 
 **Tests:**
-- unix-side unit test: a forced GPU timeout (an endless-loop compute kernel) or, if it can be made reliable natively, a page fault (a read through the GPU address of a released buffer) on an MTL4 queue. The test checks one `D9MT-GPU-ERROR: Timeout (2)` / `PageFault (3)` line and the rate limit (50 failing commits → 20 lines + a count).
+- `scripts/test-commit-feedback.sh` (bridge/tests/commit_feedback_test.cpp, no Wine) commits empty MTL4 command buffers through the commit thunk, so Metal runs the real handler.
+  - `D9MT_COMMIT_FEEDBACK_TEST=<code>` (tests only) makes every feedback read as that error. This tests the line and the limit without hanging or faulting the GPU.
+  - Cases:
+    - clean: no line;
+    - each: one PageFault line per commit, which shows Metal calls the handler for every commit;
+    - limit: 50 commits → 30 lines, then one 10.5 s later saying 20 were suppressed;
+    - off: `D9MT_COMMIT_FEEDBACK=0` → no handler;
+    - wsilog: the queue_commit lines.
+- A real GPU timeout (an endless-loop kernel) is **not** in the suite. A GPU hang reaches WindowServer (Jan's freeze ended in a logout), so it runs only by hand, with the coordinator's OK, on an unattended Mac.
 - No-error path: the hash suite stays identical and no line appears.
-- TSan on the handler counters.
 
 ### 8. The archive index: a miss costs a hash probe, not a walk (after A3, 2026-10-22)
 
