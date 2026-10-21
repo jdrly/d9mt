@@ -386,6 +386,30 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - The +140 MB with archive first off: that mode captures every build, like base. Base flushes inline every 256 (a bounded serializer, at the cost of the old stalls). The bundle flushes only at a quiet gap, an idle or a pause, so a continuous build burst (psobench's new phase) accumulates every capture.
 - With archive first on only misses are captured, except in a cold first session, where everything misses. The cold-session numbers with the quiet-gap rule are the next measurement.
 
+**Cold first session vs base** (n013-issues/results/cold-summary-2.txt; psobench 350 4 5000 from an empty cache, then the warm next start; `footprint --sample 1` on the Wine process, maximum over the run; two runs each):
+
+| | base (shipping bridge, base d3d9) | bundle 0bc955b | bundle − base |
+|---|---|---|---|
+| cold first session, max footprint | 476 / 471 MB | 648 / 643 MB | **+172 MB** |
+| warm next start, max footprint | 452 / 450 MB | 424 / 424 MB | −27 MB |
+| max IOAccelerator (cold and warm) | 151 MB | 147-151 MB | ≈ 0 |
+| warm next start, misses | – | 1 / 1 (of 946) | |
+| cold: flushes / uncaptured | inline every 256 | one of 945 PSOs (72 MB; serialize 2.2-2.3 s, sync + sum 0.35 s) / 0 | |
+| worst frame (information, not a timing window) | cold 424-433 ms, warm 471-479 ms (the inline flushes) | cold 4.2-4.3 ms, warm 227-228 ms (the first frame, see below) | |
+
+- Base holds at most 256 captures before its inline flush. The bundle holds a cold session's whole capture until the quiet gap after the burst.
+- That is the +172 MB, once, in the first session after the update; the warm sessions after it are 27 MB below base.
+- Release notes: "the first start after the update uses up to ~170 MB more memory for a moment while it saves the shader pipelines".
+- Double-buffered capture caps it (the first item for 0.1.5).
+
+**The warm start's first frame** (review M-a: a bundle warm run's worst frame 230 ms against 8.8 ms in another):
+- It is the first frame of psobench's new phase: 226-228 ms in 4 of 8 warm bundle runs, none in the other 4.
+- With the state cache's prewarm off it still occurs (1 of 2), so it isn't the prewarm.
+- No consolidation runs then (the coverage signal is incomplete before 8 sessions), so there is no consolidation and no consolidation flush in it.
+- Base warm starts have a first frame of 215 ms (and 410-660 ms on later starts, with its inline flushes).
+- So it's a warm-start cost both have, not one the bundle adds. Most likely the first lookup in a large archive, depending on the page cache; not measured.
+- For psoab, the bundle's startup-window consolidation would fall into psobench's measured phases, because psobench has no menu. `qw-bundle.sh psoab` therefore runs psobench with an 8 s menu phase first (`menu`, the default; frames with one already-built PSO, not measured, where the consolidation runs as in login or character select), or without a menu and with the startup window off (`nostartup`). Both are reported.
+
 **Tried and dropped: flushes inside a burst at a minimum interval.**
 - A burst flush has to wait for the compiles in flight before it can take the write lock (it starves otherwise; def1's flush waited 7 s).
 - While it waited, it sent new builds past the lock to the fallback compiler.
