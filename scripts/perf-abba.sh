@@ -33,7 +33,10 @@
 # otherwise its line is RESULT FAIL, it's left out of the comparison, and the script exits 1.
 # A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
 # run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
-# then every present took the presenter's scaling blit (perf-compare.py warns).
+# then a visible window's presents need the presenter's scaling blit (perf-compare.py warns). visible=1|0: whether
+# the window was visible at the end of the run (the bridge's last `D9MT-WSI ... visibility` change;
+# none means it stayed visible). An occluded window's presents are skipped, so visible and
+# occluded runs measure different things (perf-compare.py warns when they're mixed).
 # A run is marked DIRTY (also left out) when a wineserver other than this run's own is running:
 # before the launch, with this prefix's server stopped, any wineserver; during the run, more than
 # one (none at all in --native mode). DIRTY_CHECK=0 turns that off, for functional smoke runs on a
@@ -204,11 +207,17 @@ for r in $(seq "$ROUNDS"); do
     client=$(tr -d '\r' < "$A/out" 2>/dev/null | awk '$1 == "CLIENT" { c = $3
       if ($4 == "MISMATCH") { b = $5; sub(/^backbuffer=/, "", b); sub(/:$/, "", b); c = c "!=" b }
       print c; exit }')
+    visible=""
+    if [ "$NATIVE" = 0 ] && grep -q 'MtlPresenter' "$log" 2>/dev/null; then
+      visible=$(awk '/^D9MT-WSI .* visibility 0x[0-9a-f]+ -> 0x[0-9a-f]+ on / {
+          for (i = 1; i < NF; i++) if ($i == "->") s = $(i + 1) }
+        END { print (s == "" || s == "0x3") ? 1 : 0 }' "$log")
+    fi
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.
     grep -q 'not submitted yet' "$log" 2>/dev/null && line="RESULT FAIL unsubmitted-wait"
     stop_own
     case "$line" in "RESULT FAIL"*) fails=$((fails + 1)) ;; esac
-    echo "${dirty:+DIRTY }round=$r v=$v load=$load${client:+ client=$client} $line" | tee -a "$OUT"
+    echo "${dirty:+DIRTY }round=$r v=$v load=$load${client:+ client=$client}${visible:+ visible=$visible} $line" | tee -a "$OUT"
   done
 done
 trap - INT TERM

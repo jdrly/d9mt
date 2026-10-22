@@ -17,17 +17,22 @@ lies within the control's range is marked `~ noise`. A variant whose runs fall i
 is marked `bimodal?`: read its per-run values before the median (some benches switch between two
 modes per process).
 
-client=<W>x<H> (the bench's window client area, perf-abba.sh): listed per variant, with a warning
-when it isn't the back buffer's size (client=<W>x<H>!=<back buffer>: every present took the
-presenter's scaling blit) or differs between variants.
+Run metadata, never a metric: client=<W>x<H> (the bench's window client area, perf-abba.sh) is
+listed per variant (unknown for runs without it), with a warning when it isn't the back buffer's
+size (client=<W>x<H>!=<back buffer>: a visible window's presents need the presenter's scaling
+blit) or when a paired round compares different client areas. visible=1|0 (the window visible at
+the end of the run) is counted per variant, with a warning when visible and occluded runs are
+mixed (an occluded window's presents are skipped, so the two measure different things).
 """
 import argparse, re, statistics, sys
 
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
+META = ("client", "visible")
+NUM = r"=([0-9.]+)(?=\s|$)"   # the whole value token is a number (not 320x240)
 
 
 def load(paths, metric):
-    vals, skipped, seen, keys_seen, clients = {}, {"dirty": 0, "fail": 0}, set(), set(), {}
+    vals, skipped, seen, keys_seen, clients, visible = {}, {"dirty": 0, "fail": 0}, set(), set(), {}, {}
     for path in paths:
         for n, line in enumerate(open(path), 1):
             m = re.match(r"(DIRTY )?(?:round|pair|block)=(\d+) v=(\S+)", line)
@@ -46,17 +51,20 @@ def load(paths, metric):
             if "RESULT FAIL" in line:
                 skipped["fail"] += 1
                 continue
-            keys_seen.update(re.findall(r"(?:^|\s)([A-Za-z_][\w/]*)=[0-9.]+", line))
+            keys_seen.update(re.findall(r"(?:^|\s)([A-Za-z_][\w/]*)=[0-9.]+(?=\s|$)", line))
             mc = re.search(r"(?:^|\s)client=(\S+)", line)
             if mc:
-                clients.setdefault(m.group(3), set()).add(mc.group(1))
+                clients.setdefault(m.group(3), {})[ident[:2]] = mc.group(1)
+            mv = re.search(r"(?:^|\s)visible=([01])(?=\s|$)", line)
+            if mv:
+                visible.setdefault(m.group(3), {})[ident[:2]] = mv.group(1) == "1"
             for k in ([metric] if metric else METRICS):
-                mv = re.search(r"(?:^|\s)" + re.escape(k) + r"=([0-9.]+)", line)
+                mv = re.search(r"(?:^|\s)" + re.escape(k) + NUM, line)
                 if mv:
                     vals.setdefault(m.group(3), {})[ident[:2]] = float(mv.group(1))
                     metric = metric or k
                     break
-    return vals, skipped, metric, keys_seen, clients
+    return vals, skipped, metric, keys_seen, clients, visible
 
 
 def pct(x, width=0):
@@ -85,12 +93,19 @@ def main():
     ap.add_argument("--metric")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
-    vals, skipped, metric, keys_seen, clients = load(a.files, a.metric)
+    if a.metric in META:
+        sys.exit(f"--metric {a.metric}: that's run metadata, not a measurement")
+    vals, skipped, metric, keys_seen, clients, visible = load(a.files, a.metric)
     if not vals:
-        avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load", "client")))
+        avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load") + META))
         sys.exit(f"no results for metric {a.metric or ' / '.join(METRICS)}"
                  f" (skipped {skipped['dirty']} DIRTY, {skipped['fail']} FAIL)"
                  + (f"; keys present: {avail} (--metric)" if avail else ""))
+    # The metadata of the runs in the table only (a run without the metric isn't in it).
+    clients, visible = ({v: {k: x for k, x in d.items() if k in vals.get(v, {})} for v, d in md.items()}
+                        for md in (clients, visible))
+    clients = {v: d for v, d in clients.items() if d}
+    visible = {v: d for v, d in visible.items() if d}
     ref = a.ref or next(iter(vals))
     if ref not in vals:
         sys.exit(f"no results for the reference {ref}")
@@ -136,13 +151,29 @@ def main():
         rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
         print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
     if clients:
-        print("client area: " + ", ".join(f"{v} {'/'.join(sorted(c))}" for v, c in clients.items()))
-        bad = sorted(v for v, c in clients.items() if any("!=" in x for x in c))
+        def sizes(v):
+            c = clients.get(v, {})
+            return sorted(set(c.values())) + (["unknown"] if any(k not in c for k in vals[v]) else [])
+        print("client area: " + ", ".join(f"{v} {'/'.join(sizes(v))}" for v in vals))
+        bad = [v for v in vals if any("!=" in x for x in clients.get(v, {}).values())]
         if bad:
-            print(f"WARNING: the client area isn't the back buffer's size ({', '.join(bad)}): every present"
-                  " took the scaling blit, an extra PSO and GPU pass (test/perf/bench_window.h)")
-        if len({frozenset(c) for c in clients.values()}) > 1:
-            print("WARNING: the variants ran with different client areas")
+            print(f"WARNING: the client area isn't the back buffer's size ({', '.join(bad)}): a visible"
+                  " window's presents need the scaling blit, an extra PSO and GPU pass (test/perf/bench_window.h)")
+        cref = clients.get(ref, {})
+        unpaired = {v: sum(1 for k, x in clients.get(v, {}).items() if k in cref and cref[k] != x)
+                    for v in vals if v != ref}
+        unpaired = {v: n for v, n in unpaired.items() if n}
+        if unpaired:
+            print("WARNING: paired rounds compare different client areas: "
+                  + ", ".join(f"{v} {n} round(s)" for v, n in unpaired.items()))
+    if visible:
+        print("window visible: " + ", ".join(
+            f"{v} {sum(visible.get(v, {}).values())}/{len(vals[v])} runs"
+            + (f" ({sum(1 for k in vals[v] if k not in visible.get(v, {}))} unknown)"
+               if any(k not in visible.get(v, {}) for k in vals[v]) else "") for v in vals))
+        if len({x for f in visible.values() for x in f.values()}) > 1:
+            print("WARNING: visible and occluded runs are mixed: an occluded window's presents are skipped,"
+                  " so compare them separately")
 
 
 if __name__ == "__main__":
