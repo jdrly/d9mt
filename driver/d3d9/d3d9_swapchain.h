@@ -180,9 +180,6 @@ namespace dxvk {
     bool                      m_capPlanned = false;
     framecap::Cadence         m_capCadence;
     uint64_t                  m_capUntilNs = 0u;
-    // Present()'s sleeps (the cap's and the background throttle's), set up at the first one
-    framecap::Sleeper         m_sleeper;
-    bool                      m_sleeperReady = false;
     LogLimiter                m_capLog = { 20u, std::chrono::seconds(10) };
 
     HRESULT PresentLocked(

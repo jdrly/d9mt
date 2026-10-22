@@ -2,9 +2,12 @@
 //   clang++ -std=c++17 -I driver/d3d9 test/native/frame_cap_test.cpp -o /tmp/fct && /tmp/fct
 #include "d3d9_frame_cap.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace dxvk;
 using framecap::Mode;
@@ -32,14 +35,14 @@ int main() {
     CHECK(p.refreshes == 2u);
     CHECK(p.intervalNs == 33333333u);
     CHECK(near(p.minDurationS, 0.025, 1e-9));
-    std::string d = framecap::describe(p, 60.0, true);
+    std::string d = framecap::describe(p, 60.0);
     std::printf("%s\n", d.c_str());
     CHECK(has(d, "frame cap 30 fps: every 2nd refresh at 60 Hz, cadence 33.33 ms, presents aligned to vsync (minimum duration 25.00 ms)"));
   }
   { // the same without alignment: N refreshes, no minimum duration
     auto p = framecap::plan(30u, 60.0, true, false);
     CHECK(p.mode == Mode::Vsync && p.refreshes == 2u && p.minDurationS == 0.0);
-    CHECK(has(framecap::describe(p, 60.0, true), "timer only (D9MT_FPS_CAP_ALIGN=0)"));
+    CHECK(has(framecap::describe(p, 60.0), "timer only (D9MT_FPS_CAP_ALIGN=0)"));
   }
   { // Wine reports a 59.94 Hz display as 59: the cadence stays 1 / 30 (never slower than the display)
     auto p = framecap::plan(30u, 59.0, true, true);
@@ -54,7 +57,7 @@ int main() {
   { // 40 and 45 at 60 Hz: not divisors, the timer
     auto p40 = framecap::plan(40u, 60.0, true, true);
     CHECK(p40.mode == Mode::Timer && p40.intervalNs == 25000000u && p40.minDurationS == 0.0);
-    std::string d = framecap::describe(p40, 60.0, true);
+    std::string d = framecap::describe(p40, 60.0);
     std::printf("%s\n", d.c_str());
     CHECK(has(d, "frame cap 40 fps: timer, cadence 25.00 ms (not a divisor of 60 Hz"));
     auto p45 = framecap::plan(45u, 60.0, true, true);
@@ -64,7 +67,7 @@ int main() {
     CHECK(framecap::plan(60u, 60.0, true, true).mode == Mode::Off);
     CHECK(framecap::plan(60u, 59.0, true, true).mode == Mode::Off);
     CHECK(framecap::plan(144u, 60.0, true, true).mode == Mode::Off);
-    std::string d = framecap::describe(framecap::plan(60u, 60.0, true, true), 60.0, true);
+    std::string d = framecap::describe(framecap::plan(60u, 60.0, true, true), 60.0);
     CHECK(has(d, "frame cap 60 fps: off (vsync at 60 Hz caps already)"));
   }
   { // 120 Hz (ProMotion): 30 = every 4th, 40 = every 3rd, 60 = every 2nd; 45 the timer
@@ -72,7 +75,7 @@ int main() {
     CHECK(p30.mode == Mode::Vsync && p30.refreshes == 4u && near(p30.minDurationS, 3.5 / 120.0, 1e-9));
     auto p40 = framecap::plan(40u, 120.0, true, true);
     CHECK(p40.mode == Mode::Vsync && p40.refreshes == 3u && p40.intervalNs == 25000000u);
-    CHECK(has(framecap::describe(p40, 120.0, true), "every 3rd refresh at 120 Hz"));
+    CHECK(has(framecap::describe(p40, 120.0), "every 3rd refresh at 120 Hz"));
     auto p60 = framecap::plan(60u, 120.0, true, true);
     CHECK(p60.mode == Mode::Vsync && p60.refreshes == 2u && p60.intervalNs == 16666667u);
     CHECK(framecap::plan(45u, 120.0, true, true).mode == Mode::Timer);
@@ -84,11 +87,33 @@ int main() {
   { // vsync off, or the refresh rate unknown: the timer at any cap
     auto p = framecap::plan(30u, 60.0, false, true);
     CHECK(p.mode == Mode::Timer && p.intervalNs == 33333333u && p.minDurationS == 0.0);
-    CHECK(has(framecap::describe(p, 60.0, false), "(vsync off)"));
+    CHECK(has(framecap::describe(p, 60.0), "(vsync off)"));
     CHECK(framecap::plan(60u, 60.0, false, true).mode == Mode::Timer);
     auto u = framecap::plan(30u, 0.0, true, true);
     CHECK(u.mode == Mode::Timer);
-    CHECK(has(framecap::describe(u, 0.0, true), "(refresh rate unknown)"));
+    CHECK(has(framecap::describe(u, 0.0), "(refresh rate unknown)"));
+  }
+  { // present interval TWO and up: the ceiling is refresh / interval. At or above it the cap is
+    // off, so the existing pacing keeps the game's ceiling (base: DXVK's limiter at hz / interval)
+    auto p45 = framecap::plan(45u, 60.0, 2u, true);
+    CHECK(p45.mode == Mode::Off && p45.syncInterval == 2u);
+    std::string d = framecap::describe(p45, 60.0);
+    std::printf("%s\n", d.c_str());
+    CHECK(has(d, "frame cap 45 fps: off (present interval 2 at 60 Hz caps at 30 fps already)"));
+    CHECK(framecap::plan(30u, 60.0, 2u, true).mode == Mode::Off);     // = the ceiling
+    CHECK(framecap::plan(30u, 60.0, 3u, true).mode == Mode::Off);     // ceiling 20
+    CHECK(framecap::plan(30u, 60.0, 4u, true).mode == Mode::Off);     // ceiling 15
+    CHECK(framecap::plan(40u, 120.0, 4u, true).mode == Mode::Off);    // ceiling 30
+    // below the ceiling: the cap, and its cadence is never shorter than interval / refresh
+    auto p20 = framecap::plan(20u, 60.0, 2u, true);
+    CHECK(p20.mode == Mode::Vsync && p20.refreshes == 3u && p20.intervalNs == 50000000u);
+    auto p25 = framecap::plan(25u, 60.0, 2u, true);
+    CHECK(p25.mode == Mode::Timer && p25.intervalNs == 40000000u);
+    CHECK(p25.intervalNs >= uint64_t(2.0 / 60.0 * 1e9));
+    auto p30 = framecap::plan(30u, 120.0, 2u, true);
+    CHECK(p30.mode == Mode::Vsync && p30.refreshes == 4u && p30.intervalNs >= uint64_t(2.0 / 120.0 * 1e9));
+    // interval ONE is plain vsync
+    CHECK(framecap::plan(30u, 60.0, 1u, true) == framecap::plan(30u, 60.0, true, true));
   }
   { // plans compare by value (the swapchain logs a changed one)
     CHECK(framecap::plan(30u, 60.0, true, true) == framecap::plan(30u, 60.0, true, true));
@@ -106,6 +131,22 @@ int main() {
   CHECK(framecap::capFromEnv("20") == 20u);
   CHECK(framecap::capFromEnv("abc") == 0u);
   CHECK(framecap::capFromEnv("2000") == 0u);
+  { // whole numbers only; 0 is a silent off, malformed or out-of-range values are invalid
+    bool bad = true;
+    CHECK(framecap::capFromEnv("0", &bad) == 0u && !bad);
+    CHECK(framecap::capFromEnv("", &bad) == 0u && !bad);
+    CHECK(framecap::capFromEnv(nullptr, &bad) == 0u && !bad);
+    CHECK(framecap::capFromEnv("30", &bad) == 30u && !bad);
+    CHECK(framecap::capFromEnv("30abc", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv("30.5", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv("+30", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv(" 30", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv("5", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv("1001", &bad) == 0u && bad);
+    CHECK(framecap::capFromEnv("99999999999", &bad) == 0u && bad);
+    CHECK(framecap::spinNsFromEnv("300us") == 200000u);
+    CHECK(framecap::spinNsFromEnv("-1") == 200000u);
+  }
   CHECK(framecap::spinNsFromEnv(nullptr) == 200000u);
   CHECK(framecap::spinNsFromEnv("0") == 0u);
   CHECK(framecap::spinNsFromEnv("500") == 500000u);
@@ -235,6 +276,32 @@ int main() {
     const uint64_t woke = s.sleepUntil(t0, t0 + 5u * ms, clock);
     CHECK(woke >= t0 + 5u * ms);
     CHECK(clock() >= t0 + 5u * ms);
+  }
+
+  { // threadSleeper: one Sleeper per thread. Present sleeps outside the device lock, so two threads
+    // presenting on one multithreaded device sleep at once (run this test under
+    // -fsanitize=thread: no race)
+    auto clock = [] {
+      return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    std::atomic<int> late { 0 };
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; t++) {
+      threads.emplace_back([&] {
+        framecap::Sleeper& s = framecap::threadSleeper(200000u);
+        for (int i = 0; i < 20; i++) {
+          const uint64_t t0 = clock();
+          if (s.sleepUntil(t0, t0 + 2u * ms, clock) < t0 + 2u * ms) late++;
+        }
+      });
+    }
+    for (auto& t : threads) t.join();
+    CHECK(late.load() == 0);
+    CHECK(&framecap::threadSleeper(200000u) == &framecap::threadSleeper(500000u));  // per thread
+    framecap::Sleeper* other = nullptr;
+    std::thread([&] { other = &framecap::threadSleeper(200000u); }).join();
+    CHECK(other != &framecap::threadSleeper(200000u));
   }
 
   if (g_fail)

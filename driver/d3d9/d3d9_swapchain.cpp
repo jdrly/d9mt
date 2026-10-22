@@ -26,13 +26,17 @@ namespace dxvk {
       std::string raw;
     };
 
+    // (a function-local static: initialized once, thread-safe, also across devices)
     const FrameCapEnv& frameCapEnv() {
       static const FrameCapEnv s_env = [] {
         FrameCapEnv e;
         e.raw    = env::getEnvVar("D9MT_FPS_CAP");
-        e.fps    = framecap::capFromEnv(e.raw.c_str());
+        bool invalid = false;
+        e.fps    = framecap::capFromEnv(e.raw.c_str(), &invalid);
         e.align  = env::getEnvVar("D9MT_FPS_CAP_ALIGN") != "0";
         e.spinNs = framecap::spinNsFromEnv(env::getEnvVar("D9MT_FPS_CAP_SPIN_US").c_str());
+        if (invalid)
+          Logger::warn(str::format("D9MT: D9MT_FPS_CAP=", e.raw, " ignored (0 for none, or 20 to 1000)"));
         return e;
       } ();
       return s_env;
@@ -232,13 +236,13 @@ namespace dxvk {
       }
 
       // Sleep without the device lock; the CS thread never needs it. (framecap's Sleeper, not
-      // DXVK's Sleep: that one spins for 4 ms and more of every sleep.)
+      // DXVK's Sleep: that one spins for 4 ms and more of every sleep. One per thread: Present
+      // can run on several threads of a multithreaded device at once.)
       if (until != high_resolution_clock::time_point() || capUntilNs) {
-        if (!std::exchange(m_sleeperReady, true))
-          m_sleeper = framecap::Sleeper(frameCapEnv().spinNs);
         const bool bg = until != high_resolution_clock::time_point();
         hitch::Scope ss(m_parent->Hitch(), bg ? hitch::BgSleep : hitch::CapSleep);
-        m_sleeper.sleepUntil(clockNs(), bg ? clockNs(until) : capUntilNs, [] { return clockNs(); });
+        framecap::threadSleeper(frameCapEnv().spinNs).sleepUntil(clockNs(),
+          bg ? clockNs(until) : capUntilNs, [] { return clockNs(); });
       }
     }
 
@@ -408,8 +412,8 @@ namespace dxvk {
 
     try {
       UpdateWindowedRefreshRate();
-      // D9MT_FPS_CAP: not while Present is throttled (window hidden, no drawable); then
-      // DXVK's limiter as without the cap
+      // D9MT_FPS_CAP: not while Present is throttled (window hidden, no drawable), and not at
+      // or above the present interval's ceiling; then DXVK's limiter as without the cap
       const bool capped = !Throttle.fps && UpdateFrameCap(presentInterval);
       if (!capped)
         m_capCadence.reset();
@@ -1133,22 +1137,16 @@ namespace dxvk {
 
   bool D3D9SwapChainEx::UpdateFrameCap(uint32_t SyncInterval) {
     const FrameCapEnv& e = frameCapEnv();
-
-    if (!e.fps) {
-      static bool s_warned = false;
-      if (!e.raw.empty() && !std::exchange(s_warned, true))
-        Logger::warn(str::format("D9MT: D9MT_FPS_CAP=", e.raw, " ignored (0 for none, or 20 to 1000)"));
+    if (!e.fps)
       return false;
-    }
 
-    const bool vsync = SyncInterval != 0u;
-    const framecap::Plan plan = framecap::plan(e.fps, m_displayRefreshRate, vsync, e.align);
+    const framecap::Plan plan = framecap::plan(e.fps, m_displayRefreshRate, SyncInterval, e.align);
 
     if (!m_capPlanned || plan != m_capPlan) {
       uint32_t dropped = 0u;
       if (m_capLog.allow(&dropped)) {
         Logger::warn(str::format("D9MT: ", wallClockStamp(), " ",
-          framecap::describe(plan, m_displayRefreshRate, vsync),
+          framecap::describe(plan, m_displayRefreshRate),
           dropped ? str::format(" [", dropped, " earlier lines suppressed]") : std::string()));
       }
       m_capPlan    = plan;

@@ -16,8 +16,9 @@
 //     leave d9mt evenly (25 or 22.2 ms), but a 60 Hz display can only show them for one or
 //     two refreshes each (40: 2,1,2,1...; 45: 2,1,1...): even CPU and GPU load, uneven on
 //     screen.
-//   vsync on, cap >= refresh: nothing to do (vsync caps already; a timer on top would only
-//     beat against it).
+//   vsync on, cap >= refresh / present interval (60 at 60 Hz; 45 with D3DPRESENT_INTERVAL_TWO
+//     at 60 Hz, whose ceiling is 30): nothing to do. Vsync, or DXVK's limiter that holds the
+//     game's present interval, caps already; a timer on top would only beat against it.
 //   vsync off: the timer.
 //
 // The sleep (Sleeper) is the system's (NtDelayExecution), in halves down to a last piece of at
@@ -28,11 +29,13 @@
 // overslept, at least D9MT_FPS_CAP_SPIN_US (default 200 us), at most 4 ms. DXVK's Sleep always
 // spins 4 timer periods plus a sixth of the sleep, under Wine 4 ms + 1/6: at 30 fps a CPU core
 // busy 15-20% of the time, the heat this cap is meant to save. The background throttle
-// (D9MT_BG_FPS) sleeps the same way.
+// (D9MT_BG_FPS) sleeps the same way. A Sleeper is per thread (threadSleeper): Present may run
+// on several threads of a multithreaded device at once, and it sleeps outside the device lock.
 //
 // Header-only and dependency-free (the sleep aside) so the plan and the cadence can be
 // unit-tested natively (test/native/frame_cap_test.cpp).
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -57,13 +60,14 @@ namespace dxvk::framecap {
   struct Plan {
     Mode     mode         = Mode::Off;
     uint32_t fps          = 0u;   // the cap asked for
+    uint32_t syncInterval = 0u;   // the game's present interval (0 = immediate, no vsync)
     uint32_t refreshes    = 0u;   // Vsync: refreshes per frame (N)
     uint64_t intervalNs   = 0u;   // Present-to-Present cadence, 0 = none
     double   minDurationS = 0.0;  // presentAfterMinimumDuration, 0 = present as usual
 
     bool operator == (const Plan& o) const {
-      return mode == o.mode && fps == o.fps && refreshes == o.refreshes
-          && intervalNs == o.intervalNs && minDurationS == o.minDurationS;
+      return mode == o.mode && fps == o.fps && syncInterval == o.syncInterval
+          && refreshes == o.refreshes && intervalNs == o.intervalNs && minDurationS == o.minDurationS;
     }
     bool operator != (const Plan& o) const { return !(*this == o); }
   };
@@ -71,16 +75,19 @@ namespace dxvk::framecap {
   // A refresh rate the display mode reports (Wine: whole Hz) is usable between 20 and 1000.
   inline bool usableHz(double hz) { return hz >= 20.0 && hz <= 1000.0; }
 
-  // fps: the cap (0 = none); hz: the display's refresh rate (0 = unknown); vsync: presents wait
-  // for vsync (present interval != 0); align: presentAfterMinimumDuration in Vsync mode.
-  inline Plan plan(uint32_t fps, double hz, bool vsync, bool align) {
+  // fps: the cap (0 = none); hz: the display's refresh rate (0 = unknown); syncInterval: the
+  // game's present interval (0 = immediate: no vsync; 2 = D3DPRESENT_INTERVAL_TWO: at most every
+  // second refresh); align: presentAfterMinimumDuration in Vsync mode. A cap at or above the
+  // interval's ceiling (refresh / interval) is Off: the existing pacing keeps the game's ceiling.
+  inline Plan plan(uint32_t fps, double hz, uint32_t syncInterval, bool align) {
     Plan p;
-    p.fps = fps;
+    p.fps          = fps;
+    p.syncInterval = syncInterval;
     if (!fps)
       return p;
 
-    if (vsync && usableHz(hz)) {
-      if (double(fps) >= hz * 0.99)
+    if (syncInterval && usableHz(hz)) {
+      if (double(fps) >= hz / double(syncInterval) * 0.99)
         return p;
 
       const double   ratio = hz / double(fps);
@@ -105,11 +112,16 @@ namespace dxvk::framecap {
   }
 
   // The log line for a plan ("D9MT: " and the time stamp come from the caller).
-  inline std::string describe(const Plan& p, double hz, bool vsync) {
+  inline std::string describe(const Plan& p, double hz) {
+    const bool vsync = p.syncInterval != 0u;
     char buf[256];
     switch (p.mode) {
       case Mode::Off:
-        std::snprintf(buf, sizeof(buf), "frame cap %u fps: off (vsync at %.0f Hz caps already)", p.fps, hz);
+        if (p.syncInterval > 1u)
+          std::snprintf(buf, sizeof(buf), "frame cap %u fps: off (present interval %u at %.0f Hz caps at %.0f fps already)",
+            p.fps, p.syncInterval, hz, hz / double(p.syncInterval));
+        else
+          std::snprintf(buf, sizeof(buf), "frame cap %u fps: off (vsync at %.0f Hz caps already)", p.fps, hz);
         break;
       case Mode::Vsync:
         std::snprintf(buf, sizeof(buf), "frame cap %u fps: every %u%s refresh at %.0f Hz, cadence %.2f ms%s",
@@ -168,21 +180,44 @@ namespace dxvk::framecap {
 
   };
 
-  // D9MT_FPS_CAP: 0 (off) or 20..1000 (below 20, a drawable held for N refreshes would outlast
-  // the presenter's drawable timeout).
-  inline uint32_t capFromEnv(const char* v) {
+  // A whole decimal number: digits only (no sign, point or suffix), at most 9 of them.
+  inline bool parseUint(const char* v, uint32_t& out) {
     if (!v || !*v)
-      return 0u;
-    const unsigned long fps = std::strtoul(v, nullptr, 10);
-    return (fps >= 20ul && fps <= 1000ul) ? uint32_t(fps) : 0u;
+      return false;
+    uint32_t n = 0u, digits = 0u;
+    for (; *v; v++) {
+      if (!std::isdigit(static_cast<unsigned char>(*v)) || ++digits > 9u)
+        return false;
+      n = n * 10u + uint32_t(*v - '0');
+    }
+    out = n;
+    return true;
   }
 
-  // D9MT_FPS_CAP_SPIN_US: 0..5000, default 200.
-  inline uint64_t spinNsFromEnv(const char* v) {
+  // D9MT_FPS_CAP: unset, empty or 0 = off; 20..1000 = the cap (below 20, a drawable held for N
+  // refreshes would outlast the presenter's drawable timeout). Anything else (5, 30abc, 30.5) is
+  // off and sets *invalid.
+  inline uint32_t capFromEnv(const char* v, bool* invalid = nullptr) {
+    if (invalid)
+      *invalid = false;
     if (!v || !*v)
+      return 0u;
+    uint32_t fps = 0u;
+    const bool ok = parseUint(v, fps) && (fps == 0u || (fps >= 20u && fps <= 1000u));
+    if (!ok) {
+      if (invalid)
+        *invalid = true;
+      return 0u;
+    }
+    return fps;
+  }
+
+  // D9MT_FPS_CAP_SPIN_US: 0..5000 (more is 5000), default 200; not a whole number: the default.
+  inline uint64_t spinNsFromEnv(const char* v) {
+    uint32_t us = 0u;
+    if (!parseUint(v, us))
       return 200000u;
-    const unsigned long us = std::strtoul(v, nullptr, 10);
-    return uint64_t(us > 5000ul ? 5000ul : us) * 1000u;
+    return uint64_t(us > 5000u ? 5000u : us) * 1000u;
   }
 
   // The system's sleep for `ns` nanoseconds.
@@ -264,5 +299,13 @@ namespace dxvk::framecap {
     uint64_t m_lateNs = 0u;
 
   };
+
+  // The calling thread's Sleeper (its floor from the first call on that thread). Present sleeps
+  // outside the device lock, so two threads presenting on one multithreaded device must not share
+  // one.
+  inline Sleeper& threadSleeper(uint64_t floorNs) {
+    thread_local Sleeper s_sleeper(floorNs);
+    return s_sleeper;
+  }
 
 }
