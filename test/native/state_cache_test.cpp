@@ -16,6 +16,7 @@
 //     -I<dxvk>/include/native/directx test/native/state_cache_test.cpp \
 //     driver/mtl/mtl_state_cache_core.cpp driver/mtl/mtl_state_cache.cpp -o /tmp/sct
 
+#include <algorithm>
 #include <atomic>
 #include <unordered_set>
 #include <cstdio>
@@ -2196,7 +2197,9 @@ static void testJournalTwoProcesses() {
   CHECK(onDisk.size() == 70u);
 }
 
-static void benchRecord() {
+static uint32_t g_benchRounds = 200u;   // state_cache_test bench [rounds]
+
+static int benchRecord() {
   const std::string dir = tempDir();
   FakeBackend be;
   Rc<MtlStateCache> sc = new MtlStateCache(&be, configFor(dir, 0u));
@@ -2209,7 +2212,8 @@ static void benchRecord() {
   uint8_t state[KeyBytes] = { };
 
   constexpr uint32_t Batch = 512u;   // below the ring size: the writer drains between batches
-  constexpr uint32_t Rounds = 200u;
+  const uint32_t Rounds = g_benchRounds;
+  std::vector<uint64_t> perRound;
   uint64_t recordNs = 0u, emptyNs = 0u;
   volatile uint64_t sink = 0u;
 
@@ -2225,7 +2229,9 @@ static void benchRecord() {
       sink = sink + state[0];
     }
     auto t2 = std::chrono::steady_clock::now();
-    recordNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    const uint64_t roundNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    recordNs += roundNs;
+    perRound.push_back(roundNs);
     emptyNs  += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count());
     std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the writer drain
   }
@@ -2235,12 +2241,31 @@ static void benchRecord() {
   std::printf("state_cache_bench: record() %.1f ns per PSO miss (loop alone %.1f ns), %u records, ring drops %llu\n",
     double(recordNs) / double(Batch * Rounds), double(emptyNs) / double(Batch * Rounds),
     Batch * Rounds, (unsigned long long)s.ringDrops);
+  // The per-round median: robust against the rounds a CPU frequency or core change hits
+  // (runs are bimodal at ~25 and ~88 ns per miss on the same build).
+  // A record that was dropped (ring full) or not recorded didn't cost what a recorded one
+  // does: the timing would be wrong, so the run fails.
+  if (s.ringDrops || s.unrecorded) {
+    std::printf("RESULT FAIL state_cache_bench ringDrops=%llu unrecorded=%llu\n",
+      (unsigned long long)s.ringDrops, (unsigned long long)s.unrecorded);
+    return 1;
+  }
+  std::sort(perRound.begin(), perRound.end());
+  std::printf("RESULT state_cache_bench rounds=%u median_ns=%.1f mean_ns=%.1f\n", Rounds,
+    double(perRound[perRound.size() / 2]) / double(Batch), double(recordNs) / double(Batch * Rounds));
+  return 0;
 }
 
 int main(int argc, char** argv) {
   if (argc > 1 && !std::strcmp(argv[1], "bench")) {
-    benchRecord();
-    return 0;
+    if (argc > 2) {
+      if (std::atoi(argv[2]) <= 0) {
+        std::printf("RESULT FAIL usage: state_cache_test bench [rounds > 0]\n");
+        return 2;
+      }
+      g_benchRounds = uint32_t(std::atoi(argv[2]));
+    }
+    return benchRecord();
   }
 
   testFormat();
