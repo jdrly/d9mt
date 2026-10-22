@@ -15,7 +15,7 @@ and what a release candidate is checked for. What isn't in this repository yet i
 - **A layout effect is not a cost of the change.** Under Rosetta, a rebuild alone moves a
   microbenchmark by up to ±3 % because the linker moves hot code; every later merge moves it
   again, and its sign is as likely to flip as to stay. A delta that disappears under the layout
-  controls (§2.3) isn't attributed to the commit.
+  controls (§2.4) isn't attributed to the commit.
 - **The binding check is the release candidate as shipped**: the whole build at default
   alignment against the previous release (§6). A slowdown there that is layout gets a layout fix
   (an alignment flag, function order), each measured on its own, **not a revert** of the commit
@@ -31,8 +31,16 @@ and what a release candidate is checked for. What isn't in this repository yet i
 - **A quiet window**: the benchmark runs alone on the Mac. No game, no other Wine process, no
   build, no other benchmark. A run that another Wine process overlaps is **DIRTY** and doesn't
   count. Never measure while a game runs.
-- **Uncapped**: `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`, so neither the background frame cap nor the
-  stall pacing limits the frame rate.
+- **Uncapped**: `D9MT_BG_FPS=0 D9MT_STALL_PACE=0 D9MT_FPS_CAP=0`, so neither the background frame
+  cap, the stall pacing nor the frame cap (#47) limits the frame rate. A cap inherited from the
+  environment can flatten base and branch to the same frame time and hide a regression.
+- **Normal priority**: don't run benchmarks under `taskpolicy -b` (background QoS): it stretches
+  timers (a 1 ms sleep takes about 3 ms), which distorts anything that waits or retries (#43).
+- **`D9MT_PROFILE` off for rates**: it changes the regime (frames several times slower, and G1's
+  backlog gate then never carries), so use its counters, not the frame times measured with it
+  (#43).
+- **The display asleep** for benchmarks that don't need it awake, so no other window or
+  compositor work competes with them (`scripts/perf-abba.sh`).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
   on that. Record each variant's source commit next to its binary.
@@ -46,11 +54,48 @@ and what a release candidate is checked for. What isn't in this repository yet i
   then the median), and **how many rounds it was slower**, for example
   `paired -0.3250 ms (-3.2%)  slower 0/10`.
 - A difference within the ±3 % a rebuild can cause counts only if it repeats across windows,
-  with a control next to it (§2.3).
+  with a control next to it (§2.4).
 
-### 2.3 Controls
+### 2.3 The harness
 
-- **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant.
+```bash
+scripts/build-benches.sh                  # every bench into build/bench/x64/ (ARCH=i686 for 32-bit)
+D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh \
+  --variant base=<dir>/base/d3d9.dll \
+  --variant basecopy=<dir>/basecopy/d3d9.dll \
+  --variant fix=<dir>/fix/d3d9.dll \
+  --control basecopy --rounds 10 bindbench 1060
+```
+
+- `scripts/perf-abba.sh` runs the rounds rotated (§2.2), with `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`,
+  the state cache off, and the rest of the caller's environment. It doesn't reset
+  `D9MT_FPS_CAP`, so set `D9MT_FPS_CAP=0` for the call as above; an experiment with the cap sets
+  it per variant with `--env <name>:D9MT_FPS_CAP=<fps>`. Each variant gets an AIR cache and PSO
+  archives of its own (warm after its first run). The first variant is the reference unless `--ref`; `--env <name>:<VAR>=<value>`
+  gives one variant extra environment (the same DLL with a switch off); `--native` compares
+  native programs without Wine (one `state_cache_test` per tree). The bench is looked up in
+  `BENCH_DIR` (default `build/bench/x64`) or given as a path. Results go to
+  `$WORK/results/<tag>-<date>-<pid>.txt`. The harness writes nothing of its own outside `WORK`;
+  a bench may create temporary files of its own (the native state-cache bench uses
+  `/tmp/d9mt-sct.*`).
+- A run is **DIRTY** when another Wine server is running, and **FAIL** when the program doesn't
+  exit 0 with a result line (a bench given bad arguments prints `RESULT FAIL usage` and exits 2);
+  both are left out of the comparison, and the script exits 1 if a run failed. `DIRTY_CHECK=0`
+  turns the Wine server check off, for functional smoke runs only, never for measurements.
+- `scripts/perf-compare.py results.txt …` prints per variant the runs, the median, min..max, the
+  paired median against the reference and **slower n/N**. With `--control`, a variant whose paired
+  median lies within the control's range is marked **`~ noise`**; a variant whose runs fall into
+  two clusters (at least six runs, a gap wider than 2.5 % of the median, and at least 20 % of
+  the runs on each side) is marked **`bimodal?`** (§2.5). `--metric` picks another result field (for example
+  `p99` or `sd` for pacing).
+- For a virtual display, build the benches with `BENCH_INCLUDE=<header>` and wrap the whole
+  `perf-abba.sh` call in the display tool (`scripts/build-benches.sh`, `scripts/perf-abba.sh`).
+  A virtual display can vanish when the physical display is forced to sleep during a run (#43).
+
+### 2.4 Controls
+
+- **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant
+  (`--control basecopy`).
   It shows the harness's bias and the window's noise floor. A delta smaller than the A/A spread
   of that window is noise.
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
@@ -61,16 +106,16 @@ and what a release candidate is checked for. What isn't in this repository yet i
   change's code size and no behaviour change, and compare the change against the placebo. If the
   change reads like the placebo, it is layout.
 
-### 2.4 Bimodal benchmarks
+### 2.5 Bimodal benchmarks
 
 Some benchmarks land in two modes: bindbench settles into one of two frame times per run, so the
 same pair of variants can read faster in one window and slower in the next. **Look at the per-run
 values for two clusters before reading a median**; small differences on a bimodal benchmark need
 many more rounds.
 
-_The maintainer's measurements behind §2.3 and §2.4 are not public._
+_The maintainer's measurements behind §2.4 and §2.5 are not public._
 
-### 2.5 The virtual display
+### 2.6 The virtual display
 
 Benchmarks that run unattended on a virtual display see a window that AppKit reports as
 **occluded**, so d9mt **skips the presents**: the numbers are CPU time plus GPU work without the
@@ -80,26 +125,30 @@ pacing): those are measured **in a game on a real display**, with the Metal HUD.
 
 ## 3. Benchmarks
 
-| Benchmark | What it measures | Use it for | Where |
+`scripts/build-benches.sh` builds every bench into `build/bench/<arch>/` (sources in `test/perf/`,
+`bench_4k` in `test/`); each prints one `RESULT` or `BENCH` line that `scripts/perf-abba.sh`
+collects (§2.3). The arguments are the benches' own (their header comments); the defaults are in
+parentheses.
+
+| Benchmark | What it measures | Use it for | Source, arguments |
 |---|---|---|---|
-| `bench_4k` | 2048² shadow map with 4 cascades, a 3840x2160 main pass and 4 post passes, ~2,200 draws a frame; GPU-bound | GPU work, render passes, pass splits | `test/bench_4k.c` |
-| state cache bench | A synthetic SWTOR-like session with many pipelines (200 pixel shaders, 400 pipelines): world-phase frame times, compile waits, `STATECACHE` counters | Cold start, prewarm, the pipeline state cache | `test/code_statecache.c`, `scripts/run-statecache-bench.sh` |
-| state cache record cost | The render thread's cost of recording | Changes to recording | `test/native/state_cache_test.cpp` via `scripts/test-state-cache.sh` |
-| `bindbench` | 320x240, no vsync, 5000 tiny draws a frame, each with another of 64 textures; **bimodal** (§2.4) | The per-bind CPU path | _Open:_ not in the repository yet |
-| `churnbench` | 3000 rebinds of 64 textures plus 125 new 64² textures a frame | Texture creation and release, view lifetime | _Open_ |
-| `psobench` | 3000 draws a frame from one vertex buffer, each switching between two pipelines; modes `topo`, `blend`, `none`, and `blend2`/`blendop`/`blend4` (other key sets, so a result that depends on where two keys land shows as a sign flip). (blend − topo) / 3000 is the cost of one MRU miss | PSO key, cache and MRU | _Open_ |
-| `bench_4kw` (`wait`) | `bench_4k` with an event query polled with `D3DGETDATA_FLUSH`: the GPU idles between frames | Submission when the game waits every frame (G1 doesn't carry) | _Open_ |
-| `bench_4kw` (`8`, "balanced") | `bench_4k` plus 8 ms of CPU before Present, so G1's backlog gate flips | G1 and the submission path | _Open_ |
-| `bench_getdata` | A 4K pass of 1500 draws with an occlusion query around the first 500, polled the next frame (as SWTOR does, #22) | Queries, `GetData` flushes | _Open_ |
-| `bench_upload` | A 4K pass of 600 draws, each from a `Lock(DISCARD)` vertex buffer, plus 24 managed 256² textures rewritten a frame (run with `D9MT_MEMSTATS=16`) | Uploads, staging, the upload ring | _Open_ |
-| `bench_draws` | Many small draws a frame, each with a VS and a PS constant update and a render-state change; modes `present`, `flush`, `spinflush`; reports ns per draw and frame times | The per-draw CPU path; `present` mode is layout-sensitive and also depends on drawable availability | _Open:_ only on the branch `arm64ec` |
-| `bench_fps_cap` | Frame pacing with vsync on or off, a set CPU time per frame and optional jitter; reports fps, percentiles and `long` (frames over 1.5x the median) | Present-path and pacing changes | _Open:_ only on the branches `feat/fps-limiter`, `diag/fps-bgsleep-dxvk` |
+| `bench_4k` | 2048² shadow map with 4 cascades, a 3840x2160 main pass and post passes, ~2,200 draws a frame; GPU-bound (`ms/frame`) | GPU work, render passes, pass splits | `test/bench_4k.c`: `[frames (300)] [post passes (4)] [depth clears (1)]` |
+| `bench_4k … wait` | The same, ending every frame with an event query polled with `D3DGETDATA_FLUSH`: the GPU idles between frames | Submission when the game waits every frame (G1 doesn't carry) | `test/bench_4k.c`, 4th argument `wait` |
+| `bench_4k … <ms>` ("balanced") | The same, with that many ms of CPU before Present; near the GPU's frame time, G1's backlog gate flips | G1 and the submission path | `test/bench_4k.c`, 4th argument `<ms>` (for example `8`) |
+| `bindbench` | 320x240, no vsync, 5000 tiny draws a frame, each with another of 64 textures (`avg_ms`); **bimodal** (§2.5) | The per-bind CPU path | `test/perf/bindbench.c`: `[frames (1060)]` |
+| `churnbench` | 3000 rebinds of 64 textures plus 125 new 64² textures a frame (`avg_ms`) | Texture creation and release, view lifetime | `test/perf/churnbench.c`: `[frames (1060)]` |
+| `psobench` | 3000 draws a frame from one vertex buffer, each switching state: between two states (`topo`, `blend`, `blend2`, `blendop`), four (`blend4`) or none (`none`). `topo` is the floor of a state switch (since #33 it doesn't resolve the PSO); in `blend`, A → B → A hits the PSO MRU (#40), and with `D9MT_NO_PSOMRU=1` every draw builds the full key and looks it up (the key hash's cost, #34). `blend2`/`blendop`/`blend4` are other key sets, so a result that depends on where two keys land shows as a sign flip | PSO resolve, MRU, key and cache | `test/perf/psobench.c`: `<frames> <topo\|blend\|blend2\|blendop\|blend4\|none>` |
+| `bench_getdata` | A 4K pass of 1500 draws with an occlusion query around the first 500, polled the next frame (as SWTOR does, #22) | Queries, `GetData` flushes | `test/perf/bench_getdata.c`: `[frames (330)] [flush\|noflush]` |
+| `bench_upload` | A 4K pass of 600 draws, each from a `Lock(DISCARD)` vertex buffer, plus 24 managed 256² textures rewritten a frame | Uploads, staging, the upload ring (with `--env <name>:D9MT_MEMSTATS=16`) | `test/perf/bench_upload.c`: `[frames (330)]` |
+| `bench_draws` | Many small draws a frame, each with a VS and a PS constant update and a render-state change; reports ns per draw and frame times | The per-draw CPU path; `present` mode is layout-sensitive and also depends on drawable availability | `test/perf/bench_draws.c`: `[draws per frame (1000)] [frames (600)] [present\|flush\|spinflush]` |
+| `bench_fps_cap` | Frame pacing with vsync on or off, a set CPU time per frame and optional jitter; reports fps, percentiles, `sd` and `long` (frames over 1.5x the median) | Present-path and pacing changes (`--metric p99` or `sd`) | `test/perf/bench_fps_cap.c`: `[seconds (30)] [vsync 0/1 (1)] [cpu ms] [jitter ms] [quads] [game cap fps]` |
+| state cache record cost | The render thread's cost of recording a pipeline (`RESULT state_cache_bench rounds= median_ns= mean_ns=`) | Changes to recording | `test/native/state_cache_test.cpp`: `BENCH_ROUNDS=<n> scripts/test-state-cache.sh`; to compare trees, `perf-abba.sh --native` with one `state_cache_test` per tree |
+| state cache session | A synthetic SWTOR-like session with many pipelines (200 pixel shaders, 400 pipelines): world-phase frame times, compile waits, `STATECACHE` counters | Cold start, prewarm, the pipeline state cache | `test/code_statecache.c` via `scripts/run-statecache-bench.sh` |
 | `archfirst` | Native Metal 4, no Wine: `check` for correctness, `time` for the hit cost through an `MTL4Archive` vs a compiler with `lookupArchives`, and the miss cost with 1, 8 and 64 archives | Bridge PSO-archive changes | _Open:_ only on the branch `bundle/bridge-s1-pso` |
 
 The guards a change to the submission path runs are listed in
-[docs/g1-early-commit.md](docs/g1-early-commit.md). _Open:_ the benchmarks marked above, and the
-harness that rotates rounds and computes the paired statistics, are added to the repository
-separately; until then they run from the maintainer's workspace.
+[docs/g1-early-commit.md](docs/g1-early-commit.md); its `bench_4kw` is `bench_4k` with the 4th
+argument.
 
 ## 4. Diagnostics
 
@@ -228,7 +277,7 @@ with no foreign Wine load:
   whose deltas were judged as layout;
 - `bench_fps_cap` with vsync on, about 20 rounds, with counters for the drawable wait (time,
   timeouts); the present-path question behind it (#26: −2.0 % fps with vsync on, not shown to be
-  significant) is also checked in a game on a real display (§2.5).
+  significant) is also checked in a game on a real display (§2.6).
 
 A measured regression blocks the release. If it is layout, the release candidate gets a layout
 fix, each measured on its own; it is never fixed by reverting the commit that moved it.
