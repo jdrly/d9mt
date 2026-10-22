@@ -255,9 +255,10 @@ void SubmissionTracker::waitFor(uint64_t serial) {
         ", still not submitted yet after ", slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ")"));
     Logger::warn(str::format("SubmissionTracker: GPU stall waiting serial ",
       serial, " (completed ", completedSerial(), ") — slice ", slices));
-    if (submittedSlices >= 5u)
+    // D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, submitted or not
+    if (m_failFast ? submittedSlices >= 5u : slices >= 5u)
       break;
-    if (slices >= 5u && serial >= nextSerial()) {
+    if (m_failFast && slices >= 5u && serial >= nextSerial()) {
       Logger::err(str::format("SubmissionTracker: serial ", serial, " still not submitted after ",
         slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ") — abandoning wait"));
       return;
@@ -287,11 +288,10 @@ void SubmissionTracker::hung(uint64_t serial) {
     5u * s_sliceMs / 1000u, " s on the GPU (completed ", completed, ", submitted ", lastSubmittedSerial(),
     "): the GPU stopped and its queue won't recover; ending the game (exit code ", kGpuHungExitCode,
     "; D9MT_GPU_HUNG=continue keeps it running)");
-  // The line must be out whatever DXVK_LOG_LEVEL says: through the logger if it writes errors
-  // (__wine_dbg_output writes synchronously; only "none" drops them), else straight to stderr,
-  // flushed.
-  static const bool logNone = env::getEnvVar("DXVK_LOG_LEVEL") == "none";
-  if (!logNone) {
+  // The line must be out whatever the log level is: through the logger if it writes errors
+  // (__wine_dbg_output writes synchronously; only "none" drops them; the level it fixed at start),
+  // else straight to stderr, flushed.
+  if (Logger::logLevel() != LogLevel::None) {
     Logger::err(line);
   } else {
     const std::string out = "err:   " + line + "\n";

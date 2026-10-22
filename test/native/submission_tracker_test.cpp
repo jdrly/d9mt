@@ -56,6 +56,7 @@ static std::atomic<uint64_t>   g_reads     = { 0u };  // MTLSharedEvent_signaled
 // The boundary case: after the g_boundaryAt-th timed-out slice, the "GPU" completes
 // g_boundaryValue on the 4th event read that follows (hung()'s final check), not before.
 static std::atomic<uint64_t>   g_timeouts  = { 0u };
+static std::atomic<uint64_t>   g_waitCalls = { 0u };   // MTLSharedEvent_waitUntilSignaledValue calls
 static uint64_t                g_boundaryAt = 0u, g_boundaryValue = 0u;
 static std::atomic<uint64_t>   g_completeOnRead = { 0u };
 
@@ -84,6 +85,7 @@ uint64_t MTLSharedEvent_signaledValue(obj_handle_t) {
   return g_signaled;
 }
 bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t, uint64_t value, uint64_t timeoutMs) {
+  g_waitCalls++;
   std::unique_lock<std::mutex> l(g_gpuMutex);
   const bool done = g_gpuCond.wait_for(l, std::chrono::milliseconds(timeoutMs), [&] { return g_signaled >= value; });
   if (!done && g_boundaryAt && ++g_timeouts == g_boundaryAt)
@@ -511,6 +513,24 @@ static void gpuHung() {
     SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
   }
 
+  { // 5b. D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, also when the serial is
+    //     submitted late in the wait (no longer submitted-only slices)
+    resetHang();
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    SubmissionTracker t(0x1u);
+    const uint64_t s = t.nextSerial();
+    std::thread cs([&t] { std::this_thread::sleep_for(std::chrono::milliseconds(90)); t.onSubmit(0x2u); });
+    const uint64_t calls0 = g_waitCalls.load();
+    t.waitFor(s);
+    cs.join();
+    CHECK(g_waitCalls.load() - calls0 == 5u);   // the fail-fast budget would wait more slices
+    CHECK(!t.isComplete(s));
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    gpuComplete(s);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+  }
+
   { // 6. concurrent: while the reporter is past termination (parked), another thread's wait and
     //    the device's drain must not return to their callers: they park, production's way
     resetHang();
@@ -546,7 +566,7 @@ static void gpuHung() {
 // (Windows only: it redirects the stderr handle; a native ThreadSanitizer build leaves it out.)
 #ifdef _WIN32
 static int logNone() {
-  if (dxvk::env::getEnvVar("DXVK_LOG_LEVEL") != "none") {
+  if (dxvk::Logger::logLevel() != dxvk::LogLevel::None) {
     std::printf("FAIL --log-none needs DXVK_LOG_LEVEL=none\n");
     return 1;
   }

@@ -45,6 +45,11 @@ namespace dxvk::backend {
   void RetireBatch::run() { }
 }
 
+// mtl_submission.cpp asks the logger's level (a GPU hang's line falls back to stderr at "none")
+dxvk::Logger dxvk::Logger::s_instance = { "" };
+dxvk::Logger::Logger(const std::string&) : m_minLevel(LogLevel::Info) { }
+dxvk::Logger::~Logger() { }
+
 namespace dxvk {
   void Logger::info(const std::string&) { }
   void Logger::warn(const std::string&) { }
