@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bench_window.h"
 
 static const unsigned char shadertri_vs_bytecode[] = {
 #include "shadertri_vs_bytecode.inc"
@@ -81,6 +82,7 @@ int main(int argc, char **argv) {
                             NULL, NULL, wc.hInstance, NULL);
   IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
   if (!hwnd || !d3d) { printf("FAIL init\n"); return 1; }
+  bench_client(hwnd, "bench_draws", 1280, 720);
 
   D3DPRESENT_PARAMETERS pp = {0};
   pp.BackBufferWidth = 1280;

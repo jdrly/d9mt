@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bench_window.h"
 
 struct V { float x, y, z, rhw; DWORD c; };
 
@@ -28,7 +29,7 @@ int main(int argc, char **argv) {
   static const DWORD src4[4] = { D3DBLEND_SRCALPHA, D3DBLEND_ONE, D3DBLEND_DESTCOLOR, D3DBLEND_INVDESTCOLOR };
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "pb";
   RegisterClassA(&wc);
-  HWND hwnd = CreateWindowA("pb", "pb", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 340, 280, NULL, NULL, wc.hInstance, NULL);
+  HWND hwnd = bench_window("pb", "psobench", 320, 240);
   IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
   D3DPRESENT_PARAMETERS pp = { 0 };
   pp.Windowed = TRUE; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.BackBufferFormat = D3DFMT_X8R8G8B8;

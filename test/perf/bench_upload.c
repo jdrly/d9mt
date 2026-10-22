@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bench_window.h"
 
 struct V { float x, y, z, rhw; DWORD c; float u, v; };
 #define FVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1)
@@ -19,7 +20,7 @@ int main(int argc, char **argv) {
   if (frames <= 30) { printf("RESULT FAIL usage: frames must be more than the 30 warm-up frames\n"); return 2; }
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "bup";
   RegisterClassA(&wc);
-  HWND hwnd = CreateWindowA("bup", "bup", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 340, 280, NULL, NULL, wc.hInstance, NULL);
+  HWND hwnd = bench_window("bup", "bench_upload", 320, 240);
   IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
   D3DPRESENT_PARAMETERS pp = { 0 };
   pp.Windowed = TRUE; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.BackBufferFormat = D3DFMT_X8R8G8B8;

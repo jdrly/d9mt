@@ -16,6 +16,7 @@
  *   HIST <ms bin>:<count> ...   (1 ms bins, non-empty only)
  * Not a hash test; one window (scripts/build-benches.sh's BENCH_INCLUDE can place it). */
 #include "t_common.h"
+#include "bench_window.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -68,6 +69,7 @@ int main(int argc, char **argv) {
 
   t_present_interval = vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
   t_init("bench_fps_cap", 640, 360);
+  bench_client_of(t_dev, "bench_fps_cap", 640, 360);
   IDirect3DDevice9_SetVertexShader(t_dev, t_vs_pos);
 
   static double dt[MAX_FRAMES];

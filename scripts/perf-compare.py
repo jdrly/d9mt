@@ -16,6 +16,10 @@ from another path). Its paired differences are the noise floor: a variant whose 
 lies within the control's range is marked `~ noise`. A variant whose runs fall into two clusters
 is marked `bimodal?`: read its per-run values before the median (some benches switch between two
 modes per process).
+
+client=<W>x<H> (the bench's window client area, perf-abba.sh): listed per variant, with a warning
+when it isn't the back buffer's size (client=<W>x<H>!=<back buffer>: every present took the
+presenter's scaling blit) or differs between variants.
 """
 import argparse, re, statistics, sys
 
@@ -23,7 +27,7 @@ METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
 
 
 def load(paths, metric):
-    vals, skipped, seen, keys_seen = {}, {"dirty": 0, "fail": 0}, set(), set()
+    vals, skipped, seen, keys_seen, clients = {}, {"dirty": 0, "fail": 0}, set(), set(), {}
     for path in paths:
         for n, line in enumerate(open(path), 1):
             m = re.match(r"(DIRTY )?(?:round|pair|block)=(\d+) v=(\S+)", line)
@@ -43,13 +47,16 @@ def load(paths, metric):
                 skipped["fail"] += 1
                 continue
             keys_seen.update(re.findall(r"(?:^|\s)([A-Za-z_][\w/]*)=[0-9.]+", line))
+            mc = re.search(r"(?:^|\s)client=(\S+)", line)
+            if mc:
+                clients.setdefault(m.group(3), set()).add(mc.group(1))
             for k in ([metric] if metric else METRICS):
                 mv = re.search(r"(?:^|\s)" + re.escape(k) + r"=([0-9.]+)", line)
                 if mv:
                     vals.setdefault(m.group(3), {})[ident[:2]] = float(mv.group(1))
                     metric = metric or k
                     break
-    return vals, skipped, metric, keys_seen
+    return vals, skipped, metric, keys_seen, clients
 
 
 def pct(x, width=0):
@@ -78,9 +85,9 @@ def main():
     ap.add_argument("--metric")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
-    vals, skipped, metric, keys_seen = load(a.files, a.metric)
+    vals, skipped, metric, keys_seen, clients = load(a.files, a.metric)
     if not vals:
-        avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load")))
+        avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load", "client")))
         sys.exit(f"no results for metric {a.metric or ' / '.join(METRICS)}"
                  f" (skipped {skipped['dirty']} DIRTY, {skipped['fail']} FAIL)"
                  + (f"; keys present: {avail} (--metric)" if avail else ""))
@@ -128,6 +135,14 @@ def main():
     if noise:
         rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
         print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
+    if clients:
+        print("client area: " + ", ".join(f"{v} {'/'.join(sorted(c))}" for v, c in clients.items()))
+        bad = sorted(v for v, c in clients.items() if any("!=" in x for x in c))
+        if bad:
+            print(f"WARNING: the client area isn't the back buffer's size ({', '.join(bad)}): every present"
+                  " took the scaling blit, an extra PSO and GPU pass (test/perf/bench_window.h)")
+        if len({frozenset(c) for c in clients.values()}) > 1:
+            print("WARNING: the variants ran with different client areas")
 
 
 if __name__ == "__main__":

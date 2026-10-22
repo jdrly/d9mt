@@ -31,6 +31,9 @@
 #
 # A run counts only if the program exits 0 with a RESULT/BENCH line that isn't "RESULT FAIL";
 # otherwise its line is RESULT FAIL, it's left out of the comparison, and the script exits 1.
+# A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
+# run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
+# then every present took the presenter's scaling blit (perf-compare.py warns).
 # A run is marked DIRTY (also left out) when a wineserver other than this run's own is running:
 # before the launch, with this prefix's server stopped, any wineserver; during the run, more than
 # one (none at all in --native mode). DIRTY_CHECK=0 turns that off, for functional smoke runs on a
@@ -198,11 +201,14 @@ for r in $(seq "$ROUNDS"); do
         line="RESULT FAIL rc=0, no RESULT line"
       fi
     fi
+    client=$(tr -d '\r' < "$A/out" 2>/dev/null | awk '$1 == "CLIENT" { c = $3
+      if ($4 == "MISMATCH") { b = $5; sub(/^backbuffer=/, "", b); sub(/:$/, "", b); c = c "!=" b }
+      print c; exit }')
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.
     grep -q 'not submitted yet' "$log" 2>/dev/null && line="RESULT FAIL unsubmitted-wait"
     stop_own
     case "$line" in "RESULT FAIL"*) fails=$((fails + 1)) ;; esac
-    echo "${dirty:+DIRTY }round=$r v=$v load=$load $line" | tee -a "$OUT"
+    echo "${dirty:+DIRTY }round=$r v=$v load=$load${client:+ client=$client} $line" | tee -a "$OUT"
   done
 done
 trap - INT TERM
