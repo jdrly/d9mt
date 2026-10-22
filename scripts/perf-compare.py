@@ -20,9 +20,11 @@ modes per process).
 Run metadata, never a metric: client=<W>x<H> (the bench's window client area, perf-abba.sh) is
 listed per variant (unknown for runs without it), with a warning when it isn't the back buffer's
 size (client=<W>x<H>!=<back buffer>: a visible window's presents need the presenter's scaling
-blit) or when a paired round compares different client areas. visible=1|0 (the window visible at
-the end of the run) is counted per variant, with a warning when visible and occluded runs are
-mixed (an occluded window's presents are skipped, so the two measure different things).
+blit) or when a paired round compares different client areas. visible= (0: occluded throughout,
+nolog: no change logged, visible throughout if the bench presented; 0>1 etc.: changed within the
+run; ?: not established) is counted per variant, with a warning about runs that changed or are
+unknown, and when occluded runs are mixed with others (an occluded window's presents are
+skipped, so the two measure different things).
 """
 import argparse, re, statistics, sys
 
@@ -55,9 +57,9 @@ def load(paths, metric):
             mc = re.search(r"(?:^|\s)client=(\S+)", line)
             if mc:
                 clients.setdefault(m.group(3), {})[ident[:2]] = mc.group(1)
-            mv = re.search(r"(?:^|\s)visible=([01])(?=\s|$)", line)
+            mv = re.search(r"(?:^|\s)visible=(\S+)", line)
             if mv:
-                visible.setdefault(m.group(3), {})[ident[:2]] = mv.group(1) == "1"
+                visible.setdefault(m.group(3), {})[ident[:2]] = mv.group(1)
             for k in ([metric] if metric else METRICS):
                 mv = re.search(r"(?:^|\s)" + re.escape(k) + NUM, line)
                 if mv:
@@ -167,12 +169,20 @@ def main():
             print("WARNING: paired rounds compare different client areas: "
                   + ", ".join(f"{v} {n} round(s)" for v, n in unpaired.items()))
     if visible:
-        print("window visible: " + ", ".join(
-            f"{v} {sum(visible.get(v, {}).values())}/{len(vals[v])} runs"
-            + (f" ({sum(1 for k in vals[v] if k not in visible.get(v, {}))} unknown)"
-               if any(k not in visible.get(v, {}) for k in vals[v]) else "") for v in vals))
-        if len({x for f in visible.values() for x in f.values()}) > 1:
-            print("WARNING: visible and occluded runs are mixed: an occluded window's presents are skipped,"
+        def kind(x):
+            return {"0": "occluded", "nolog": "no change logged", None: "unknown", "?": "unknown"}.get(x, "changed")
+        def vis(v):
+            ks = [kind(visible.get(v, {}).get(k)) for k in vals[v]]
+            return f"{v} " + ", ".join(f"{ks.count(w)} {w}" for w in ("occluded", "no change logged", "changed", "unknown") if w in ks)
+        print("window visibility: " + "; ".join(vis(v) for v in vals))
+        kinds = {kind(visible.get(v, {}).get(k)) for v in vals for k in vals[v]}
+        odd = sorted({x for v in vals for k in vals[v] for x in [visible.get(v, {}).get(k, "?")]
+                      if kind(x) in ("changed", "unknown")})
+        if odd:
+            print(f"WARNING: runs whose window changed visibility or whose visibility is unknown ({', '.join(odd)}):"
+                  " they don't measure one present path")
+        if "occluded" in kinds and len(kinds) > 1:
+            print("WARNING: occluded runs are mixed with others: an occluded window's presents are skipped,"
                   " so compare them separately")
 
 

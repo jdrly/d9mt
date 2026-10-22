@@ -33,10 +33,15 @@
 # otherwise its line is RESULT FAIL, it's left out of the comparison, and the script exits 1.
 # A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
 # run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
-# then a visible window's presents need the presenter's scaling blit (perf-compare.py warns). visible=1|0: whether
-# the window was visible at the end of the run (the bridge's last `D9MT-WSI ... visibility` change;
-# none means it stayed visible). An occluded window's presents are skipped, so visible and
-# occluded runs measure different things (perf-compare.py warns when they're mixed).
+# then a visible window's presents need the presenter's scaling blit (perf-compare.py warns).
+# visible=: the window's visibility over the run, from the bridge's `D9MT-WSI ... visibility A -> B`
+# lines (it starts at visible and logs every change, but nothing when it starts watching): 0
+# (occluded from the first change on), the states in order when it changed again (0>1, 0>1>0,
+# ...), nolog (no change logged: visible throughout if the bench presented; a bench that never
+# presents, like bench_draws flush, never has its visibility read), or ? when lines may have been
+# dropped (30 or more, or a suppression mark). The presents before the first change aren't in it.
+# An occluded window's presents are skipped, so perf-compare.py warns about runs that changed or
+# are unknown, and about occluded runs mixed with others.
 # A run is marked DIRTY (also left out) when a wineserver other than this run's own is running:
 # before the launch, with this prefix's server stopped, any wineserver; during the run, more than
 # one (none at all in --native mode). DIRTY_CHECK=0 turns that off, for functional smoke runs on a
@@ -210,8 +215,11 @@ for r in $(seq "$ROUNDS"); do
     visible=""
     if [ "$NATIVE" = 0 ] && grep -q 'MtlPresenter' "$log" 2>/dev/null; then
       visible=$(awk '/^D9MT-WSI .* visibility 0x[0-9a-f]+ -> 0x[0-9a-f]+ on / {
-          for (i = 1; i < NF; i++) if ($i == "->") s = $(i + 1) }
-        END { print (s == "" || s == "0x3") ? 1 : 0 }' "$log")
+          n++; if (/earlier lines suppressed/) lost = 1
+          for (i = 1; i < NF; i++) if ($i == "->") s = ($(i + 1) == "0x3") ? "1" : "0"
+          if (seq == "") seq = s; else if (s != last) seq = seq ">" s
+          last = s }
+        END { print (lost || n >= 30) ? "?" : (n == 0) ? "nolog" : seq }' "$log")
     fi
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.
     grep -q 'not submitted yet' "$log" 2>/dev/null && line="RESULT FAIL unsubmitted-wait"
