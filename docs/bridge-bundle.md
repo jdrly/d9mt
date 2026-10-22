@@ -454,7 +454,7 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - **Cost:** one more serializer-attached compiler (≈0 MB without content: `attr`). The code is about part 5's size.
 - **Gate:** the cold-session peak, uncaptured = 0, and psoab's new phase.
 
-### 7. MTL4 commit feedback errors as a log line: code on bridge/commit-feedback (tests pass; the cost A/B in window A2)
+### 7. MTL4 commit feedback errors as a log line: bridge/commit-feedback (ships with the bundle, ADR-0004)
 
 **Why.** Jan's Cartel Market freeze on 2026-10-21 was a real GPU hang, followed by the WindowServer watchdog and a logout (field-reports/20261021-jan-freeze/ANALYSIS.md). Nothing in wine.log could tell a timeout from a page fault. The unified log only had `IOGPUMetalError: <private>`, so the hang was inferred from timing. Metal 4 gives the cause to whoever asks. The proposal is field-reports/20261021-jan-freeze/BRIDGE-COMMIT-FEEDBACK.md.
 
@@ -471,7 +471,8 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
   - An error from another domain is named by its domain.
   - The lines go through the bridge's existing diagnostic limit (`d9mt_log_allow`: 30 lines per 10 s, lock-free atomics). The first line of the next window says how many were suppressed, instead of the proposal's 20 lines plus a count line.
   - After a hang the dead channel rejects every later commit (one every 10 s in Jan's log), so the rate limit matters.
-- **Not the commit's number:** one shared options object means one block for every commit, and the feedback carries no commit identity. A per-commit options object or block would allocate on every commit. The line therefore carries the GPU times and the count of commits submitted so far (an atomic counter that is always on), which places the error in time next to the SubmissionTracker / HITCH lines.
+  - The whole record is formatted and written with one `fprintf` (review M), so another callback's line or a WSI line can't land inside it. stderr is unbuffered, and libc formats such a call into a buffer and writes it once.
+- **Not the commit's number:** only the handler block is shared; the options object is per commit (above). The feedback still carries no commit identity, and a block per commit, capturing the number, would be a heap copy on every commit. So the line carries the GPU times and `commits`, the cumulative number of commits submitted when the record is written (an atomic counter that is always on), not the failing commit's own number. That places the error in time next to the SubmissionTracker / HITCH lines.
 - In the same change, the commit's `getenv("D9MT_WSILOG")` (on every commit) becomes `d9mt_wsilog_enabled()`, which is cached. Like every other WSI line, it now needs `D9MT_WSILOG=1`; before, any value turned it on.
 - **Dropped from the proposal:** `MTLCommandBufferErrorOptionEncoderExecutionStatus` is an `MTLCommandBufferDescriptor` option (Metal 3). `MTL4CommandBufferOptions` has only `logState`, so it doesn't exist for d9mt's MTL4 command buffers.
 - **Later, d9mt side:** a unixcall for the last error code, so that `D9MT-GPU-HUNG` / `D9MT-GPU-LOST` name the cause. That is an ABI addition (a new call number, check-abi-mix, the skew case of a new d3d9 on an old bridge), so it is a separate step.
@@ -479,6 +480,16 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 **Cost per commit.** Our block costs nothing when there's no error. On the committing thread: one `MTL4CommitOptions` alloc/init, `addFeedbackHandler:` (a retain of the shared block) and a release. The larger unknown is Metal's: with a feedback handler, Metal has to deliver a completion callback for every commit, on its own thread. Without one, an MTL4 commit probably needs no host-side completion at all, since d9mt tracks completion with its shared events. This is unverified, and the A/B decides. At ~60–600 commits/s that is that many callbacks a second, off the render thread but not free under Rosetta.
 - **Gate (hard rule):** window A2, `n013-issues/scripts/qw-cfb.sh`: on / on2 (the A-A control) / off, bindbench 3060 and bench_4k 600, 10 rounds each with the order rotated, d3d9 = the shipped/pinned main a779f54. on − off must be within the on − on2 spread.
 - If it measures worse, it ships off by default and on under `D9MT_WSILOG` / Collect Logs.
+- **A2 result (2026-10-22 06:24, results/qw-cfb-{bind,4k}-0624.txt), qualified:**
+  - bindbench: on − off −0.50 %, slower in 4/10 (−2.1…+3.6 %).
+  - bench_4k: on − off +0.40 %, 5/10.
+  - 0 GPU error lines, 0 dirty runs.
+  - **But the A-A control has a systematic label offset:** on2 (identical bits and environment to on) ran +5.75 % slower than on in 10/10 rounds of bindbench, and +6.25 % slower than off in 10/10. The written inequality (on − off inside on − on2) holds. But an offset tied to the label (bin directory, cache directory) is a bias, not a noise floor, and it could hide or fake a callback cost of the same size.
+  - So the A2 conclusion is only "no slowdown shown"; it isn't "no cost". No feedback slowdown was seen.
+- **A2b (crossed, window after A3):** `n013-issues/scripts/qw-cfb2.sh`. bindbench only. The two labels that showed the offset (the on and on2 directories and caches) each run both modes, so every round has 4 runs, order rotated:
+  - the feedback effect is on − off **within** each label;
+  - the label effect is label2 − label1 within each mode.
+  - Gate: the within-label on − off not measurably slower in both labels.
 
 **ABI and LC_UUID.**
 - PE side: no source change (the diff is winemetal_unix.c only) and no new unixcall, so check-abi-mix is unaffected and the previous drop's winemetal.dll stays valid. (The DLL bytes aren't reproducible across build trees: dlltool's ntdll import library differs from tree to tree, even from the same `.def`. A rebuild in the same tree differs only in the PE timestamp and checksum.)

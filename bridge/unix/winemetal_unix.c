@@ -7747,14 +7747,14 @@ commit_feedback_handler(void) {
         const long code = err ? (long)err.code : fake;
         const char *name = !err || [err.domain isEqualToString:MTLCommandBufferErrorDomain]
                            ? gpu_error_name(code) : err.domain.UTF8String;
-        char ts[16];
+        char ts[16], more[48] = "";
         d9mt_wallstamp(ts);
-        fprintf(stderr, "D9MT-GPU-ERROR %s %s (%ld): %s gpu=%.3f-%.3f now=%.3f commits=%lu",
-                ts, name, code, err ? err.localizedDescription.UTF8String : "(test)", fb.GPUStartTime,
-                fb.GPUEndTime, CACurrentMediaTime(), atomic_load(&g_commits));
         if (dropped)
-          fprintf(stderr, " [%d earlier lines suppressed]", dropped);
-        fputc('\n', stderr);
+          snprintf(more, sizeof(more), " [%d earlier lines suppressed]", dropped);
+        /* the whole record in one stdio call: another callback's or a WSI line can't land inside it */
+        fprintf(stderr, "D9MT-GPU-ERROR %s %s (%ld): %s gpu=%.3f-%.3f now=%.3f commits=%lu%s\n",
+                ts, name, code, err ? err.localizedDescription.UTF8String : "(test)", fb.GPUStartTime,
+                fb.GPUEndTime, CACurrentMediaTime(), atomic_load(&g_commits), more);
       }
     });
   });
