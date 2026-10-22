@@ -108,6 +108,7 @@ int main(int argc, char **argv) {
     const double now = qpcMs();
 
     if (!measuring && now - t0 >= 2000.0) {
+      bench_timed_mark();
       measuring = 1;
       tMeasure = now;
       cpu0 = cpuMs(GetCurrentProcess(), FALSE);
@@ -140,6 +141,7 @@ int main(int argc, char **argv) {
   if (!n) { printf("RESULT FAIL no measured frames\n"); return 1; }
   /* avg_ms: the mean frame time, lower is better (scripts/perf-compare.py's default metric); for
    * pacing compare p99= or sd= with --metric. */
+  bench_timed_print("bench_fps_cap");
   printf("RESULT n=%d fps=%.2f avg_ms=%.4f p1=%.2f p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f sd=%.3f long=%d"
          " cpuProc=%.0f cpuMain=%.0f vsync=%d cpuWork=%.1f jitter=%.1f quads=%d gameCap=%.0f\n",
          n, 1000.0 / mean, mean, n ? pct(s, n, 1.0) : 0.0, p50, n ? pct(s, n, 95.0) : 0.0,

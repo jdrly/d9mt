@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
   MSG msg;
   for (int n = 1; n <= frames; n++) {
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
-    if (n == 61) QueryPerformanceCounter(&t0);
+    if (n == 61) { bench_timed_mark(); QueryPerformanceCounter(&t0); }
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
     for (int i = 0; i < 3000; i++) {
@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
     if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
+  bench_timed_print("psobench");
   printf("RESULT psobench mode=%s frames=%d avg_ms=%.4f\n", mode, frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
   IDirect3DVertexBuffer9_Release(vb);
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);

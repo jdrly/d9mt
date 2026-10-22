@@ -34,12 +34,17 @@
 # A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
 # run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
 # then a visible window's presents need the presenter's scaling blit (perf-compare.py warns).
-# visible=: the window's visibility over the run, from the bridge's `D9MT-WSI ... visibility A -> B`
-# lines (it starts at visible and logs every change, but nothing when it starts watching): 0
-# (occluded from the first change on), the states in order when it changed again (0>1, 0>1>0,
-# ...), nolog (no change logged: visible throughout if the bench presented; a bench that never
-# presents, like bench_draws flush, never has its visibility read), or ? when lines may have been
-# dropped (30 or more, or a suppression mark). The presents before the first change aren't in it.
+# visible=: the window's visibility over the timed interval, from the bridge's `D9MT-WSI ...
+# visibility A -> B` lines (it starts at visible and logs every change, but nothing when it
+# starts watching) and the bench's `TIMED <bench> <HH:MM:SS.mmm>` line (the timed start, the
+# same wall clock):
+#   0         occluded from before the timed start on
+#   1>0, 0>1  the states in order when it changed (1> first: the first change came at or after
+#             the timed start, so it began visible)
+#   nolog     no change logged: visible throughout if the bench presented (a bench that never
+#             presents, like bench_draws flush, never has its visibility read)
+#   ?, ?>0    not established: lines may have been dropped (30 or more, or a suppression mark),
+#             the clocks disagree by more than 10 min, or (?> first) the bench printed no TIMED
 # An occluded window's presents are skipped, so perf-compare.py warns about runs that changed or
 # are unknown, and about occluded runs mixed with others.
 # A run is marked DIRTY (also left out) when a wineserver other than this run's own is running:
@@ -214,12 +219,22 @@ for r in $(seq "$ROUNDS"); do
       print c; exit }')
     visible=""
     if [ "$NATIVE" = 0 ] && grep -q 'MtlPresenter' "$log" 2>/dev/null; then
-      visible=$(awk '/^D9MT-WSI .* visibility 0x[0-9a-f]+ -> 0x[0-9a-f]+ on / {
+      timed=$(tr -d '\r' < "$A/out" 2>/dev/null | awk '$1 == "TIMED" { print $3; exit }')
+      visible=$(awk -v T="$timed" '
+        function ms(t, a) { split(t, a, ":"); return (a[1] * 3600 + a[2] * 60 + a[3]) * 1000 }
+        /^D9MT-WSI .* visibility 0x[0-9a-f]+ -> 0x[0-9a-f]+ on / {
           n++; if (/earlier lines suppressed/) lost = 1
+          if (n == 1) first = ms($2)
           for (i = 1; i < NF; i++) if ($i == "->") s = ($(i + 1) == "0x3") ? "1" : "0"
           if (seq == "") seq = s; else if (s != last) seq = seq ">" s
           last = s }
-        END { print (lost || n >= 30) ? "?" : (n == 0) ? "nolog" : seq }' "$log")
+        END {
+          if (lost || n >= 30) { print "?"; exit }
+          if (n == 0) { print "nolog"; exit }
+          if (T == "") { print "?>" seq; exit }
+          d = first - ms(T)
+          if (d > 600000 || d < -600000) { print "?"; exit }
+          print (d >= 0 ? "1>" : "") seq }' "$log")
     fi
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.
     grep -q 'not submitted yet' "$log" 2>/dev/null && line="RESULT FAIL unsubmitted-wait"

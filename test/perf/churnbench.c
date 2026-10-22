@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
   MSG msg;
   for (int n = 1; n <= frames; n++) {
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
-    if (n == 61) QueryPerformanceCounter(&t0);
+    if (n == 61) { bench_timed_mark(); QueryPerformanceCounter(&t0); }
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
     for (int i = 0; i < 3000; i++) {
@@ -70,6 +70,7 @@ int main(int argc, char **argv) {
     if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
+  bench_timed_print("churnbench");
   printf("RESULT churnbench frames=%d avg_ms=%.4f\n", frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
   for (int i = 0; i < 64; i++) IDirect3DTexture9_Release(tex[i]);
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);

@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
   unsigned long long polls = 0;
   for (int n = 1; n <= frames; n++) {
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
-    if (n == 31) QueryPerformanceCounter(&t0);
+    if (n == 31) { bench_timed_mark(); QueryPerformanceCounter(&t0); }
     if (n > 1) {
       DWORD samples = 0;
       LARGE_INTEGER p0, p1; QueryPerformanceCounter(&p0);
@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
     if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
+  bench_timed_print("bench_getdata");
   printf("RESULT bench_getdata mode=%s frames=%d polls_per_frame=%.1f avg_ms=%.4f\n", flush ? "flush" : "noflush",
          frames - 30, (double)polls / frames, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 30));
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);

@@ -20,9 +20,9 @@ modes per process).
 Run metadata, never a metric: client=<W>x<H> (the bench's window client area, perf-abba.sh) is
 listed per variant (unknown for runs without it), with a warning when it isn't the back buffer's
 size (client=<W>x<H>!=<back buffer>: a visible window's presents need the presenter's scaling
-blit) or when a paired round compares different client areas. visible= (0: occluded throughout,
-nolog: no change logged, visible throughout if the bench presented; 0>1 etc.: changed within the
-run; ?: not established) is counted per variant, with a warning about runs that changed or are
+blit) or when a paired round compares different client areas. visible= (0: occluded from before
+the timed start; nolog: no change logged, visible throughout if the bench presented; 1>0, 0>1
+etc.: changed; ? or ?>...: not established) is counted per variant, with a warning about runs that changed or are
 unknown, and when occluded runs are mixed with others (an occluded window's presents are
 skipped, so the two measure different things).
 """
@@ -170,7 +170,9 @@ def main():
                   + ", ".join(f"{v} {n} round(s)" for v, n in unpaired.items()))
     if visible:
         def kind(x):
-            return {"0": "occluded", "nolog": "no change logged", None: "unknown", "?": "unknown"}.get(x, "changed")
+            if x is None or x.startswith("?"):
+                return "unknown"
+            return {"0": "occluded", "nolog": "no change logged"}.get(x, "changed")
         def vis(v):
             ks = [kind(visible.get(v, {}).get(k)) for k in vals[v]]
             return f"{v} " + ", ".join(f"{ks.count(w)} {w}" for w in ("occluded", "no change logged", "changed", "unknown") if w in ks)

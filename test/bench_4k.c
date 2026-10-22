@@ -217,8 +217,10 @@ int main(int argc, char **argv) {
       TranslateMessage(&msg);
       DispatchMessageA(&msg);
     }
-    if (i == warm)
+    if (i == warm) {
+      bench_timed_mark();
       QueryPerformanceCounter(&t0);
+    }
     frame(i);
     if (cpuMs > 0.0) {
       LARGE_INTEGER b0, b1;
@@ -240,6 +242,7 @@ int main(int argc, char **argv) {
   }
   QueryPerformanceCounter(&t1);
   const double ms = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart / frames;
+  bench_timed_print("bench_4k");
   printf("BENCH4K frames=%d post=%d clears=%d draws=%d ms/frame=%.3f fps=%.1f mode=%s\n", frames, postPasses, depthClears,
          DRAWS + 3 + postPasses, ms, 1000.0 / ms, waitMode ? "wait" : cpuMs > 0.0 ? "balanced" : "present");
   fflush(stdout);

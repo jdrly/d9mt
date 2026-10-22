@@ -29,6 +29,18 @@ static inline void bench_client_of(IDirect3DDevice9 *dev, const char *bench, UIN
                bench, w, h);
 }
 
+/* The timed interval's start on the wall clock: bench_timed_mark() right before the timer starts
+ * (GetLocalTime, no I/O in the timed loop), bench_timed_print() after the measurement prints
+ * `TIMED <bench> <HH:MM:SS.mmm>`. scripts/perf-abba.sh compares it with the bridge's `D9MT-WSI`
+ * visibility lines (the same local wall clock) to tell whether the window's state was known before
+ * timing began. */
+static SYSTEMTIME bench_timed_at;
+static inline void bench_timed_mark(void) { GetLocalTime(&bench_timed_at); }
+static inline void bench_timed_print(const char *bench) {
+  printf("TIMED %s %02u:%02u:%02u.%03u\n", bench, bench_timed_at.wHour, bench_timed_at.wMinute,
+         bench_timed_at.wSecond, bench_timed_at.wMilliseconds);
+}
+
 /* A visible WS_OVERLAPPEDWINDOW of the registered class cls whose client area is w x h. */
 static inline HWND bench_window(const char *cls, const char *bench, UINT w, UINT h) {
   RECT rc = { 0, 0, (LONG)w, (LONG)h };

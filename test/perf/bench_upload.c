@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
   MSG msg;
   for (int n = 1; n <= frames; n++) {
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
-    if (n == 31) QueryPerformanceCounter(&t0);
+    if (n == 31) { bench_timed_mark(); QueryPerformanceCounter(&t0); }
     for (int i = 0; i < 24; i++) {
       D3DLOCKED_RECT lr;
       if (SUCCEEDED(IDirect3DTexture9_LockRect(tex[i], 0, &lr, NULL, 0))) {
@@ -79,6 +79,7 @@ int main(int argc, char **argv) {
     if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
   }
   QueryPerformanceCounter(&t1);
+  bench_timed_print("bench_upload");
   printf("RESULT bench_upload frames=%d avg_ms=%.4f\n", frames - 30,
          (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 30));
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);
