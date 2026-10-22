@@ -3,6 +3,7 @@
 #include "d3d9_device_child.h"
 #include "d3d9_device.h"
 #include "d3d9_format.h"
+#include "d3d9_frame_cap.h"
 
 #include "../mtl/mtl_presenter.h"
 
@@ -147,7 +148,8 @@ namespace dxvk {
 
     // Used instead of presentAfterMinimumDuration: Apple documents that API as
     // holding drawables longer than necessary, which is fatal here since a held
-    // drawable never retires while the layer is uncomposited.
+    // drawable never retires while the layer is uncomposited. (D9MT_FPS_CAP's
+    // vsync-aligned mode uses it, for visible windows only.)
     FpsLimiter                m_fpsLimiter;
 
     double                    m_displayRefreshRate = 0.0;
@@ -172,6 +174,14 @@ namespace dxvk {
     high_resolution_clock::time_point m_hiddenSince = { };
     LogLimiter                m_bgLog = { 20u, std::chrono::seconds(10) };
 
+    // D9MT_FPS_CAP (d3d9_frame_cap.h): the plan for the current refresh rate and vsync, its
+    // cadence, and the time Present() sleeps to after the frame (outside the device lock).
+    framecap::Plan            m_capPlan;
+    bool                      m_capPlanned = false;
+    framecap::Cadence         m_capCadence;
+    uint64_t                  m_capUntilNs = 0u;
+    LogLimiter                m_capLog = { 20u, std::chrono::seconds(10) };
+
     HRESULT PresentLocked(
       const RECT*    pSourceRect,
       const RECT*    pDestRect,
@@ -181,7 +191,11 @@ namespace dxvk {
 
     high_resolution_clock::time_point UpdateBackgroundThrottle(const PresentThrottle& Throttle);
 
-    void PresentImage(UINT PresentInterval);
+    void PresentImage(UINT PresentInterval, double MinDuration);
+
+    // D9MT_FPS_CAP's plan for this Present (m_capPlan, logged when it changes); true if it
+    // caps.
+    bool UpdateFrameCap(uint32_t SyncInterval);
 
     Rc<MtlPresenter> CreatePresenter(
             HWND                Window,
