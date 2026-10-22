@@ -543,6 +543,8 @@ static void gpuHung() {
 
 // With DXVK_LOG_LEVEL=none the logger writes nothing; the D9MT-GPU-HUNG line must still reach
 // stderr. Run as its own process: submission_tracker_test.exe --log-none (env DXVK_LOG_LEVEL=none).
+// (Windows only: it redirects the stderr handle; a native ThreadSanitizer build leaves it out.)
+#ifdef _WIN32
 static int logNone() {
   if (dxvk::env::getEnvVar("DXVK_LOG_LEVEL") != "none") {
     std::printf("FAIL --log-none needs DXVK_LOG_LEVEL=none\n");
@@ -578,10 +580,13 @@ static int logNone() {
   std::printf("%s submission_tracker_test --log-none (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail.load());
   return g_fail ? 1 : 0;
 }
+#endif
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
   if (argc > 1 && std::strcmp(argv[1], "--log-none") == 0)
     return logNone();
+#endif
   basics();
   unsubmittedWait();
   signalsWithoutCs();
