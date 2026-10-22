@@ -43,9 +43,11 @@ and what a release candidate is checked for. What isn't in this repository yet i
   compositor work competes with them (`scripts/perf-abba.sh`).
 - **The window's client area equals the back buffer**: otherwise every present of a visible
   window takes the presenter's scaling blit (an extra pipeline and a GPU pass) instead of the
-  copy. The benches size their windows with `bench_window()` (`test/perf/bench_window.h`) and
-  print `CLIENT <bench> WxH`; `scripts/perf-abba.sh` records it as `client=`, and
-  `scripts/perf-compare.py` warns on a mismatch (#52).
+  copy. bindbench, churnbench, psobench, bench_getdata and bench_upload size their windows with
+  `bench_window()` (`test/perf/bench_window.h`); bench_draws, bench_4k and bench_fps_cap with
+  `AdjustWindowRect` of their own. Every bench prints `CLIENT <bench> WxH`;
+  `scripts/perf-abba.sh` records it as `client=`, and `scripts/perf-compare.py` warns on a
+  mismatch (#52).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
   on that. Record each variant's source commit next to its binary.
@@ -122,20 +124,23 @@ _The maintainer's measurements behind §2.4 and §2.5 are not public._
 
 ### 2.6 The virtual display
 
-Benchmarks that run unattended on a virtual display see a window that AppKit reports as
-**occluded**, so d9mt **skips the presents**: the numbers are CPU time plus GPU work without the
-present copy. A **locked session** hides the window too. On a virtual display `nextDrawable` takes
-much longer than a frame, so it can't answer present-path questions (drawable waits, vsync
-pacing): those are measured **in a game on a real display**, with the Metal HUD.
+Whether a benchmark's presents run depends on its window's visibility, not on the display it's
+on. When AppKit reports the window as **occluded**, as it does with the session locked (and so in
+unattended runs), d9mt **skips the presents**: the numbers are CPU time plus GPU work without the
+present copy. With the session unlocked and the display awake, a window on a virtual display is
+visible and its presents run (#52).
 
-With the session unlocked and the display awake, the window on a virtual display is visible and
-its presents run. Each run's line says which it was: `scripts/perf-abba.sh` compares the bridge's
-visibility changes with the bench's timed start (`TIMED <bench> HH:MM:SS.mmm`) and records
-`visible=0` (occluded from before the timed start), `visible=nolog` (no change logged: visible
-throughout in a bench that presents every frame), or the changes in order (`1>0`, `0>1`, ...)
-and `?` when it can't tell; `scripts/perf-compare.py` warns about runs that changed and about
-occluded runs mixed with others (#52). The scaling blit costs only on a visible window: on a
-virtual display or with the session locked the presents are skipped anyway.
+So read a run's present path from its line, not from where it ran: `scripts/perf-abba.sh`
+compares the bridge's visibility changes with the bench's timed start (`TIMED <bench>
+HH:MM:SS.mmm`) and records `visible=0` (occluded from before the timed start), `visible=nolog`
+(no change logged: visible throughout in a bench that presents every frame), or the changes in
+order (`1>0`, `0>1`, ...) and `?` when it can't tell; `scripts/perf-compare.py` warns about runs
+that changed and about occluded runs mixed with others. The scaling blit costs only in visible
+runs.
+
+On a virtual display `nextDrawable` takes much longer than a frame, so it can't answer
+present-path questions (drawable waits, vsync pacing): those are measured **in a game on a real
+display**, with the Metal HUD.
 
 ## 3. Benchmarks
 
