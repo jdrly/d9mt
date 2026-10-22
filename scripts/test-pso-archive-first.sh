@@ -369,6 +369,11 @@ suite() { # <label>
   local N8x="$OUT/$1-p8x"
   run "$N8x" "$1-p8-off" MT_COVERAGE=0 D9MT_PSO_INDEX=0 -- "${SET_A[@]}"
   check "D9MT_PSO_INDEX=0: none written" "$(ls "$N8x"/pso/mt.exe/os-*/ | grep -c '\.idx$')" 0
+  # and existing indexes unused: walked, no index line at exit
+  run "$N8" "$1-p8-offwarm" MT_COVERAGE=0 D9MT_PSO_INDEX=0 -- "${SET_A[@]}"
+  check "D9MT_PSO_INDEX=0: indexes unused" "$(idxline "$1-p8-offwarm" | sed 's/ (.*//')" "0 of 2 archive(s) indexed"
+  check "D9MT_PSO_INDEX=0: no misses (walked)" "$(misses_in "$1-p8-offwarm")" 0
+  check "D9MT_PSO_INDEX=0: no index stats" "$(grep -c 'PSO archive index: [0-9]* hits' "$OUT/$1-p8-offwarm.log")" 0
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"

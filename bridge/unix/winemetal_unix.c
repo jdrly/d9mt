@@ -6376,7 +6376,7 @@ pso_fnv_u32(uint64_t h, uint32_t v) {
 
 static void
 pso_library_identity(id<MTLLibrary> library, dispatch_data_t data) {
-  if (!g_pso_archive_first && !g_pso_serializer)
+  if (!g_pso_index_on || (!g_pso_archive_first && !g_pso_serializer))
     return;
   __block CC_SHA256_CTX c;
   CC_SHA256_Init(&c);
@@ -8066,7 +8066,7 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
 
   /* the key of the descriptor: the archive index (part 8) and its capture */
-  const uint64_t key = g_pso_archive_first || g_pso_serializer ? pso_key(info) : 0u;
+  const uint64_t key = g_pso_index_on && (g_pso_archive_first || g_pso_serializer) ? pso_key(info) : 0u;
 
   /* Archive first (bundle part 3): a hit neither compiles nor is captured, and
    * takes neither g_pso_lock nor a pso_note_compiled() count (M6). */
@@ -8139,7 +8139,7 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   if (params->ret_pso) {
     if (g_pso_note_delay_ms && (atomic_fetch_add(&g_pso_note_delay_n, 1u) & 1u))
       usleep(g_pso_note_delay_ms * 1000u);
-    if (g_pso_serializer)
+    if (g_pso_index_on && g_pso_serializer)
       pso_note_key(key);
     pso_note_compiled();
   }

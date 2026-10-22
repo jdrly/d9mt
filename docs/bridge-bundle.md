@@ -520,7 +520,7 @@ The new phase's bridge traffic is its 143 misses, each paying the 2-delta walk (
   - Archives without an index (written before part 8) are walked as before.
   - A damaged or mismatched index (magic, version, size, checksum, or the archive's size/SHA-256 not matching its `.sum`) is removed, its archive walked, and `.verify` checks every archive's SHA-256 at the next start.
   - A missing index can't be told apart from an archive older than part 8, so it is walked without `.verify`.
-  - `D9MT_PSO_INDEX=0` turns the whole part off.
+  - `D9MT_PSO_INDEX=0` turns the whole part off: no library hash, no key, no key bookkeeping at capture, no index read or written (review M: the legacy-cost control).
   - An older bridge ignores `.idx` files (and its stray rules don't match them); after a downgrade and upgrade they still match their archives by size and SHA-256.
 
 **Tests** (first.sh "part 8", plain and TSan):
