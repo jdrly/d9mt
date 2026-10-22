@@ -484,7 +484,7 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
   - bindbench: on − off −0.50 %, slower in 4/10 (−2.1…+3.6 %).
   - bench_4k: on − off +0.40 %, 5/10.
   - 0 GPU error lines, 0 dirty runs.
-  - **But the A-A control has a systematic label offset:** on2 (identical bits and environment to on) ran +5.75 % slower than on in 10/10 rounds of bindbench, and +6.25 % slower than off in 10/10. The written inequality (on − off inside on − on2) holds. But an offset tied to the label (bin directory, cache directory) is a bias, not a noise floor, and it could hide or fake a callback cost of the same size.
+  - **But the A-A control has a systematic label offset:** on2 (identical bits and environment to on) ran +6.10 % slower than on (on relative to on2: −5.75 %) in 10/10 rounds of bindbench, and +6.25 % slower than off in 10/10. The written inequality (on − off inside on − on2) holds. But an offset tied to the label (bin directory, cache directory) is a bias, not a noise floor, and it could hide or fake a callback cost of the same size.
   - So the A2 conclusion is only "no slowdown shown"; it isn't "no cost". No feedback slowdown was seen.
 - **A2b (crossed, window after A3):** `n013-issues/scripts/qw-cfb2.sh`. bindbench only. The two labels that showed the offset (the on and on2 directories and caches) each run both modes, so every round has 4 runs, order rotated:
   - the feedback effect is on − off **within** each label;
