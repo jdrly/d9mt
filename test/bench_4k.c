@@ -24,6 +24,7 @@
  * the limit (it is at 4K on any Mac) that is GPU time per frame; check with
  * a Metal System Trace (test/perf/mst_overlap.py). Not a hash test. */
 #include "t_common.h"
+#include "perf/bench_window.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -172,6 +173,7 @@ int main(int argc, char **argv) {
   const double cpuMs = argc > 4 && !waitMode ? atof(argv[4]) : 0.0;
   t_present_interval = D3DPRESENT_INTERVAL_IMMEDIATE;
   t_init("d9mt_bench_4k", 640, 360);
+  bench_client_of(t_dev, "bench_4k", 640, 360);
   T_CHECK(IDirect3DDevice9_CreateVertexShader(t_dev, (const DWORD *)bench_vs_bytecode, &vsBench));
   T_CHECK(IDirect3DDevice9_CreatePixelShader(t_dev, (const DWORD *)post_ps_bytecode, &psPost));
   T_CHECK(IDirect3DDevice9_CreatePixelShader(t_dev, (const DWORD *)lit_ps_bytecode, &psLit));
@@ -215,8 +217,10 @@ int main(int argc, char **argv) {
       TranslateMessage(&msg);
       DispatchMessageA(&msg);
     }
-    if (i == warm)
+    if (i == warm) {
+      bench_timed_mark();
       QueryPerformanceCounter(&t0);
+    }
     frame(i);
     if (cpuMs > 0.0) {
       LARGE_INTEGER b0, b1;
@@ -238,6 +242,7 @@ int main(int argc, char **argv) {
   }
   QueryPerformanceCounter(&t1);
   const double ms = 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart / frames;
+  bench_timed_print("bench_4k");
   printf("BENCH4K frames=%d post=%d clears=%d draws=%d ms/frame=%.3f fps=%.1f mode=%s\n", frames, postPasses, depthClears,
          DRAWS + 3 + postPasses, ms, 1000.0 / ms, waitMode ? "wait" : cpuMs > 0.0 ? "balanced" : "present");
   fflush(stdout);

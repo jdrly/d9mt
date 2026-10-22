@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bench_window.h"
 
 static const unsigned char shadertri_vs_bytecode[] = {
 #include "shadertri_vs_bytecode.inc"
@@ -81,6 +82,7 @@ int main(int argc, char **argv) {
                             NULL, NULL, wc.hInstance, NULL);
   IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
   if (!hwnd || !d3d) { printf("FAIL init\n"); return 1; }
+  bench_client(hwnd, "bench_draws", 1280, 720);
 
   D3DPRESENT_PARAMETERS pp = {0};
   pp.BackBufferWidth = 1280;
@@ -132,7 +134,7 @@ int main(int argc, char **argv) {
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
     LARGE_INTEGER tl;
-    if (f == warmup) cpu0 = process_cpu_100ns();
+    if (f == warmup) { bench_timed_mark(); cpu0 = process_cpu_100ns(); }
     QueryPerformanceCounter(&t0);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(24, 24, 40), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
@@ -173,6 +175,7 @@ int main(int argc, char **argv) {
   cpu1 = process_cpu_100ns();
   qsort(ms, frames, sizeof(double), cmp_double);
   qsort(loop, frames, sizeof(double), cmp_double);
+  bench_timed_print("bench_draws");
   printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f\n",
          flush ? "flush" : spinflush ? "spinflush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
          ms[frames / 2], ms[frames * 99 / 100]);
