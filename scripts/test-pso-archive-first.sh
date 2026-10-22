@@ -272,6 +272,9 @@ suite() { # <label>
   run "$NP-B" "$1-p6-vp1" MT_COVERAGE=0 D9MT_PSO_TEST_LOOKUP_THROW=1 D9MT_PSO_CONVERT_DELAY_MS=2000 MT_SETTLE_MS=3000 -- "${SET_B[@]}"
   vd=$(ls -d "$NP"/pso/mt.exe/os-*)
   check "producer: the game's compile failed first" "$(grep -c "lookup archive's file is gone before its first use (D9MT_PSO_TEST_LOOKUP_THROW)" "$OUT/$1-p6-vp1.log")" 1
+  # the order (review L): the message is the same for every caller, so the conversion must say it
+  # came second; a run slow enough for the conversion to fail first doesn't pass
+  check "producer: the conversion came after it" "$(grep -c 'conversion: another compile met the lookup failure first' "$OUT/$1-p6-vp1.log")" 1
   check "producer: every file there, so the marker" "$([ -e "$vd/.verify" ] && echo written || echo missing)" written
   check "producer: said so" "$(grep -c "every archive's SHA-256 is checked at the next start" "$OUT/$1-p6-vp1.log")" 1
   run "$NP" "$1-p6-vp2" MT_COVERAGE=0 -- "${SET_A[@]}"

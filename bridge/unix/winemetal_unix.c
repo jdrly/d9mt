@@ -6295,6 +6295,8 @@ pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
       d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
       MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
       id<MTL4Compiler> c = lib ? [device newCompilerWithDescriptor:cd error:&err] : nil;
+      if (atomic_load(&g_pso_lookup_gone))
+        PSO_EVENT("conversion: another compile met the lookup failure first; converting nothing");
       id<MTLRenderPipelineState> pso = c ? pso_compile(c, d, opt, &err) : nil;
       PSO_EVENT("%lu lookup archive(s) converted in %llu ms (%s)", (unsigned long)opt.lookupArchives.count,
                 (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000000ull),
