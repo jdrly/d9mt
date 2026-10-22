@@ -487,6 +487,61 @@ Jan's logs: SWTOR was "not visible" in 0 of 4 sessions, and ResetSwapChain only 
 - No-error path: the hash suite stays identical and no line appears.
 - TSan on the handler counters.
 
+### 8. The archive index: a miss costs a hash probe, not a walk (after A3, 2026-10-22)
+
+**Why (measured).** A3 failed with the new phase +5.45 ms (6/6, display asleep). The cause batch (n013-issues/results/a3-cause-static.md) crossed d3d9 × bridge:
+- bundle bridge with base d3d9: +6.60 (6/6), with no consolidation at all (no coverage signal);
+- bundle d3d9 with the shipping bridge: +0.35 (4/6);
+- menunowin: +4.85 (6/6).
+
+So it is the bridge, and not the consolidation.
+
+Native costs (tools/hitpos.m, one process per measurement):
+- each archive asked costs ~32 µs;
+- a hit at position 0 costs ~70 µs, the same as the compiler path with one archive;
+- compiler + lookupArchives costs 69/114/137/224 µs for 1/3/4/8 archives.
+
+The new phase's bridge traffic is its 143 misses, each paying the 2-delta walk (~65 µs) before the compiler searches the same archives again. That is ≈ 9 ms of CPU against the observed +5–7 ms.
+
+**Design (unix side only, no ABI change):**
+- **Key:** every value `_MTL4Compiler_newRenderPipelineState` sets on the descriptor, as set: the 8 color attachments after `to_metal_pixel_format`, the vertex descriptor with the same layout-skip rule, the sample count (0 → 1), alpha-to-coverage, rasterization and topology. Each library counts as 16 bytes of the SHA-256 of its metallib bytes, taken once when `_MTLDevice_newLibrary` creates it (an associated object), and each entry point by its name.
+  - The hash is FNV-1a 64 over field-wise values, never raw struct bytes (the info struct has padding).
+  - A library without an identity gives no key: that descriptor is walked as before, and an archive holding one gets no index.
+- **`.idx` per archive:** "D9IX", version 1, count, the archive's size and SHA-256 (as in its `.sum`), the sorted keys, and an FNV-1a checksum.
+  - Deltas: the keys of the epoch's captured builds (noted before the unlock, like `pso_note_compiled`), written after the archive and its sum are in place.
+  - Chunks: the keys of the descriptors built into each chunk.
+  - Removed with its archive (`pso_remove_archive`). A stray `.idx` without an archive goes like a stray `.sum`.
+- **At load:** the loaded archives' indexes merge into one sorted key → archive table (binary search; the first-loaded archive wins: the newest set, then the newest deltas). The walk list becomes `g_pso_lookup` minus the indexed archives. Older deltas past the walk's cap are indexed too, so they hit directly.
+- **A wrong key never gives a wrong PSO:** Metal still looks the full descriptor up in the archive the index names.
+  - **False hit:** the named archive returns nil → walk/compile as before.
+  - **False miss:** the index has no key but an archive holds the PSO → the compiler builds it, captured once more. Every 64th index miss (every one with `D9MT_PSO_IDX_CHECK=1`) also asks the indexed archives and counts it.
+  - Both appear in the exit line `PSO archive index: N hits, F false hits, M false misses in C checked` (with `D9MT_PSO_STATS=1`).
+- **Compatibility:**
+  - Archives without an index (written before part 8) are walked as before.
+  - A damaged or mismatched index (magic, version, size, checksum, or the archive's size/SHA-256 not matching its `.sum`) is removed, its archive walked, and `.verify` checks every archive's SHA-256 at the next start.
+  - A missing index can't be told apart from an archive older than part 8, so it is walked without `.verify`.
+  - `D9MT_PSO_INDEX=0` turns the whole part off.
+  - An older bridge ignores `.idx` files (and its stray rules don't match them); after a downgrade and upgrade they still match their archives by size and SHA-256.
+
+**Tests** (first.sh "part 8", plain and TSan):
+- an index written with the delta, its key count = the flushed builds;
+- a warm start's hits all through the index (keys match across processes);
+- new PSOs with every index miss checked: 0 false misses;
+- the hooks `D9MT_PSO_TEST_IDX=2` (keys dropped: every hit a detected false miss) and `=1` (keys shifted to the other archive: false hits, built instead, correct);
+- archives without an index walked;
+- a damaged and a mismatched index both removed, walked, `.verify` written;
+- a stray index removed;
+- a consolidated set indexed per chunk, the next start all through it, the replaced parts' indexes gone;
+- `D9MT_PSO_INDEX=0` writes none.
+
+The cap test now runs the walk's cap with `D9MT_PSO_INDEX=0`; with the index the old delta's PSOs hit.
+
+**The steady phase's +0.10–0.15 ms worst frame** (A3 5/6, menunowin 5/6) is part 5's idle flush of the new phase's misses. psoab sets `D9MT_PSO_FLUSH_IDLE_MS=1000` to land it in the steady phase on purpose; in the game the idle is 10 s. It runs at UTILITY QoS: serialize (~0.3 s for 143 PSOs), fsync, SHA-256. Part 8 adds no flush work beyond the small `.idx`.
+- `D9MT_PSO_FLUSH_QOS=background` (opt-in, default unchanged) runs the flush thread at BACKGROUND, for an A/B.
+- psoab's variants `bq` (bundle + that) and `bn` (bundle without the idle flush in the steady phase: its cost's control) go into the A3 re-run.
+
+**Gate:** A3 again (display asleep, psobench-menu2, x4 incl. xb, plus bq/bn): the new phase not measurably slower, steady 0/6 worse.
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).

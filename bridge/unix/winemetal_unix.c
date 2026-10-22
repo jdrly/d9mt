@@ -2176,6 +2176,8 @@ _MTLDevice_minimumLinearTextureAlignmentForPixelFormat(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static void pso_library_identity(id<MTLLibrary> library, dispatch_data_t data);
+
 static NTSTATUS
 _MTLDevice_newLibrary(void *obj) {
   struct unixcall_mtldevice_newlibrary *params = obj;
@@ -2183,6 +2185,8 @@ _MTLDevice_newLibrary(void *obj) {
   NSError *err = NULL;
   params->ret_library = (obj_handle_t)[device newLibraryWithData:(dispatch_data_t)params->data error:&err];
   params->ret_error = (obj_handle_t)[err retain];
+  if (params->ret_library)
+    pso_library_identity((id<MTLLibrary>)params->ret_library, (dispatch_data_t)params->data);
 #if DXMT_APITRACE_METAL
   if (dxmt_apitrace_runtime_enabled() && !err && params->ret_library) {
     const void *bytes = NULL;
@@ -5945,6 +5949,9 @@ _MTLDevice_newArgumentTable(void *obj) {
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
  *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs pending before the 60 s backstop counts (default 256)
  *   D9MT_PSO_FLUSH_IDLE_MS=<ms>     flush after this long without a build (default 10000)
+ *   D9MT_PSO_FLUSH_QOS=background   the flush thread at BACKGROUND QoS (default UTILITY; an A/B
+ *                                   of its cost in the frames it lands in: A3, part 8)
+ *   D9MT_PSO_INDEX=0                no archive index (part 8): neither written nor used
  *   D9MT_PSO_STATS=1                hit/miss/uncaptured counts at exit (tests) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
@@ -5960,6 +5967,7 @@ static _Atomic bool                      g_pso_pause_hint;   /* a device Reset (
 static _Atomic uint64_t                  g_pso_uncaptured;   /* builds through g_pso_fallback */
 static _Atomic unsigned                  g_pso_flushes;      /* flushes finished (or failed) */
 static uint64_t                          g_pso_flush_idle_ns = 10000000000ull;
+static qos_class_t                       g_pso_flush_qos = QOS_CLASS_UTILITY;
 static uint64_t                          g_pso_flush_backstop_ns = 60000000000ull;
 static unsigned                          g_pso_note_delay_ms;  /* tests: every other build, before its count */
 static _Atomic unsigned                  g_pso_note_delay_n;
@@ -6149,6 +6157,7 @@ static void
 pso_remove_archive(NSString *path) {
   unlink(path.fileSystemRepresentation);
   unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
+  unlink([path stringByAppendingString:@".idx"].fileSystemRepresentation);
 }
 
 /* Consolidated archives (bundle part 6): a set of chunks "c-<stamp>-<pid>-<n>.mtl4archive",
@@ -6314,12 +6323,333 @@ pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
 }
 
 /* Caller holds g_pso_lock exclusively. */
+/* Bundle part 8: the archive index. A miss asked every archive of g_pso_lookup in turn (~32 µs
+ * each, natively) before the compiler, which searches the same archives again: with 2 deltas
+ * ~65 µs per miss, the whole of A3's +5–7 ms in psobench's new phase (the cause batch,
+ * 2026-10-22: the bridge, not d3d9 nor the consolidation). Every archive written now gets
+ * "<archive>.idx", the keys of the PSOs it holds; at load they make one sorted key -> archive
+ * table, so a request asks at most the one archive that holds it and a miss costs a binary
+ * search. The key mirrors exactly what _MTL4Compiler_newRenderPipelineState sets on the
+ * descriptor, each library by the SHA-256 of its metallib bytes (the same bytes are the same
+ * Metal function in any process). A wrong key costs no correctness: a "hit" in an archive that
+ * returns nil falls back (a false hit); a key that misses although an archive holds the PSO
+ * builds it through the compiler, captured once more (a false miss: every 64th index miss
+ * walks the indexed archives too, D9MT_PSO_IDX_CHECK=1 every one). Archives without an index
+ * (written before part 8) are walked as before; a damaged index is removed, its archive
+ * walked, and .verify checks every archive's SHA-256 at the next start.
+ *   .idx: "D9IX", u32 version 1, u32 count, u32 0, u64 the archive's size, its SHA-256 (32
+ *         bytes, as in its .sum), count sorted u64 keys, u64 FNV-1a of everything before. */
+static char g_pso_lib_id;     /* associated object of an MTLLibrary: 16 bytes of its SHA-256 */
+static char g_pso_desc_key;   /* associated object of a recorded descriptor: its key */
+static bool g_pso_index_on = true;                     /* D9MT_PSO_INDEX=0: off */
+static bool g_pso_idx_check;                           /* D9MT_PSO_IDX_CHECK=1 (tests) */
+static int g_pso_idx_test;                             /* D9MT_PSO_TEST_IDX: 1 shift, 2 drop */
+static uint64_t *g_pso_idx_keys;                       /* sorted */
+static uint16_t *g_pso_idx_arch;                       /* each key's archive in g_pso_idx_archives */
+static size_t g_pso_idx_n;
+static NSArray<id<MTL4Archive>> *g_pso_idx_archives;   /* the archives with a valid index */
+static NSArray<id<MTL4Archive>> *g_pso_walk;           /* g_pso_lookup without them */
+static unsigned g_pso_idx_absent, g_pso_idx_damaged;
+static _Atomic uint64_t g_pso_idx_hits, g_pso_idx_false_hits, g_pso_idx_misses, g_pso_idx_checked,
+                        g_pso_idx_false_misses;
+/* the keys of the PSOs in the serializer since its last flush (an unkeyed one: no index) */
+static pthread_mutex_t g_pso_keys_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t *g_pso_keys;
+static size_t g_pso_keys_n, g_pso_keys_cap;
+static bool g_pso_keys_incomplete;
+
+#define PSO_FNV0 0xcbf29ce484222325ull
+static inline uint64_t
+pso_fnv(uint64_t h, const void *p, size_t n) {
+  const uint8_t *b = p;
+  for (size_t i = 0; i < n; i++) {
+    h ^= b[i];
+    h *= 0x100000001b3ull;
+  }
+  return h;
+}
+
+static inline uint64_t
+pso_fnv_u32(uint64_t h, uint32_t v) {
+  return pso_fnv(h, &v, sizeof(v));
+}
+
+static void
+pso_library_identity(id<MTLLibrary> library, dispatch_data_t data) {
+  if (!g_pso_archive_first && !g_pso_serializer)
+    return;
+  __block CC_SHA256_CTX c;
+  CC_SHA256_Init(&c);
+  dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t offset, const void *buf, size_t size) {
+    (void)region;
+    (void)offset;
+    CC_SHA256_Update(&c, buf, (CC_LONG)size);
+    return true;
+  });
+  unsigned char h[CC_SHA256_DIGEST_LENGTH];
+  CC_SHA256_Final(h, &c);
+  NSData *ident = [[NSData alloc] initWithBytes:h length:16u];
+  objc_setAssociatedObject(library, &g_pso_lib_id, ident, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  [ident release];
+}
+
+static uint64_t
+pso_hash_function(uint64_t h, obj_handle_t library, const char *name) {
+  NSData *ident = objc_getAssociatedObject((id)library, &g_pso_lib_id);
+  if (!ident)
+    return 0u;
+  h = pso_fnv(h, ident.bytes, 16u);
+  return pso_fnv(h, name, strlen(name) + 1u);
+}
+
+/* The descriptor's key: every value _MTL4Compiler_newRenderPipelineState sets on it, as set
+ * (keep the two in step). 0: no key (a library without an identity). */
+static uint64_t
+pso_key(const struct WMTMtl4RenderPipelineInfo *info) {
+  uint64_t h = pso_hash_function(PSO_FNV0, info->vertex_library, (const char *)info->vertex_entry_name.ptr);
+  if (!h)
+    return 0u;
+  const bool frag = info->fragment_library && info->fragment_entry_name.ptr;
+  h = pso_fnv_u32(h, frag);
+  if (frag && !(h = pso_hash_function(h, info->fragment_library, (const char *)info->fragment_entry_name.ptr)))
+    return 0u;
+  for (unsigned i = 0; i < 8; i++) {
+    const struct WMTColorAttachmentBlendInfo *c = &info->colors[i];
+    const uint32_t v[9] = { (uint32_t)to_metal_pixel_format(c->pixel_format), c->blending_enabled ? 1u : 0u,
+                            c->write_mask, c->rgb_blend_operation, c->alpha_blend_operation,
+                            c->src_rgb_blend_factor, c->src_alpha_blend_factor, c->dst_rgb_blend_factor,
+                            c->dst_alpha_blend_factor };
+    h = pso_fnv(h, v, sizeof(v));
+  }
+  const struct WMTRenderPipelineVertexInfo *vi = &info->vertex;
+  const bool vd = vi->num_attributes || vi->num_layouts;
+  h = pso_fnv_u32(h, vd);
+  if (vd) {
+    for (unsigned i = 0; i < vi->num_attributes && i < 31; i++) {
+      const uint32_t v[4] = { i, vi->attributes[i].format, vi->attributes[i].offset, vi->attributes[i].buffer_index };
+      h = pso_fnv(h, v, sizeof(v));
+    }
+    for (unsigned i = 0; i < vi->num_layouts && i < 31; i++) {
+      const struct WMTVertexBufferLayoutInfo *l = &vi->layouts[i];
+      if (!l->stride && l->step_function == WMTVertexStepFunctionPerVertex)
+        continue;
+      const uint32_t v[4] = { 0x80000000u | i, l->stride, l->step_function,
+                              l->step_function == WMTVertexStepFunctionConstant ? 0u : l->step_rate };
+      h = pso_fnv(h, v, sizeof(v));
+    }
+  }
+  const uint32_t v[4] = { info->raster_sample_count ? info->raster_sample_count : 1u,
+                          info->alpha_to_coverage_enabled ? 1u : 0u, info->rasterization_enabled ? 1u : 0u,
+                          info->input_primitive_topology };
+  h = pso_fnv(h, v, sizeof(v));
+  return h ? h : 1u;
+}
+
+/* A build captured into the serializer (before its unlock, like pso_note_compiled). */
+static void
+pso_note_key(uint64_t key) {
+  pthread_mutex_lock(&g_pso_keys_mutex);
+  if (!key) {
+    g_pso_keys_incomplete = true;
+  } else {
+    if (g_pso_keys_n == g_pso_keys_cap) {
+      g_pso_keys_cap = g_pso_keys_cap ? g_pso_keys_cap * 2u : 256u;
+      g_pso_keys = realloc(g_pso_keys, g_pso_keys_cap * sizeof(*g_pso_keys));
+    }
+    g_pso_keys[g_pso_keys_n++] = key;
+  }
+  pthread_mutex_unlock(&g_pso_keys_mutex);
+}
+
+static int
+pso_cmp_u64(const void *a, const void *b) {
+  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+  return x < y ? -1 : x > y;
+}
+
+/* size and SHA-256 from a sum ("<size> <sha>" or v2) */
+static bool
+pso_sum_fields(NSString *sum, uint64_t *size, uint8_t sha[32]) {
+  char hex[65];
+  uint64_t mtime;
+  NSArray<NSString *> *f = [sum componentsSeparatedByString:@" "];
+  if (f.count == 2u) {
+    *size = strtoull(f[0].UTF8String, NULL, 10);
+    if (f[1].length != 64u)
+      return false;
+    memcpy(hex, f[1].UTF8String, 65u);
+  } else if (!d9mt_pso_sum_parse_v2(sum.UTF8String, size, &mtime, hex)) {
+    return false;
+  }
+  for (unsigned i = 0; i < 32u; i++) {
+    unsigned v;
+    if (sscanf(hex + 2u * i, "%2x", &v) != 1)
+      return false;
+    sha[i] = (uint8_t)v;
+  }
+  return true;
+}
+
+/* After the archive and its sum are in place. A missing index only costs the walk. */
+static void
+pso_write_index(NSString *archive, NSString *sum, uint64_t *keys, size_t n) {
+  uint64_t size;
+  uint8_t sha[32];
+  if (!g_pso_index_on || !n || n > UINT32_MAX || !pso_sum_fields(sum, &size, sha))
+    return;
+  qsort(keys, n, sizeof(*keys), pso_cmp_u64);
+  NSMutableData *d = [NSMutableData dataWithCapacity:64u + 8u * n];
+  const uint32_t head[3] = { 1u, (uint32_t)n, 0u };
+  [d appendBytes:"D9IX" length:4u];
+  [d appendBytes:head length:sizeof(head)];
+  [d appendBytes:&size length:8u];
+  [d appendBytes:sha length:32u];
+  [d appendBytes:keys length:8u * n];
+  const uint64_t check = pso_fnv(PSO_FNV0, d.bytes, d.length);
+  [d appendBytes:&check length:8u];
+  NSString *path = [archive stringByAppendingString:@".idx"];
+  NSString *tmp = [path stringByAppendingString:@".tmp"];
+  if (![d writeToFile:tmp atomically:NO] || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation))
+    unlink(tmp.fileSystemRepresentation);
+}
+
+/* 1: the index of archive (its sum checked) in *keys; 0: none; -1: damaged, removed. */
+static int
+pso_read_index(NSString *archive, uint64_t **keys, size_t *n) {
+  NSString *path = [archive stringByAppendingString:@".idx"];
+  NSData *d = [NSData dataWithContentsOfFile:path];
+  if (!d)
+    return 0;
+  const uint8_t *b = d.bytes;
+  const size_t len = d.length;
+  uint32_t version = 0u, count = 0u;
+  uint64_t size = 0u, want = 0u, have = 0u;
+  uint8_t sha[32];
+  bool ok = len >= 64u && !memcmp(b, "D9IX", 4u);
+  if (ok) {
+    memcpy(&version, b + 4, 4u);
+    memcpy(&count, b + 8, 4u);
+    ok = version == 1u && len == 64u + 8u * (size_t)count;
+  }
+  if (ok) {
+    memcpy(&want, b + len - 8u, 8u);
+    ok = pso_fnv(PSO_FNV0, b, len - 8u) == want;
+  }
+  if (ok) {
+    NSString *sum = [NSString stringWithContentsOfFile:[archive stringByAppendingString:@".sum"]
+                                              encoding:NSUTF8StringEncoding error:nil];
+    memcpy(&have, b + 16, 8u);
+    ok = sum && pso_sum_fields(sum, &size, sha) && size == have && !memcmp(sha, b + 24, 32u);
+  }
+  if (!ok) {
+    unlink(path.fileSystemRepresentation);
+    return -1;
+  }
+  *keys = malloc(8u * (size_t)count + 8u);
+  memcpy(*keys, b + 56, 8u * (size_t)count);
+  *n = count;
+  return 1;
+}
+
+typedef struct { uint64_t key; uint32_t order; uint16_t archive; } PsoIdxEntry;
+
+static int
+pso_cmp_idx(const void *a, const void *b) {
+  const PsoIdxEntry *x = a, *y = b;
+  if (x->key != y->key)
+    return x->key < y->key ? -1 : 1;
+  return x->order < y->order ? -1 : x->order > y->order;
+}
+
+/* The table from the loaded archives' indexes; lookup is the walk list without them. */
+static void
+pso_index_build(NSArray *archives, NSArray<NSString *> *paths, NSArray *lookup, NSString *dir) {
+  NSMutableArray *indexed = [NSMutableArray array];
+  PsoIdxEntry *e = NULL;
+  size_t n = 0u, cap = 0u;
+  for (NSUInteger i = 0; g_pso_index_on && i < archives.count && i < paths.count; i++) {
+    uint64_t *keys = NULL;
+    size_t k = 0u;
+    const int r = pso_read_index(paths[i], &keys, &k);
+    if (r <= 0) {
+      if (r < 0) {
+        g_pso_idx_damaged++;
+        fprintf(stderr, "d9mt: PSO archives: the index of %s is damaged; walking that archive, every archive's "
+                "SHA-256 is checked at the next start\n", paths[i].lastPathComponent.UTF8String);
+      } else {
+        g_pso_idx_absent++;
+      }
+      continue;
+    }
+    const uint16_t a = (uint16_t)indexed.count;
+    [indexed addObject:archives[i]];
+    if (n + k > cap) {
+      cap = (n + k) * 2u;
+      e = realloc(e, cap * sizeof(*e));
+    }
+    for (size_t j = 0; j < k; j++)
+      e[n + j] = (PsoIdxEntry){ keys[j], (uint32_t)(n + j), a };
+    n += k;
+    free(keys);
+  }
+  if (g_pso_idx_damaged)
+    [@"1\n" writeToFile:[dir stringByAppendingPathComponent:@".verify"] atomically:YES
+               encoding:NSUTF8StringEncoding error:nil];
+  if (indexed.count) {
+    if (g_pso_idx_test == 2)   /* tests: every key dropped, the archives still indexed: false misses */
+      n = 0u;
+    qsort(e, n, sizeof(*e), pso_cmp_idx);
+    g_pso_idx_keys = malloc(8u * n + 8u);
+    g_pso_idx_arch = malloc(2u * n + 2u);
+    size_t m = 0u;
+    for (size_t j = 0; j < n; j++) {
+      if (m && g_pso_idx_keys[m - 1u] == e[j].key)
+        continue;   /* the first-loaded archive holding it: the newest set, then newest deltas */
+      g_pso_idx_keys[m] = e[j].key;
+      /* tests: each key in the next archive's slot, so it isn't there: false hits */
+      g_pso_idx_arch[m++] = g_pso_idx_test == 1 ? (uint16_t)((e[j].archive + 1u) % indexed.count) : e[j].archive;
+    }
+    g_pso_idx_n = m;
+    g_pso_idx_archives = [indexed copy];
+  }
+  free(e);
+  NSMutableArray *walk = [NSMutableArray array];
+  for (id a in lookup)
+    if (![indexed containsObject:a])
+      [walk addObject:a];
+  g_pso_walk = [walk copy];
+  fprintf(stderr, "d9mt: PSO archive index: %lu of %lu archive(s) indexed (%zu keys), %u without an index, "
+          "%u damaged\n", (unsigned long)indexed.count, (unsigned long)archives.count, g_pso_idx_n,
+          g_pso_idx_absent, g_pso_idx_damaged);
+}
+
+static id<MTL4Archive>
+pso_index_find(uint64_t key) {
+  size_t lo = 0u, hi = g_pso_idx_n;
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2u;
+    if (g_pso_idx_keys[mid] < key)
+      lo = mid + 1u;
+    else
+      hi = mid;
+  }
+  return lo < g_pso_idx_n && g_pso_idx_keys[lo] == key ? g_pso_idx_archives[g_pso_idx_arch[lo]] : nil;
+}
+
 static void
 pso_flush_locked(void) {
   if (!g_pso_serializer || !atomic_load(&g_pso_pending))
     return;
   const unsigned flushed = atomic_exchange(&g_pso_pending, 0u);
   atomic_store(&g_pso_due_since, 0u);
+  /* this epoch's keys (the write lock: no build is adding one) */
+  pthread_mutex_lock(&g_pso_keys_mutex);
+  uint64_t *keys = g_pso_keys;
+  const size_t nkeys = g_pso_keys_incomplete ? 0u : g_pso_keys_n;
+  g_pso_keys = NULL;
+  g_pso_keys_n = g_pso_keys_cap = 0u;
+  g_pso_keys_incomplete = false;
+  pthread_mutex_unlock(&g_pso_keys_mutex);
   const uint64_t f0 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
     [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
@@ -6330,6 +6660,7 @@ pso_flush_locked(void) {
     fprintf(stderr, "d9mt: PSO archive flush failed: %s\n",
             err ? err.localizedDescription.UTF8String : "(no error)");
     unlink(tmp.fileSystemRepresentation);
+    free(keys);
     return;
   }
   const uint64_t f1 = g_pso_stats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
@@ -6343,8 +6674,11 @@ pso_flush_locked(void) {
     unlink(sumTmp.fileSystemRepresentation);
     pso_remove_archive(path);
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+    free(keys);
     return;
   }
+  pso_write_index(path, sum, keys, nkeys);
+  free(keys);
   PSO_EVENT("flushed %u PSOs into %s: %lld bytes, serialize %llu ms, sync+sum %llu ms", flushed,
             path.lastPathComponent.UTF8String, (long long)st.st_size, (unsigned long long)((f1 - f0) / 1000000ull),
             (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - f1) / 1000000ull));
@@ -6364,6 +6698,10 @@ pso_stats_atexit(void) {
           (unsigned long long)atomic_load(&g_pso_hits), (unsigned long long)atomic_load(&g_pso_misses));
   fprintf(stderr, "d9mt: PSO builds not captured (a flush held the lock): %llu\n",
           (unsigned long long)atomic_load(&g_pso_uncaptured));
+  if (g_pso_idx_archives)
+    fprintf(stderr, "d9mt: PSO archive index: %llu hits, %llu false hits, %llu false misses in %llu checked\n",
+            (unsigned long long)atomic_load(&g_pso_idx_hits), (unsigned long long)atomic_load(&g_pso_idx_false_hits),
+            (unsigned long long)atomic_load(&g_pso_idx_false_misses), (unsigned long long)atomic_load(&g_pso_idx_checked));
 }
 
 static bool pso_paused(void);
@@ -6379,7 +6717,7 @@ static void *
 pso_flush_thread(void *arg) {
   (void)arg;
   pthread_setname_np("d9mt-pso-flush");
-  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+  pthread_set_qos_class_self_np(g_pso_flush_qos, 0);
   for (;;) {
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     const unsigned seen = atomic_load(&g_pso_pending);
@@ -6564,6 +6902,9 @@ pso_consolidate(const char *why) {
   NSError *err = nil;
   unsigned built = 0u, notArchived = 0u, inChunk = 0u, chunks = 0u, yields = 0u;
   bool ok = true;
+  /* the keys of the chunk's builds, for its index (one without a key: no index for it) */
+  NSMutableData *chunkKeys = [[NSMutableData alloc] init];
+  bool chunkKeyed = true;
   for (NSUInteger i = 0; ok && i <= requested.count; i++) {
     @autoreleasepool {
       /* a chunk is full, or the last one: flush it */
@@ -6574,6 +6915,10 @@ pso_consolidate(const char *why) {
           ok = false;
           break;
         }
+        pso_write_index([g_pso_dir stringByAppendingPathComponent:name], sum, chunkKeys.mutableBytes,
+                        chunkKeyed ? chunkKeys.length / 8u : 0u);
+        chunkKeys.length = 0u;
+        chunkKeyed = true;
         [marker appendFormat:@"%@ %@\n", name, sum];
         chunks++;
         inChunk = 0u;
@@ -6634,6 +6979,11 @@ pso_consolidate(const char *why) {
       if (pso) {
         built++;
         inChunk++;
+        const uint64_t key = [objc_getAssociatedObject(d, &g_pso_desc_key) unsignedLongLongValue];
+        if (key)
+          [chunkKeys appendBytes:&key length:8u];
+        else
+          chunkKeyed = false;
         [pso release];
       }
     }
@@ -6641,6 +6991,7 @@ pso_consolidate(const char *why) {
   [opt release];
   [compiler release];
   [ser release];
+  [chunkKeys release];
 
   /* The marker last: only now is the set complete, and only then are its parts deleted. */
   if (ok && chunks) {
@@ -6861,6 +7212,9 @@ pso_archive_init(id<MTLDevice> device) {
   const char *afm = getenv("D9MT_PSO_ARCHIVE_FIRST_MAX");
   if (afm && *afm)
     g_pso_archive_first_max = (unsigned)strtoul(afm, NULL, 10);
+  const char *fqos = getenv("D9MT_PSO_FLUSH_QOS");
+  if (fqos && !strcmp(fqos, "background"))
+    g_pso_flush_qos = QOS_CLASS_BACKGROUND;
   const char *fidle = getenv("D9MT_PSO_FLUSH_IDLE_MS");
   if (fidle && *fidle)
     g_pso_flush_idle_ns = (uint64_t)strtoull(fidle, NULL, 10) * 1000000ull;
@@ -6876,6 +7230,12 @@ pso_archive_init(id<MTLDevice> device) {
   const char *stats = getenv("D9MT_PSO_STATS");
   g_pso_stats = stats && !strcmp(stats, "1");
   g_pso_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const char *idxon = getenv("D9MT_PSO_INDEX");
+  g_pso_index_on = !(idxon && !strcmp(idxon, "0"));
+  const char *idxcheck = getenv("D9MT_PSO_IDX_CHECK");
+  g_pso_idx_check = idxcheck && !strcmp(idxcheck, "1");
+  const char *idxtest = getenv("D9MT_PSO_TEST_IDX");
+  g_pso_idx_test = idxtest ? atoi(idxtest) : 0;
   const char *tthrow = getenv("D9MT_PSO_TEST_LOOKUP_THROW");
   g_pso_test_lookup_throw = tthrow && !strcmp(tthrow, "1");
   const char *cdelay = getenv("D9MT_PSO_CONVERT_DELAY_MS");
@@ -6975,7 +7335,7 @@ pso_archive_init(id<MTLDevice> device) {
       struct stat st;
       if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
         unlink(path.fileSystemRepresentation);
-    } else if ([name hasSuffix:@".mtl4archive.sum"]) {
+    } else if ([name hasSuffix:@".mtl4archive.sum"] || [name hasSuffix:@".mtl4archive.idx"]) {
       struct stat st;
       if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]]
        && !stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > D9MT_PSO_YOUNG_S)
@@ -7166,6 +7526,7 @@ pso_archive_init(id<MTLDevice> device) {
      * there is captured into a new delta, so the old one can age out). */
     const NSUInteger first = consolidatedLoaded + g_pso_archive_first_max;
     g_pso_lookup = [[archives subarrayWithRange:NSMakeRange(0u, MIN(first, archives.count))] copy];
+    pso_index_build(archives, loadedPaths, g_pso_lookup, dir);
     g_pso_parts = [parts retain];
     g_pso_session_parts = [[NSMutableArray alloc] init];
     g_pso_requested = [[NSMutableArray alloc] init];
@@ -7704,15 +8065,48 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   descriptor.rasterizationEnabled = info->rasterization_enabled ? YES : NO;
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
 
+  /* the key of the descriptor: the archive index (part 8) and its capture */
+  const uint64_t key = g_pso_archive_first || g_pso_serializer ? pso_key(info) : 0u;
+
   /* Archive first (bundle part 3): a hit neither compiles nor is captured, and
    * takes neither g_pso_lock nor a pso_note_compiled() count (M6). */
   if (g_pso_archive_first) {
     pthread_mutex_lock(&g_pso_record_mutex);
-    if (g_pso_recording)
+    if (g_pso_recording) {
       [g_pso_requested addObject:descriptor];
+      if (key)
+        objc_setAssociatedObject(descriptor, &g_pso_desc_key, @(key), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     pthread_mutex_unlock(&g_pso_record_mutex);
     atomic_store(&g_pso_last_request, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
-    for (id<MTL4Archive> a in g_pso_lookup) {
+    /* Part 8: the index names the one archive to ask; the walk is left with the archives
+     * without an index (all of them for a descriptor without a key). */
+    NSArray<id<MTL4Archive>> *walk = g_pso_lookup;
+    if (key && g_pso_idx_archives) {
+      walk = g_pso_walk;
+      id<MTL4Archive> a = pso_index_find(key);
+      id<MTLRenderPipelineState> hit = a ? [a newRenderPipelineStateWithDescriptor:descriptor error:nil] : nil;
+      if (!hit && a)
+        atomic_fetch_add(&g_pso_idx_false_hits, 1u);
+      if (!hit && !a && (g_pso_idx_check || !(atomic_fetch_add(&g_pso_idx_misses, 1u) & 63u))) {
+        atomic_fetch_add(&g_pso_idx_checked, 1u);
+        for (id<MTL4Archive> b in g_pso_idx_archives)
+          if ((hit = [b newRenderPipelineStateWithDescriptor:descriptor error:nil])) {
+            atomic_fetch_add(&g_pso_idx_false_misses, 1u);
+            break;
+          }
+      }
+      if (hit) {
+        if (a)
+          atomic_fetch_add(&g_pso_idx_hits, 1u);
+        atomic_fetch_add(&g_pso_hits, 1u);
+        params->ret_pso = (obj_handle_t)hit;
+        params->ret_error = 0;
+        [descriptor release];
+        return STATUS_SUCCESS;
+      }
+    }
+    for (id<MTL4Archive> a in walk) {
       id<MTLRenderPipelineState> hit = [a newRenderPipelineStateWithDescriptor:descriptor error:nil];
       if (hit) {
         atomic_fetch_add(&g_pso_hits, 1u);
@@ -7745,6 +8139,8 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   if (params->ret_pso) {
     if (g_pso_note_delay_ms && (atomic_fetch_add(&g_pso_note_delay_n, 1u) & 1u))
       usleep(g_pso_note_delay_ms * 1000u);
+    if (g_pso_serializer)
+      pso_note_key(key);
     pso_note_compiled();
   }
   pthread_rwlock_unlock(&g_pso_lock);

@@ -14,7 +14,13 @@
 #            kept at the next start, where its PSOs are hits
 #   cap      only the newest D9MT_PSO_ARCHIVE_FIRST_MAX (8) deltas are asked first: a PSO only
 #            in an older one is a miss built through the compiler's lookupArchives, consistent
-#            with the run that recorded it, and captured again; with a cap of 64, a hit
+#            with the run that recorded it, and captured again; with a cap of 64, a hit (the
+#            walk's cap, D9MT_PSO_INDEX=0; with the index the old delta is asked directly: a hit)
+#   part 8   the archive index (.idx per archive): written with every delta and chunk (keys =
+#            the flushed builds), a warm start's hits all through it, misses checked against a
+#            walk (no false miss), the test hooks' false misses and false hits detected and
+#            still correct, archives without an index walked, a damaged or mismatched index
+#            removed + .verify, a stray index removed, D9MT_PSO_INDEX=0 writes none
 #   restore  archives copied without their times: the SHA-256 decides (same size, other time),
 #            the sums are rewritten; a byte changed in the copy: deleted
 #   part 5   the flush thread: idle (a delta before exit, the next run all hits); nothing at
@@ -291,6 +297,79 @@ suite() { # <label>
   check "deleted, not damaged: the failure" "$(grep -c "lookup archive's file is gone before its first use" "$OUT/$1-p6-vg1.log")" 1
   check "deleted, not damaged: no marker" "$([ -e "$qd/.verify" ] && echo written || echo none)" none
 
+  echo "[pso-first:$1] part 8: the archive index"
+  local N8="$OUT/$1-p8" d8 f n8
+  idxline() { sed -n 's/^d9mt: PSO archive index: \([0-9]* of [0-9]* archive(s) indexed.*\)$/\1/p' "$OUT/$1.log"; }
+  idxexit() { # <log> <hits|false hits|false misses>: from the exit line
+    case $2 in
+      hits) sed -n 's/^d9mt: PSO archive index: \([0-9]*\) hits, .*/\1/p' "$OUT/$1.log" ;;
+      *) sed -n "s/^d9mt: PSO archive index: .*, \([0-9]*\) $2[, ].*/\1/p" "$OUT/$1.log" ;;
+    esac; }
+  idxkeys() { python3 -I -c 'import os,sys; print((os.path.getsize(sys.argv[1]) - 64) // 8)' "$1"; }
+  run "$N8" "$1-p8-cold" MT_COVERAGE=0 -- "${SET_A[@]}"
+  d8=$(ls -d "$N8"/pso/mt.exe/os-*)
+  f=$(ls "$d8"/*.mtl4archive | head -1)
+  check "written with the delta" "$([ -e "$f.idx" ] && echo yes || echo no)" yes
+  n8=$(sed -n 's/.*flushed \([0-9]*\) PSOs into.*/\1/p' "$OUT/$1-p8-cold.log" | head -1)
+  check "its keys = the flushed builds" "$(idxkeys "$f.idx")" "$n8"
+  run "$N8" "$1-p8-warm" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "warm: loaded" "$(idxline "$1-p8-warm" | sed 's/ (.*//')" "1 of 1 archive(s) indexed"
+  check "warm: no misses" "$(misses_in "$1-p8-warm")" 0
+  check "warm: every hit through the index" "$(idxexit "$1-p8-warm" hits)" "$(stat_line "$1-p8-warm" | sed 's/^\([0-9]*\) hits.*/\1/')"
+  # new PSOs on these archives, every index miss checked by a walk: none was a false miss
+  mkdir -p "$N8-B"; ln -sfn "$N8/pso" "$N8-B/pso"
+  run "$N8-B" "$1-p8-miss" MT_COVERAGE=0 D9MT_PSO_IDX_CHECK=1 -- "${SET_B[@]}"
+  check "misses: no false miss" "$(idxexit "$1-p8-miss" 'false misses')" 0
+  check "misses: every one checked" "$(sed -n 's/.* in \([0-9]*\) checked$/\1/p' "$OUT/$1-p8-miss.log")" "$(misses_in "$1-p8-miss")"
+  check "misses: a second indexed delta" "$(ls "$d8"/*.mtl4archive.idx | wc -l | tr -d ' ')" 2
+  # the hooks: keys dropped (every hit is a false miss, found by the check) and keys shifted to
+  # the other archive (every hit a false hit, built by the compiler): both still correct
+  run "$N8" "$1-p8-drop" MT_COVERAGE=0 D9MT_PSO_TEST_IDX=2 D9MT_PSO_IDX_CHECK=1 -- "${SET_A[@]}"
+  check "dropped keys: every hit a detected false miss" "$(idxexit "$1-p8-drop" 'false misses')" "$(stat_line "$1-p8-drop" | sed 's/^\([0-9]*\) hits.*/\1/')"
+  check "dropped keys: no misses" "$(misses_in "$1-p8-drop")" 0
+  local N8s="$OUT/$1-p8s"; cp -Rp "$N8" "$N8s"
+  run "$N8s" "$1-p8-shift" MT_COVERAGE=0 D9MT_PSO_TEST_IDX=1 -- "${SET_A[@]}"
+  local fh; fh=$(idxexit "$1-p8-shift" 'false hits')
+  [ "${fh:-0}" -gt 0 ] && echo "  shifted keys: $fh false hits, built instead: ok" \
+    || { echo "  shifted keys: FAIL (no false hit)"; fails=$((fails + 1)); }
+  # archives without an index: walked as before
+  local N8o="$OUT/$1-p8o"; cp -Rp "$N8" "$N8o"; rm -f "$N8o"/pso/mt.exe/os-*/*.idx
+  run "$N8o" "$1-p8-old" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "no index: walked" "$(idxline "$1-p8-old" | sed 's/.*), //')" "2 without an index, 0 damaged"
+  check "no index: no misses" "$(misses_in "$1-p8-old")" 0
+  # damaged (a byte flipped) and mismatched (another archive's index): removed, walked, .verify
+  local N8d="$OUT/$1-p8d" a1 a2; cp -Rp "$N8" "$N8d"
+  a1=$(ls "$N8d"/pso/mt.exe/os-*/*.mtl4archive | head -1); a2=$(ls "$N8d"/pso/mt.exe/os-*/*.mtl4archive | sed -n 2p)
+  python3 -I -c 'import sys; f=open(sys.argv[1],"r+b"); f.seek(60); b=f.read(1); f.seek(60); f.write(bytes([b[0]^1]))' "$a1.idx"
+  cp "$N8/pso/mt.exe/$(basename "$(dirname "$a1")")/$(basename "$a1").idx" "$a2.idx"
+  run "$N8d" "$1-p8-dmg" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "damaged + mismatched: both reported" "$(grep -c 'is damaged; walking that archive' "$OUT/$1-p8-dmg.log")" 2
+  check "damaged + mismatched: removed" "$(ls "$N8d"/pso/mt.exe/os-*/*.idx 2>/dev/null | wc -l | tr -d ' ')" 0
+  check "damaged: .verify for the next start" "$([ -e "$(dirname "$a1")/.verify" ] && echo yes || echo no)" yes
+  check "damaged: no misses (walked)" "$(misses_in "$1-p8-dmg")" 0
+  # a stray index (no archive), old: removed at the start
+  printf 'x' > "$d8/1000000000-1-0000.mtl4archive.idx"; ages 700 "$d8/1000000000-1-0000.mtl4archive.idx"
+  run "$N8" "$1-p8-stray" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "a stray index removed" "$([ -e "$d8/1000000000-1-0000.mtl4archive.idx" ] && echo kept || echo removed)" removed
+  # a consolidated set: an index per chunk, the next start all through them; the replaced
+  # parts' indexes gone with them
+  # (cold: the startup window's consolidation flushes the session's captures, then builds them
+  # into 4 chunks, as part 6's chunk test)
+  local N8c="$OUT/$1-p8c"
+  run "$N8c" "$1-p8-c1" D9MT_PSO_CONSOLIDATE_CHUNK=4 MT_WAIT_CONSOLIDATED=20 -- "${SET_A[@]}"
+  local dc; dc=$(ls -d "$N8c"/pso/mt.exe/os-*)
+  local nch; nch=$(ls "$dc" | grep -cE '^c-[0-9]+-[0-9]+-[0-9]+\.mtl4archive$')
+  check "chunks indexed" "$(ls "$dc" | grep -cE '^c-[0-9]+-[0-9]+-[0-9]+\.mtl4archive\.idx$')" "$nch"
+  check "no index without its archive" "$(for x in "$dc"/*.idx; do [ -e "${x%.idx}" ] || echo "$x"; done | wc -l | tr -d ' ')" 0
+  check "chunks: a set" "$(ls "$dc" | grep -cE '^c-[0-9]+-[0-9]+\.set$')" 1
+  run "$N8c" "$1-p8-c2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "the set: no misses" "$(misses_in "$1-p8-c2")" 0
+  check "the set: every hit through the index" "$(idxexit "$1-p8-c2" hits)" "$(stat_line "$1-p8-c2" | sed 's/^\([0-9]*\) hits.*/\1/')"
+  # off: no index written
+  local N8x="$OUT/$1-p8x"
+  run "$N8x" "$1-p8-off" MT_COVERAGE=0 D9MT_PSO_INDEX=0 -- "${SET_A[@]}"
+  check "D9MT_PSO_INDEX=0: none written" "$(ls "$N8x"/pso/mt.exe/os-*/ | grep -c '\.idx$')" 0
+
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"
   run "$S" "$1-r1" D9MT_STATE_CACHE=0 MT_WAIT_CONSOLIDATED=3 -- "${SET_A[@]}"
@@ -350,7 +429,12 @@ if c:
   cp -Rp "$K/pso" "$K/pso64"; mkdir -p "$K/c64"; cp -p "$K/w0/results.txt" "$K/c64/"; ln -sfn "$K/pso64" "$K/c64/pso"
   run "$K/c64" cap-64 MT_COVERAGE=0 D9MT_PSO_ARCHIVE_FIRST_MAX=64 -- "${SET_A[@]}"
   check "cap 64: all hits" "$(misses_of cap-64)" 0
-  run "$K/w0" cap-8 MT_COVERAGE=0 -- "${SET_A[@]}"
+  # part 8: the index names the old delta directly, past the walk's cap
+  cp -Rp "$K/pso" "$K/psoidx"; mkdir -p "$K/cidx"; cp -p "$K/w0/results.txt" "$K/cidx/"; ln -sfn "$K/psoidx" "$K/cidx/pso"
+  run "$K/cidx" cap-idx MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "cap with the index: the old delta's PSOs hit through its index" "$(misses_of cap-idx)" 0
+  # the walk's cap itself, index off
+  run "$K/w0" cap-8 MT_COVERAGE=0 D9MT_PSO_INDEX=0 -- "${SET_A[@]}"
   local ok; ok=$(grep -o 'psos: [0-9]* ok' "$OUT/cap-8.log" | grep -o '[0-9]*' | head -1)
   check "cap 8: the old delta's PSOs miss archive first" "$(misses_of cap-8)" "$ok"
   grep -q 'consistent' "$OUT/cap-8.log" && echo "  cap 8: results consistent with the recording run" \
