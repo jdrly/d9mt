@@ -30,7 +30,8 @@
 #            the capture flush at FLUSH_EVERY after a quiet gap; a warm start whose consolidation
 #            deletes the loaded parts, then misses (Metal throws for a deleted lookup archive it
 #            never converted: pso_convert_lookups; unlink_lookup_test shows both); the conversion
-#            late (no consolidation that session); .verify (a one-time SHA-256 check)
+#            late (no consolidation that session); .verify (a one-time SHA-256 check), written by
+#            whichever compile meets the first lookup failure while every loaded file is there
 #   TSan     the cold, warm, part 5 and part 6 runs under ThreadSanitizer (TSAN=0 skips; needs test-compile-mt.sh's
 #            TSan winemetal, built here)
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
@@ -262,6 +263,30 @@ suite() { # <label>
   for f in "${others[@]}"; do [ -e "$f" ] && kept=$((kept + 1)); done
   check ".verify: the others kept" "$kept" "${#others[@]}"
   check ".verify: the marker gone" "$([ -e "$(ls -d "$NW"/pso/mt.exe/os-*)/.verify" ] && echo kept || echo gone)" gone
+  # .verify's producer: the game's compile meets the lookup failure first (D9MT_PSO_TEST_LOOKUP_THROW:
+  # every compile with lookups throws, as Metal does; the conversion held 2 s, so the game's miss
+  # comes before it), every loaded file is there -> the marker; the next start checks once
+  local NP="$OUT/$1-p6-vprod" vd
+  run "$NP" "$1-p6-vp0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  mkdir -p "$NP-B"; ln -sfn "$NP/pso" "$NP-B/pso"   # SET_B's new PSOs miss: compiled with lookups
+  run "$NP-B" "$1-p6-vp1" MT_COVERAGE=0 D9MT_PSO_TEST_LOOKUP_THROW=1 D9MT_PSO_CONVERT_DELAY_MS=2000 MT_SETTLE_MS=3000 -- "${SET_B[@]}"
+  vd=$(ls -d "$NP"/pso/mt.exe/os-*)
+  check "producer: the game's compile failed first" "$(grep -c "lookup archive's file is gone before its first use (D9MT_PSO_TEST_LOOKUP_THROW)" "$OUT/$1-p6-vp1.log")" 1
+  check "producer: every file there, so the marker" "$([ -e "$vd/.verify" ] && echo written || echo missing)" written
+  check "producer: said so" "$(grep -c "every archive's SHA-256 is checked at the next start" "$OUT/$1-p6-vp1.log")" 1
+  run "$NP" "$1-p6-vp2" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "producer: the next start checks once" "$(grep -c "checking every archive's SHA-256 this once" "$OUT/$1-p6-vp2.log")" 1
+  check "producer: the marker consumed" "$([ -e "$vd/.verify" ] && echo kept || echo gone)" gone
+  # a lookup failure with a loaded file deleted is a deletion, not damage: no marker
+  # (D9MT_PSO_TEST_UNLINK_LOADED deletes the one loaded delta right after the load; SET_B's new
+  # PSOs miss, and the test hook throws at the first)
+  local NQ="$OUT/$1-p6-vgone" qd
+  run "$NQ" "$1-p6-vg0" MT_COVERAGE=0 -- "${SET_A[@]}"
+  qd=$(ls -d "$NQ"/pso/mt.exe/os-*)
+  mkdir -p "$NQ-B"; ln -sfn "$NQ/pso" "$NQ-B/pso"
+  run "$NQ-B" "$1-p6-vg1" MT_COVERAGE=0 D9MT_PSO_TEST_LOOKUP_THROW=1 D9MT_PSO_TEST_UNLINK_LOADED=1 D9MT_PSO_CONVERT_DELAY_MS=2000 MT_SETTLE_MS=3000 -- "${SET_B[@]}"
+  check "deleted, not damaged: the failure" "$(grep -c "lookup archive's file is gone before its first use" "$OUT/$1-p6-vg1.log")" 1
+  check "deleted, not damaged: no marker" "$([ -e "$qd/.verify" ] && echo written || echo none)" none
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"

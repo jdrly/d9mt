@@ -6225,27 +6225,53 @@ pso_set_chunks(NSString *dir, NSString *marker) {
 static _Atomic bool g_pso_lookup_gone;
 static _Atomic bool g_pso_lookups_converted = true;   /* false while pso_convert_lookups runs */
 static unsigned g_pso_convert_delay_ms;                 /* tests: before the conversion */
+static bool g_pso_test_lookup_throw;                    /* tests: compiles with lookups throw */
+static NSArray<NSString *> *g_pso_loaded_paths;         /* the loaded archives' files and their */
+static NSString *g_pso_loaded_dir;                      /* directory, set before the conversion */
+
+/* The session's first lookup failure, whoever's compile met it (the game's, the fallback's, the
+ * conversion's, the consolidation's). Every loaded file still there means not a deletion but an
+ * archive Metal can't read although it passed the startup check (a damaged file with the shape
+ * and its sum's size and time): ".verify" makes the next start check every archive's SHA-256
+ * (as D9MT_PSO_VERIFY=1), so the damaged one goes instead of costing every session its lookups.
+ * Off the compiling thread: a few stats and a small file. */
+static void
+pso_lookup_failed(void) {
+  NSArray<NSString *> *paths = g_pso_loaded_paths;
+  NSString *dir = g_pso_loaded_dir;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    @autoreleasepool {
+      bool allThere = paths.count > 0u;
+      for (NSString *path in paths)
+        allThere = allThere && !pso_gone(path);
+      if (allThere && [@"1\n" writeToFile:[dir stringByAppendingPathComponent:@".verify"] atomically:YES
+                                 encoding:NSUTF8StringEncoding error:nil])
+        fprintf(stderr, "d9mt: PSO archives: a loaded archive can't be used although its file is there; "
+                "every archive's SHA-256 is checked at the next start\n");
+    }
+  });
+}
 
 static id<MTLRenderPipelineState>
 pso_compile(id<MTL4Compiler> compiler, MTL4RenderPipelineDescriptor *d, MTL4CompilerTaskOptions *opt, NSError **err) {
   if (opt && !atomic_load(&g_pso_lookup_gone)) {
     @try {
+      if (g_pso_test_lookup_throw)
+        [NSException raise:NSInvalidArgumentException format:@"D9MT_PSO_TEST_LOOKUP_THROW"];
       return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opt error:err];
     } @catch (NSException *e) {
-      if (!atomic_exchange(&g_pso_lookup_gone, true))
+      if (!atomic_exchange(&g_pso_lookup_gone, true)) {
         fprintf(stderr, "d9mt: PSO archives: a lookup archive's file is gone before its first use (%s); "
                 "building without lookup archives from now on\n", e.reason.UTF8String);
+        pso_lookup_failed();
+      }
     }
   }
   return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:err];
 }
 
-/* paths: the loaded archives' files. An exception while converting with every file there means an
- * archive Metal can't read although it passed the startup check (a damaged file with the shape
- * and its sum's size and time): ".verify" makes the next start check every archive's SHA-256
- * (as D9MT_PSO_VERIFY=1), so the damaged one goes instead of costing every session its lookups. */
 static void
-pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt, NSArray<NSString *> *paths, NSString *dir) {
+pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt) {
   atomic_store(&g_pso_lookups_converted, false);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
     @autoreleasepool {
@@ -6269,19 +6295,7 @@ pso_convert_lookups(id<MTLDevice> device, MTL4CompilerTaskOptions *opt, NSArray<
       d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
       MTL4CompilerDescriptor *cd = [[MTL4CompilerDescriptor alloc] init];
       id<MTL4Compiler> c = lib ? [device newCompilerWithDescriptor:cd error:&err] : nil;
-      const bool goneBefore = atomic_load(&g_pso_lookup_gone);
       id<MTLRenderPipelineState> pso = c ? pso_compile(c, d, opt, &err) : nil;
-      if (!goneBefore && atomic_load(&g_pso_lookup_gone)) {
-        bool allThere = true;
-        for (NSString *path in paths)
-          allThere = allThere && !pso_gone(path);
-        if (allThere) {
-          [@"1\n" writeToFile:[dir stringByAppendingPathComponent:@".verify"] atomically:YES
-                      encoding:NSUTF8StringEncoding error:nil];
-          fprintf(stderr, "d9mt: PSO archives: a loaded archive can't be used although its file is there; "
-                  "every archive's SHA-256 is checked at the next start\n");
-        }
-      }
       PSO_EVENT("%lu lookup archive(s) converted in %llu ms (%s)", (unsigned long)opt.lookupArchives.count,
                 (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000000ull),
                 pso ? "ok" : "no pipeline");
@@ -6860,6 +6874,8 @@ pso_archive_init(id<MTLDevice> device) {
   const char *stats = getenv("D9MT_PSO_STATS");
   g_pso_stats = stats && !strcmp(stats, "1");
   g_pso_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const char *tthrow = getenv("D9MT_PSO_TEST_LOOKUP_THROW");
+  g_pso_test_lookup_throw = tthrow && !strcmp(tthrow, "1");
   const char *cdelay = getenv("D9MT_PSO_CONVERT_DELAY_MS");
   if (cdelay && *cdelay)
     g_pso_convert_delay_ms = (unsigned)strtoul(cdelay, NULL, 10);
@@ -7134,7 +7150,12 @@ pso_archive_init(id<MTLDevice> device) {
   if (archives.count) {
     g_pso_task_options = [[MTL4CompilerTaskOptions alloc] init];
     g_pso_task_options.lookupArchives = archives;
-    pso_convert_lookups(device, g_pso_task_options, loadedPaths, dir);
+    g_pso_loaded_paths = [loadedPaths copy];
+    g_pso_loaded_dir = [dir copy];
+    const char *tunlink = getenv("D9MT_PSO_TEST_UNLINK_LOADED");   /* tests: one loaded file deleted */
+    if (tunlink && !strcmp(tunlink, "1"))
+      pso_remove_archive(loadedPaths[0]);
+    pso_convert_lookups(device, g_pso_task_options);
   }
   if (g_pso_archive_first) {
     /* A miss asks every archive in g_pso_lookup before the compiler, so only the
