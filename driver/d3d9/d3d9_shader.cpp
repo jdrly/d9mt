@@ -15,7 +15,7 @@ namespace dxvk {
     if (map.abUsed) {
       fn->abWords.reserve(map.abWords.size());
       for (const auto& w : map.abWords)
-        fn->abWords.push_back({ MtlShaderFunction::AbWordKind(w.kind), w.reg });
+        fn->abWords.push_back({ MtlShaderFunction::AbWordKind(w.kind), w.reg, w.dim });
     }
   }
 

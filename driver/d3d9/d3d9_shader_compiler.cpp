@@ -1225,9 +1225,9 @@ namespace dxvk {
 
         if (e.flags & D9MT_AIR_ENTRY_IN_AB) {
           if (map.abWords.size() <= e.index)
-            map.abWords.resize(e.index + 1u, { uint8_t(0xFFu), 0u });
+            map.abWords.resize(e.index + 1u, { uint8_t(0xFFu), 0u, 0u });
 
-          D3D9CbvSlotMap::AbWord w = { uint8_t(0xFFu), 0u };
+          D3D9CbvSlotMap::AbWord w = { uint8_t(0xFFu), 0u, 0u };
           if (e.kind == D9MT_AIR_BIND_BUFFER) {
             w.kind = 0u;
             w.reg = e.reg_index != D9MT_AIR_NO_REG_INDEX
@@ -1243,6 +1243,7 @@ namespace dxvk {
                   || e.kind == D9MT_AIR_BIND_TEXTURE_3D) {
             w.kind = 1u;
             w.reg = uint8_t(e.reg_index);
+            w.dim = e.kind == D9MT_AIR_BIND_TEXTURE_CUBE ? 1u : e.kind == D9MT_AIR_BIND_TEXTURE_3D ? 2u : 0u;
           }
           map.abWords[e.index] = w;
 

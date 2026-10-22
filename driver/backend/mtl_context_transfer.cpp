@@ -481,7 +481,8 @@ namespace dxvk::backend {
               case MtlShaderFunction::AbWordKind::Cbv: {
                 if (!full && !(dirtyCbvs & (1u << e.reg)))
                   continue;
-                v = 0u;
+                // unbound: #38's null buffer, as in the argument table
+                v = m_nullAddress;
                 if (e.reg < b.cbvs.size()) {
                   StageBindings::CbvBinding& cbv = b.cbvs[e.reg];
                   if (cbv.slice.defined() && cbv.slice.storage() != nullptr
@@ -492,7 +493,8 @@ namespace dxvk::backend {
               case MtlShaderFunction::AbWordKind::Texture: {
                 if (!full && !(dirtyTexs & (1u << e.reg)))
                   continue;
-                v = 0u;
+                // unbound: the null texture of the slot's declared kind (2D, cube, 3D)
+                v = e.dim == 1u ? m_nullCubeId : e.dim == 2u ? m_null3DId : m_null2DId;
                 if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr) {
                   auto* tv = static_cast<MtlTextureViewImpl*>(b.textures[e.reg].ptr());
                   v = tv->gpuResourceId;
@@ -502,7 +504,7 @@ namespace dxvk::backend {
               case MtlShaderFunction::AbWordKind::Sampler: {
                 if (!full && !(dirtySmps & (1u << e.reg)))
                   continue;
-                v = 0u;
+                v = m_nullSamplerId;
                 if (e.reg < b.samplers.size() && b.samplers[e.reg] != nullptr)
                   v = static_cast<MtlSamplerStateImpl*>(
                     b.samplers[e.reg].ptr())->gpuResourceId;
