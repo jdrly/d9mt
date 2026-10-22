@@ -31,8 +31,9 @@ and what a release candidate is checked for. What isn't in this repository yet i
 - **A quiet window**: the benchmark runs alone on the Mac. No game, no other Wine process, no
   build, no other benchmark. A run that another Wine process overlaps is **DIRTY** and doesn't
   count. Never measure while a game runs.
-- **Uncapped**: `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`, so neither the background frame cap nor the
-  stall pacing limits the frame rate.
+- **Uncapped**: `D9MT_BG_FPS=0 D9MT_STALL_PACE=0 D9MT_FPS_CAP=0`, so neither the background frame
+  cap, the stall pacing nor the frame cap (#47) limits the frame rate. A cap inherited from the
+  environment can flatten base and branch to the same frame time and hide a regression.
 - **Normal priority**: don't run benchmarks under `taskpolicy -b` (background QoS): it stretches
   timers (a 1 ms sleep takes about 3 ms), which distorts anything that waits or retries (#43).
 - **`D9MT_PROFILE` off for rates**: it changes the regime (frames several times slower, and G1's
@@ -59,7 +60,7 @@ and what a release candidate is checked for. What isn't in this repository yet i
 
 ```bash
 scripts/build-benches.sh                  # every bench into build/bench/x64/ (ARCH=i686 for 32-bit)
-ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh \
+D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh \
   --variant base=<dir>/base/d3d9.dll \
   --variant basecopy=<dir>/basecopy/d3d9.dll \
   --variant fix=<dir>/fix/d3d9.dll \
@@ -67,12 +68,16 @@ ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh \
 ```
 
 - `scripts/perf-abba.sh` runs the rounds rotated (§2.2), with `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`,
-  the state cache off, and an AIR cache and PSO archives of each variant's own (warm after its
-  first run). The first variant is the reference unless `--ref`; `--env <name>:<VAR>=<value>`
+  the state cache off, and the rest of the caller's environment. It doesn't reset
+  `D9MT_FPS_CAP`, so set `D9MT_FPS_CAP=0` for the call as above; an experiment with the cap sets
+  it per variant with `--env <name>:D9MT_FPS_CAP=<fps>`. Each variant gets an AIR cache and PSO
+  archives of its own (warm after its first run). The first variant is the reference unless `--ref`; `--env <name>:<VAR>=<value>`
   gives one variant extra environment (the same DLL with a switch off); `--native` compares
   native programs without Wine (one `state_cache_test` per tree). The bench is looked up in
   `BENCH_DIR` (default `build/bench/x64`) or given as a path. Results go to
-  `$WORK/results/<tag>-<date>-<pid>.txt`; nothing outside `WORK` is written.
+  `$WORK/results/<tag>-<date>-<pid>.txt`. The harness writes nothing of its own outside `WORK`;
+  a bench may create temporary files of its own (the native state-cache bench uses
+  `/tmp/d9mt-sct.*`).
 - A run is **DIRTY** when another Wine server is running, and **FAIL** when the program doesn't
   exit 0 with a result line (a bench given bad arguments prints `RESULT FAIL usage` and exits 2);
   both are left out of the comparison, and the script exits 1 if a run failed. `DIRTY_CHECK=0`
@@ -80,8 +85,8 @@ ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh \
 - `scripts/perf-compare.py results.txt …` prints per variant the runs, the median, min..max, the
   paired median against the reference and **slower n/N**. With `--control`, a variant whose paired
   median lies within the control's range is marked **`~ noise`**; a variant whose runs fall into
-  two clusters (a gap wider than 2.5 % of the median, with at least 20 % of the runs on each
-  side) is marked **`bimodal?`** (§2.5). `--metric` picks another result field (for example
+  two clusters (at least six runs, a gap wider than 2.5 % of the median, and at least 20 % of
+  the runs on each side) is marked **`bimodal?`** (§2.5). `--metric` picks another result field (for example
   `p99` or `sd` for pacing).
 - For a virtual display, build the benches with `BENCH_INCLUDE=<header>` and wrap the whole
   `perf-abba.sh` call in the display tool (`scripts/build-benches.sh`, `scripts/perf-abba.sh`).
@@ -132,7 +137,7 @@ parentheses.
 | `bench_4k … <ms>` ("balanced") | The same, with that many ms of CPU before Present; near the GPU's frame time, G1's backlog gate flips | G1 and the submission path | `test/bench_4k.c`, 4th argument `<ms>` (for example `8`) |
 | `bindbench` | 320x240, no vsync, 5000 tiny draws a frame, each with another of 64 textures (`avg_ms`); **bimodal** (§2.5) | The per-bind CPU path | `test/perf/bindbench.c`: `[frames (1060)]` |
 | `churnbench` | 3000 rebinds of 64 textures plus 125 new 64² textures a frame (`avg_ms`) | Texture creation and release, view lifetime | `test/perf/churnbench.c`: `[frames (1060)]` |
-| `psobench` | 3000 draws a frame from one vertex buffer, each switching between two pipelines; `blend2`/`blendop`/`blend4` are other key sets, so a result that depends on where two keys land shows as a sign flip. (blend − topo) / 3000 is the cost of one MRU miss | PSO key, cache and MRU | `test/perf/psobench.c`: `<frames> <topo\|blend\|blend2\|blendop\|blend4\|none>` |
+| `psobench` | 3000 draws a frame from one vertex buffer, each switching state: between two states (`topo`, `blend`, `blend2`, `blendop`), four (`blend4`) or none (`none`). `topo` is the floor of a state switch (since #33 it doesn't resolve the PSO); in `blend`, A → B → A hits the PSO MRU (#40), and with `D9MT_NO_PSOMRU=1` every draw builds the full key and looks it up (the key hash's cost, #34). `blend2`/`blendop`/`blend4` are other key sets, so a result that depends on where two keys land shows as a sign flip | PSO resolve, MRU, key and cache | `test/perf/psobench.c`: `<frames> <topo\|blend\|blend2\|blendop\|blend4\|none>` |
 | `bench_getdata` | A 4K pass of 1500 draws with an occlusion query around the first 500, polled the next frame (as SWTOR does, #22) | Queries, `GetData` flushes | `test/perf/bench_getdata.c`: `[frames (330)] [flush\|noflush]` |
 | `bench_upload` | A 4K pass of 600 draws, each from a `Lock(DISCARD)` vertex buffer, plus 24 managed 256² textures rewritten a frame | Uploads, staging, the upload ring (with `--env <name>:D9MT_MEMSTATS=16`) | `test/perf/bench_upload.c`: `[frames (330)]` |
 | `bench_draws` | Many small draws a frame, each with a VS and a PS constant update and a render-state change; reports ns per draw and frame times | The per-draw CPU path; `present` mode is layout-sensitive and also depends on drawable availability | `test/perf/bench_draws.c`: `[draws per frame (1000)] [frames (600)] [present\|flush\|spinflush]` |
