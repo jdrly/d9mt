@@ -14,6 +14,8 @@ set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 DLL="$V2/build/driver-x64/d3d9.dll"; BRDLL="$V2/build/bridge/winemetal64.dll"
 fails=0
+# a missing build would make every "doesn't import" check pass on empty output
+for f in "$DLL" "$BRDLL"; do [ -f "$f" ] || { echo "FATAL: $f missing (build it first)" >&2; exit 1; }; done
 # captured once: grep -q on a live pipe would SIGPIPE objdump, which pipefail reports
 IMP=$(x86_64-w64-mingw32-objdump -p "$DLL" | awk '/DLL Name: winemetal.dll/{f=1;next} /DLL Name:/{f=0} f')
 EXP=$(x86_64-w64-mingw32-objdump -p "$BRDLL")
