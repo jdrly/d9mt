@@ -554,11 +554,23 @@ The cap test now runs the walk's cap with `D9MT_PSO_INDEX=0`; with the index the
 - Test (first.sh part 9a): a seeded directory, then a run under `MTL_SHADER_VALIDATION=1` → the line, nothing loaded, no delta, no crash. The next normal start: 0 misses.
 - Mutation (the gate off): the validation run crashes (signal 11), its line is missing and the archive is loaded: 3 failures.
 
-**9b, the validation report: on hold.** The probe's first round:
-- **Metal 3:** an out-of-bounds read 64 bytes past a 1000-byte buffer (inside its page) is reported through `MTLCommandBuffer.logs`: one `MTLFunctionLog`, type Validation, the encoder label, the function and the line.
-- **Metal 4 (first round):** the same read was reported through **no** channel the probe tried, though validation is on ("Metal GPU Validation Enabled"): not the commit feedback's error, not an `MTLLogState` handler on the command buffer, not the unified log. That holds with and without `MTL4PipelineOptions.shaderValidation`.
-- MTL4 binds buffers by GPU address through argument tables, so validation may know only allocations, not a binding's logical length.
-- Before any conclusion: Apple's Metal 4 documentation and WWDC25 are being read (research/metal4-validation.md) for what validation needs from an MTL4 binding (a length, a buffer range, a reporting switch). The second probe round (a placement heap: a read through buffer A into the live buffer B after it, mapped memory) will then test exactly that. Until then, the field diagnostic for GPU faults stays part 7 (the PageFault code and GPU times per commit).
+**9b, labels for the validation report (implemented).** The probe (n013-issues/scripts/qw-valprobe.sh, three rounds, research/metal4-validation.md):
+- **Metal 4 reports a fault only on stderr**, and only with `MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1`. There's no API: the commit feedback, an `MTLLogState` handler and the default unified log all stay silent.
+- It checks **per buffer** (64 bytes past a 1000-byte buffer, inside its page, is caught) for argument-table bindings too.
+- The default zerofill keeps the process running. `RETURN_BADFOOD_ON_FAULT` and `ABORT_ON_FAULT` end it.
+- A report names the buffer (label, length, GPU address), the pipeline's label and UID, the encoder's label, the command, and where the buffer was allocated. d9mt names every AIR shader "main", so without labels a report can't say which pipeline or pass.
+- Under `MTL_SHADER_VALIDATION` only, the bridge now labels:
+  - **pipelines** `d9mt vs:<libid>/<entry> fs:<libid>/<entry>`: libid is the first 8 hex digits of the library's identity from part 8 (the SHA-256 of its metallib bytes), now taken under validation too;
+  - **encoders** `d9mt enc#<n> render <rt0 pixel format> <w>x<h>` or `d9mt enc#<n> compute`.
+- No buffer labels: their meaning (which object's VB/IB/constants) is on the PE side, which would be an ABI change.
+- Off: one read-once bool per pipeline and encoder creation (measured: the 9b off A/B).
+- Test (scripts/test-validation-labels.sh, native, one render pass through the bridge's thunks):
+  - off: no report;
+  - in bounds under validation: no report;
+  - out of bounds under validation: one report naming `d9mt vs:…/vmain fs:…/fmain` and `d9mt enc#0 render 80 4x4`, zero-filled, the process goes on.
+  - The out-of-bounds read only ever runs under validation; the GPU-alarm check runs after each case.
+  - Mutation (labels never applied): 2 failures.
+- A validation session for the game is an environment, not a build: `MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1`, without BADFOOD/ABORT. 9a turns the archives off; without the switch, 9a says to set it.
 
 ## Order and gates
 

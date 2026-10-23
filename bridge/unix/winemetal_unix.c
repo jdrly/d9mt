@@ -3823,6 +3823,23 @@ _MetalDrawable_texture(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* MTL_SHADER_VALIDATION set and not "0": a validation session (bundle parts 9a/9b). Read once. */
+static bool d9mt_shader_validation(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *v = getenv("MTL_SHADER_VALIDATION");
+    cached = v && *v && strcmp(v, "0") ? 1 : 0;
+  }
+  return cached;
+}
+
+/* Bundle part 9b: a validation session's labels. Metal 4 shader validation reports a fault on
+ * stderr with the buffer's, the pipeline's and the encoder's labels (n013-issues probe round 3);
+ * d9mt names every AIR shader "main", so without labels a report can't say which pipeline or
+ * pass. Under validation only, encoders get "d9mt enc#<n> render <rt0 pixel format> <w>x<h>" or
+ * "d9mt enc#<n> compute" (pipelines: _MTL4Compiler_newRenderPipelineState). */
+static _Atomic unsigned long g_val_encoders;
+
 static int d9mt_wsilog_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -6377,7 +6394,8 @@ pso_fnv_u32(uint64_t h, uint32_t v) {
 
 static void
 pso_library_identity(id<MTLLibrary> library, dispatch_data_t data) {
-  if (!g_pso_index_on || (!g_pso_archive_first && !g_pso_serializer))
+  /* the index (part 8), or a validation session's pipeline labels (part 9b) */
+  if ((!g_pso_index_on || (!g_pso_archive_first && !g_pso_serializer)) && !d9mt_shader_validation())
     return;
   __block CC_SHA256_CTX c;
   CC_SHA256_Init(&c);
@@ -6401,6 +6419,18 @@ pso_hash_function(uint64_t h, obj_handle_t library, const char *name) {
     return 0u;
   h = pso_fnv(h, ident.bytes, 16u);
   return pso_fnv(h, name, strlen(name) + 1u);
+}
+
+/* Part 9b: a library's identity as 8 hex digits for a pipeline label ("--------": none). */
+static void
+pso_lib_hex(obj_handle_t library, char out[9]) {
+  NSData *ident = library ? objc_getAssociatedObject((id)library, &g_pso_lib_id) : nil;
+  if (!ident) {
+    memcpy(out, "--------", 9u);
+    return;
+  }
+  const uint8_t *b = ident.bytes;
+  snprintf(out, 9u, "%02x%02x%02x%02x", b[0], b[1], b[2], b[3]);
 }
 
 /* The descriptor's key: every value _MTL4Compiler_newRenderPipelineState sets on it, as set
@@ -7814,6 +7844,15 @@ _MTL4CommandBuffer_renderCommandEncoder(void *obj) {
             info->colors[0].clear_color.r, info->colors[0].clear_color.g,
             info->colors[0].clear_color.b, info->colors[0].clear_color.a);
   params->ret = (obj_handle_t)[[(id<MTL4CommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor] retain];
+  if (params->ret && d9mt_shader_validation()) {
+    id<MTLTexture> rt = (id<MTLTexture>)info->colors[0].texture;
+    const unsigned long k = atomic_fetch_add(&g_val_encoders, 1u);
+    [(id<MTL4RenderCommandEncoder>)params->ret setLabel:rt
+      ? [NSString stringWithFormat:@"d9mt enc#%lu render %lu %lux%lu", k, (unsigned long)rt.pixelFormat,
+                                   (unsigned long)rt.width, (unsigned long)rt.height]
+      : [NSString stringWithFormat:@"d9mt enc#%lu render - %ux%u", k, (unsigned)info->render_target_width,
+                                   (unsigned)info->render_target_height]];
+  }
   [descriptor release];
   return STATUS_SUCCESS;
 }
@@ -7923,6 +7962,9 @@ static NTSTATUS
 _MTL4CommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[[(id<MTL4CommandBuffer>)params->handle computeCommandEncoder] retain];
+  if (params->ret && d9mt_shader_validation())
+    [(id<MTL4ComputeCommandEncoder>)params->ret setLabel:[NSString stringWithFormat:@"d9mt enc#%lu compute",
+                                                          atomic_fetch_add(&g_val_encoders, 1u)]];
   return STATUS_SUCCESS;
 }
 
@@ -8079,6 +8121,18 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
       info->alpha_to_coverage_enabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
   descriptor.rasterizationEnabled = info->rasterization_enabled ? YES : NO;
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
+
+  /* Part 9b: under validation, the pipeline named by its shaders (archives are off then, 9a) */
+  if (d9mt_shader_validation()) {
+    char vh[9], fh[9] = "-";
+    const bool frag = info->fragment_library && info->fragment_entry_name.ptr;
+    pso_lib_hex(info->vertex_library, vh);
+    if (frag)
+      pso_lib_hex(info->fragment_library, fh);
+    descriptor.label = [NSString stringWithFormat:@"d9mt vs:%s/%s fs:%s/%s", vh,
+                        (const char *)info->vertex_entry_name.ptr, fh,
+                        frag ? (const char *)info->fragment_entry_name.ptr : "-"];
+  }
 
   /* the key of the descriptor: the archive index (part 8) and its capture */
   const uint64_t key = g_pso_index_on && (g_pso_archive_first || g_pso_serializer) ? pso_key(info) : 0u;
