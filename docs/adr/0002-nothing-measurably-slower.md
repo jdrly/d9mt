@@ -21,6 +21,9 @@ layout.
   D9MT_STALL_PACE=0`), each benchmark alone in a quiet window, never while a game runs; paired
   rounds against the base commit with the order alternated; a byte-identical copy of base as a
   control; the paired difference and the count of slower rounds in the PR.
+- Every median slowdown over 0.25 % (ms up, fps down; the median or the paired median against
+  base) is flagged and re-verified before a merge, even when it lies inside the control's range
+  (the maintainer, 2026-10-23). `scripts/perf-compare.py` marks it `FLAG >0.25%`.
 - A small delta of a single commit is checked with the a64 layout control (both sides built with
   `-falign-functions=64`). When the change alters the size of its translation unit's code, the
   control is a placebo of identical size instead.

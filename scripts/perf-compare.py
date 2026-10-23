@@ -5,11 +5,16 @@
 
 Input lines: `round=<r> v=<variant> ... <metric>=<value>` (or block=/pair=); lines starting with DIRTY (another
 engine's Wine was running) or holding `RESULT FAIL` are skipped and counted. The metric is the
-first of avg_ms, ms/frame, frame_median_ms, median_ns present (lower is better), or --metric.
+first of avg_ms, ms/frame, frame_median_ms, median_ns present (lower is better), or --metric
+(fps: higher is better; "slower" and the flag follow the metric's direction).
 
 Per variant: runs, median, min..max, the median against the reference's, the median of the
 per-round paired differences (same round, so drift between rounds cancels), and "slower n/N":
 in how many paired rounds the variant was slower than the reference.
+
+`FLAG >0.25%`: a variant whose median or paired median is more than 0.25 % slower than the
+reference's (ms up, fps down), even inside the control's range (`~ noise`). It is re-verified
+before a merge (PERFORMANCE.md §2.4, ADR-0002); the flag doesn't change the exit code.
 
 --control: a variant expected to equal the reference (a byte copy of its DLL, or the same build
 from another path). Its paired differences are the noise floor: a variant whose paired median
@@ -29,6 +34,8 @@ skipped, so the two measure different things).
 import argparse, re, statistics, sys
 
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
+HIGHER_IS_BETTER = ("fps",)
+FLAG = 0.0025   # a median slowdown over 0.25 % is re-verified before a merge (ADR-0002)
 META = ("client", "visible")
 NUM = r"=([0-9.]+)(?=\s|$)"   # the whole value token is a number (not 320x240)
 
@@ -124,11 +131,13 @@ def main():
         c = paired(a.control)
         noise = (min(c), max(c)) if c else None
 
-    print(f"metric {metric} (lower is better), reference {ref}"
+    sign = -1 if metric in HIGHER_IS_BETTER else 1   # +: a larger value is slower
+    print(f"metric {metric} ({'higher' if sign < 0 else 'lower'} is better), reference {ref}"
           + (f", control {a.control}" if a.control else "")
           + (f"; skipped: {skipped['dirty']} DIRTY, {skipped['fail']} FAIL" if any(skipped.values()) else ""))
     print(f"{'variant':22} {'n':>3} {'median':>10} {'min':>10} {'max':>10} {'vs ref':>8} "
           f"{'paired median':>22} {'slower':>8}")
+    flagged = []
     for v, d in vals.items():
         xs = list(d.values())
         med = statistics.median(xs)
@@ -141,17 +150,24 @@ def main():
             print(f"{v:22} {len(xs):3} {med:10.4f}  (no rounds paired with the reference)")
             continue
         pd = statistics.median(diffs)
-        slower = sum(1 for x in diffs if x > 0)
+        slower = sum(1 for x in diffs if sign * x > 0)
         tag = ""
         if v == a.control:
             tag = " [control]"
         elif noise and noise[0] <= pd <= noise[1]:
             tag = " ~ noise"
+        if bmed and max(sign * (med / bmed - 1), sign * pd / bmed) > FLAG:
+            tag += " FLAG >0.25%"
+            if v != a.control:
+                flagged.append(v)
         print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {pct(med / bmed - 1 if bmed else None):>8} "
               f"{pd:+11.4f} ({pct(pd / bmed if bmed else None, 5)}) {slower:>4}/{len(diffs):<3}{tag}{flag}")
     if noise:
         rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
         print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
+    if flagged:
+        print(f"FLAG: {', '.join(flagged)}: median slower than the reference by more than 0.25 %; "
+              "re-verify before a merge, even within the control's range (PERFORMANCE.md §2.4, ADR-0002)")
     if clients:
         def sizes(v):
             c = clients.get(v, {})
