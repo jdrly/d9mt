@@ -108,6 +108,12 @@ D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh
 - **A median slowdown over 0.25 % is flagged anyway** (ms up, fps down; the median or the paired
   median against base), even inside the A/A spread, and re-verified before a merge:
   `scripts/perf-compare.py` marks it `FLAG >0.25%` and names it in a closing line (ADR-0002).
+  A flag is first the author's to clear, in this order:
+  1. **Re-verify**: more rounds, read per mode on a bimodal bench (§2.5), and the layout
+     controls above.
+  2. **If it holds, find a solution that costs nothing.**
+  3. **Only if there is none**, it goes to the maintainer, with a solid explanation of the cost
+     and a second opinion from the independent agent review (GPT-6.1-Sol).
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
   `-falign-functions=64`. If the gap disappears there, it is layout, not the change. Check that
   the flag alone doesn't move base (base-a64 against base).

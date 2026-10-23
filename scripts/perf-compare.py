@@ -36,6 +36,12 @@ import argparse, re, statistics, sys
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
 HIGHER_IS_BETTER = ("fps",)
 FLAG = 0.0025   # a median slowdown over 0.25 % is re-verified before a merge (ADR-0002)
+
+
+def over_flag(slowdown):
+    """More than 0.25 % slower. Exactly 0.25 % isn't: the 1e-12 absorbs float rounding at the
+    boundary (0.30075 / 0.3 - 1 is 0.0025000000000001), far below any measurable difference."""
+    return slowdown is not None and slowdown > FLAG + 1e-12
 META = ("client", "visible")
 NUM = r"=([0-9.]+)(?=\s|$)"   # the whole value token is a number (not 320x240)
 
@@ -145,9 +151,16 @@ def main():
         if v == ref:
             print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {'[ref]':>8} {'':>22} {'':>8}{flag}")
             continue
+        # The median against the reference flags a variant even without paired rounds.
+        med_slow = sign * (med / bmed - 1) if bmed else None
         diffs = paired(v)
         if not diffs:
-            print(f"{v:22} {len(xs):3} {med:10.4f}  (no rounds paired with the reference)")
+            tag = ""
+            if over_flag(med_slow):
+                tag = " FLAG >0.25%"
+                if v != a.control:
+                    flagged.append(v)
+            print(f"{v:22} {len(xs):3} {med:10.4f}  (no rounds paired with the reference){tag}")
             continue
         pd = statistics.median(diffs)
         slower = sum(1 for x in diffs if sign * x > 0)
@@ -156,7 +169,7 @@ def main():
             tag = " [control]"
         elif noise and noise[0] <= pd <= noise[1]:
             tag = " ~ noise"
-        if bmed and max(sign * (med / bmed - 1), sign * pd / bmed) > FLAG:
+        if over_flag(med_slow) or (bmed and over_flag(sign * pd / bmed)):
             tag += " FLAG >0.25%"
             if v != a.control:
                 flagged.append(v)
