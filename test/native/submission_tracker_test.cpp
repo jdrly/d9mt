@@ -11,6 +11,14 @@
 //  - random submit/complete/process from three threads: nothing runs early, everything runs,
 //    and a fence every batch signals never goes backwards (the pump and the CS thread both run
 //    retirements; sync::Fence stores whatever value it is given).
+//  - a GPU hang (a submitted serial not signalled for 5 slices it spent submitted): one
+//    termination (an observer stands in for TerminateProcess), and from then on no wait on an
+//    incomplete serial returns to its caller (they park; the test's park blocks like production's
+//    until the test releases it), also concurrently: the reporter, another thread's wait and the
+//    device's drain; a serial completed exactly at the end of the wait, or submitted late in it,
+//    is no hang; a serial nobody submits and D9MT_GPU_HUNG=continue give up the wait as before;
+//  - with DXVK_LOG_LEVEL=none the D9MT-GPU-HUNG line still reaches stderr (--log-none, its own
+//    process).
 // The tracker uses dxvk::thread and the driver's util, so this is a mingw exe run under Wine
 // (no window). RetireBatch::run is the driver's minus the buffer recycling, which needs the device.
 //   x86_64-w64-mingw32-g++ -std=c++17 -O1 -DWINEMETAL_API='extern "C"' -I driver/backend \
@@ -18,10 +26,15 @@
 //     build/driver-x64/obj/util_{log_log,thread,util_env,util_string}.cpp.o ... -o stt.exe
 #include "mtl_submission.h"
 #include "mtl_profiler.h"
+#include "../util/util_env.h"
+
+#include <windows.h>
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -40,6 +53,12 @@ static std::condition_variable g_gpuCond;
 static uint64_t                g_signaled  = 0u;   // value the "GPU" has reached
 static uint64_t                g_submitted = 0u;   // highest serial signalEvent was called for
 static std::atomic<uint64_t>   g_reads     = { 0u };  // MTLSharedEvent_signaledValue calls
+// The boundary case: after the g_boundaryAt-th timed-out slice, the "GPU" completes
+// g_boundaryValue on the 4th event read that follows (hung()'s final check), not before.
+static std::atomic<uint64_t>   g_timeouts  = { 0u };
+static std::atomic<uint64_t>   g_waitCalls = { 0u };   // MTLSharedEvent_waitUntilSignaledValue calls
+static uint64_t                g_boundaryAt = 0u, g_boundaryValue = 0u;
+static std::atomic<uint64_t>   g_completeOnRead = { 0u };
 
 static void gpuComplete(uint64_t serial) {
   { std::lock_guard<std::mutex> l(g_gpuMutex);
@@ -59,13 +78,19 @@ void MTL4CommandQueue_signalEvent(obj_handle_t, obj_handle_t, uint64_t value) {
   g_submitted = value;
 }
 uint64_t MTLSharedEvent_signaledValue(obj_handle_t) {
-  g_reads++;
+  const uint64_t n = ++g_reads;
   std::lock_guard<std::mutex> l(g_gpuMutex);
+  if (g_completeOnRead.load() && n == g_completeOnRead.load() && g_boundaryValue > g_signaled)
+    g_signaled = g_boundaryValue;
   return g_signaled;
 }
 bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t, uint64_t value, uint64_t timeoutMs) {
+  g_waitCalls++;
   std::unique_lock<std::mutex> l(g_gpuMutex);
-  return g_gpuCond.wait_for(l, std::chrono::milliseconds(timeoutMs), [&] { return g_signaled >= value; });
+  const bool done = g_gpuCond.wait_for(l, std::chrono::milliseconds(timeoutMs), [&] { return g_signaled >= value; });
+  if (!done && g_boundaryAt && ++g_timeouts == g_boundaryAt)
+    g_completeOnRead = g_reads.load() + 4u;
+  return done;
 }
 void NSObject_release(obj_handle_t obj);
 }
@@ -358,13 +383,237 @@ static void unsubmittedWait() {
   CHECK(prof::g_unsubWaits.load() == before + 1u);
 }
 
-int main() {
+// ---- GPU hang: the observer stands in for TerminateProcess; the park blocks like production's
+// (Sleep(INFINITE)) until the test releases it, then returns so the test can end
+
+static std::atomic<int>      g_terminated = { 0 };
+static std::atomic<unsigned> g_exitCode = { 0u };
+static std::atomic<int64_t>  g_terminatedAtMs = { 0 };
+static std::atomic<int>      g_parked = { 0 };
+static std::mutex              g_parkMutex;
+static std::condition_variable g_parkCond;
+static bool                    g_parkRelease = true;   // true: a park returns at once (counted)
+static std::chrono::steady_clock::time_point g_t0;
+
+static int64_t msSince(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static void observeTerminate(unsigned code) {
+  g_exitCode = code;
+  g_terminatedAtMs = msSince(g_t0);
+  g_terminated++;
+}
+
+static void testPark() {
+  g_parked++;
+  std::unique_lock<std::mutex> l(g_parkMutex);
+  g_parkCond.wait(l, [] { return g_parkRelease; });
+}
+
+static void resetHang() {
+  g_terminated = 0; g_parked = 0; g_exitCode = 0u; g_terminatedAtMs = 0;
+  g_boundaryAt = 0u; g_boundaryValue = 0u; g_completeOnRead = 0u; g_timeouts = 0u;
+  { std::lock_guard<std::mutex> l(g_parkMutex); g_parkRelease = true; }
+  { std::lock_guard<std::mutex> l(g_gpuMutex); g_signaled = 0u; }
+}
+
+static void gpuHung() {
+  SubmissionTracker::s_sliceMs = 20u;
+  SubmissionTracker::s_terminate = observeTerminate;
+  SubmissionTracker::s_park = testPark;
+
+  { // 1. a submitted serial never signalled: one report, then termination; later waits park
+    resetHang();
+    SubmissionTracker t(0x1u);
+    uint64_t s1 = t.onSubmit(0x2u);
+    gpuComplete(s1);
+    uint64_t s2 = t.onSubmit(0x2u);
+    uint64_t s3 = t.onSubmit(0x2u);
+    g_t0 = std::chrono::steady_clock::now();
+    t.waitFor(s2);
+    CHECK(msSince(g_t0) >= 90);   // 5 slices of 20 ms on the GPU
+    CHECK(g_terminated.load() == 1);
+    CHECK(g_exitCode.load() == SubmissionTracker::kGpuHungExitCode);
+    CHECK(g_parked.load() == 1);  // termination doesn't return in production: the reporter parks
+    CHECK(t.gpuHung());
+    t.waitFor(s3);                // a later wait on an incomplete serial parks at once
+    CHECK(g_parked.load() == 2);
+    t.waitFor(s1);                // a complete one returns
+    CHECK(g_parked.load() == 2);
+    CHECK(g_terminated.load() == 1);
+  }
+  CHECK(g_parked.load() == 3);    // the destructor's drain parks too
+  CHECK(g_terminated.load() == 1);
+
+  { // 2. the GPU completes the serial exactly at the end of the wait (hung()'s final check):
+    //    not a hang
+    resetHang();
+    SubmissionTracker t(0x1u);
+    uint64_t s = t.onSubmit(0x2u);
+    g_boundaryAt = 5u;
+    g_boundaryValue = s;
+    t.waitFor(s);
+    CHECK(g_completeOnRead.load() != 0u);   // the boundary was reached
+    CHECK(t.completedSerialCached() >= s || t.isComplete(s));
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    CHECK(!t.gpuHung());
+  }
+
+  { // 3. submitted late in the wait: the GPU gets its whole budget from the submission on
+    resetHang();
+    SubmissionTracker t(0x1u);
+    const uint64_t s = t.nextSerial();
+    g_t0 = std::chrono::steady_clock::now();
+    std::thread cs([&t] { std::this_thread::sleep_for(std::chrono::milliseconds(90)); t.onSubmit(0x2u); });
+    t.waitFor(s);
+    cs.join();
+    CHECK(g_terminated.load() == 1);
+    CHECK(g_terminatedAtMs.load() >= 90 + 5 * 20 - 10);   // not right after the submission
+    CHECK(g_parked.load() == 1);
+  }
+
+  { // 3b. submitted late and completed soon after: no hang
+    resetHang();
+    SubmissionTracker t(0x1u);
+    const uint64_t s = t.nextSerial();
+    std::thread cs([&t, s] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(90));
+      t.onSubmit(0x2u);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      gpuComplete(s);
+    });
+    t.waitFor(s);
+    cs.join();
+    CHECK(t.isComplete(s));
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+  }
+
+  { // 4. a serial nobody submits: given up after 5 slices, as before; no hang, no park
+    resetHang();
+    SubmissionTracker t(0x1u);
+    t.waitFor(t.nextSerial());
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    CHECK(!t.gpuHung());
+  }
+
+  { // 5. D9MT_GPU_HUNG=continue: the wait is given up, the game renders on (as before)
+    resetHang();
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    SubmissionTracker t(0x1u);
+    uint64_t s = t.onSubmit(0x2u);
+    t.waitFor(s);
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    CHECK(!t.gpuHung());
+    gpuComplete(s);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+  }
+
+  { // 5b. D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, also when the serial is
+    //     submitted late in the wait (no longer submitted-only slices)
+    resetHang();
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    SubmissionTracker t(0x1u);
+    const uint64_t s = t.nextSerial();
+    std::thread cs([&t] { std::this_thread::sleep_for(std::chrono::milliseconds(90)); t.onSubmit(0x2u); });
+    const uint64_t calls0 = g_waitCalls.load();
+    t.waitFor(s);
+    cs.join();
+    CHECK(g_waitCalls.load() - calls0 == 5u);   // the fail-fast budget would wait more slices
+    CHECK(!t.isComplete(s));
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    gpuComplete(s);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+  }
+
+  { // 6. concurrent: while the reporter is past termination (parked), another thread's wait and
+    //    the device's drain must not return to their callers: they park, production's way
+    resetHang();
+    { std::lock_guard<std::mutex> l(g_parkMutex); g_parkRelease = false; }
+    auto* t = new SubmissionTracker(0x1u);
+    uint64_t s1 = t->onSubmit(0x2u);
+    uint64_t s2 = t->onSubmit(0x2u);
+    std::atomic<int> returned = { 0 };
+    std::thread reporter([t, s1, &returned] { t->waitFor(s1); returned++; });
+    for (int i = 0; i < 400 && g_terminated.load() == 0; i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(g_terminated.load() == 1);
+    std::thread waiter([t, s2, &returned] { t->waitFor(s2); returned++; });
+    std::thread drain([t, &returned] { t->drainAndStopPump(); returned++; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(returned.load() == 0);          // nobody went back to a caller that would reuse memory
+    CHECK(g_parked.load() == 3);          // reporter, waiter, drain
+    CHECK(g_terminated.load() == 1);      // one report
+    { std::lock_guard<std::mutex> l(g_parkMutex); g_parkRelease = true; }
+    g_parkCond.notify_all();
+    reporter.join(); waiter.join(); drain.join();
+    CHECK(returned.load() == 3);
+    delete t;
+  }
+
+  SubmissionTracker::s_sliceMs = 2000u;
+  SubmissionTracker::s_terminate = nullptr;
+  SubmissionTracker::s_park = nullptr;
+}
+
+// With DXVK_LOG_LEVEL=none the logger writes nothing; the D9MT-GPU-HUNG line must still reach
+// stderr. Run as its own process: submission_tracker_test.exe --log-none (env DXVK_LOG_LEVEL=none).
+// (Windows only: it redirects the stderr handle; a native ThreadSanitizer build leaves it out.)
+#ifdef _WIN32
+static int logNone() {
+  if (dxvk::Logger::logLevel() != dxvk::LogLevel::None) {
+    std::printf("FAIL --log-none needs DXVK_LOG_LEVEL=none\n");
+    return 1;
+  }
+  char path[MAX_PATH];
+  GetTempPathA(MAX_PATH, path);
+  std::strcat(path, "stt-hung-stderr.txt");
+  HANDLE h = CreateFileA(path, GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
+  HANDLE old = GetStdHandle(STD_ERROR_HANDLE);
+  SetStdHandle(STD_ERROR_HANDLE, h);
+  resetHang();
+  SubmissionTracker::s_sliceMs = 20u;
+  SubmissionTracker::s_terminate = observeTerminate;
+  SubmissionTracker::s_park = testPark;
+  {
+    SubmissionTracker t(0x1u);
+    t.waitFor(t.onSubmit(0x2u));
+  }
+  SetStdHandle(STD_ERROR_HANDLE, old);
+  CloseHandle(h);
+  std::string text;
+  if (FILE* f = std::fopen(path, "rb")) {
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+      text.append(buf, n);
+    std::fclose(f);
+  }
+  DeleteFileA(path);
+  CHECK(g_terminated.load() == 1);
+  CHECK(text.find("D9MT-GPU-HUNG: serial") != std::string::npos);
+  std::printf("%s submission_tracker_test --log-none (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail.load());
+  return g_fail ? 1 : 0;
+}
+#endif
+
+int main(int argc, char** argv) {
+#ifdef _WIN32
+  if (argc > 1 && std::strcmp(argv[1], "--log-none") == 0)
+    return logNone();
+#endif
   basics();
   unsubmittedWait();
   signalsWithoutCs();
   manyDue();
   drain();
   stress();
+  gpuHung();
   std::printf("%s submission_tracker_test (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail.load());
   return g_fail ? 1 : 0;
 }

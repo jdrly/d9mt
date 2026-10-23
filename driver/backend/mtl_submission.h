@@ -97,9 +97,29 @@ public:
   // retirements: it runs them in serial order, so fence values only go up.
   void processRetirements(uint64_t completed);
 
+  // Blocks until the GPU is past `serial`, in slices of s_sliceMs. A submitted serial the GPU
+  // doesn't signal for 5 slices it spent submitted means the GPU stopped (a command buffer that
+  // never finishes, cut off by the GPU's timeout: the queue stays dead). Unless
+  // D9MT_GPU_HUNG=continue, that ends the process (hung); from then on no wait on an incomplete
+  // serial returns. A serial still not submitted after 5 slices isn't the GPU's fault: that wait
+  // is given up with an error line, as before.
   void waitFor(uint64_t serial);
 
+  // The GPU stopped (see waitFor). Set once; from then on waits on incomplete serials park and
+  // the context commits nothing more.
+  bool gpuHung() const { return m_gpuHung.load(std::memory_order_acquire); }
+
   void drainAndStopPump();
+
+  // The process's exit code after D9MT-GPU-HUNG.
+  static constexpr unsigned kGpuHungExitCode = 0xD9D9u;
+
+  // Tests only: a shorter slice; an observer called instead of TerminateProcess; and the
+  // parking of a wait after a hang, which by default never returns (a test's may block and then
+  // return, to end the test).
+  static inline uint32_t s_sliceMs = 2000u;
+  static inline void (*s_terminate)(unsigned exitCode) = nullptr;
+  static inline void (*s_park)() = nullptr;
 
 private:
 
@@ -124,9 +144,16 @@ private:
   bool m_stop = false;
   bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
 
+  const bool m_failFast;   // D9MT_GPU_HUNG unset (not "continue")
+  std::atomic<bool> m_gpuHung = { false };
+
   dxvk::thread m_pump;
 
   void pumpThread();
+
+  void hung(uint64_t serial);
+
+  void parkHung();
 
   void runDue(uint64_t completed);  // m_runMutex held
 
