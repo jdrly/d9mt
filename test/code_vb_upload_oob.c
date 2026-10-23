@@ -39,7 +39,7 @@ int main(void) {
   {
     struct V *v = NULL;
     TRY(IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&v, 0));
-    for (int i = 0; i < NV; i++) {   /* vertices 600..701: a fan of triangles across the window */
+    for (int i = 0; i < NV; i++) {   /* the indices use vertices 600..700: a fan of triangles across the window */
       float a = (float)(i % 100) * 3.2f;
       v[i].x = 20.0f + a; v[i].y = (i % 2) ? 40.0f : 200.0f; v[i].z = 0.5f; v[i].rhw = 1.0f;
       v[i].psize = 1.0f; v[i].c = 0xff00c000u;
@@ -60,7 +60,7 @@ int main(void) {
   for (; frames < 5; frames++) {
     TRY(IDirect3DDevice9_BeginScene(dev));
     TRY(IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff202040, 1.0f, 0));
-    /* hint: vertices 600..855 of a 768-vertex buffer; indices: 600..701 */
+    /* hint: vertices 600..855 of a 768-vertex buffer; indices: 600..700 */
     TRY(IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 600, 256, 0, 100));
     TRY(IDirect3DDevice9_EndScene(dev));
     TRY(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL));
