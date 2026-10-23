@@ -7206,6 +7206,10 @@ pso_archive_init(id<MTLDevice> device) {
   if (sv && *sv && strcmp(sv, "0")) {
     fprintf(stderr, "d9mt: PSO archives off: Metal shader validation is on (MTL_SHADER_VALIDATION=%s); "
             "archives neither asked nor written\n", sv);
+    /* Metal 4 reports validation errors through no API; only this switch sends them to stderr
+     * (wine.log). Not BADFOOD/ABORT_ON_FAULT: those end the process at the first report. */
+    if (!getenv("MTL_SHADER_VALIDATION_REPORT_TO_STDERR"))
+      fprintf(stderr, "d9mt: set MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 for shader validation's reports in this log\n");
     return;
   }
   const char *env = getenv("D9MT_PSO_ARCHIVE_DIR");

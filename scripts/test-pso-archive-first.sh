@@ -383,6 +383,9 @@ suite() { # <label>
   d9n=$(deltas "$N9")
   run "$N9" "$1-p9a-val" MT_COVERAGE=0 MTL_SHADER_VALIDATION=1 -- "${SET_A[@]}"
   check "validation: archives off, said so" "$(grep -c 'PSO archives off: Metal shader validation is on' "$OUT/$1-p9a-val.log")" 1
+  check "validation: the stderr hint" "$(grep -c 'set MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1' "$OUT/$1-p9a-val.log")" 1
+  run "$N9" "$1-p9a-val2" MT_COVERAGE=0 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 -- "${SET_A[@]}"
+  check "validation with REPORT_TO_STDERR: no hint" "$(grep -c 'set MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1' "$OUT/$1-p9a-val2.log")" 0
   check "validation: nothing loaded" "$(grep -c 'PSO archives: [0-9]* loaded' "$OUT/$1-p9a-val.log")" 0
   check "validation: nothing written" "$(deltas "$N9")" "$d9n"
   run "$N9" "$1-p9a-after" MT_COVERAGE=0 -- "${SET_A[@]}"
