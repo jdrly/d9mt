@@ -160,6 +160,7 @@ clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp
 clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 clang++ -std=c++17 -I driver/d3d9 test/native/pace_test.cpp -o /tmp/pt && /tmp/pt
 clang++ -std=c++17 -I driver/d3d9 test/native/frame_cap_test.cpp -o /tmp/fct && /tmp/fct
+clang++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I driver/d3d9 test/native/upload_copy_test.cpp -o /tmp/uct && /tmp/uct
 ```
 
 `scripts/test-state-cache.sh` runs the pipeline state cache tests (file
