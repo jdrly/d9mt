@@ -542,6 +542,24 @@ The cap test now runs the walk's cap with `D9MT_PSO_INDEX=0`; with the index the
 
 **Gate:** A3 again (display asleep, psobench-menu2, x4 incl. xb, plus bq/bn): the new phase not measurably slower, steady 0/6 worse.
 
+### 9. A validation session (2026-10-24)
+
+**9a, archives off under Metal shader validation (implemented).**
+- a48a1119's shader-validation check of the game crashed in the PSO thunk (unix call 196, an access violation) and ran with `D9MT_PSO_ARCHIVE=0`.
+- Natively, reproduced by this part's mutation: the bridge without the gate **loads** the existing archives under `MTL_SHADER_VALIDATION=1` ("1 loaded") and then **crashes (SIGSEGV)** when it asks them, the same access violation as in Wine. Apple documents shader validation as incompatible with binary archives (research/metal4-validation.md).
+- An archive **written** under validation didn't load in the same session (archfirst_test `check`: its freshly serialized archive, newArchiveWithURL nil). So a validation session's captures would be deltas of unknown use for the next normal start, and instrumented binaries mustn't reach the shared archives.
+- So with `MTL_SHADER_VALIDATION` set (and not "0"), `pso_archive_init` returns as with `D9MT_PSO_ARCHIVE=0`: nothing loaded, asked, captured or consolidated. One line: `d9mt: PSO archives off: Metal shader validation is on (…); archives neither asked nor written`.
+- Part 8's library hash and key don't run then (no archive first, no serializer).
+- The debug layer (`MTL_DEBUG_LAYER=1`) loads and uses archives fine (archfirst check ok), so no gate for it.
+- Test (first.sh part 9a): a seeded directory, then a run under `MTL_SHADER_VALIDATION=1` → the line, nothing loaded, no delta, no crash. The next normal start: 0 misses.
+- Mutation (the gate off): the validation run crashes (signal 11), its line is missing and the archive is loaded: 3 failures.
+
+**9b, the validation report: on hold.** The probe's first round:
+- **Metal 3:** an out-of-bounds read 64 bytes past a 1000-byte buffer (inside its page) is reported through `MTLCommandBuffer.logs`: one `MTLFunctionLog`, type Validation, the encoder label, the function and the line.
+- **Metal 4 (first round):** the same read was reported through **no** channel the probe tried, though validation is on ("Metal GPU Validation Enabled"): not the commit feedback's error, not an `MTLLogState` handler on the command buffer, not the unified log. That holds with and without `MTL4PipelineOptions.shaderValidation`.
+- MTL4 binds buffers by GPU address through argument tables, so validation may know only allocations, not a binding's logical length.
+- Before any conclusion: Apple's Metal 4 documentation and WWDC25 are being read (research/metal4-validation.md) for what validation needs from an MTL4 binding (a length, a buffer range, a reporting switch). The second probe round (a placement heap: a read through buffer A into the live buffer B after it, mapped memory) will then test exactly that. Until then, the field diagnostic for GPU faults stays part 7 (the PageFault code and GPU times per commit).
+
 ## Order and gates
 
 1. **Part 1** (S1, implemented) and **part 2** (M4 + M5).

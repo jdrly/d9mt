@@ -5944,7 +5944,8 @@ _MTLDevice_newArgumentTable(void *obj) {
  * set. Without it (D9MT_STATE_CACHE=0) archive first and consolidation are
  * off and everything is captured as before: the newest D9MT_PSO_KEEP_SESSIONS
  * sessions are kept (a session's files hold every PSO it used, hits included).
- *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
+ *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture); also under
+ *                                  MTL_SHADER_VALIDATION (part 9a)
  *   D9MT_PSO_ARCHIVE_FIRST=0       archive first and consolidation off
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
  *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs pending before the 60 s backstop counts (default 256)
@@ -7197,6 +7198,16 @@ pso_archive_init(id<MTLDevice> device) {
   const char *off = getenv("D9MT_PSO_ARCHIVE");
   if (off && (!*off || !strcmp(off, "0")))
     return;
+  /* Bundle part 9a: under Metal shader validation, pipelines are instrumented; asking the
+   * archives crashed MTL4Compiler newRenderPipelineState (an access violation, a48a1119,
+   * 2026-10-23), and instrumented binaries mustn't reach archives a normal session loads. A
+   * validation session runs as with D9MT_PSO_ARCHIVE=0: nothing loaded, asked or written. */
+  const char *sv = getenv("MTL_SHADER_VALIDATION");
+  if (sv && *sv && strcmp(sv, "0")) {
+    fprintf(stderr, "d9mt: PSO archives off: Metal shader validation is on (MTL_SHADER_VALIDATION=%s); "
+            "archives neither asked nor written\n", sv);
+    return;
+  }
   const char *env = getenv("D9MT_PSO_ARCHIVE_DIR");
   if (env && (!*env || !strcmp(env, "0")))
     return;

@@ -21,6 +21,8 @@
 #            walk (no false miss), the test hooks' false misses and false hits detected and
 #            still correct, archives without an index walked, a damaged or mismatched index
 #            removed + .verify, a stray index removed, D9MT_PSO_INDEX=0 writes none
+#   part 9a  MTL_SHADER_VALIDATION=1: archives off (the line, nothing loaded or written, no
+#            crash), the next normal start uses them as before
 #   restore  archives copied without their times: the SHA-256 decides (same size, other time),
 #            the sums are rewritten; a byte changed in the copy: deleted
 #   part 5   the flush thread: idle (a delta before exit, the next run all hits); nothing at
@@ -374,6 +376,17 @@ suite() { # <label>
   check "D9MT_PSO_INDEX=0: indexes unused" "$(idxline "$1-p8-offwarm" | sed 's/ (.*//')" "0 of 2 archive(s) indexed"
   check "D9MT_PSO_INDEX=0: no misses (walked)" "$(misses_in "$1-p8-offwarm")" 0
   check "D9MT_PSO_INDEX=0: no index stats" "$(grep -c 'PSO archive index: [0-9]* hits' "$OUT/$1-p8-offwarm.log")" 0
+
+  echo "[pso-first:$1] part 9a: archives off under Metal shader validation"
+  local N9="$OUT/$1-p9a" d9n
+  run "$N9" "$1-p9a-seed" MT_COVERAGE=0 -- "${SET_A[@]}"
+  d9n=$(deltas "$N9")
+  run "$N9" "$1-p9a-val" MT_COVERAGE=0 MTL_SHADER_VALIDATION=1 -- "${SET_A[@]}"
+  check "validation: archives off, said so" "$(grep -c 'PSO archives off: Metal shader validation is on' "$OUT/$1-p9a-val.log")" 1
+  check "validation: nothing loaded" "$(grep -c 'PSO archives: [0-9]* loaded' "$OUT/$1-p9a-val.log")" 0
+  check "validation: nothing written" "$(deltas "$N9")" "$d9n"
+  run "$N9" "$1-p9a-after" MT_COVERAGE=0 -- "${SET_A[@]}"
+  check "after it: the archives as before" "$(misses_in "$1-p9a-after")" 0
 
   echo "[pso-first:$1] R1: state cache off"
   local S="$OUT/$1-r1"; cp -Rp "$W" "$S"
