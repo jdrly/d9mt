@@ -443,6 +443,11 @@ namespace dxvk::backend {
     return s_n;
   }
 
+  static uint64_t canaryNowNs() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+
   // The canary slot of the command buffer being recorded: its offset in the canary buffer,
   // the slot cleared and armed (with reason); ~0 if this command buffer gets no canary (off,
   // no buffer, the slot's previous serial still on the GPU). Armed already: its offset again.
@@ -487,6 +492,7 @@ namespace dxvk::backend {
       offset = 1ull << 40;
     }
     s = { m_currentSerial, m_attFrame, reason, offset };
+    m_canaryGate.armed(canaryNowNs());
     return offset;
   }
 
@@ -496,15 +502,20 @@ namespace dxvk::backend {
   // every later encoder too, so the next command buffer could only start once this one is
   // done (+12 % in a GPU-bound 4K bench). The fill can therefore run before this command
   // buffer's other work ends. Such an encoder costs GPU time of its own (bindbench without
-  // presents, two submits a frame: +2 %), so only every kCanaryEvery-th of these command
-  // buffers gets one: a fault still shows, as the command buffers queued after it are
-  // discarded too and the next present's copy has its canary.
+  // presents, two submits a frame: +2 %; bench_draws present, occluded: +1.5 % with one on
+  // every 4th), so one is armed only on every kCanaryEvery-th of these command buffers, and
+  // only if no canary of any kind was armed for 250 ms (CanaryGate): never while a game
+  // presents, at most one every 250 ms while the presents are skipped. A fault still shows, as
+  // the command buffers queued after it are discarded too and the next present's copy, or the
+  // next own one, has its canary.
   void MtlContextImpl::armCanary() {
     const char* reason = m_submitReason ? m_submitReason : "flush";
     m_submitReason = nullptr;
     if (!canaryEnabled() || (m_canaryBuffer && m_canarySlots[m_currentSerial % kCanarySlots].serial == m_currentSerial))
       return;
     if (m_canaryOwn++ % kCanaryEvery != 0u)
+      return;
+    if (!m_canaryGate.ownDue(canaryNowNs()))
       return;
     const uint64_t offset = canarySlot(reason);
     if (offset == ~0ull)
