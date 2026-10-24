@@ -14,10 +14,19 @@
  *   RESULT n=<frames> fps=<avg> p1/p50/p95/p99=<ms> min/max=<ms> sd=<ms> long=<frames over 1.5x
  *     the median> cpuProc=<process CPU ms per s> cpuMain=<render thread CPU ms per s> ...
  *     p50_ms=<p50, 4 decimals> cpuProcFrame=<process CPU ms per frame>
- *     cpuMainFrame=<render thread CPU ms per frame> cpu_tick_ms=<the process CPU clock's step>
- *     thread_tick_ms=<the thread CPU clock's step>
- *   The CPU clocks' steps are measured at startup (0: no step seen); a CPU time resolves no finer
- *   than one step over the measured interval (cpuProc, cpuMain) or its frames (*Frame).
+ *     cpuMainFrame=<render thread CPU ms per frame> cpu_tick_ms=<the process CPU clock's smallest
+ *     observed step> thread_tick_ms=<the thread CPU clock's> qpc_tick_ns=<the QPC tick>
+ *     measured_frames=<frames in the measured interval> measured_s=<its length>
+ *   Two cohorts: n, fps, avg_ms, the percentiles, sd, long and HIST describe the stored frame
+ *   intervals, the first MAX_FRAMES of the measured interval; cpuProc, cpuMain and the *Frame values
+ *   describe the whole measured interval, measured_frames frames over measured_s (the same frames
+ *   unless the run exceeds MAX_FRAMES).
+ *   Resolution: frame times have the QPC tick, plus their printed rounding (p50 0.01 ms, p50_ms and
+ *   the *Frame values 0.0001 ms). The CPU clocks' steps are observed at startup (0: none observed,
+ *   so unknown, not exact). Each is an upper bound on the clock's granularity, not the granularity
+ *   itself: a fine clock reads as the polling loop's interval. A coarse clock (Wine on macOS: 10 ms
+ *   for the process) shows its tick, and then a CPU time can't resolve less than one tick over
+ *   measured_s (cpuProc, cpuMain) or over measured_frames (*Frame). Neither bounds the other errors.
  *   HIST <ms bin>:<count> ...   (1 ms bins, non-empty only)
  * Not a hash test; one window (scripts/build-benches.sh's BENCH_INCLUDE can place it). */
 #include "t_common.h"
@@ -53,7 +62,7 @@ static void busy(double ms) {
     for (int i = 0; i < 200; i++) x = x * 1664525u + 1013904223u;
 }
 
-/* A CPU clock's step: the smallest change seen while spinning for up to 50 ms. */
+/* A CPU clock's smallest step observed while spinning for up to 50 ms (0: none). */
 static double cpuTickMs(HANDLE h, BOOL thread) {
   const double end = qpcMs() + 50.0;
   double last = cpuMs(h, thread), step = 0.0;
@@ -92,6 +101,9 @@ int main(int argc, char **argv) {
   t_init("bench_fps_cap", 640, 360);
   bench_client_of(t_dev, "bench_fps_cap", 640, 360);
   IDirect3DDevice9_SetVertexShader(t_dev, t_vs_pos);
+  LARGE_INTEGER qpcFreq;
+  QueryPerformanceFrequency(&qpcFreq);
+  const double qpcTickNs = 1e9 / (double)qpcFreq.QuadPart;
   const double procTick = cpuTickMs(GetCurrentProcess(), FALSE);
   const double threadTick = cpuTickMs(GetCurrentThread(), TRUE);
 
@@ -170,11 +182,12 @@ int main(int argc, char **argv) {
   bench_timed_print("bench_fps_cap");
   printf("RESULT n=%d fps=%.2f avg_ms=%.4f p1=%.2f p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f sd=%.3f long=%d"
          " cpuProc=%.0f cpuMain=%.0f vsync=%d cpuWork=%.1f jitter=%.1f quads=%d gameCap=%.0f"
-         " p50_ms=%.4f cpuProcFrame=%.4f cpuMainFrame=%.4f cpu_tick_ms=%.4f thread_tick_ms=%.4f\n",
+         " p50_ms=%.4f cpuProcFrame=%.4f cpuMainFrame=%.4f cpu_tick_ms=%.4f thread_tick_ms=%.4f"
+         " qpc_tick_ns=%.1f measured_frames=%d measured_s=%.3f\n",
          n, 1000.0 / mean, mean, n ? pct(s, n, 1.0) : 0.0, p50, n ? pct(s, n, 95.0) : 0.0,
          n ? pct(s, n, 99.0) : 0.0, n ? s[0] : 0.0, n ? s[n - 1] : 0.0, sd, longFrames, cpuP, cpuM,
          vsync, cpuWork, jitter, quads, gameCap, p50, frames ? cpuPTotal / frames : 0.0,
-         frames ? cpuMTotal / frames : 0.0, procTick, threadTick);
+         frames ? cpuMTotal / frames : 0.0, procTick, threadTick, qpcTickNs, frames, wall);
 
   /* 1 ms bins */
   printf("HIST");
