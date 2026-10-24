@@ -10,7 +10,17 @@
  * depends on drawable availability:
  *
  *   BENCH draws=1000 frames=600 loop_ns_per_draw=... proc_cpu_ns_per_draw=...
- *         frame_median_ms=... frame_p99_ms=...
+ *         frame_median_ms=... frame_p99_ms=... frame_median_ns=... frame_mean_ms=...
+ *         cpu_tick_ms=... qpc_tick_ns=...
+ *
+ * frame_median_ns is frame_median_ms in whole ns: its resolution is the QPC tick (qpc_tick_ns, from
+ * QueryPerformanceFrequency) or 1 ns of rounding, whichever is coarser; frame_mean_ms is the mean
+ * over the measured frames (0.0001 ms of rounding). cpu_tick_ms is the smallest step of the process
+ * CPU clock observed at startup (0: none observed, so unknown, not exact). It is an upper bound on
+ * the clock's granularity, not the granularity itself: a fine clock reads as the polling loop's
+ * interval. A coarse clock (Wine on macOS: 10 ms ticks) shows its tick, and then
+ * proc_cpu_ns_per_draw can't resolve less than that tick over frames * draws. Neither bounds the
+ * measurement's other errors.
  *
  * With "flush", each frame ends with an event query instead of Present,
  * polled with D3DGETDATA_FLUSH every 20 us (a QPC busy-wait in between, so
@@ -56,6 +66,25 @@ static ULONGLONG process_cpu_100ns(void) {
   GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
   return (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime)
        + (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
+}
+
+/* The smallest step of the process CPU clock observed while spinning for up to 50 ms (0: none). */
+static double cpu_tick_ms(void) {
+  LARGE_INTEGER freq, t0, t;
+  ULONGLONG last = process_cpu_100ns(), step = 0;
+  int changes = 0;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&t0);
+  do {
+    ULONGLONG now = process_cpu_100ns();
+    if (now != last) {
+      if (now > last && (!step || now - last < step)) step = now - last;
+      last = now;
+      changes++;
+    }
+    QueryPerformanceCounter(&t);
+  } while (changes < 8 && (t.QuadPart - t0.QuadPart) * 20 < freq.QuadPart);
+  return (double)step / 10000.0;
 }
 
 int main(int argc, char **argv) {
@@ -127,6 +156,7 @@ int main(int argc, char **argv) {
   IDirect3DDevice9_SetPixelShader(dev, ps);
   IDirect3DDevice9_SetStreamSource(dev, 0, vb, 0, sizeof(struct Vertex));
 
+  const double tick = cpu_tick_ms();
   ms = calloc(frames, sizeof(double));
   loop = calloc(frames, sizeof(double));
   QueryPerformanceFrequency(&freq);
@@ -173,12 +203,16 @@ int main(int argc, char **argv) {
     }
   }
   cpu1 = process_cpu_100ns();
+  double sum = 0.0;
+  for (f = 0; f < frames; f++) sum += ms[f];
   qsort(ms, frames, sizeof(double), cmp_double);
   qsort(loop, frames, sizeof(double), cmp_double);
   bench_timed_print("bench_draws");
-  printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f\n",
+  printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f"
+         " frame_median_ns=%.0f frame_mean_ms=%.4f cpu_tick_ms=%.4f qpc_tick_ns=%.1f\n",
          flush ? "flush" : spinflush ? "spinflush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
-         ms[frames / 2], ms[frames * 99 / 100]);
+         ms[frames / 2], ms[frames * 99 / 100], ms[frames / 2] * 1e6, sum / frames, tick,
+         1e9 / (double)freq.QuadPart);
   fflush(stdout);
   IDirect3DDevice9_Release(dev);
   IDirect3D9_Release(d3d);
