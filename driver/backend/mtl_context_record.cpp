@@ -515,8 +515,10 @@ namespace dxvk::backend {
   // 250 ms (CanaryGate): none in a game that presents, and otherwise the next eligible submit
   // after those 250 ms, as long as submissions continue.
   // The trade-off (mtl_canary_gate.h): without presents, a fault whose discarded command
-  // buffers all fall between two of these samples isn't reported; a freeze or a burst longer
-  // than the spacing is. And without present marks, "no mark of 64" (Failed) takes 16 s or more.
+  // buffers all fall between two of these samples isn't reported; a burst longer than the
+  // spacing is, once a sampled command buffer of it completes (a queue that never completes
+  // again shows no LOST line; #53's D9MT-GPU-HUNG covers that on main). And without present
+  // marks, "no mark of 64" (Failed) takes 16 s or more.
   void MtlContextImpl::armCanary() {
     const char* reason = m_submitReason ? m_submitReason : "flush";
     m_submitReason = nullptr;
