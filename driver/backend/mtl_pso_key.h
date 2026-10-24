@@ -69,9 +69,30 @@ namespace dxvk::backend {
 
   struct PsoVertexLayout {
     uint16_t stride = 0u;
-    uint8_t  stepFunction = 0u;
+    uint8_t  stepFunction = 0u;   // psoStepFunction()
     uint8_t  pad = 0u;   // the Metal buffer index (kVertexBufferBaseIndex + stream)
   };
+
+  /// PsoVertexLayout::stepFunction: 0 constant (every vertex and instance reads element 0),
+  /// 1 per vertex, 2..255 per instance with a step rate of the value - 1. 1 and 2 are the
+  /// values before #60, so their state cache entries stay valid.
+  constexpr uint32_t kPsoStepConstant  = 0u;
+  constexpr uint32_t kPsoStepPerVertex = 1u;
+  constexpr uint32_t kPsoMaxStepRate   = 254u;
+
+  /// A stream's step function. A bound stride of 0 (D3D9 stride 0, an unbound stream, the
+  /// null stream) is constant: stepping it would walk past the one element there is. An
+  /// instance divisor of 0 is constant too; one above kPsoMaxStepRate falls back to
+  /// constant (bounded, but instances from the divisor on read element 0).
+  inline uint8_t psoStepFunction(uint32_t boundStride, bool perInstance, uint32_t divisor) {
+    if (!boundStride)
+      return uint8_t(kPsoStepConstant);
+    if (!perInstance)
+      return uint8_t(kPsoStepPerVertex);
+    if (!divisor || divisor > kPsoMaxStepRate)
+      return uint8_t(kPsoStepConstant);
+    return uint8_t(divisor + 1u);
+  }
 
   struct PsoColorAttachment {
     uint32_t pixelFormat = 0u;
@@ -162,6 +183,10 @@ namespace dxvk::backend {
   ///    vertex shaders with packed input declarations.
   /// 4: topologyClass and the depth/stencil formats are always 0 and the padding is explicit:
   ///    one pipeline was up to three keys (triangles, lines, points) and three entries.
+  /// Not bumped by #60: the step function byte gained values (0, 3..255) and kept 1 and 2, so
+  /// every older entry still builds the pipeline it recorded. Older entries of stride-0 and
+  /// unbound streams are no longer requested (their state now keys as constant): a prewarm
+  /// builds them once and nothing draws with them.
   constexpr uint32_t kPsoKeyMappingVersion = 4u;
 
   /// Metal buffer indices of vertex streams: kVertexBufferBaseIndex (3) +
@@ -234,7 +259,8 @@ namespace dxvk::backend {
    * Metal terminates the process on invalid descriptors. Every check is an
    * invariant of the draw path: counts within the arrays, vertex formats
    * from attributeFormat(), buffer indices 3..19, every attribute's buffer
-   * with a layout of nonzero stride, render target formats from the D3D9
+   * with a layout of nonzero stride (any step function byte: psoStepFunction()
+   * uses all 256 values), render target formats from the D3D9
    * format table, blending only on blendable formats, blend factors/ops and
    * write masks in range, 1/2/4/8 samples, no depth/stencil format (internal
    * pipelines only). why: a static string naming the first failed check.
@@ -260,8 +286,6 @@ namespace dxvk::backend {
         return fail("layout buffer index");
       if (!l.stride)
         return fail("layout stride");
-      if (l.stepFunction != 1u && l.stepFunction != 2u)
-        return fail("layout step function");
       for (uint32_t j = 0u; j < i; j++) {
         if (k.layouts[j].pad == l.pad)
           return fail("layout buffer index twice");
