@@ -1822,6 +1822,7 @@ namespace dxvk::backend {
       return;
     m_vertexAttrs.assign(attrs, attrs + nAttr);
     m_vertexLayouts.assign(layouts, layouts + nLayout);
+    m_drawLimitsDirty = true;
     m_psoGenDirty |= PsoGenLayout;
     m_dirty |= DirtyPso;
   }
@@ -1907,6 +1908,7 @@ namespace dxvk::backend {
     }
     stream.slice = std::move(slice);
     stream.stride = stride;
+    m_drawLimitsDirty = true;
     m_dirtyVertexStreams |= 1u << binding;
     m_dirty |= DirtyVertexBuffers;
   }
@@ -1922,6 +1924,7 @@ namespace dxvk::backend {
     stream.slice = MtlBufferSlice(stream.slice.buffer(), stream.slice.storage(),
                                   offset, length);
     stream.stride = stride;
+    m_drawLimitsDirty = true;
     m_dirtyVertexStreams |= 1u << binding;
     m_dirty |= DirtyVertexBuffers;
   }
@@ -2043,19 +2046,41 @@ namespace dxvk::backend {
     return true;
   }
 
+  void MtlContextImpl::updateDrawLimits() {
+    m_drawLimitsDirty = false;
+    m_drawLimits = { };
+    for (const MtlVertexLayout& l : m_vertexLayouts) {
+      if (l.binding >= m_vertexStreams.size())
+        continue;   // the null stream: constant
+      const VertexStream& s = m_vertexStreams[l.binding];
+      drawbounds::Stream d;
+      d.length       = s.slice.defined() ? s.slice.length() : 0u;
+      d.stride       = s.stride;
+      d.vertexSize   = l.stride;
+      d.stepFunction = psoStepFunction(s.stride, l.perInstance, l.divisor);
+      drawbounds::add(m_drawLimits, d);
+    }
+  }
+
   void MtlContextImpl::draw(uint32_t count, const MtlDrawArgs* args) {
     if (!prepareDraw())
       return;
     prof::Scope profScope(prof::EncodeDraw);
+    if (unlikely(m_drawLimitsDirty))
+      updateDrawLimits();
+    const drawbounds::Limits limits = m_drawLimits;
     if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
       if (!ensureFanIndices())
         return;
       if (m_fanIndices->trackingSerial() != m_currentSerial)
         m_fanIndices->setTrackingSerial(m_currentSerial);
       for (uint32_t i = 0; i < count; i++) {
-        if (args[i].vertexCount < 3u)
+        const uint32_t vertexCount = drawbounds::clamp(args[i].firstVertex, args[i].vertexCount, limits.vertices);
+        const uint32_t instances   = drawbounds::clamp(args[i].firstInstance,
+          args[i].instanceCount ? args[i].instanceCount : 1u, limits.instances);
+        if (vertexCount < 3u || !instances)
           continue;
-        const uint32_t verts = std::min(args[i].vertexCount, kFanMaxVerts);
+        const uint32_t verts = std::min(vertexCount, kFanMaxVerts);
         auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw_indexed>(
           uint16_t(WMTMtl4RenderCommandDrawIndexed));
         cmd->primitive           = uint64_t(WMTPrimitiveTypeTriangle);
@@ -2063,19 +2088,24 @@ namespace dxvk::backend {
         cmd->index_type          = uint64_t(WMTIndexTypeUInt32);
         cmd->index_buffer        = m_fanIndices->gpuAddress(0u);
         cmd->index_buffer_length = m_fanIndices->size;
-        cmd->instance_count      = args[i].instanceCount ? args[i].instanceCount : 1u;
+        cmd->instance_count      = instances;
         cmd->base_vertex         = int64_t(args[i].firstVertex);
         cmd->base_instance       = args[i].firstInstance;
       }
       return;
     }
     for (uint32_t i = 0; i < count; i++) {
+      const uint32_t vertexCount = drawbounds::clamp(args[i].firstVertex, args[i].vertexCount, limits.vertices);
+      const uint32_t instances   = drawbounds::clamp(args[i].firstInstance,
+        args[i].instanceCount ? args[i].instanceCount : 1u, limits.instances);
+      if (unlikely(!vertexCount || !instances))
+        continue;
       auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_draw>(
         uint16_t(WMTMtl4RenderCommandDraw));
       cmd->primitive      = uint64_t(wmtPrimitive(m_topology));
       cmd->vertex_start   = args[i].firstVertex;
-      cmd->vertex_count   = args[i].vertexCount;
-      cmd->instance_count = args[i].instanceCount ? args[i].instanceCount : 1u;
+      cmd->vertex_count   = vertexCount;
+      cmd->instance_count = instances;
       cmd->base_instance  = args[i].firstInstance;
     }
   }
@@ -2099,8 +2129,16 @@ namespace dxvk::backend {
     const uint64_t idxSize = (m_indexType == MtlIndexType::Uint16) ? 2u : 4u;
     const WMTIndexType idxType = (m_indexType == MtlIndexType::Uint16)
       ? WMTIndexTypeUInt16 : WMTIndexTypeUInt32;
+    // Only the instance count: the vertices come from the indices, which only the GPU reads.
+    if (unlikely(m_drawLimitsDirty))
+      updateDrawLimits();
+    const uint32_t instanceLimit = m_drawLimits.instances;
 
     for (uint32_t i = 0; i < count; i++) {
+      const uint32_t instances = drawbounds::clamp(args[i].firstInstance,
+        args[i].instanceCount ? args[i].instanceCount : 1u, instanceLimit);
+      if (unlikely(!instances))
+        continue;
       uint64_t indexOffset = uint64_t(args[i].firstIndex) * idxSize;
       uint64_t gpuAddr     = m_indexBuffer.gpuAddress(indexOffset);
       uint64_t accessible  = m_indexBuffer.addressableLength(indexOffset);
@@ -2111,7 +2149,7 @@ namespace dxvk::backend {
       cmd->index_type          = uint64_t(idxType);
       cmd->index_buffer        = gpuAddr;
       cmd->index_buffer_length = accessible;
-      cmd->instance_count      = args[i].instanceCount ? args[i].instanceCount : 1u;
+      cmd->instance_count      = instances;
       cmd->base_vertex         = int64_t(args[i].vertexOffset);
       cmd->base_instance       = args[i].firstInstance;
     }
