@@ -23,10 +23,13 @@ namespace dxvk::backend {
    *    eligible submit, as long as submissions continue (no later work: no later mark).
    *
    * The trade-off, accepted for a diagnostic that only logs: a GPU fault discards the faulting
-   * command buffer and those queued after it. A freeze, or a discarded burst longer than the
-   * spacing, still reaches a sampled command buffer and is reported. A burst whose discarded
-   * command buffers all fall between two samples (no presents; it ends and the GPU recovers
-   * before the next mark) isn't. A game that presents samples every frame, by copy or not.
+   * command buffer and those queued after it. The canary reports a sampled command buffer that
+   * completes with its mark missing (checkCanaries needs completion progress). A discarded
+   * burst longer than the spacing reaches such a command buffer and is reported once it
+   * completes; one whose discarded command buffers all fall between two samples (no presents;
+   * it ends and the GPU recovers before the next mark) isn't. A game that presents samples
+   * every frame, by copy or not. A queue that never completes again (a hang) gives no LOST
+   * line at all: main ends the process then (#53, D9MT-GPU-HUNG); a build without #53 stalls.
    */
   class CanaryGate {
 
