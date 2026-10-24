@@ -3825,12 +3825,14 @@ _MetalDrawable_texture(void *obj) {
 
 /* MTL_SHADER_VALIDATION set and not "0": a validation session (bundle parts 9a/9b). Read once. */
 static bool d9mt_shader_validation(void) {
-  static int cached = -1;
-  if (cached < 0) {
+  static _Atomic int cached = -1;   /* atomic: compile threads ask it concurrently (TSan) */
+  int c = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (c < 0) {
     const char *v = getenv("MTL_SHADER_VALIDATION");
-    cached = v && *v && strcmp(v, "0") ? 1 : 0;
+    c = v && *v && strcmp(v, "0") ? 1 : 0;
+    atomic_store_explicit(&cached, c, memory_order_relaxed);
   }
-  return cached;
+  return c;
 }
 
 /* Bundle part 9b: a validation session's labels. Metal 4 shader validation reports a fault on
@@ -3841,12 +3843,14 @@ static bool d9mt_shader_validation(void) {
 static _Atomic unsigned long g_val_encoders;
 
 static int d9mt_wsilog_enabled(void) {
-  static int cached = -1;
-  if (cached < 0) {
+  static _Atomic int cached = -1;   /* atomic: asked from several threads */
+  int c = atomic_load_explicit(&cached, memory_order_relaxed);
+  if (c < 0) {
     const char *v = getenv("D9MT_WSILOG");
-    cached = (v && v[0] == '1') ? 1 : 0;
+    c = (v && v[0] == '1') ? 1 : 0;
+    atomic_store_explicit(&cached, c, memory_order_relaxed);
   }
-  return cached;
+  return c;
 }
 #define D9MT_WSILOG(fmt, ...) do { \
     if (d9mt_wsilog_enabled()) \
