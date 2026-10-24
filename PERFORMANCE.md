@@ -51,8 +51,9 @@ and what a release candidate is checked for. What isn't in this repository yet i
 - **Every variant under the same path and environment**: a process's speed can depend on the
   length of its path and environment (its memory layout). A byte-identical copy of a DLL ran 6 %
   faster than the original in every round of a bindbench run, under a variant name one character
-  longer (#65). `scripts/perf-abba.sh` therefore runs every variant from one directory, with
-  its caches under a fixed-length id. Switches set per variant (`--env`) should be set on every
+  longer (#65). `scripts/perf-abba.sh` therefore runs every variant from one directory and, under
+  Wine, with its caches under a fixed-length id (`scripts/test-perf-abba.sh` checks both, without
+  Wine). That covers the harness, not every layout effect. Switches set per variant (`--env`) should be set on every
   variant, with values of the same length (`D9MT_GPU_CANARY=0` on one, `=1` on the others).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
@@ -135,14 +136,22 @@ same pair of variants can read faster in one window and slower in the next. **Lo
 values for two clusters before reading a median**; small differences on a bimodal benchmark need
 many more rounds.
 
-**bench_fps_cap's fps with real presents is mostly a stall count.** Uncapped with vsync off, a
-run's rate is set by how many drawable stalls of ~18 ms it gets (in one quiet window `long=` ranged
-from 45 to 672 of ~3000 frames, its correlation with fps −0.996). Runs fall into a fast and a slow
-mode by time, not by variant. Variants with no behaviour difference differ by about ±1 % paired even
-within one mode, so its fps can't resolve the 0.25 % rule. Read a present-path cost from the
-stall-free frame time `p50` and the CPU time `cpuProc`/`cpuMain`, paired and per mode, and state
-their printed resolution next to the A/A spread (`p50` in 0.01 ms, about 0.37 % of a 2.7 ms frame;
-`cpuProc` in whole ms per second).
+**bench_fps_cap's fps can be set by stalls, not by the work per frame.** In the maintainer's
+runs (bench_fps_cap, 15 s, uncapped with vsync off, no CPU work or game cap, presenting to a
+visible window on the virtual display), a run's fps followed its number of long frames (`long=`)
+almost exactly. Runs fell into a fast and a slow mode by time, not by variant, and variants with
+no behaviour difference still differed by more than the 0.25 % rule paired within one mode. That
+is one configuration: CPU work, GPU load or the bench's own game cap can set the rate instead.
+In such a run:
+- Don't read a present-path cost from fps alone. Equal fps under a pacing limit (vsync, a cap,
+  the display's refresh) only shows that the pacing is unchanged.
+- Compare the CPU time per frame: `cpuProc` and `cpuMain` are CPU milliseconds per wall-clock
+  second, so divide each by the run's fps. A different stall rate moves fps and the CPU per second
+  without changing the cost per frame.
+- `p50` is the median frame interval. It includes the CPU work and the waits, so it isn't
+  stall-free and isn't the present's cost on its own; compare it paired and within one mode.
+- State each value's printed resolution next to the A/A spread: `p50` in 0.01 ms, `cpuProc` and
+  `cpuMain` in whole ms per second. A difference below either is unresolved, not zero.
 
 _The maintainer's measurements behind §2.4 and §2.5 are not public._
 

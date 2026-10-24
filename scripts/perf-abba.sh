@@ -54,11 +54,13 @@
 # under Wine, only this WORK prefix's server) before it exits.
 #
 # Nothing outside WORK is written; the DLLs, the bench and the engine are only read and executed.
-# Every variant runs from the same directory ($WORK/abba/run): its d3d9.dll (with --native, its
-# program, as run/native-program) is copied in right before each of its runs, so the process's path
-# doesn't depend on the variant's name. Each variant gets its own AIR cache and PSO archives (warm
-# after its first run) under caches/<8 hex digits of its name's sha256>, a fixed length; the state
-# cache is off. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
+# Every variant runs from the same directory ($WORK/abba/run, WORK made absolute): its d3d9.dll
+# (with --native, its program, as run/native-program) is copied in right before each of its runs,
+# so the process's working directory and path don't depend on the variant's name. Under Wine, each
+# variant gets its own AIR cache and PSO archives (warm after its first run) under caches/<8 hex
+# digits of its name's sha256>, a fixed length, so the environment doesn't either; the state cache
+# is off. --native sets no cache variables (only the --env ones).
+# scripts/test-perf-abba.sh checks this without Wine. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
 # asleep unless the bench needs it awake.
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -126,6 +128,8 @@ else
 fi
 case "$TAG" in ''|*[!A-Za-z0-9._-]*) die "tag '$TAG': letters, digits, . _ - only" ;; esac
 
+mkdir -p "$WORK" || die "can't create $WORK"
+WORK="$(cd "$WORK" && pwd)" || die "can't enter $WORK"   # absolute: the runs cd into $RUN
 A="$WORK/abba"
 mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs"
 OUT="$WORK/results/$TAG-$(date +%Y%m%d-%H%M%S)-$$.txt"
@@ -179,12 +183,14 @@ mkdir -p "$RUN" || die "can't create $RUN"
 [ "$NATIVE" = 1 ] || cp "$EXE" "$RUN/" || die "can't copy $EXE into $RUN"
 cid() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
 CIDS=()
-for i in "${!NAMES[@]}"; do
-  c=$(cid "${NAMES[$i]}")
-  for o in ${CIDS[@]+"${CIDS[@]}"}; do [ "$o" != "$c" ] || die "variants ${NAMES[$i]} and another share cache id $c: rename one"; done
-  CIDS+=("$c")
-  [ "$NATIVE" = 1 ] || mkdir -p "$A/caches/$c/pso" || die "can't create $A/caches/$c"
-done
+if [ "$NATIVE" = 0 ]; then
+  for i in "${!NAMES[@]}"; do
+    c=$(cid "${NAMES[$i]}")
+    for o in ${CIDS[@]+"${CIDS[@]}"}; do [ "$o" != "$c" ] || die "variants ${NAMES[$i]} and another share cache id $c: rename one"; done
+    CIDS+=("$c")
+    mkdir -p "$A/caches/$c/pso" || die "can't create $A/caches/$c"
+  done
+fi
 # put <variant index>'s binary into the run directory (a temporary name, then a rename)
 place() {
   local i=$1
@@ -196,7 +202,7 @@ place() {
 }
 
 echo "# $WHAT $* rounds=$ROUNDS variants=${NAMES[*]} ref=$REF${CONTROL:+ control=$CONTROL} $(date '+%F %T')" > "$OUT" || die "can't write $OUT"
-for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16)) cache=${CIDS[$i]}" >> "$OUT"; done
+for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16))${CIDS[$i]+ cache=${CIDS[$i]}}" >> "$OUT"; done
 echo "#   run directory: $RUN (every variant)" >> "$OUT"
 echo "perf-abba: results in $OUT"
 OWN=$([ "$NATIVE" = 1 ] && echo 0 || echo 1)
