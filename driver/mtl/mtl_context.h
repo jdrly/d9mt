@@ -34,6 +34,12 @@ namespace dxvk {
     };
     uint8_t             abTableIndex = 21u;
     std::vector<AbWord> abWords;
+    // The kind of each argument-table texture slot the shader declares: 0 2D, 1 cube, 2 3D,
+    // NoTextureDim when it declares none or has no reflection (the fixed-function shaders).
+    // An unbound slot gets the null texture of its kind (#62).
+    static constexpr uint8_t NoTextureDim = 0xFFu;
+    std::array<uint8_t, 16> textureDim = { { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } };
 
     // Set at creation for functions compiled asynchronously (never changed
     // afterwards); every other field is only valid once task->isDone().
