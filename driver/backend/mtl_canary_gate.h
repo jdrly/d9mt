@@ -5,18 +5,28 @@
 namespace dxvk::backend {
 
   /**
-   * \brief When a command buffer without a present copy gets a GPU canary encoder of its own
+   * \brief When a command buffer that doesn't present gets a GPU canary encoder of its own
    *
    * The present copy into the drawable carries the canary fill in its own encoder, so a game
-   * that presents arms a canary every frame at no extra cost. A command buffer without one
-   * (a mid-frame flush, or every one while the presents are skipped: an occluded window, a
-   * benchmark) needs an encoder of its own, which costs GPU and CPU time (bench_draws present,
-   * one command buffer a frame: +1.5 % with one on every 4th, RC health pass 0.1.4).
+   * that presents by copy arms a canary every frame at no extra cost. A command buffer without
+   * that canary needs an encoder of its own, which costs GPU and CPU time (bench_draws present,
+   * occluded, one command buffer a frame: +1.5 % with one on every 4th, RC health pass 0.1.4).
    *
-   * So such a command buffer gets one only if no canary of any kind was armed for kOwnGapNs:
-   * none in a presenting game, at most one every 250 ms otherwise. A GPU fault discards the
-   * faulting command buffer and those queued after it, so the next present's canary or the
-   * next own one (within 250 ms) still reports it.
+   * A command buffer that presents without the copy's canary (a scaled blit, MetalFX) gets one
+   * every time, so every presented frame carries a canary (MtlContextImpl::armCanary). One that
+   * doesn't present (a mid-frame flush, or every one while the presents are skipped: an
+   * occluded window, a benchmark) gets one on every 4th, and only once no canary of any kind
+   * was armed for kOwnGapNs. So:
+   *  - in a game that presents: none (every presented frame carries a canary);
+   *  - otherwise: the next eligible (every-4th) submit after those 250 ms. 250 ms is the
+   *    minimum spacing, not the maximum delay: that is 250 ms plus the time to the next
+   *    eligible submit, as long as submissions continue (no later work: no later mark).
+   *
+   * The trade-off, accepted for a diagnostic that only logs: a GPU fault discards the faulting
+   * command buffer and those queued after it. A freeze, or a discarded burst longer than the
+   * spacing, still reaches a sampled command buffer and is reported. A burst whose discarded
+   * command buffers all fall between two samples (no presents; it ends and the GPU recovers
+   * before the next mark) isn't. A game that presents samples every frame, by copy or not.
    */
   class CanaryGate {
 

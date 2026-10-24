@@ -503,20 +503,31 @@ namespace dxvk::backend {
   // done (+12 % in a GPU-bound 4K bench). The fill can therefore run before this command
   // buffer's other work ends. Such an encoder costs GPU time of its own (bindbench without
   // presents, two submits a frame: +2 %; bench_draws present, occluded: +1.5 % with one on
-  // every 4th), so one is armed only on every kCanaryEvery-th of these command buffers, and
-  // only if no canary of any kind was armed for 250 ms (CanaryGate): never while a game
-  // presents, at most one every 250 ms while the presents are skipped. A fault still shows, as
-  // the command buffers queued after it are discarded too and the next present's copy, or the
-  // next own one, has its canary.
+  // every 4th). A command buffer that presents without the copy's canary (a scaled blit,
+  // MetalFX) gets one every time: every presented frame carries a canary, as a copy present's
+  // does (at most one tiny encoder a frame, in games whose window isn't the back buffer's size).
+  // One that doesn't present (a mid-frame flush, or every one while the presents are skipped)
+  // gets one only on every kCanaryEvery-th, and only once no canary of any kind was armed for
+  // 250 ms (CanaryGate): none in a game that presents, and otherwise the next eligible submit
+  // after those 250 ms, as long as submissions continue.
+  // The trade-off (mtl_canary_gate.h): without presents, a fault whose discarded command
+  // buffers all fall between two of these samples isn't reported; a freeze or a burst longer
+  // than the spacing is. And without present marks, "no mark of 64" (Failed) takes 16 s or more.
   void MtlContextImpl::armCanary() {
     const char* reason = m_submitReason ? m_submitReason : "flush";
     m_submitReason = nullptr;
-    if (!canaryEnabled() || (m_canaryBuffer && m_canarySlots[m_currentSerial % kCanarySlots].serial == m_currentSerial))
+    const bool presents = m_cmdbufPresents;
+    m_cmdbufPresents = false;
+    if (!canaryEnabled() || m_canaryState == CanaryState::Failed
+     || (m_canaryBuffer && m_canarySlots[m_currentSerial % kCanarySlots].serial == m_currentSerial))
       return;
-    if (m_canaryOwn++ % kCanaryEvery != 0u)
-      return;
-    if (!m_canaryGate.ownDue(canaryNowNs()))
-      return;
+    // A scaled or MetalFX present: every presented frame carries a canary, as a copy's does.
+    if (!presents) {
+      if (m_canaryOwn++ % kCanaryEvery != 0u)
+        return;
+      if (!m_canaryGate.ownDue(canaryNowNs()))
+        return;
+    }
     const uint64_t offset = canarySlot(reason);
     if (offset == ~0ull)
       return;
@@ -647,6 +658,7 @@ namespace dxvk::backend {
       closePass();
     }
     ensureCommandBuffer();
+    m_cmdbufPresents = true;
 
     MTL4CommandQueue_waitForDrawable(m_device->wmtQueue(), sync.drawable);
     m_submitReason = "present";

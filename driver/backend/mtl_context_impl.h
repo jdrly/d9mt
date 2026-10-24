@@ -384,8 +384,8 @@ namespace dxvk::backend {
     // as D9MT-GPU-LOST in wine.log.
     static constexpr uint32_t kCanarySlots = 512u;
     static constexpr uint64_t kCanaryFilled = 0xa5a5a5a5a5a5a5a5ull;
-    // command buffers without a present copy: a canary encoder of their own on every 4th, and
-    // only if no canary was armed for CanaryGate::kOwnGapNs (mtl_canary_gate.h)
+    // command buffers without a present copy: a canary encoder of their own on every 4th; one
+    // that doesn't present either also waits for CanaryGate (mtl_canary_gate.h)
     static constexpr uint32_t kCanaryEvery = 4u;
     struct CanarySlot {
       uint64_t    serial = 0u;  // armed for this serial, 0 = not armed
@@ -407,6 +407,7 @@ namespace dxvk::backend {
     uint64_t    m_canaryArmed   = 0u;  // D9MT_GPU_CANARY_TEST_FAULT's count
     uint32_t    m_canaryOwn     = 0u;  // command buffers that could have had an encoder of their own
     CanaryGate  m_canaryGate;          // when the last canary of any kind was armed
+    bool        m_cmdbufPresents = false;  // the command buffer being recorded presents (synchronizeWsi)
     const char* m_submitReason  = nullptr;
 
     static constexpr uint32_t kVisSlots = 65536u;
