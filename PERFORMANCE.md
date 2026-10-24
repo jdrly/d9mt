@@ -48,6 +48,12 @@ and what a release candidate is checked for. What isn't in this repository yet i
   `AdjustWindowRect` of their own. Every bench prints `CLIENT <bench> WxH`;
   `scripts/perf-abba.sh` records it as `client=`, and `scripts/perf-compare.py` warns on a
   mismatch (#52).
+- **Every variant under the same path and environment**: a process's speed can depend on the
+  length of its path and environment (its memory layout). A byte-identical copy of a DLL ran 6 %
+  faster than the original in every round of a bindbench run, under a variant name one character
+  longer (#65). `scripts/perf-abba.sh` therefore runs every variant from one directory, with
+  its caches under a fixed-length id. Switches set per variant (`--env`) should be set on every
+  variant, with values of the same length (`D9MT_GPU_CANARY=0` on one, `=1` on the others).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
   on that. Record each variant's source commit next to its binary.
@@ -128,6 +134,15 @@ Some benchmarks land in two modes: bindbench settles into one of two frame times
 same pair of variants can read faster in one window and slower in the next. **Look at the per-run
 values for two clusters before reading a median**; small differences on a bimodal benchmark need
 many more rounds.
+
+**bench_fps_cap's fps with real presents is mostly a stall count.** Uncapped with vsync off, a
+run's rate is set by how many drawable stalls of ~18 ms it gets (in one quiet window `long=` ranged
+from 45 to 672 of ~3000 frames, its correlation with fps −0.996). Runs fall into a fast and a slow
+mode by time, not by variant. Variants with no behaviour difference differ by about ±1 % paired even
+within one mode, so its fps can't resolve the 0.25 % rule. Read a present-path cost from the
+stall-free frame time `p50` and the CPU time `cpuProc`/`cpuMain`, paired and per mode, and state
+their printed resolution next to the A/A spread (`p50` in 0.01 ms, about 0.37 % of a 2.7 ms frame;
+`cpuProc` in whole ms per second).
 
 _The maintainer's measurements behind §2.4 and §2.5 are not public._
 

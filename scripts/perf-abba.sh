@@ -54,7 +54,10 @@
 # under Wine, only this WORK prefix's server) before it exits.
 #
 # Nothing outside WORK is written; the DLLs, the bench and the engine are only read and executed.
-# Each variant gets its own AIR cache and PSO archives (warm after its first run); the state
+# Every variant runs from the same directory ($WORK/abba/run): its d3d9.dll (with --native, its
+# program, as run/native-program) is copied in right before each of its runs, so the process's path
+# doesn't depend on the variant's name. Each variant gets its own AIR cache and PSO archives (warm
+# after its first run) under caches/<8 hex digits of its name's sha256>, a fixed length; the state
 # cache is off. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
 # asleep unless the bench needs it awake.
 set -uo pipefail
@@ -167,15 +170,34 @@ if [ "$NATIVE" = 0 ]; then
     CHILD=""
     "$WINESERVER" -w
   fi
-  for i in "${!NAMES[@]}"; do
-    d="$A/bin-${NAMES[$i]}"
-    mkdir -p "$d" "$A/caches/${NAMES[$i]}/pso" || die "can't create $d"
-    cp "${DLLS[$i]}" "$d/d3d9.dll" && cp "$EXE" "$d/" || die "can't copy into $d"
-  done
 fi
+# Every variant runs from one directory, its DLL (or native program) copied in right before its run,
+# and its caches live under a fixed-length id: a process's speed can depend on the length of its
+# path and environment (#65: a byte-identical copy ran 6 % faster under a name one character longer).
+RUN="$A/run"
+mkdir -p "$RUN" || die "can't create $RUN"
+[ "$NATIVE" = 1 ] || cp "$EXE" "$RUN/" || die "can't copy $EXE into $RUN"
+cid() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
+CIDS=()
+for i in "${!NAMES[@]}"; do
+  c=$(cid "${NAMES[$i]}")
+  for o in ${CIDS[@]+"${CIDS[@]}"}; do [ "$o" != "$c" ] || die "variants ${NAMES[$i]} and another share cache id $c: rename one"; done
+  CIDS+=("$c")
+  [ "$NATIVE" = 1 ] || mkdir -p "$A/caches/$c/pso" || die "can't create $A/caches/$c"
+done
+# put <variant index>'s binary into the run directory (a temporary name, then a rename)
+place() {
+  local i=$1
+  if [ "$NATIVE" = 1 ]; then
+    cp -p "${DLLS[$i]}" "$RUN/.prog.tmp" && mv -f "$RUN/.prog.tmp" "$RUN/native-program"
+  else
+    cp "${DLLS[$i]}" "$RUN/.d3d9.tmp" && mv -f "$RUN/.d3d9.tmp" "$RUN/d3d9.dll"
+  fi
+}
 
 echo "# $WHAT $* rounds=$ROUNDS variants=${NAMES[*]} ref=$REF${CONTROL:+ control=$CONTROL} $(date '+%F %T')" > "$OUT" || die "can't write $OUT"
-for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16))" >> "$OUT"; done
+for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16)) cache=${CIDS[$i]}" >> "$OUT"; done
+echo "#   run directory: $RUN (every variant)" >> "$OUT"
 echo "perf-abba: results in $OUT"
 OWN=$([ "$NATIVE" = 1 ] && echo 0 || echo 1)
 n=${#NAMES[@]} fails=0
@@ -185,16 +207,17 @@ for r in $(seq "$ROUNDS"); do
     log="$A/logs/$TAG-$$-$v-$r.err"
     load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
     stop_own
+    place "$i" || die "can't put ${NAMES[$i]}'s binary into $RUN"
     dirty=""; [ "$(servers)" -gt 0 ] && dirty=1   # before the launch: nothing of ours runs
     (
       for e in ${ENVS[@]+"${ENVS[@]}"}; do [ "${e%%:*}" = "$v" ] && export "${e#*:}"; done
+      cd "$RUN" || exit 125
       if [ "$NATIVE" = 1 ]; then
-        exec ${RUN_WRAPPER:-} "${DLLS[$i]}" "$@"
+        exec ${RUN_WRAPPER:-} "$RUN/native-program" "$@"
       fi
       export WINEDLLOVERRIDES="d3d9=n,b"
-      export D9MT_AIR_CACHE="$A/caches/$v/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$A/caches/$v/pso"
+      export D9MT_AIR_CACHE="$A/caches/${CIDS[$i]}/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$A/caches/${CIDS[$i]}/pso"
       export D9MT_STATE_CACHE=0 D9MT_BG_FPS=0 D9MT_STALL_PACE=0
-      cd "$A/bin-$v" || exit 125
       exec ${RUN_WRAPPER:-} "$WINE" "$NAME_EXE" "$@"
     ) > "$A/out" 2> "$log" &
     CHILD=$! t=0
