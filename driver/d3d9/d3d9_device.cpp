@@ -15,6 +15,7 @@
 #include "d3d9_monitor.h"
 #include "d3d9_names.h"
 #include "d3d9_format_helpers.h"
+#include "d3d9_upload_copy.h"
 
 #include "../mtl/mtl_device.h"
 
@@ -5550,16 +5551,8 @@ namespace dxvk {
       vertexBuffersToUpload = 0;
 
 
-    struct VBOCopy {
-      uint32_t srcOffset;
-      uint32_t dstOffset;
-      uint32_t copyBufferLength;
-      uint32_t copyElementCount;
-      uint32_t copyElementSize;
-      uint32_t copyElementStride;
-    };
     uint32_t totalUpBufferSize = 0;
-    std::array<VBOCopy, caps::MaxStreams> vboCopies = {};
+    std::array<D3D9VboCopy, caps::MaxStreams> vboCopies = {};
 
     for (uint32_t i : bit::BitMask(vertexBuffersToUpload)) {
       auto* vbo = GetCommonBuffer(m_state.vertexBuffers[i].vertexBuffer);
@@ -5586,21 +5579,8 @@ namespace dxvk {
       const uint32_t vertexBufferSize = vbo->Desc()->Size;
       const uint32_t srcOffset = vboOffset + vertexOffset;
 
-      if (unlikely(srcOffset > vertexBufferSize)) {
-        vboCopies[i].copyBufferLength = 0;
-      } else if (unlikely(srcOffset + elementCount * srcStride > vertexBufferSize)) {
-        uint32_t boundVertexBufferRange = vertexBufferSize - vboOffset;
-        elementCount = boundVertexBufferRange / srcStride;
-        vboCopies[i].copyBufferLength = elementCount * dstStride;
-        vboCopies[i].copyBufferLength += std::min(dstStride, boundVertexBufferRange % srcStride);
-      } else {
-        vboCopies[i].copyBufferLength = elementCount * dstStride;
-      }
-
-      vboCopies[i].copyElementCount = elementCount;
-      vboCopies[i].copyElementStride = srcStride;
-      vboCopies[i].copyElementSize = dstStride;
-      vboCopies[i].srcOffset = srcOffset;
+      // at most up to the buffer's end, measured from the first vertex (d3d9_upload_copy.h, #56)
+      d3d9ClampVboCopy(vboCopies[i], srcOffset, elementCount, srcStride, dstStride, vertexBufferSize);
       vboCopies[i].dstOffset = totalUpBufferSize;
       totalUpBufferSize += vboCopies[i].copyBufferLength;
     }
@@ -5633,26 +5613,13 @@ namespace dxvk {
 
     if (dynamicSysmemVBOs) {
       for (uint32_t i : bit::BitMask(vertexBuffersToUpload)) {
-        const VBOCopy& copy = vboCopies[i];
+        const D3D9VboCopy& copy = vboCopies[i];
 
         if (likely(copy.copyBufferLength != 0)) {
           const auto* vbo = GetCommonBuffer(m_state.vertexBuffers[i].vertexBuffer);
           uint8_t* data = reinterpret_cast<uint8_t*>(upSlice.mapPtr) + copy.dstOffset;
           const uint8_t* src = reinterpret_cast<uint8_t*>(vbo->GetMappedSlice()->mapPtr) + copy.srcOffset;
-
-          if (likely(copy.copyElementStride == copy.copyElementSize)) {
-            std::memcpy(data, src, copy.copyBufferLength);
-          } else {
-            for (uint32_t j = 0; j < copy.copyElementCount; j++) {
-              std::memcpy(data + j * copy.copyElementSize, src + j * copy.copyElementStride, copy.copyElementSize);
-            }
-            if (unlikely(copy.copyBufferLength > copy.copyElementCount * copy.copyElementSize)) {
-              std::memcpy(
-                data + copy.copyElementCount * copy.copyElementSize,
-                src + copy.copyElementCount * copy.copyElementStride,
-                copy.copyBufferLength - copy.copyElementCount * copy.copyElementSize);
-            }
-          }
+          d3d9CopyVbo(data, src, copy);
         }
 
         auto vboSlice = upSlice.slice.subSlice(copy.dstOffset, copy.copyBufferLength);
