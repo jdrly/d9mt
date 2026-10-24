@@ -11,6 +11,7 @@ namespace dxvk {
       fn->cbvSlotMap[i] = (i < map.slot.size()) ? map.slot[i] : int8_t(-1);
 
     fn->abTableIndex = map.abTableIndex;
+    fn->textureDim   = map.textureDim;
     fn->abWords.clear();
     if (map.abUsed) {
       fn->abWords.reserve(map.abWords.size());
@@ -25,6 +26,7 @@ namespace dxvk {
     dst->entryName    = src->entryName;
     dst->cbvSlotMap   = src->cbvSlotMap;
     dst->abTableIndex = src->abTableIndex;
+    dst->textureDim   = src->textureDim;
     dst->abWords      = src->abWords;
   }
 
