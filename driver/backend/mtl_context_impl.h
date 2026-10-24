@@ -384,8 +384,9 @@ namespace dxvk::backend {
     // as D9MT-GPU-LOST in wine.log.
     static constexpr uint32_t kCanarySlots = 512u;
     static constexpr uint64_t kCanaryFilled = 0xa5a5a5a5a5a5a5a5ull;
-    // command buffers without a present copy: a canary encoder of their own on every 4th; one
-    // that doesn't present either also waits for CanaryGate (mtl_canary_gate.h)
+    // a present copy carries the canary; a command buffer that presents otherwise (a scaled
+    // blit, MetalFX) gets a canary encoder of its own every time; one that doesn't present gets
+    // one on every 4th, and only once CanaryGate allows it (mtl_canary_gate.h)
     static constexpr uint32_t kCanaryEvery = 4u;
     struct CanarySlot {
       uint64_t    serial = 0u;  // armed for this serial, 0 = not armed
