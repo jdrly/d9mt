@@ -334,6 +334,13 @@ compile_one() {
   local src="$1" obj="$2"; shift 2
   "$MINGW" "${FLAGS[@]}" "$@" -MMD -MP -MF "$obj.d" -c "$src" -o "$obj"
 }
+# wait_batch <pid>...: wait for every compile of a batch; nonzero when any of them failed. A
+# single `wait <pid>...` returns only the last pid's status.
+wait_batch() {
+  local p rc=0
+  for p in "$@"; do wait "$p" || rc=1; done
+  return "$rc"
+}
 # The compile flags are a dependency too (-D switches such as STATE_CACHE_TESTING, -O, the
 # compiler): a hash of them in $OBJ/.flags; when it changes, every object is stale. Written
 # once all objects compiled, so a failed build with new flags stays all-stale.
@@ -374,10 +381,10 @@ for src in "${CORE[@]}"; do
   if stale "$obj" "$src"; then
     echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
     compile_one "$src" "$obj" $pflag & PIDS+=($!)
-    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
+    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait_batch "${PIDS[@]}" || RC=1; PIDS=(); fi
   fi
 done
-[ "${#PIDS[@]}" -gt 0 ] && { wait "${PIDS[@]}" || RC=1; }
+[ "${#PIDS[@]}" -gt 0 ] && { wait_batch "${PIDS[@]}" || RC=1; }
 [ "$RC" -eq 0 ] || { echo "FATAL: CORE compile failed" >&2; exit 1; }
 
 # sha1.c — the C SHA-1 core backing Sha1Hash (referenced by config.cpp). Compiled
@@ -468,10 +475,10 @@ while IFS= read -r f; do
   SM3_OBJS+=("$o")
   if stale "$o" "$f"; then
     "$MINGW" "${FLAGS[@]}" -MMD -MP -MF "$o.d" -c "$f" -o "$o" & SM3_PIDS+=($!)
-    if [ "${#SM3_PIDS[@]}" -ge "$JOBS" ]; then wait "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
+    if [ "${#SM3_PIDS[@]}" -ge "$JOBS" ]; then wait_batch "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
   fi
 done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
-[ "${#SM3_PIDS[@]}" -gt 0 ] && { wait "${SM3_PIDS[@]}" || SM3_RC=1; }
+[ "${#SM3_PIDS[@]}" -gt 0 ] && { wait_batch "${SM3_PIDS[@]}" || SM3_RC=1; }
 [ "$SM3_RC" -eq 0 ] || { echo "FATAL: libdxbcsm3 compile failed" >&2; exit 1; }
 printf '%s\n' "$FLAGS_HASH" > "$OBJ/.flags"
 rm -f "$DXBCSM3_LIB"

@@ -42,8 +42,17 @@ SRCS=(
   "$V2"/air/*.cpp
 )
 
+# wait_batch <pid>...: wait for every compile of a batch; nonzero when any of them failed. A
+# single `wait <pid>...` returns only the last pid's status.
+wait_batch() {
+  local p rc=0
+  for p in "$@"; do wait "$p" || rc=1; done
+  return "$rc"
+}
+
 OBJS=()
 PIDS=()
+RC=0
 for src in "${SRCS[@]}"; do
   obj="$OBJ/$(echo "${src#$V2/}" | tr '/' '_').o"
   OBJS+=("$obj")
@@ -54,10 +63,11 @@ for src in "${SRCS[@]}"; do
       *)       $CXX "${COMMON_FLAGS[@]}" -c "$src" -o "$obj" & ;;
     esac
     PIDS+=($!)
-    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait "${PIDS[@]}"; PIDS=(); fi
+    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait_batch "${PIDS[@]}" || RC=1; PIDS=(); fi
   fi
 done
-[ "${#PIDS[@]}" -gt 0 ] && wait "${PIDS[@]}"
+[ "${#PIDS[@]}" -gt 0 ] && { wait_batch "${PIDS[@]}" || RC=1; }
+[ "$RC" -eq 0 ] || { echo "FATAL: air compiler compile failed" >&2; exit 1; }
 
 echo "[link] air_compiler"
 # llvm-config prints a list of flags: split into words on purpose.
