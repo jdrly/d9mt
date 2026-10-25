@@ -11,6 +11,9 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 DX="$V2/third_party/dxbc-spirv"
 BUILD="$V2/build/air-compiler"
 OBJ="$BUILD/obj"
+# D9MT_JOBS: the most compiles running at once; 1 compiles one TU at a time.
+JOBS="${D9MT_JOBS:-10}"
+[[ "$JOBS" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "FATAL: D9MT_JOBS must be a whole number from 1 to 999, not '$JOBS'" >&2; exit 1; }
 mkdir -p "$OBJ"
 
 LLVM_CONFIG="${LLVM_CONFIG:-/opt/homebrew/opt/llvm@15/bin/llvm-config}"
@@ -51,12 +54,14 @@ for src in "${SRCS[@]}"; do
       *)       $CXX "${COMMON_FLAGS[@]}" -c "$src" -o "$obj" & ;;
     esac
     PIDS+=($!)
-    if [ "${#PIDS[@]}" -ge 10 ]; then wait "${PIDS[@]}"; PIDS=(); fi
+    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait "${PIDS[@]}"; PIDS=(); fi
   fi
 done
 [ "${#PIDS[@]}" -gt 0 ] && wait "${PIDS[@]}"
 
 echo "[link] air_compiler"
+# llvm-config prints a list of flags: split into words on purpose.
+# shellcheck disable=SC2046
 $CXX "${COMMON_FLAGS[@]}" $LLVM_CXXFLAGS \
   "$V2/air/tools/air_compiler.cpp" \
   "${OBJS[@]}" \

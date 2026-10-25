@@ -124,6 +124,10 @@ ARCH=x86 scripts/build-driver.sh
   `xcodebuild -downloadComponent MetalToolchain` once. If `xcode-select`
   points at the Command Line Tools, the script falls back to
   `/Applications/Xcode.app`.
+- `D9MT_JOBS=<n>` (1–999) is the most compiles `build-driver.sh` and
+  `build-air-compiler.sh` run at once (default 12 and 10); `D9MT_JOBS=1`
+  compiles one file at a time and needs the least memory. The compiles and
+  the link order are the same for any value (`scripts/test-build-jobs.sh`).
 - `build-bridge.sh` ends with a smoke test that needs reference metallibs
   from `scripts/build-air-compiler.sh` (Homebrew `llvm@15` and a SPIRV-Cross
   checkout in `third_party/SPIRV-Cross`). Without them the test is skipped;

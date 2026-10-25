@@ -25,6 +25,10 @@ if [ "$ARCH" = x64 ]; then
 else
   BUILD="$V2/build/driver"; MINGW_PREFIX=i686-w64-mingw32
 fi
+# D9MT_JOBS: the most compiles running at once (both batch loops below); 1 compiles one TU at a
+# time, for a build that must stay within a memory budget.
+JOBS="${D9MT_JOBS:-12}"
+[[ "$JOBS" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "FATAL: D9MT_JOBS must be a whole number from 1 to 999, not '$JOBS'" >&2; exit 1; }
 OBJ="$BUILD/obj"
 mkdir -p "$OBJ"
 # Every embedded metallib comes in two builds: one for the SDK's newest Metal language (MSL
@@ -186,7 +190,7 @@ command -v "$MINGW" >/dev/null || { echo "FATAL: need $MINGW" >&2; exit 1; }
 # -fno-strict-aliasing: the PE<->unix boundary structs and wmtcmd stream do
 # type punning that -O2's aliasing assumptions would otherwise miscompile.
 # -ffile-prefix-map: no absolute build paths in __FILE__/asserts or debug info.
-FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g -ffile-prefix-map="$V2"=. -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
+FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g "-ffile-prefix-map=$V2=." -DDXVK_WSI_WIN32 -Wno-unused-parameter -msse -msse2 -mfpmath=sse)
 # STATE_CACHE_TESTING=1: a test build of the pipeline state cache (fault injection and
 # D9MT_STATE_CACHE_TEST_* switches, docs/state-cache.md); never for release.
 [ "${STATE_CACHE_TESTING:-0}" = 1 ] && FLAGS+=(-DD9MT_STATE_CACHE_TESTING) && echo "=== [driver] STATE_CACHE_TESTING=1: test build ==="
@@ -370,7 +374,7 @@ for src in "${CORE[@]}"; do
   if stale "$obj" "$src"; then
     echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
     compile_one "$src" "$obj" $pflag & PIDS+=($!)
-    if [ "${#PIDS[@]}" -ge 12 ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
+    if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait "${PIDS[@]}" || RC=1; PIDS=(); fi
   fi
 done
 [ "${#PIDS[@]}" -gt 0 ] && { wait "${PIDS[@]}" || RC=1; }
@@ -464,7 +468,7 @@ while IFS= read -r f; do
   SM3_OBJS+=("$o")
   if stale "$o" "$f"; then
     "$MINGW" "${FLAGS[@]}" -MMD -MP -MF "$o.d" -c "$f" -o "$o" & SM3_PIDS+=($!)
-    if [ "${#SM3_PIDS[@]}" -ge 12 ]; then wait "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
+    if [ "${#SM3_PIDS[@]}" -ge "$JOBS" ]; then wait "${SM3_PIDS[@]}" || SM3_RC=1; SM3_PIDS=(); fi
   fi
 done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
 [ "${#SM3_PIDS[@]}" -gt 0 ] && { wait "${SM3_PIDS[@]}" || SM3_RC=1; }
