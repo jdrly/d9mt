@@ -11,7 +11,13 @@
 #      reached), and every compile's argv (as a set), the ordered archive/link/run steps and stdout
 #      equal the reference's;
 #   3. invalid values (0, 08, -1, abc, 1.5, " 2", 1000, a 20-digit number): the script exits
-#      nonzero with a D9MT_JOBS message before running any tool.
+#      nonzero with a D9MT_JOBS message before running any tool;
+#   4. one compile fails (#87) in each of the three batch loops (driver core, libdxbcsm3, air
+#      compiler), with D9MT_JOBS unset, 1 and 2: the third compile of the loop (in the middle of a
+#      batch, not its last), and with D9MT_JOBS unset also the first of the last, partial batch.
+#      The build exits nonzero with the loop's "compile failed" message as stderr's last line,
+#      writes no .flags and runs none of the reference's archive/link/run steps from the loop's
+#      own archive or link on.
 #   scripts/test-build-jobs.sh [base ref (default origin/main)] [ref under test (default: this tree)]
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,9 +32,10 @@ bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 mkdir -p "$T/bin"
 cat > "$T/bin/stub" <<'EOF'
 #!/bin/bash
-name=${0##*/} out= prev= compile=0
+name=${0##*/} out= src= prev= compile=0
 for a in "$@"; do
   { [ "$prev" = -o ] || { [ "$prev" = -l ] && [ "$name" != "${name%-dlltool}" ]; }; } && out=$a
+  [ "$prev" = -c ] && src=$a
   [ "$a" = -c ] && compile=1
   prev=$a
 done
@@ -48,6 +55,8 @@ if [ "$compile" = 1 ]; then
   echo "$n|$name $(printf '%q ' "$@")" > "$(mktemp "$REC/cc/XXXXXX")"
   sleep 0.2
   rm -f "$REC/running/$$"
+  # FAIL: the path suffix of the one source whose compile fails, like a compiler's error
+  if [ -n "$FAIL" ] && [ "$src" != "${src%/"$FAIL"}" ]; then echo "$src:1:1: error: stand-in failure" >&2; exit 1; fi
   : > "$out"
   exit 0
 fi
@@ -85,17 +94,19 @@ variant() {  # <ref, or empty for this tree>: put its build scripts into the fix
   done
 }
 
-# run <out> <script> [D9MT_JOBS value]: a fresh build/ and record; <out>/{rc,stdout,stderr,cc,seq,max}
+# run <out> <script> [D9MT_JOBS value]: a fresh build/ and record; <out>/{rc,stdout,stderr,cc,seq,max,
+# flags}. FAIL (a source's path suffix) makes that compile fail.
 run() {
   local out="$1" s="$2"; shift 2
   rm -rf "$F/build" "$T/rec"; mkdir -p "$T/rec/running" "$T/rec/cc" "$out"; : > "$T/rec/seq"
-  env -i HOME="$HOME" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" REC="$T/rec" ARCH=x64 \
+  env -i HOME="$HOME" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" REC="$T/rec" FAIL="${FAIL:-}" ARCH=x64 \
     LLVM_CONFIG="$T/bin/llvm-config" ${1+D9MT_JOBS="$1"} \
     "$BASH" "$F/scripts/$s" > "$out/stdout" 2> "$out/stderr"
   echo $? > "$out/rc"
   cat "$T/rec/cc"/* 2>/dev/null | cut -d'|' -f2- | LC_ALL=C sort > "$out/cc"
   { cat "$T/rec/cc"/* 2>/dev/null | cut -d'|' -f1; echo 0; } | sort -n | tail -1 > "$out/max"
   cp "$T/rec/seq" "$out/seq"
+  find "$F/build" -name .flags > "$out/flags" 2>/dev/null
 }
 
 variant "$BASE"
@@ -127,6 +138,40 @@ for s in build-driver.sh build-air-compiler.sh; do
     if [ "$(cat "$o/rc")" != 0 ] && grep -q D9MT_JOBS "$o/stderr" && [ ! -s "$o/cc" ] && [ ! -s "$o/seq" ]; then
       ok "$s D9MT_JOBS='$v': stops before any tool runs ($(head -1 "$o/stderr"))"
     else bad "$s D9MT_JOBS='$v': stops before any tool runs (exit $(cat "$o/rc"), $(wc -l < "$o/cc" | tr -d ' ') compiles)"; fi
+  done
+done
+
+# A failed compile in each batch loop (#87). Each loop's sources in compile order: the driver core's
+# from the reference's [cc] lines (without sha1.c, compiled after the loop), libdxbcsm3's as the
+# script lists them (it prints no [cc] lines), the air compiler's from its [cc] lines.
+for loop in core sm3 air; do
+  case "$loop" in
+    core) s=build-driver.sh def=12 msg="FATAL: CORE compile failed" next=libdriver_core.a
+          srcs=$(awk '/CORE compile/ {on = 1} /archive libdriver_core.a/ {on = 0} on && /^\[cc\] / {print "driver/" substr($0, 6)}' \
+                   "$T/out/$s/base/stdout" | grep -vx driver/util/sha1/sha1.c) ;;
+    sm3)  s=build-driver.sh def=12 msg="FATAL: libdxbcsm3 compile failed" next=libdxbcsm3.a
+          srcs=$(cd "$F" && find -L third_party/dxbc-spirv/sm3 third_party/dxbc-spirv/ir third_party/dxbc-spirv/util -name '*.cpp' | LC_ALL=C sort) ;;
+    *)    s=build-air-compiler.sh def=10 msg="FATAL: air compiler compile failed" next=air_compiler
+          srcs=$(sed -n 's/^\[cc\] //p' "$T/out/$s/base/stdout") ;;
+  esac
+  ref="$T/out/$s/base" n=$(printf '%s\n' "$srcs" | wc -l | tr -d ' ')
+  # the reference's steps before the loop's own archive or link: all a failed build may run
+  awk -v p="$next" 'index($0, p) {exit} {print}' "$ref/seq" > "$T/expect"
+  for j in unset 1 2; do
+    case "$j" in unset) cap=$def ;; *) cap=$j ;; esac
+    ps=3; [ "$j" = unset ] && [ $((n % cap)) -ge 2 ] && ps="3 $((n - n % cap + 1))"
+    for p in $ps; do
+      fsrc=$(printf '%s\n' "$srcs" | sed -n "${p}p") o="$T/out/$s/fail"
+      if [ "$j" = unset ]; then FAIL=$fsrc run "$o" "$s"; else FAIL=$fsrc run "$o" "$s" "$j"; fi
+      what="$s $loop D9MT_JOBS=$j: compile $p of $n (${fsrc#*/}, batch $(( (p - 1) / cap + 1 )) of $(( (n + cap - 1) / cap ))) fails"
+      last=$(tail -1 "$o/stderr") why=
+      [ "$(cat "$o/rc")" != 0 ] || why+=", exit 0"
+      [ "$last" = "$msg" ] || why+=", stderr ends '$last'"
+      [ ! -s "$o/flags" ] || why+=", .flags written"
+      cmp -s "$T/expect" "$o/seq" || why+=", $(wc -l < "$o/seq" | tr -d ' ') archive/link/run steps, $(wc -l < "$T/expect" | tr -d ' ') expected"
+      if [ -z "$why" ]; then ok "$what: stops with '$msg', no .flags, no archive or link"
+      else bad "$what: stops with '$msg', no .flags, no archive or link (${why#, })"; fi
+    done
   done
 done
 
