@@ -126,11 +126,15 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
 - **Before it starts**, every build and correctness job has finished, and the window is verified
   quiet for 20 s: the display **asleep** for CPU benchmarks (class Q) or **awake and unlocked** for
   present benchmarks (class Q+D, `--present`), no Wine, virtual display or compiler that the job
-  doesn't own, the 1-minute load below 4 and the other processes' CPU below half a core. A
-  benchmark submitted while the window isn't quiet waits and says why.
-- **During the block**, foreign Wine, a compiler, other processes' CPU, or a display or session
-  change makes the **whole block invalid** (it stops, and nothing of it counts), where
-  `perf-abba.sh`'s own DIRTY mark only drops one run. A game launch stops it too.
+  doesn't own, the 1-minute load below 4, and below half a core of CPU in the user's other
+  processes. That CPU is sampled from the processes the runner can read (the user's own, not the
+  system's daemons, which only the load shows). A benchmark submitted while the window isn't
+  quiet waits and says why.
+- **During the block**, foreign Wine, a compiler, the user's other processes above half a core
+  (sampled every 5 s), or a change of the class's display state makes the **whole block
+  invalid** (it stops, and nothing of it counts), where `perf-abba.sh`'s own DIRTY mark only drops
+  one run. The display state is per class: for Q the display waking, for Q+D the display sleeping
+  or the session locking. A game launch stops it too.
 - **The runner adds nothing of variable length** to a run's arguments, environment or paths: two
   variables of fixed width (a job id of 8 digits and the queue's root), plus the class. The
   workspace's fixtures run this script through it and check that every variant sees the same
