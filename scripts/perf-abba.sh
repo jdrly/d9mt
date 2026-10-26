@@ -59,7 +59,9 @@
 # so the process's working directory and path don't depend on the variant's name. Under Wine, each
 # variant gets its own AIR cache and PSO archives (warm after its first run) under caches/<8 hex
 # digits of its name's sha256>, a fixed length, so the environment doesn't either; the state cache
-# is off. --native sets no cache variables (only the --env ones).
+# is off. --native sets no cache variables (only the --env ones). Each run's stderr (fd 2) goes to
+# logs/<tag>-<pid, 5 digits>-<the variant's 8-hex id>-<round, zero-padded>.err, a fixed length for
+# every variant and round of one call; the results header names each variant's id (cache= or id=).
 # scripts/test-perf-abba.sh checks this without Wine. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
 # asleep unless the bench needs it awake.
 set -uo pipefail
@@ -182,15 +184,21 @@ RUN="$A/run"
 mkdir -p "$RUN" || die "can't create $RUN"
 [ "$NATIVE" = 1 ] || cp "$EXE" "$RUN/" || die "can't copy $EXE into $RUN"
 cid() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
-CIDS=()
-if [ "$NATIVE" = 0 ]; then
-  for i in "${!NAMES[@]}"; do
-    c=$(cid "${NAMES[$i]}")
-    for o in ${CIDS[@]+"${CIDS[@]}"}; do [ "$o" != "$c" ] || die "variants ${NAMES[$i]} and another share cache id $c: rename one"; done
+# IDS: each variant's fixed-length id (its stderr logs, and under Wine its caches); CIDS: the cache
+# ids, the same values, Wine only
+IDS=() CIDS=()
+for i in "${!NAMES[@]}"; do
+  c=$(cid "${NAMES[$i]}")
+  for o in ${IDS[@]+"${IDS[@]}"}; do [ "$o" != "$c" ] || die "variants ${NAMES[$i]} and another share id $c: rename one"; done
+  IDS+=("$c")
+  if [ "$NATIVE" = 0 ]; then
     CIDS+=("$c")
     mkdir -p "$A/caches/$c/pso" || die "can't create $A/caches/$c"
-  done
-fi
+  fi
+done
+# Each run's stderr log has a fixed-length name too (#71): the call's pid padded to 5 digits, the
+# variant's id, and the round padded to the width of --rounds.
+PID5=$(printf '%05d' $$) RW=${#ROUNDS}
 # put <variant index>'s binary into the run directory (a temporary name, then a rename)
 place() {
   local i=$1
@@ -202,15 +210,20 @@ place() {
 }
 
 echo "# $WHAT $* rounds=$ROUNDS variants=${NAMES[*]} ref=$REF${CONTROL:+ control=$CONTROL} $(date '+%F %T')" > "$OUT" || die "can't write $OUT"
-for i in "${!NAMES[@]}"; do echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16))${CIDS[$i]+ cache=${CIDS[$i]}}" >> "$OUT"; done
+for i in "${!NAMES[@]}"; do
+  if [ "$NATIVE" = 1 ]; then idf="id=${IDS[$i]}"; else idf="cache=${CIDS[$i]}"; fi
+  echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16)) $idf" >> "$OUT"
+done
 echo "#   run directory: $RUN (every variant)" >> "$OUT"
+if [ "$NATIVE" = 1 ]; then idf="<id>"; else idf="<cache id>"; fi
+echo "#   stderr logs: $A/logs/$TAG-$PID5-$idf-<round %0${RW}d>.err" >> "$OUT"
 echo "perf-abba: results in $OUT"
 OWN=$([ "$NATIVE" = 1 ] && echo 0 || echo 1)
 n=${#NAMES[@]} fails=0
 for r in $(seq "$ROUNDS"); do
   for k in $(seq 0 $((n - 1))); do
     i=$(( (k + r) % n )); v=${NAMES[$i]}
-    log="$A/logs/$TAG-$$-$v-$r.err"
+    log="$A/logs/$TAG-$PID5-${IDS[$i]}-$(printf '%0*d' "$RW" "$r").err"
     load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
     stop_own
     place "$i" || die "can't put ${NAMES[$i]}'s binary into $RUN"

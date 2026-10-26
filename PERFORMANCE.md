@@ -52,8 +52,10 @@ and what a release candidate is checked for. What isn't in this repository yet i
   length of its path and environment (its memory layout). A byte-identical copy of a DLL ran 6 %
   faster than the original in every round of a bindbench run, under a variant name one character
   longer (#65). `scripts/perf-abba.sh` therefore runs every variant from one directory and, under
-  Wine, with its caches under a fixed-length id (`scripts/test-perf-abba.sh` checks both, without
-  Wine). That covers the harness, not every layout effect. Switches set per variant (`--env`) should be set on every
+  Wine, with its caches under a fixed-length id, and gives each run's stderr log a name of fixed
+  length (#71: `logs/<tag>-<pid, 5 digits>-<id>-<round, zero-padded>.err`; the results header
+  names each variant's id). `scripts/test-perf-abba.sh` checks all three without Wine. That
+  covers the harness, not every layout effect. Switches set per variant (`--env`) should be set on every
   variant, with values of the same length (`D9MT_GPU_CANARY=0` on one, `=1` on the others).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
@@ -105,6 +107,43 @@ D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh
 - For a virtual display, build the benches with `BENCH_INCLUDE=<header>` and wrap the whole
   `perf-abba.sh` call in the display tool (`scripts/build-benches.sh`, `scripts/perf-abba.sh`).
   A virtual display can vanish when the physical display is forced to sleep during a run (#43).
+
+#### Through the maintainer's job runner (`job Q`)
+
+On the maintainer's Mac, benchmarks don't start by hand: each `perf-abba.sh` call is one job of
+class **Q** of the workspace's test runner (not part of this repository), so the machine checks the
+conditions of §2.1 instead of a person:
+
+```bash
+D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
+  <workspace>/tools/job/runner/adapters/timing.sh abba <new run dir> -- \
+  --variant base=… --variant basecopy=… --variant fix=… --control basecopy --rounds 10 bindbench 1060
+```
+
+- **One call is one block of paired rounds:** the whole rotation runs under one admission and
+  one observer, the same for every variant. Rounds are never cut to meet a deadline: a block that
+  runs out of time ends without a result.
+- **Before it starts**, every build and correctness job has finished, and the window is verified
+  quiet for 20 s: the display **asleep** for CPU benchmarks (class Q) or **awake and unlocked** for
+  present benchmarks (class Q+D, `--present`), no Wine, virtual display or compiler that the job
+  doesn't own, the 1-minute load below 4, and below half a core of CPU in the user's other
+  processes. That CPU is sampled from the processes the runner can read (the user's own, not the
+  system's daemons, which only the load shows). A benchmark submitted while the window isn't
+  quiet waits and says why.
+- **During the block**, foreign Wine, a compiler, the user's other processes above half a core
+  (sampled every 5 s), or a change of the class's display state makes the **whole block
+  invalid** (it stops, and nothing of it counts), where `perf-abba.sh`'s own DIRTY mark only drops
+  one run. The display state is per class: for Q the display waking, for Q+D the display sleeping
+  or the session locking. A game launch stops it too.
+- **The runner adds nothing of variable length** to a run's arguments, environment or paths: two
+  variables of fixed width (a job id of 8 digits and the queue's root), plus the class. The
+  workspace's fixtures run this script through it and check that every variant sees the same
+  working directory, arguments, environment shape and stderr path length.
+- **Cleanup** is the runner's: the job's processes and, under Wine, only `WORK`'s prefix
+  (`wineserver -k`/`-w`), by exact identity, never by name.
+- _Open:_ whether the runner's own sampling (its process table every 0.5 s, a memory sampler)
+  biases an A/A is measured by a quiet A/A and a reverse-order window with and without it; until
+  then that observer is an unmeasured condition of runs made through it.
 
 ### 2.4 Controls
 
