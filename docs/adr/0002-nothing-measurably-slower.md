@@ -50,8 +50,9 @@ layout.
   run on the Mac meanwhile.
 - A fix whose cost can't be removed waits until it can; “just measure it” isn't enough.
 - Layout effects are judged per release, not per commit.
-- Where the method can't resolve 0.25 % on a bench, a comparison of two different binaries there
-  stays unresolved and goes to a council. That costs benchmark windows and review rounds, and it
+- A comparison the method can't resolve stays unresolved and goes to a council, also when the
+  bench itself can't resolve 0.25 % yet. A cost the method does establish across blocks still
+  takes the established-cost path. The council costs benchmark windows and review rounds, and it
   can hold a correct fix back until the method improves.
 
 ## Alternatives considered

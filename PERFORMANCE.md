@@ -171,8 +171,9 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
   (GPT-6.1-Sol among them) work on it alone, debate it and write one result for the maintainer.
   It isn't held without a word, and it isn't read as free (the maintainer, 2026-10-27).
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
-  `-falign-functions=64`. If the gap disappears there, the code's placement is ruled out as its
-  cause in that block. Check that the flag alone doesn't move base (base-a64 against base).
+  `-falign-functions=64`. If the gap disappears there, that points at code layout, not the
+  change. It is a diagnosis for that block, and it counts only when it repeats across blocks.
+  Check that the flag alone doesn't move base (base-a64 against base).
   a64 controls less than it seems to:
   - It aligns where functions start. **It doesn't neutralise a change of data layout:** a member
     added to or moved inside a struct shifts every later field's offset, and with it which hot
