@@ -93,31 +93,32 @@ clang++ "${CXXFLAGS[@]}" \
   -o "$OUT/airlib_loopback"
 
 echo "[d9mtair] ntdll import libs"
+# dlltool runs inside $OUT with relative names: it names the import library's members and
+# symbols after its -l path, which would put the checkout's path into the library.
 cat > "$OUT/ntdll-cx32.def" <<'EOF'
 LIBRARY ntdll.dll
 EXPORTS
   __wine_unix_call@16
   NtQueryVirtualMemory@24
 EOF
-i686-w64-mingw32-dlltool -k -d "$OUT/ntdll-cx32.def" \
-  -l "$OUT/libntdll-cx32.a" --dllname ntdll.dll
+(cd "$OUT" && i686-w64-mingw32-dlltool --deterministic-libraries -k -d ntdll-cx32.def -l libntdll-cx32.a --dllname ntdll.dll)
 cat > "$OUT/ntdll-cx64.def" <<'EOF'
 LIBRARY ntdll.dll
 EXPORTS
   __wine_unix_call
   NtQueryVirtualMemory
 EOF
-x86_64-w64-mingw32-dlltool -d "$OUT/ntdll-cx64.def" \
-  -l "$OUT/libntdll-cx64.a" --dllname ntdll.dll
+(cd "$OUT" && x86_64-w64-mingw32-dlltool --deterministic-libraries -d ntdll-cx64.def -l libntdll-cx64.a --dllname ntdll.dll)
 
 echo "[d9mtair] PE dlls (builtin file-alignment, stripped: see d9mtmetal notes)"
 mkdir -p "$OUT/i386" "$OUT/x86_64"
+# Fixed image bases: ld's automatic one hashes the -o path (see IMAGE_BASE in build-driver.sh).
 i686-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/i386/d9mtair.dll" \
   "$SRC/dll.c" -I "$SRC" "$OUT/libntdll-cx32.a" \
-  -Wl,--file-alignment,0x1000
+  -Wl,--file-alignment,0x1000 -Wl,--no-insert-timestamp -Wl,--image-base,0x6e000000
 x86_64-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/x86_64/d9mtair.dll" \
   "$SRC/dll.c" -I "$SRC" "$OUT/libntdll-cx64.a" \
-  -Wl,--file-alignment,0x1000
+  -Wl,--file-alignment,0x1000 -Wl,--no-insert-timestamp -Wl,--image-base,0x380000000
 cp "$OUT/i386/d9mtair.dll" "$OUT/d9mtair32.dll"
 cp "$OUT/x86_64/d9mtair.dll" "$OUT/d9mtair64.dll"
 
@@ -129,8 +130,7 @@ LIBRARY d9mtair.dll
 EXPORTS
   D9MTAir_UnixCall
 EOF
-i686-w64-mingw32-dlltool -d "$OUT/d9mtair.def" \
-  -l "$OUT/libd9mtair32.a" --dllname d9mtair.dll
+(cd "$OUT" && i686-w64-mingw32-dlltool --deterministic-libraries -d d9mtair.def -l libd9mtair32.a --dllname d9mtair.dll)
 
 if [ "${1:-}" = "--install" ]; then
   CX="${CX:?set CX to the Wine engine root (a dedicated copy, not CrossOver.app)}"
