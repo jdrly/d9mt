@@ -173,6 +173,7 @@ clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp
 clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
 clang++ -std=c++17 -I driver/d3d9 test/native/pace_test.cpp -o /tmp/pt && /tmp/pt
 clang++ -std=c++17 -I driver/d3d9 test/native/frame_cap_test.cpp -o /tmp/fct && /tmp/fct
+scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
 ```
 
 `scripts/test-state-cache.sh` runs the pipeline state cache tests (file
