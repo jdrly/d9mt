@@ -146,9 +146,9 @@ ARCH=x86 scripts/build-driver.sh
 
 ### Release binaries
 
-Absolute build paths are mapped out of the binaries (`-ffile-prefix-map`),
-but the driver is built with `-g` and is about 80 MB. Strip before
-installing or shipping:
+The checkout's path is mapped out of the binaries (`-ffile-prefix-map`; the
+debug info still names the toolchain's own build paths), but the driver is
+built with `-g` and is about 80 MB. Strip before installing or shipping:
 
 ```bash
 x86_64-w64-mingw32-strip build/driver-x64/d3d9.dll
