@@ -4,8 +4,9 @@
 // into the three .inc files included below, and runs them against a fake device:
 //  - the vertex buffer's CPU copy and the upload slice are heap allocations of exactly their size,
 //    so ASan reports any byte read or written past them;
-//  - the copied bytes are the source's (the first copyElementSize bytes of each vertex, a vertex
-//    the buffer's end cuts through as far as it goes), and nothing that fits is left out;
+//  - the copy's length is what the case asks for, worked out from the case alone (of each
+//    requested vertex its first min(stride, vertex size) bytes, as far as they lie inside the
+//    buffer), and the copied bytes are the source's;
 //  - SWTOR's hint (#56): first vertex 600, 256 vertices of 24 bytes in a 768-vertex buffer copies
 //    the 168 vertices left from vertex 600, not 18432 bytes from it;
 //  - zero strides, a first vertex at and past the end, packed and strided partial last vertices,
@@ -89,6 +90,17 @@ static FakeDevice::VBOCopy run(const Case& t) {
   dev.clamp(0, t.first, t.instanced ? 1u : t.count, t.base, copies, total);
   const FakeDevice::VBOCopy c = copies[0];
   CHECK(total == c.copyBufferLength);
+  // the length from the case alone: the first vertex at the stream offset plus (first + base)
+  // vertices (D3D9's 32-bit offset), then of each requested vertex its first min(stride, vertex
+  // size) bytes, as far as they lie inside the buffer
+  const uint32_t start = t.vboOffset + (t.first + uint32_t(t.base)) * t.stride;
+  const uint32_t part = std::min(t.stride, t.vertexSize);
+  uint64_t expected = 0;
+  if (start < t.size && part != 0u)
+    for (uint64_t j = 0; j < t.count && start + j * t.stride < t.size; j++)
+      expected += std::min<uint64_t>(part, t.size - (start + j * t.stride));
+  CHECK(c.srcOffset == start);
+  CHECK(total == expected);
   if (total == 0u)
     return c;   // the driver allocates and copies nothing
 
