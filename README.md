@@ -136,13 +136,13 @@ ARCH=x86 scripts/build-driver.sh
   `SMOKE=0` skips it explicitly.
 - The driver and the bridge share an ABI: always rebuild and install them
   together.
-- Two builds of the same commit are byte-identical, wherever the checkout is:
-  the PE links write no time stamp and use fixed image bases, the archives
-  carry no dates, and import libraries don't name the build directory. Check
-  it with `shasum -a 256` over the `.dll`, `.a`, `.o` and `.def` files of two
-  from-scratch builds (`build/driver-x64`, `build/driver`, `build/bridge`,
-  `build/airlib`). Two different toolchains (mingw-w64, Xcode) give
-  different bytes.
+- Two from-scratch builds of the same commit with the same toolchain give
+  byte-identical `d3d9.dll`, `winemetal.dll`, `d9mtair.dll`, `.a` and `.o`
+  files, wherever the checkout is: the PE links write no time stamp and use
+  fixed image bases, the archives carry no dates, and the import libraries
+  don't name the build directory. Check it with `shasum -a 256` over those
+  files of both builds (`build/driver-x64`, `build/driver`, `build/bridge`,
+  `build/airlib`).
 
 ### Release binaries
 
