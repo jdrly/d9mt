@@ -215,7 +215,32 @@ sides equally (CONTRIBUTING; ADR-0002).
 
 **a64**
 The layout control: base and branch both built with `-falign-functions=64`; a gap that
-disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0002).
+disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0002). It doesn't
+control data layout, and one block under a64 isn't a pass (PERFORMANCE.md §2.4).
+
+**Block**
+One call of the benchmark harness: paired rounds of every variant under one admission, in one
+setup. A bench's mode can change between blocks, so one block's interval doesn't carry to the
+next (PERFORMANCE.md §2.3, §2.5).
+
+**Mode, mode occupancy, within-mode contrast**
+A **mode** is one of the few levels a bimodal bench's frame time settles at. A binary's **mode
+occupancy** is how many of its runs fall in each mode. The **within-mode contrast** is the paired
+contrast over the rounds in which both runs share a mode: diagnosis, not the change's cost
+(PERFORMANCE.md §2.4, §2.5).
+
+**Layout-matched**
+A comparison whose two sides share their code and data layout as far as the disassembly shows:
+the a64 pair, or a change and its identical-size placebo. Per PR, a cost is judged on it
+(PERFORMANCE.md §2.4).
+
+**Outcome**
+What a comparison of two binaries concludes: cost established, cost bounded below +0.25 % under
+stated conditions, or unresolved. A sign flip between blocks is unresolved (PERFORMANCE.md §2.4).
+
+**Council**
+Independent agent reviewers on different models who work on an unresolved flag alone, debate it
+and write one result for the maintainer (PERFORMANCE.md §2.4).
 
 **Quiet window**
 A time slot in which a benchmark runs alone on the Mac: no game, no other build or benchmark

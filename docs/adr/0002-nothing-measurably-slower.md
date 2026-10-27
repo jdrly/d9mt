@@ -27,9 +27,19 @@ layout.
   first the author's: re-verify; if it holds, find a cost-free solution; only if there is none,
   take it to the maintainer with a solid explanation and a second opinion from the independent
   agent review (GPT-6.1-Sol).
+- A re-verification ends in one of three outcomes (PERFORMANCE.md §2.4): **cost established**,
+  **cost bounded** below +0.25 % under stated conditions, or **unresolved**. An established cost
+  takes the path above. A bound clears the flag under its stated conditions; an established
+  slowdown smaller than +0.25 % still doesn't merge. An unresolved flag, a sign flip between blocks included, is debated
+  in a council of independent agent reviewers: it isn't held without a word, and it isn't read
+  as free (the maintainer, 2026-10-27).
 - A small delta of a single commit is checked with the a64 layout control (both sides built with
   `-falign-functions=64`). When the change alters the size of its translation unit's code, the
-  control is a placebo of identical size instead.
+  control is a placebo of identical size instead. Neither neutralises a change of data layout; a
+  placebo then carries the same data-layout change. One block is never a pass.
+- Per PR, the cost is judged on layout-matched evidence, with the unfiltered contrast, the mode
+  occupancy and the within-mode contrast reported on a bimodal bench. Mode and layout shifts are
+  judged at the release candidate check (the maintainer, 2026-10-27).
 - The binding check is the release candidate as shipped (default alignment) against the previous
   release. A slowdown there that is layout gets a layout fix (alignment, function order), each
   measured on its own, not a revert of the commit that happened to move it.
@@ -40,6 +50,10 @@ layout.
   run on the Mac meanwhile.
 - A fix whose cost can't be removed waits until it can; “just measure it” isn't enough.
 - Layout effects are judged per release, not per commit.
+- A comparison the method can't resolve stays unresolved and goes to a council, also when the
+  bench itself can't resolve 0.25 % yet. A cost the method does establish across blocks still
+  takes the established-cost path. The council costs benchmark windows and review rounds, and it
+  can hold a correct fix back until the method improves.
 
 ## Alternatives considered
 
@@ -56,3 +70,7 @@ layout.
   only `test/bench_4k.c` is.
 - Building releases with `-falign-functions=64` would make layout steadier; it is proven for one
   benchmark only and not decided.
+- bindbench's mode is mostly fixed per binary and block (PERFORMANCE.md §2.5), so today it doesn't
+  resolve 0.25 % between different binaries. The goal is a method that does. A larger bound for one
+  benchmark, or an exception, comes only if calibration can't get there, and only from the
+  maintainer.

@@ -15,14 +15,16 @@ and what a release candidate is checked for. What isn't in this repository yet i
 - **A layout effect is not a cost of the change.** Under Rosetta, a rebuild alone moves a
   microbenchmark by up to ±3 % because the linker moves hot code; every later merge moves it
   again, and its sign is as likely to flip as to stay. A delta that disappears under the layout
-  controls (§2.4) isn't attributed to the commit.
+  controls, in more than one block (§2.4), isn't attributed to the commit. A delta the method
+  can't resolve isn't attributed to layout either: it is unresolved (§2.4, *Outcomes*).
 - **The binding check is the release candidate as shipped**: the whole build at default
   alignment against the previous release (§6). A slowdown there that is layout gets a layout fix
   (an alignment flag, function order), each measured on its own, **not a revert** of the commit
   that happened to move it.
-- There is no exception. The PSO MRU change (#40), for example, merged once the cause of its
-  synthetic worst case (psobench `topo`) was gone with #33, merged before it, and what remained
-  flipped sign with alignment, so it was layout (#40).
+- No author or reviewer grants an exception; only the maintainer can (§2.4, step 3). The PSO
+  MRU change (#40), for example, was no exception: it merged once the cause of its synthetic
+  worst case (psobench `topo`) was gone with #33, merged before it, and what remained flipped
+  sign with alignment, so it was layout (#40).
 
 ## 2. How to measure
 
@@ -150,30 +152,118 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
 - **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant
   (`--control basecopy`).
   It shows the harness's bias and the window's noise floor. A delta smaller than the A/A spread
-  of that window is noise.
+  of that window can't be told from noise in that window. Inside one block a byte-identical
+  copy lands in base's mode (§2.5), so the A/A doesn't show how far two different binaries can
+  move between blocks.
 - **A median slowdown over 0.25 % is flagged anyway** (ms up, fps down; the median or the paired
   median against base), even inside the A/A spread, and re-verified before a merge:
   `scripts/perf-compare.py` marks it `FLAG >0.25%` and names it in a closing line (ADR-0002).
   A flag is first the author's to clear, in this order:
-  1. **Re-verify**: more rounds, read per mode on a bimodal bench (§2.5), and the layout
-     controls: the a64 pair or the identical-size placebo (below).
-  2. **If it holds, find a solution that costs nothing.**
+  1. **Re-verify** in another block (on bindbench more rounds in the same block don't help,
+     §2.5), with the layout controls below and, on a bimodal bench, the mode report
+     (*Per PR and at the release check*). The re-verification ends in one of the three
+     outcomes below.
+  2. **If the cost is established, find a solution that costs nothing.**
   3. **Only if there is none**, it goes to the maintainer, with a solid explanation of the cost
      and a second opinion from the independent agent review (GPT-6.1-Sol).
+
+  An **unresolved** flag goes to a council: independent agent reviewers on different models
+  (GPT-6.1-Sol among them) work on it alone, debate it and write one result for the maintainer.
+  It isn't held without a word, and it isn't read as free (the maintainer, 2026-10-27).
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
-  `-falign-functions=64`. If the gap disappears there, it is layout, not the change. Check that
-  the flag alone doesn't move base (base-a64 against base).
+  `-falign-functions=64`. If the gap disappears there, that points at code layout, not the
+  change. It is a diagnosis for that block, and it counts only when it repeats across blocks.
+  Check that the flag alone doesn't move base (base-a64 against base).
+  a64 controls less than it seems to:
+  - It aligns where functions start. **It doesn't neutralise a change of data layout:** a member
+    added to or moved inside a struct shifts every later field's offset, and with it which hot
+    fields share a cache line, at any code alignment. #55's branch, for example, adds three
+    members in the middle of the device context, before its per-draw state, so every later
+    field moves by 0x18 bytes.
+  - It keeps each function's offset within a cache line, but not its address or its position
+    within a page.
+  - So a gap that survives a64 can still be layout, and a gap that disappears under a64 in one
+    block isn't a pass yet (*Outcomes*).
 - **Identical-size placebo**: a64 can't neutralise a change that alters the size of its
   translation unit's code, because everything after it moves. Then build a placebo with exactly the
   change's code size and no behaviour change, and compare the change against the placebo. If the
-  change reads like the placebo, it is layout.
+  change reads like the placebo, it is layout. A change that alters data layout needs a placebo
+  with the same data-layout change too (the same members at the same offsets); otherwise the
+  comparison mixes layout with the change. Check both against the disassembly: the function
+  spans, and the field offsets the hot path uses.
+- **A near-identical pair is a control, not a verdict.** Two binaries that match in the
+  disassembly (an a64 pair, a change and its placebo) still place their code and data at
+  different addresses. Whether such a pair reads the same in every block is measured for that
+  pair, across blocks. It never passes on one block.
+
+#### Outcomes
+
+Every comparison of two different binaries ends in one of three outcomes, and the PR names it:
+
+1. **Cost established**: the declared uncertainty, across blocks, supports a positive slowdown.
+   It doesn't merge (§1), whatever its size, and it takes steps 2 and 3 above. +0.25 % stays
+   the threshold for the flag, not for the cost.
+2. **Cost bounded below +0.25 %, under stated conditions**: a one-sided upper bound, declared
+   before the data, lies below +0.25 %, and the PR states the conditions it holds under (the
+   bench, the blocks, the layout control). This doesn't permit a smaller slowdown that is
+   measured reliably: that one is still measurably slower (§1).
+3. **Unresolved**: everything else. A sign flip between blocks is unresolved, not "the flag
+   didn't hold". So is one block's narrow interval, whatever its sign, when the bench's mode can
+   change between blocks (§2.5). An unresolved comparison goes to a council (above).
+
+Every raw flag stays on record with its block, its interval, its slower n/N and its outcome, also
+after a later block reads otherwise.
+
+#### Per PR and at the release check
+
+The rule is there to stop code that costs: a design or a pipeline that makes the hot path slower
+when it could be written better and faster. Layout luck is a separate question, and it gets a
+separate check (the maintainer, 2026-10-27):
+
+- **Per PR**, the cost is judged on **layout-matched** evidence: a comparison whose two sides
+  share their code and data layout as far as the disassembly shows (the a64 pair or the
+  identical-size placebo above). On a bimodal bench the PR reports, side by side:
+  - the unfiltered paired contrast, over all rounds;
+  - each binary's **mode occupancy**, its runs in each mode;
+  - the **within-mode contrast**, the paired contrast over the rounds in which both runs share a
+    mode.
+
+  Declare the mode criterion before the data. The within-mode contrast is diagnosis, not the
+  change's cost: if a change moves which mode a run lands in, keeping only the rounds where both
+  runs share a mode removes part of its effect by construction.
+- **Mode and layout shifts**, a change that moves a binary into another mode or a cost that lives
+  only in the layout, are judged at the release candidate check (§6) with the calibrated method.
+- **The goal is a method that resolves 0.25 %.** A larger bound for one benchmark, or an
+  exception, comes only if calibration shows the method can't get there, and only the
+  maintainer grants either. _Open:_ on bindbench it doesn't resolve 0.25 % yet. In the
+  maintainer's runs one block of 30 to 40 rounds didn't bound even an A/A below +0.25 % (the
+  intervals' upper ends were +0.59 to +0.86 %), and the contrast of two different binaries
+  ranged from +5.3 % to −5.3 % over three blocks (§2.5).
 
 ### 2.5 Bimodal benchmarks
 
-Some benchmarks land in two modes: bindbench settles into one of two frame times per run, so the
-same pair of variants can read faster in one window and slower in the next. **Look at the per-run
-values for two clusters before reading a median**; small differences on a bimodal benchmark need
-many more rounds.
+Some benchmarks land in modes: a frame time settles at one of a few levels. **Look at the per-run
+values for clusters before reading a median.**
+
+**On bindbench the mode is mostly fixed per binary and block, not per run.** Inside one block
+(one call of the harness, §2.3) a binary stays at one level, with a rare run at another. The next
+block can put the same binary at another level while a second binary stays put. In the
+maintainer's runs one fix-versus-base pair read +5.31 %, −2.42 % and −5.28 % in three blocks, each
+with a narrow interval and 40/40, 1/30 and 0/30 rounds slower, while byte-identical copies agreed
+inside every block (A/A +0.12 %, +0.16 %, +0.20 %). What sets a binary's level in a block isn't
+known yet; the path and the environment (§2.1) are suspects, not proven causes. So:
+
+- **More rounds in one block don't help.** They narrow that block's interval, which covers only
+  the run-to-run noise around the modes the block happened to give each binary. The uncertainty
+  between blocks stays where it was. A small difference needs more blocks, not more rounds per
+  block.
+- **One block's interval is conditional on that block.** A narrow interval with every round on one
+  side is still one block's reading, and it can flip sign in the next (§2.4, *Outcomes*).
+- **The A/A doesn't show it.** A byte-identical copy lands in base's mode, so the A/A can be tight
+  in a block where two different binaries sit 5 % apart.
+- **`perf-compare.py`'s `bimodal?` doesn't see it either:** it looks for two clusters among one
+  variant's runs, and a binary that keeps one mode for a whole block has one cluster. A mode that
+  changes between blocks shows only when the blocks are compared.
 
 **bench_fps_cap's fps can be set by stalls, not by the work per frame.** In the maintainer's
 runs (bench_fps_cap, 15 s, uncapped with vsync off, no CPU work or game cap, presenting to a
@@ -363,7 +453,8 @@ compared with the previous release (and a basecopy) in at least five paired roun
 with no foreign Wine load:
 
 - the hash suite;
-- `bench_4k`, `bindbench` (uncapped; many rounds, it is bimodal), `churnbench`;
+- `bench_4k`, `bindbench` (uncapped; its mode can change between blocks, so several blocks, not
+  only more rounds, §2.5), `churnbench`;
 - `psobench` `blend` and `topo`, and `bench_draws` `present`: the binding check for the commits
   whose deltas were judged as layout;
 - `bench_fps_cap` with vsync on, about 20 rounds, with counters for the drawable wait (time,

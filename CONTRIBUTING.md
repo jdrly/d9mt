@@ -140,7 +140,9 @@ A change is done only when all of these hold:
       commit's small delta is checked with the **a64 layout control**: base and branch both
       built with `-falign-functions=64`; if the gap disappears, it is layout. When the change
       alters the size of its translation unit's code, a64 can't separate it, and the control is
-      a placebo of identical size. The release candidate's whole-build comparison at default
+      a placebo of identical size; a change of data layout needs the same change in the placebo.
+      One block isn't a pass, and the PR names the outcome: cost established, cost bounded, or
+      unresolved (PERFORMANCE.md §2.4). The release candidate's whole-build comparison at default
       alignment is the binding check; a slowdown there gets a layout fix, not a revert. The full
       method, the benchmarks and the diagnostics are in [PERFORMANCE.md](PERFORMANCE.md).
 - [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
