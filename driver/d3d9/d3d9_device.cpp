@@ -5588,8 +5588,8 @@ namespace dxvk {
 
       if (unlikely(srcOffset > vertexBufferSize)) {
         vboCopies[i].copyBufferLength = 0;
-      } else if (unlikely(srcOffset + elementCount * srcStride > vertexBufferSize)) {
-        uint32_t boundVertexBufferRange = vertexBufferSize - vboOffset;
+      } else if (unlikely(uint64_t(srcOffset) + uint64_t(elementCount) * srcStride > vertexBufferSize)) {
+        uint32_t boundVertexBufferRange = vertexBufferSize - srcOffset;  // from the first vertex (#56)
         elementCount = boundVertexBufferRange / srcStride;
         vboCopies[i].copyBufferLength = elementCount * dstStride;
         vboCopies[i].copyBufferLength += std::min(dstStride, boundVertexBufferRange % srcStride);
