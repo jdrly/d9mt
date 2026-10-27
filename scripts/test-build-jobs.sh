@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# test-build-jobs.sh — D9MT_JOBS in build-driver.sh (driver core, libdxbcsm3) and
-# build-air-compiler.sh (#85), without a compiler and without a real build: the scripts run in a
-# fixture tree (the real driver/, bridge/ and air/ sources, a fake dxbc-spirv and SPIRV-Cross,
-# build/ of its own) with stand-ins for mingw, clang++, ar, dlltool, objdump, llvm-config and
-# xcrun on a PATH of the system directories. Each stand-in compile records how many compiles run
-# at that moment and its argv. Per script:
+# test-build-jobs.sh — D9MT_JOBS in build-driver.sh (driver core, libdxbcsm3),
+# build-air-compiler.sh (#85) and build-d9mtair.sh (#90), without a compiler and without a real
+# build: the scripts run in a fixture tree (the real driver/, bridge/, airlib/ and air/ sources, a
+# fake dxbc-spirv, SPIRV-Cross and x86_64 LLVM toolchain, build/ of its own) with stand-ins for
+# mingw, clang, clang++, ar, dlltool, objdump, llvm-config, xcrun and python3 on a PATH of the
+# system directories. Each stand-in compile records how many compiles run at that moment and its
+# argv. Per script:
 #   1. the base ref's scripts, D9MT_JOBS unset: the reference;
 #   2. the scripts under test with D9MT_JOBS unset, empty, 1 and 2: the build succeeds, at most
 #      D9MT_JOBS compiles run at once (the default 12 / 10 when unset or empty; exactly 1 and 2 are
@@ -12,12 +13,14 @@
 #      equal the reference's;
 #   3. invalid values (0, 08, -1, abc, 1.5, " 2", 1000, a 20-digit number): the script exits
 #      nonzero with a D9MT_JOBS message before running any tool;
-#   4. one compile fails (#87) in each of the three batch loops (driver core, libdxbcsm3, air
-#      compiler), with D9MT_JOBS unset, 1 and 2: the third compile of the loop (in the middle of a
-#      batch, not its last), and with D9MT_JOBS unset also the first of the last, partial batch.
-#      The build exits nonzero with the loop's "compile failed" message as stderr's last line,
-#      writes no .flags and runs none of the reference's archive/link/run steps from the loop's
-#      own archive or link on.
+#   4. one compile fails (#87) in each of the five batch loops (driver core, libdxbcsm3, air
+#      compiler, d9mtair's core and front-end objects), with D9MT_JOBS unset, 1 and 2: the third
+#      compile of the loop (in the middle of a batch, not its last), and with D9MT_JOBS unset also
+#      the first of the last, partial batch. The build exits nonzero with the loop's "compile
+#      failed" message as stderr's last line, writes no .flags and runs none of the reference's
+#      archive/link/run steps from the loop's own archive or link on.
+# Then build-bridge.sh, which runs build-d9mtair.sh first: with D9MT_JOBS=1 it succeeds with one
+# compile at a time, and a failed d9mtair compile fails it before winemetal.so's link.
 #   scripts/test-build-jobs.sh [base ref (default origin/main)] [ref under test (default: this tree)]
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,11 +75,16 @@ esac
 EOF
 chmod +x "$T/bin/stub"
 for t in x86_64-w64-mingw32-g++ x86_64-w64-mingw32-gcc x86_64-w64-mingw32-ar x86_64-w64-mingw32-dlltool \
-         x86_64-w64-mingw32-objdump clang++ xcrun llvm-config; do ln -s stub "$T/bin/$t"; done
+         x86_64-w64-mingw32-objdump i686-w64-mingw32-gcc i686-w64-mingw32-dlltool clang clang++ xcrun \
+         llvm-config python3; do ln -s stub "$T/bin/$t"; done
+ln -s "$BASH" "$T/bin/bash"  # build-bridge.sh runs build-d9mtair.sh with the bash on PATH (local -n)
 
 # The fixture tree: real sources (read only), fake third-party sources, scripts of the variant.
+# build-d9mtair.sh's IR_CORE files (ir/ir.cpp, util/util_log.cpp, ...) are left out on purpose:
+# a stand-in compile doesn't read its source, and they would change the other scripts' globs.
 F="$T/v2"
-mkdir -p "$F/scripts" "$F/third_party/SPIRV-Cross"
+mkdir -p "$F/scripts" "$F/third_party/SPIRV-Cross" "$F/toolchains/llvm-x86_64/include" "$F/toolchains/llvm-x86_64/lib"
+for l in BitWriter Core Support; do : > "$F/toolchains/llvm-x86_64/lib/libLLVM$l.a"; done
 for d in driver bridge airlib air; do ln -s "$V2/$d" "$F/$d"; done
 for d in sm3:9 ir:8 ir/passes:5 util:6 spirv:3; do
   mkdir -p "$F/third_party/dxbc-spirv/${d%:*}"
@@ -88,7 +96,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$F/scripts/check-deps.sh"  # the fake 
 
 variant() {  # <ref, or empty for this tree>: put its build scripts into the fixture
   local s
-  for s in build-driver.sh build-air-compiler.sh; do
+  for s in build-driver.sh build-air-compiler.sh build-d9mtair.sh build-bridge.sh; do
     if [ -z "$1" ]; then cp "$V2/scripts/$s" "$F/scripts/$s"
     else git -C "$V2" show "$1:scripts/$s" > "$F/scripts/$s" || { echo "FATAL: no scripts/$s at $1" >&2; exit 2; }; fi
   done
@@ -99,7 +107,7 @@ variant() {  # <ref, or empty for this tree>: put its build scripts into the fix
 run() {
   local out="$1" s="$2"; shift 2
   rm -rf "$F/build" "$T/rec"; mkdir -p "$T/rec/running" "$T/rec/cc" "$out"; : > "$T/rec/seq"
-  env -i HOME="$HOME" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" REC="$T/rec" FAIL="${FAIL:-}" ARCH=x64 \
+  env -i HOME="$HOME" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" REC="$T/rec" FAIL="${FAIL:-}" ARCH=x64 SMOKE=0 \
     LLVM_CONFIG="$T/bin/llvm-config" ${1+D9MT_JOBS="$1"} \
     "$BASH" "$F/scripts/$s" > "$out/stdout" 2> "$out/stderr"
   echo $? > "$out/rc"
@@ -110,9 +118,9 @@ run() {
 }
 
 variant "$BASE"
-for s in build-driver.sh build-air-compiler.sh; do run "$T/out/$s/base" "$s"; done
+for s in build-driver.sh build-air-compiler.sh build-d9mtair.sh; do run "$T/out/$s/base" "$s"; done
 variant "$UNDER"
-for s in build-driver.sh build-air-compiler.sh; do
+for s in build-driver.sh build-air-compiler.sh build-d9mtair.sh; do
   case "$s" in build-driver.sh) def=12 ;; *) def=10 ;; esac
   ref="$T/out/$s/base"
   if [ "$(cat "$ref/rc")" != 0 ] || [ ! -s "$ref/cc" ]; then
@@ -143,16 +151,23 @@ done
 
 # A failed compile in each batch loop (#87). Each loop's sources in compile order: the driver core's
 # from the reference's [cc] lines (without sha1.c, compiled after the loop), libdxbcsm3's as the
-# script lists them (it prints no [cc] lines), the air compiler's from its [cc] lines.
-for loop in core sm3 air; do
+# script lists them (it prints no [cc] lines), the air compiler's and d9mtair's from their [cc]
+# lines (d9mtair's front-end objects: ir_legalize, the passes, sm3 and util_md5).
+front='/(ir/ir_legalize|ir/passes/|sm3/|util/util_md5)'
+for loop in core sm3 air aircore airfront; do
   case "$loop" in
     core) s=build-driver.sh def=12 msg="FATAL: CORE compile failed" next=libdriver_core.a
           srcs=$(awk '/CORE compile/ {on = 1} /archive libdriver_core.a/ {on = 0} on && /^\[cc\] / {print "driver/" substr($0, 6)}' \
                    "$T/out/$s/base/stdout" | grep -vx driver/util/sha1/sha1.c) ;;
     sm3)  s=build-driver.sh def=12 msg="FATAL: libdxbcsm3 compile failed" next=libdxbcsm3.a
           srcs=$(cd "$F" && find -L third_party/dxbc-spirv/sm3 third_party/dxbc-spirv/ir third_party/dxbc-spirv/util -name '*.cpp' | LC_ALL=C sort) ;;
-    *)    s=build-air-compiler.sh def=10 msg="FATAL: air compiler compile failed" next=air_compiler
+    air)  s=build-air-compiler.sh def=10 msg="FATAL: air compiler compile failed" next=air_compiler
           srcs=$(sed -n 's/^\[cc\] //p' "$T/out/$s/base/stdout") ;;
+    aircore)
+          s=build-d9mtair.sh def=10 msg="FATAL: d9mtair compile failed" next=d9mtair.so
+          srcs=$(sed -n 's/^\[cc\] //p' "$T/out/$s/base/stdout" | grep -Ev "$front") ;;
+    *)    s=build-d9mtair.sh def=10 msg="FATAL: d9mtair compile failed" next=d9mtair.so
+          srcs=$(sed -n 's/^\[cc\] //p' "$T/out/$s/base/stdout" | grep -E "$front") ;;
   esac
   ref="$T/out/$s/base" n=$(printf '%s\n' "$srcs" | wc -l | tr -d ' ')
   # the reference's steps before the loop's own archive or link: all a failed build may run
@@ -174,6 +189,18 @@ for loop in core sm3 air; do
     done
   done
 done
+
+# build-bridge.sh (the variant's, with its build-d9mtair.sh): D9MT_JOBS reaches the d9mtair
+# compiles, and their failure stops the bridge build before its own link.
+s=build-bridge.sh o="$T/out/$s/1"; run "$o" "$s" 1
+if [ "$(cat "$o/rc")" = 0 ] && [ "$(cat "$o/max")" = 1 ] && grep -q winemetal.so "$o/seq"; then
+  ok "$s D9MT_JOBS=1: builds winemetal.so with one compile at a time"
+else bad "$s D9MT_JOBS=1: builds winemetal.so with one compile at a time (exit $(cat "$o/rc"), at most $(cat "$o/max") at once)"; fi
+fsrc=$(sed -n 's/^\[cc\] //p' "$T/out/build-d9mtair.sh/base/stdout" | sed -n 3p) o="$T/out/$s/fail"
+FAIL=$fsrc run "$o" "$s"
+if [ "$(cat "$o/rc")" != 0 ] && [ "$(tail -1 "$o/stderr")" = "FATAL: d9mtair compile failed" ] && ! grep -q winemetal "$o/seq"; then
+  ok "$s: a failed d9mtair compile (${fsrc#*/}) stops it before winemetal.so's link"
+else bad "$s: a failed d9mtair compile (${fsrc#*/}) stops it before winemetal.so's link (exit $(cat "$o/rc"), stderr ends '$(tail -1 "$o/stderr")')"; fi
 
 under="${UNDER:-this tree}"
 [ "$fail" = 0 ] && echo "test-build-jobs: all passed ($under against $BASE)" || echo "test-build-jobs: $fail FAILED ($under against $BASE)"

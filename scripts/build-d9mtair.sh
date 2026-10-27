@@ -14,6 +14,9 @@ SRC="$V2/airlib"
 DX="$V2/third_party/dxbc-spirv"
 OUT="$V2/build/airlib"
 OBJ="$OUT/obj"
+# D9MT_JOBS: the most compiles running at once; 1 compiles one TU at a time.
+JOBS="${D9MT_JOBS:-10}"
+[[ "$JOBS" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "FATAL: D9MT_JOBS must be a whole number from 1 to 999, not '$JOBS'" >&2; exit 1; }
 mkdir -p "$OBJ"
 
 # Toolchain LLVM was built with LLVM_BUILD_TOOLS=Off (no llvm-config), so
@@ -22,7 +25,7 @@ mkdir -p "$OBJ"
 LLVM="$V2/toolchains/llvm-x86_64"
 [ -f "$LLVM/lib/libLLVMBitWriter.a" ] || { echo "FATAL: run scripts/build-llvm-unixside.sh first" >&2; exit 1; }
 
-CXXFLAGS=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2"=.
+CXXFLAGS=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map="$V2=."
           -I"$DX" -I"$V2" -I"$LLVM/include"
           -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
 # Link the full archive set (built with no codegen targets, so it is lean);
@@ -38,21 +41,30 @@ IR_CORE=("$DX"/ir/ir.cpp "$DX"/ir/ir_builder.cpp "$DX"/ir/ir_serialize.cpp
          "$DX"/util/util_log.cpp "$DX"/util/util_float16.cpp "$DX"/util/util_swizzle.cpp)
 FRONT=("$DX"/ir/ir_legalize.cpp "$DX"/ir/passes/*.cpp "$DX"/sm3/*.cpp "$DX"/util/util_md5.cpp)
 
+# wait_batch <pid>...: wait for every compile of a batch; nonzero when any of them failed. A
+# single `wait <pid>...` returns only the last pid's status.
+wait_batch() {
+  local p rc=0
+  for p in "$@"; do wait "$p" || rc=1; done
+  return "$rc"
+}
+
 compile() { # dstvar srcs...
   local -n dst=$1; shift
-  local pids=()
+  local pids=() rc=0
   for src in "$@"; do
-    local obj="$OBJ/$(echo "${src#$V2/}" | tr '/' '_').o"
+    local obj
+    obj="$OBJ/$(echo "${src#$V2/}" | tr '/' '_').o"
     dst+=("$obj")
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
       echo "[cc] ${src#$V2/}"
       clang++ "${CXXFLAGS[@]}" -c "$src" -o "$obj" &
       pids+=($!)
-      if [ "${#pids[@]}" -ge 10 ]; then wait "${pids[@]}"; pids=(); fi
+      if [ "${#pids[@]}" -ge "$JOBS" ]; then wait_batch "${pids[@]}" || rc=1; pids=(); fi
     fi
   done
-  [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}"
-  return 0
+  [ "${#pids[@]}" -gt 0 ] && { wait_batch "${pids[@]}" || rc=1; }
+  [ "$rc" -eq 0 ] || { echo "FATAL: d9mtair compile failed" >&2; exit 1; }
 }
 
 CORE_OBJS=(); compile CORE_OBJS "${IR_CORE[@]}" \
@@ -124,7 +136,6 @@ if [ "${1:-}" = "--install" ]; then
   CX="${CX:?set CX to the Wine engine root (a dedicated copy, not CrossOver.app)}"
   BOTTLE="${BOTTLE:?set BOTTLE to the CrossOver bottle name}"
   echo "[d9mtair] installing (CrossOver dxmt dir + wine tree + bottle)"
-  for d in "$CX/lib/dxmt" "$CX/lib/wine"; do :; done
   mkdir -p "$CX/lib/dxmt/i386-windows" "$CX/lib/dxmt/x86_64-windows" "$CX/lib/dxmt/x86_64-unix"
   cp "$OUT/d9mtair32.dll" "$CX/lib/dxmt/i386-windows/d9mtair.dll"
   cp "$OUT/d9mtair64.dll" "$CX/lib/dxmt/x86_64-windows/d9mtair.dll"
