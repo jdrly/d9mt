@@ -89,32 +89,33 @@ clang++ -arch x86_64 -dynamiclib \
 echo "  -> $OUT/winemetal.so ($(wc -c < "$OUT/winemetal.so") bytes)"
 
 echo "[bridge] ntdll import libs"
+# dlltool runs inside $OUT with relative names: it names the import library's members and
+# symbols after its -l path, which would put the checkout's path into the library.
 cat > "$OUT/ntdll-cx32.def" <<'EOF'
 LIBRARY ntdll.dll
 EXPORTS
   __wine_unix_call@16
   NtQueryVirtualMemory@24
 EOF
-i686-w64-mingw32-dlltool -k -d "$OUT/ntdll-cx32.def" \
-  -l "$OUT/libntdll-cx32.a" --dllname ntdll.dll
+(cd "$OUT" && i686-w64-mingw32-dlltool --deterministic-libraries -k -d ntdll-cx32.def -l libntdll-cx32.a --dllname ntdll.dll)
 cat > "$OUT/ntdll-cx64.def" <<'EOF'
 LIBRARY ntdll.dll
 EXPORTS
   __wine_unix_call
   NtQueryVirtualMemory
 EOF
-x86_64-w64-mingw32-dlltool -d "$OUT/ntdll-cx64.def" \
-  -l "$OUT/libntdll-cx64.a" --dllname ntdll.dll
+(cd "$OUT" && x86_64-w64-mingw32-dlltool --deterministic-libraries -d ntdll-cx64.def -l libntdll-cx64.a --dllname ntdll.dll)
 
 echo "[bridge] PE winemetal dlls"
 PE_SRC=("$BR/main.c" "$BR/winecrt0_compat.c" "$BR/winemetal_thunks.c" "$BR/airconv_thunks.c" "$BR/d9mtair_thunks.c")
 mkdir -p "$OUT/i386" "$OUT/x86_64"
+# Fixed image bases: ld's automatic one hashes the -o path (see IMAGE_BASE in build-driver.sh).
 i686-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/i386/winemetal.dll" \
   "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
-  "$OUT/libntdll-cx32.a" -Wl,--file-alignment,0x1000
+  "$OUT/libntdll-cx32.a" -Wl,--file-alignment,0x1000 -Wl,--no-insert-timestamp -Wl,--image-base,0x6d000000
 x86_64-w64-mingw32-gcc -shared -O2 -s -ffile-prefix-map="$V2"=. -o "$OUT/x86_64/winemetal.dll" \
   "${PE_SRC[@]}" -I"$BR" -I"$V2/airlib" \
-  "$OUT/libntdll-cx64.a" -Wl,--file-alignment,0x1000
+  "$OUT/libntdll-cx64.a" -Wl,--file-alignment,0x1000 -Wl,--no-insert-timestamp -Wl,--image-base,0x390000000
 cp "$OUT/i386/winemetal.dll" "$OUT/winemetal32.dll"
 cp "$OUT/x86_64/winemetal.dll" "$OUT/winemetal64.dll"
 
@@ -123,8 +124,7 @@ python3 "$V2/scripts/make-builtin.py" "$OUT/winemetal32.dll" "$OUT/winemetal64.d
 echo "[bridge] import lib for the driver"
 bash "$V2/scripts/gen-bridge-def.sh" > "$OUT/winemetal.def"
 echo "  $(grep -c '^  ' "$OUT/winemetal.def") exports -> $OUT/winemetal.def"
-i686-w64-mingw32-dlltool -d "$OUT/winemetal.def" \
-  -l "$OUT/libwinemetal32.a" --dllname winemetal.dll
+(cd "$OUT" && i686-w64-mingw32-dlltool --deterministic-libraries -d winemetal.def -l libwinemetal32.a --dllname winemetal.dll)
 
 # Smoke test (x86_64 host, needs a Metal GPU): vertex-descriptor PSO, MTL4
 # path and AIR parity against reference metallibs from the host AIR compiler

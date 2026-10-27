@@ -20,10 +20,13 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 DRV="$V2/driver"
 # ARCH=x64 -> 64-bit driver for 64-bit games; own build dir, x86_64 mingw.
 ARCH="${ARCH:-x86}"
+# IMAGE_BASE: fixed, because ld's automatic base hashes the -o path, which would make the DLL
+# depend on where the checkout is. Picked from ld's auto-base range, clear of Wine's fixed bases
+# and of DXMT's and the bridge's DLLs (build-bridge.sh, build-d9mtair.sh).
 if [ "$ARCH" = x64 ]; then
-  BUILD="$V2/build/driver-x64"; MINGW_PREFIX=x86_64-w64-mingw32
+  BUILD="$V2/build/driver-x64"; MINGW_PREFIX=x86_64-w64-mingw32; IMAGE_BASE=0x3a0000000
 else
-  BUILD="$V2/build/driver"; MINGW_PREFIX=i686-w64-mingw32
+  BUILD="$V2/build/driver"; MINGW_PREFIX=i686-w64-mingw32; IMAGE_BASE=0x61600000
 fi
 # D9MT_JOBS: the most compiles running at once (both batch loops below); 1 compiles one TU at a
 # time, for a build that must stay within a memory budget.
@@ -399,7 +402,7 @@ OBJS+=("$SHA1C_OBJ")
 
 echo "=== [driver] archive libdriver_core.a ==="
 rm -f "$BUILD/libdriver_core.a"
-"$MINGW_PREFIX-ar" rcs "$BUILD/libdriver_core.a" "${OBJS[@]}"
+"$MINGW_PREFIX-ar" rcsD "$BUILD/libdriver_core.a" "${OBJS[@]}"
 echo "  -> $BUILD/libdriver_core.a ($(wc -c < "$BUILD/libdriver_core.a") bytes)"
 
 # --- D3D9-LEAF attempt (non-fatal; reports Phase-C readiness) --------------
@@ -482,7 +485,7 @@ done < <(find -L "$DXBC/sm3" "$DXBC/ir" "$DXBC/util" -name '*.cpp' | sort)
 [ "$SM3_RC" -eq 0 ] || { echo "FATAL: libdxbcsm3 compile failed" >&2; exit 1; }
 printf '%s\n' "$FLAGS_HASH" > "$OBJ/.flags"
 rm -f "$DXBCSM3_LIB"
-"$MINGW_PREFIX-ar" rcs "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
+"$MINGW_PREFIX-ar" rcsD "$DXBCSM3_LIB" "${SM3_OBJS[@]}"
 echo "  libdxbcsm3.a: $DXBCSM3_LIB ($(wc -c < "$DXBCSM3_LIB") bytes, ${#SM3_OBJS[@]} objs)"
 
 # winemetal import lib: the export list is generated from the bridge headers
@@ -496,7 +499,7 @@ D3D9DEF="${D3D9DEF:-$DRV/d3d9/d3d9.def}"
 if command -v "$MINGW_PREFIX-dlltool" >/dev/null && [ -f "$WMDEF" ]; then
   # From inside $BUILD with relative names: dlltool names the import library's symbols after
   # its -l path, which would put the build directory into the DLL.
-  (cd "$BUILD" && "$MINGW_PREFIX-dlltool" -d "${WMDEF##*/}" -l "${WMIMP##*/}" --dllname winemetal.dll) 2>/dev/null \
+  (cd "$BUILD" && "$MINGW_PREFIX-dlltool" --deterministic-libraries -d "${WMDEF##*/}" -l "${WMIMP##*/}" --dllname winemetal.dll) 2>/dev/null \
     && echo "  winemetal import lib: $WMIMP ($(wc -c < "$WMIMP") bytes, from ${WMDEF#$V2/})"
 fi
 LINK_LOG="$BUILD/d3d9-link.log"
@@ -504,7 +507,7 @@ LINK_LOG="$BUILD/d3d9-link.log"
 # interface/main + seam resolvers) links d3d9.dll with all 20 d3d9.def exports;
 # the winemetal MTLDevice_* imports resolve via the bridge import lib above.
 if "$MINGW" -shared -static -static-libgcc -static-libstdc++ -o "$BUILD/d3d9.dll" \
-      -Wl,--enable-stdcall-fixup \
+      -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--image-base,"$IMAGE_BASE" \
       "$D3D9DEF" "${OBJS[@]}" "$DXBCSM3_LIB" "$WMIMP" \
       -lgdi32 -luser32 -lole32 -lsetupapi 2>"$LINK_LOG"; then
   echo "  d3d9.dll LINKED: $BUILD/d3d9.dll ($(wc -c < "$BUILD/d3d9.dll") bytes)"
