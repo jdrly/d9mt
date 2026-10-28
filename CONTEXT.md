@@ -248,7 +248,8 @@ For the performance rule, a **fix** is a change that prevents a bug or a GPU fau
 when no cost is established at the measurable resolution. A **speed-only change** is one whose
 purpose is speed, not preventing a bug; it needs evidence of identical rendering on other Mac
 generations, a slower and a fanless Mac among them, or it goes in behind a switch that is off by
-default (PERFORMANCE.md §1; ADR-0005).
+default. That applies to new speed-only changes; existing speed optimisations stay as they are
+(PERFORMANCE.md §1; ADR-0005).
 
 **Measurable resolution**
 The smallest cost the calibrated method actually resolves between two binaries on a benchmark:

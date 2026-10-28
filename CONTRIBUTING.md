@@ -153,7 +153,8 @@ A change is done only when all of these hold:
       - **A speed-only change** (its purpose is speed, not preventing a bug) also shows that it
         renders identically on Mac generations other than the one it was measured on, a slower
         and a fanless Mac among them, and the PR names them. Without that coverage it goes in
-        only behind a switch that is off by default, in the README's tables (ADR-0005).
+        only behind a switch that is off by default, in the README's tables. This applies to
+        new speed-only changes; existing speed optimisations stay as they are (ADR-0005).
 - [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
       byte-identical to `main`'s. A change to the bridge changes its LC_UUID, the key of every
       player's AIR cache, so every player recompiles their shaders once: the PR says so, and
