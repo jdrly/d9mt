@@ -11,10 +11,16 @@
 #      place (not the previous variant's binary, which is still in the run directory);
 #   5. --native and 6. Wine, 10 rounds (so rounds 9 and 10): each run's stderr (fd 2) is a file of
 #      its own whose path has the same length for every variant and round (#71), and the results
-#      header says how to find it (the variant's id and the stderr log pattern).
+#      header says how to find it (the variant's id and the stderr log pattern);
+#   7. --native and 8. Wine, two calls of one WORK (#96): from different cwds, with different tags,
+#      OLDPWDs, PATHs, shell levels and virtual display positions, one with a secret-like variable:
+#      every run sees the same cwd, argv, environment (names, order, values; VD_* only the same
+#      length) and umask (the callers' are 077 and 022), fd 2 paths of the same length, no caller
+#      variable but D9MT_*, OLDPWD=WORK, and the results headers give the same launch digests.
 # 08827cb's harness fails 1 (argv[0] is the variant's own program) and 2 (bin-<name> and
 # caches/<name>), and passes 3 and 4 (it runs each program in place, so 4 is a failed run there).
-# dbd9139's fails 5 and 6 (logs/<tag>-<pid>-<name>-<round>.err).
+# dbd9139's fails 5 and 6 (logs/<tag>-<pid>-<name>-<round>.err). 07d4a60's fails 7 and 8 (the
+# caller's environment and OLDPWD reach the run, the tag sets fd 2's length).
 #   scripts/test-perf-abba.sh [perf-abba.sh to test (default: this tree's)]
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,9 +33,13 @@ bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 lines() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 
 # What a run sees, one line: its working directory, its arguments, and every environment variable
-# as NAME=<length of the value>, minus the ones that differ by design (the variant's own --env).
+# as NAME=<length of the value>, minus the ones that differ by design (the variant's own --env);
+# and (7, 8) the whole environment in order, a "--" line after each run. Where it writes comes from
+# D9MT_TEST_SEEN, a caller's D9MT_* switch (those reach every run).
 cat > "$T/seen.sh" <<'EOF'
 #!/usr/bin/env bash
+SEEN=$D9MT_TEST_SEEN
+{ env; echo "umask $(umask)"; echo --; } >> "$SEEN.env"
 env_shape=$(env | LC_ALL=C sort | awk -F= '{ n = $1; v = substr($0, length(n) + 2); print n "=" length(v) }' | shasum -a 256 | cut -c1-16)
 echo "$(pwd -P)|$0|$*|$env_shape" >> "$SEEN"
 # the file fd 2 points to (fcntl F_GETPATH)
@@ -45,43 +55,43 @@ same() {  # <file> <what>: all lines identical, and as many as expected
 }
 
 # 1. --native, unequal-length names
-export SEEN="$T/seen-native" DIRTY_CHECK=0
+export D9MT_TEST_SEEN="$T/seen-native" DIRTY_CHECK=0
 WORK="$T/w1" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 2 -- bench 5 >/dev/null 2>&1
-same "$SEEN" "native: the same cwd, argv[0] and environment shape under names a and bbbb" 4
+same "$D9MT_TEST_SEEN" "native: the same cwd, argv[0] and environment shape under names a and bbbb" 4
 
 # 2. Wine, with a fake engine: wine records what the run sees and which d3d9.dll it found
 mkdir -p "$T/engine/bin" "$T/bench"
 { cat <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = wineboot ]; then mkdir -p "$WINEPREFIX" && : > "$WINEPREFIX/system.reg"; exit 0; fi
-echo "$(cat d3d9.dll)" >> "$SEEN.dll"
+echo "$(cat d3d9.dll)" >> "$D9MT_TEST_SEEN.dll"
 EOF
 sed 1d "$T/seen.sh"; } > "$T/engine/bin/wine"
 printf '#!/bin/sh\nexit 0\n' > "$T/engine/bin/wineserver"
 chmod +x "$T/engine/bin/wine" "$T/engine/bin/wineserver"
 : > "$T/bench/fake.exe"
 echo dll-a > "$T/d3d9-a.dll"; echo dll-bbbb > "$T/d3d9-bbbb.dll"
-export SEEN="$T/seen-wine"
+export D9MT_TEST_SEEN="$T/seen-wine"
 ENGINE="$T/engine" WORK="$T/w2" BENCH_DIR="$T/bench" bash "$ABBA" --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" --rounds 2 fake >/dev/null 2>&1
-same "$SEEN" "wine: the same cwd, arguments and environment shape (cache paths included) under names a and bbbb" 4
+same "$D9MT_TEST_SEEN" "wine: the same cwd, arguments and environment shape (cache paths included) under names a and bbbb" 4
 # rotation: round 1 runs bbbb then a, round 2 a then bbbb
-if [ "$(tr '\n' ' ' < "$SEEN.dll" 2>/dev/null)" = "dll-bbbb dll-a dll-a dll-bbbb " ]; then ok "wine: each run found its own variant's d3d9.dll"
-else bad "wine: each run found its own variant's d3d9.dll ($(tr '\n' ' ' < "$SEEN.dll" 2>/dev/null))"; fi
+if [ "$(tr '\n' ' ' < "$D9MT_TEST_SEEN.dll" 2>/dev/null)" = "dll-bbbb dll-a dll-a dll-bbbb " ]; then ok "wine: each run found its own variant's d3d9.dll"
+else bad "wine: each run found its own variant's d3d9.dll ($(tr '\n' ' ' < "$D9MT_TEST_SEEN.dll" 2>/dev/null))"; fi
 
 # 3. a relative WORK in --native mode
-export SEEN="$T/seen-rel"
+export D9MT_TEST_SEEN="$T/seen-rel"
 (cd "$T" && WORK=relative-work bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1)
 rc=$?
-if [ "$rc" = 0 ] && [ "$(lines "$SEEN")" = 2 ]; then ok "a relative WORK: every run executes"
-else bad "a relative WORK: every run executes (exit $rc, $(lines "$SEEN") runs)"; fi
+if [ "$rc" = 0 ] && [ "$(lines "$D9MT_TEST_SEEN")" = 2 ]; then ok "a relative WORK: every run executes"
+else bad "a relative WORK: every run executes (exit $rc, $(lines "$D9MT_TEST_SEEN") runs)"; fi
 
 # 4. a binary that can't be copied (unreadable): rotation runs a first, then bbbb's copy fails
-export SEEN="$T/seen-copy"
+export D9MT_TEST_SEEN="$T/seen-copy"
 cp "$T/prog-bbbb" "$T/prog-locked"; chmod 000 "$T/prog-locked"
 WORK="$T/w4" bash "$ABBA" --native --variant bbbb="$T/prog-locked" --variant a="$T/prog-a" --rounds 1 -- bench 5 >/dev/null 2>&1
 rc=$?
-if [ "$rc" != 0 ] && [ "$(lines "$SEEN")" = 1 ]; then ok "a failed copy: the call fails (exit $rc), nothing runs in its place"
-else bad "a failed copy: the call fails, nothing runs in its place (exit $rc, $(lines "$SEEN") runs)"; fi
+if [ "$rc" != 0 ] && [ "$(lines "$D9MT_TEST_SEEN")" = 1 ]; then ok "a failed copy: the call fails (exit $rc), nothing runs in its place"
+else bad "a failed copy: the call fails, nothing runs in its place (exit $rc, $(lines "$D9MT_TEST_SEEN") runs)"; fi
 
 # 5./6. the stderr log of every run: one file per run, the same path length, findable from the header
 fd2() {  # <what> <seen file> <results dir> <runs>
@@ -105,12 +115,63 @@ fd2() {  # <what> <seen file> <results dir> <runs>
   if [ "$ok" = 1 ]; then ok "$what: the results header names each run's stderr log (variant id + pattern)"
   else bad "$what: the results header names each run's stderr log (pattern '${pat:-none}', missing$missing)"; fi
 }
-export SEEN="$T/seen-fd2n"
+export D9MT_TEST_SEEN="$T/seen-fd2n"
 WORK="$T/w5" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 10 -- bench 5 >/dev/null 2>&1
-fd2 "native, 10 rounds" "$SEEN" "$T/w5" 20
-export SEEN="$T/seen-fd2w"
+fd2 "native, 10 rounds" "$D9MT_TEST_SEEN" "$T/w5" 20
+export D9MT_TEST_SEEN="$T/seen-fd2w"
 ENGINE="$T/engine" WORK="$T/w6" BENCH_DIR="$T/bench" bash "$ABBA" --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" --rounds 10 fake >/dev/null 2>&1
-fd2 "wine, 10 rounds" "$SEEN" "$T/w6" 20
+fd2 "wine, 10 rounds" "$D9MT_TEST_SEEN" "$T/w6" 20
+
+# 7./8. two calls of one WORK from different callers: only VD_*'s values (at a fixed width) and the
+# test's own D9MT_TEST_SEEN may differ
+twocalls() {  # <what> <work> <perf-abba args after --tag>
+  local what=$1 w=$2 d h1 h2; shift 2
+  mkdir -p "$T/c1" "$T/a/much/longer/caller/directory"
+  export D9MT_TEST_SEEN="$T/seen-two-$what-1"
+  (cd "$T/c1" && umask 077 && env OLDPWD=/x SHLVL=2 PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" SECRET_TOKEN=hunter2 \
+     VD_BOUNDS="1920 0 1600 1400" VD_X=1980 VD_Y=60 WORK="$w" bash "$ABBA" --tag t "$@" >/dev/null 2>&1)
+  export D9MT_TEST_SEEN="$T/seen-two-$what-2"
+  (cd "$T/a/much/longer/caller/directory" && env OLDPWD=/a/much/longer/previous/directory SHLVL=7 \
+     PATH="$PATH:/usr/local/bin" VD_BOUNDS="-1600 -220 1600 1400" VD_X=-1540 VD_Y=-160 WORK="$w" \
+     bash "$ABBA" --tag a-much-longer-tag "$@" >/dev/null 2>&1)
+  d=$(python3 -I - "$T/seen-two-$what-1" "$T/seen-two-$what-2" "$w" <<'CMP'
+import sys
+a, b, w = sys.argv[1:4]
+def runs(p):
+    try:
+        return [r.strip("\n").split("\n") for r in open(p + ".env").read().split("--\n") if r.strip()]
+    except OSError:
+        return []
+A, B = runs(a), runs(b)
+out = [] if A and len(A) == len(B) else ["runs %d vs %d" % (len(A), len(B))]
+for i, (x, y) in enumerate(zip(A, B)):
+    for r in (x, y):
+        e = dict(l.split("=", 1) for l in r if "=" in l)
+        if "SECRET_TOKEN" in e or e.get("OLDPWD") != w or e.get("SHLVL") != "1":
+            out.append("the caller's environment got through (SECRET_TOKEN, OLDPWD or SHLVL)")
+    if [l.split("=", 1)[0] for l in x] != [l.split("=", 1)[0] for l in y]:
+        out.append("the variables' names or order differ")
+    for l, m in zip(x, y):
+        if len(l) != len(m) or (l != m and not l.startswith(("VD_", "D9MT_TEST_SEEN="))):
+            out.append("%s differs" % l.split("=", 1)[0])
+for f in ("", ".fd2"):
+    try:
+        la, lb = [len(l) for l in open(a + f)], [len(l) for l in open(b + f)]
+    except OSError:
+        la, lb = [], [0]
+    if la != lb:
+        out.append("the %s lengths differ" % ("fd 2 path" if f else "cwd, argv or shape"))
+print("; ".join(sorted(set(out))[:6]))
+CMP
+)
+  h1=$(grep -ho 'launch=[^ ]*' "$w"/results/t-*.txt 2>/dev/null)
+  h2=$(grep -ho 'launch=[^ ]*' "$w"/results/a-much-longer-tag-*.txt 2>/dev/null)
+  { [ -n "$h1" ] && [ "$h1" = "$h2" ]; } || d="${d:+$d; }the headers' launch digests differ or are missing"
+  if [ -z "$d" ]; then ok "$what, two callers (cwd, tag, OLDPWD, PATH, SHLVL, umask, a secret, VD_*): every run sees the same inputs, VD_* at a fixed width; the same launch digests"
+  else bad "$what, two callers: $d"; fi
+}
+twocalls native "$T/w7" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 2 -- bench 5
+ENGINE="$T/engine" BENCH_DIR="$T/bench" twocalls wine "$T/w8" --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" --rounds 2 fake
 
 [ "$fail" = 0 ] && echo "test-perf-abba: all passed ($ABBA)" || echo "test-perf-abba: $fail FAILED ($ABBA)"
 [ "$fail" = 0 ]
