@@ -6,7 +6,8 @@
 Input lines: `round=<r> v=<variant> ... <metric>=<value>` (or block=/pair=); lines starting with DIRTY (another
 engine's Wine was running) or holding `RESULT FAIL` are skipped and counted. The metric is the
 first of avg_ms, ms/frame, frame_median_ms, median_ns present (lower is better), or --metric
-(fps: higher is better; "slower" and the flag follow the metric's direction).
+(fps, low1_fps and frame_low1_fps: higher is better; "slower" and the flag follow the metric's
+direction).
 
 Per variant: runs, median, min..max, the median against the reference's, the median of the
 per-round paired differences (same round, so drift between rounds cancels), and "slower n/N":
@@ -36,7 +37,7 @@ skipped, so the two measure different things).
 import argparse, re, statistics, sys
 
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
-HIGHER_IS_BETTER = ("fps",)
+HIGHER_IS_BETTER = ("fps", "low1_fps", "frame_low1_fps")
 FLAG = 0.0025   # a median slowdown over 0.25 % is flagged; when it is re-verified: ADR-0005
 
 

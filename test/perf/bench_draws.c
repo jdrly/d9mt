@@ -11,9 +11,11 @@
  *
  *   BENCH draws=1000 frames=600 loop_ns_per_draw=... proc_cpu_ns_per_draw=...
  *         frame_median_ms=... frame_p99_ms=... frame_median_ns=... frame_mean_ms=...
- *         cpu_tick_ms=... qpc_tick_ns=...
+ *         cpu_tick_ms=... qpc_tick_ns=... frame_low1_ms=... frame_low1_fps=... frame_max_ms=...
  *
- * frame_median_ns is frame_median_ms in whole ns: its resolution is the QPC tick (qpc_tick_ns, from
+ * frame_low1_ms is the 1 % low: the mean of the slowest 1 % of the measured frames (at least one,
+ * 0.0001 ms of rounding), frame_low1_fps 1000 / frame_low1_ms, frame_max_ms the slowest frame. They
+ * come last, after the older fields, so existing parsers read the line unchanged. frame_median_ns is frame_median_ms in whole ns: its resolution is the QPC tick (qpc_tick_ns, from
  * QueryPerformanceFrequency) or 1 ns of rounding, whichever is coarser; frame_mean_ms is the mean
  * over the measured frames (0.0001 ms of rounding). cpu_tick_ms is the smallest step of the process
  * CPU clock observed at startup (0: none observed, so unknown, not exact). It is an upper bound on
@@ -207,12 +209,17 @@ int main(int argc, char **argv) {
   for (f = 0; f < frames; f++) sum += ms[f];
   qsort(ms, frames, sizeof(double), cmp_double);
   qsort(loop, frames, sizeof(double), cmp_double);
+  const int low_n = (frames + 99) / 100;
+  double low_sum = 0.0;
+  for (f = frames - low_n; f < frames; f++) low_sum += ms[f];
+  const double low1 = low_sum / low_n;
   bench_timed_print("bench_draws");
   printf("BENCH mode=%s draws=%d frames=%d loop_ns_per_draw=%.0f proc_cpu_ns_per_draw=%.0f frame_median_ms=%.3f frame_p99_ms=%.3f"
-         " frame_median_ns=%.0f frame_mean_ms=%.4f cpu_tick_ms=%.4f qpc_tick_ns=%.1f\n",
+         " frame_median_ns=%.0f frame_mean_ms=%.4f cpu_tick_ms=%.4f qpc_tick_ns=%.1f"
+         " frame_low1_ms=%.4f frame_low1_fps=%.2f frame_max_ms=%.3f\n",
          flush ? "flush" : spinflush ? "spinflush" : "present", draws, frames, loop[frames / 2], (double)(cpu1 - cpu0) * 100.0 / ((double)frames * draws),
          ms[frames / 2], ms[frames * 99 / 100], ms[frames / 2] * 1e6, sum / frames, tick,
-         1e9 / (double)freq.QuadPart);
+         1e9 / (double)freq.QuadPart, low1, low1 > 0.0 ? 1000.0 / low1 : 0.0, ms[frames - 1]);
   fflush(stdout);
   IDirect3DDevice9_Release(dev);
   IDirect3D9_Release(d3d);
