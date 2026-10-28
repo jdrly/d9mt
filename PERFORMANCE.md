@@ -2,16 +2,39 @@
 
 d9mt exists to make games faster. This guide is **binding**: the Definition of Done in
 [CONTRIBUTING.md](CONTRIBUTING.md) refers to it, and the decision behind it is
+[ADR-0005](docs/adr/0005-correctness-first-speed-proven.md), which supersedes
 [ADR-0002](docs/adr/0002-nothing-measurably-slower.md). It says what the rule is, how to measure
 against it, which benchmarks and diagnostics exist, which design rules keep the hot path fast,
 and what a release candidate is checked for. What isn't in this repository yet is marked _Open_.
 
 ## 1. The rule
 
+- **Correctness on every supported Mac comes first.** A change that renders correctly on one Mac
+  can still break on another generation, a slower or a fanless one. #18's lossless compression
+  for textures that aren't block-compressed is the suspected cause of magenta icons on a player's
+  MacBook Air M4, not confirmed yet (ADR-0005).
+- **A fix merges unless a cost is established at the measurable resolution.** A fix, a change
+  that prevents a bug or a GPU fault, merges when the calibrated method establishes no cost at
+  the resolution it actually reaches: about ±1 % on bindbench today (§2.4, *Per PR and at the
+  release check*). It doesn't need a bound below +0.25 %. A flag larger than that resolution is
+  re-verified before the fix merges; a cost the re-verification establishes still goes to the
+  maintainer (§2.4, steps 2 and 3).
+- **A speed-only change carries the burden of proof.** A change whose purpose is speed, not
+  preventing a bug, needs evidence that it renders identically on Mac generations other than the
+  one it was measured on, a slower and a fanless Mac among them, not only a faster benchmark.
+  Without that coverage it goes in only behind a switch that is **off by default**, in the
+  README's tables, and a later PR that brings the coverage turns it on (`D9MT_AIR_FASTMATH` has
+  this shape). The player on an untested Mac is the one who would need an off switch and the one
+  least likely to know it exists. Existing speed optimisations stay as they are; this applies to
+  new speed-only changes (ADR-0005).
+- **+0.25 % is a flag, not a hard stop.** Every median slowdown over it is flagged and
+  re-verified (§2.4). A small flag at the edge of the measurable resolution goes to a council and
+  doesn't block a fix. Such flags can add up over a release; the smoothness guard (§6) is where
+  that is caught.
 - **Nothing measurably slower merges**, in any scenario. The per-draw and per-bind paths are the
-  most sensitive; a gain in one scenario doesn't offset a loss in another (ADR-0002).
+  most sensitive; a gain in one scenario doesn't offset a loss in another (ADR-0005).
 - **A cost that can't be removed waits until it can.** Measuring a regression is not enough; it
-  has to be solved (ADR-0002).
+  has to be solved (ADR-0005).
 - **A layout effect is not a cost of the change.** Under Rosetta, a rebuild alone moves a
   microbenchmark by up to ±3 % because the linker moves hot code; every later merge moves it
   again, and its sign is as likely to flip as to stay. A delta that disappears under the layout
@@ -170,7 +193,9 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
   move between blocks.
 - **A median slowdown over 0.25 % is flagged anyway** (ms up, fps down; the median or the paired
   median against base), even inside the A/A spread, and re-verified before a merge:
-  `scripts/perf-compare.py` marks it `FLAG >0.25%` and names it in a closing line (ADR-0002).
+  `scripts/perf-compare.py` marks it `FLAG >0.25%` and names it in a closing line (ADR-0005).
+  For a fix, only a flag larger than the measurable resolution is re-verified before the merge; a
+  smaller one goes to a council (below) and doesn't hold the fix (§1).
   A flag is first the author's to clear, in this order:
   1. **Re-verify** in another block (on bindbench more rounds in the same block don't help,
      §2.5), with the layout controls below and, on a bimodal bench, the mode report
@@ -219,10 +244,12 @@ Every comparison of two different binaries ends in one of three outcomes, and th
 2. **Cost bounded below +0.25 %, under stated conditions**: a one-sided upper bound, declared
    before the data, lies below +0.25 %, and the PR states the conditions it holds under (the
    bench, the blocks, the layout control). This doesn't permit a smaller slowdown that is
-   measured reliably: that one is still measurably slower (§1).
+   measured reliably: that one is still measurably slower (§1). A fix doesn't need this outcome
+   (§1).
 3. **Unresolved**: everything else. A sign flip between blocks is unresolved, not "the flag
    didn't hold". So is one block's narrow interval, whatever its sign, when the bench's mode can
-   change between blocks (§2.5). An unresolved comparison goes to a council (above).
+   change between blocks (§2.5). An unresolved comparison goes to a council (above); for a fix,
+   that doesn't hold the merge.
 
 Every raw flag stays on record with its block, its interval, its slower n/N and its outcome, also
 after a later block reads otherwise.
@@ -248,10 +275,13 @@ separate check (the maintainer, 2026-10-27):
   only in the layout, are judged at the release candidate check (§6) with the calibrated method.
 - **The goal is a method that resolves 0.25 %.** A larger bound for one benchmark, or an
   exception, comes only if calibration shows the method can't get there, and only the
-  maintainer grants either. _Open:_ on bindbench it doesn't resolve 0.25 % yet. In the
-  maintainer's runs one block of 30 to 40 rounds didn't bound even an A/A below +0.25 % (the
-  intervals' upper ends were +0.59 to +0.86 %), and the contrast of two different binaries
-  ranged from +5.3 % to −5.3 % over three blocks (§2.5).
+  maintainer grants either. Until then a fix is judged at the **measurable resolution**, the one
+  the calibrated method actually reaches (§1). _Open:_ on bindbench it doesn't resolve 0.25 %
+  yet. In the maintainer's runs one block of 30 to 40 rounds didn't bound even an A/A below
+  +0.25 % (the intervals' upper ends were +0.59 to +0.86 %), and the contrast of two different
+  binaries ranged from +5.3 % to −5.3 % over three blocks (§2.5). In the maintainer's runs of
+  2026-10-28 the A/A intervals spanned about ±1 %: that is bindbench's measurable resolution
+  today. The other benchmarks' resolution isn't calibrated yet.
 
 ### 2.5 Bimodal benchmarks
 
@@ -479,3 +509,27 @@ fix, each measured on its own; it is never fixed by reverting the commit that mo
 
 _Open:_ the drawable-wait counters are on the branch `diag/drawable-wait-stats`, not on `main`
 yet.
+
+### 6.1 The smoothness guard
+
+Per PR, a fix's flag below the measurable resolution doesn't hold it (§1), so small costs can add
+up over a release. The release check is where that is caught, on what the player feels rather
+than on average fps or ms alone: the release candidate is compared with **the last stable
+release** on the numbers below. **Any measurable regression in them goes to the maintainer
+before the release, with both builds' numbers** (ADR-0005).
+
+| What the player feels | Where the number comes from |
+|---|---|
+| 1 % lows and frame-time p99 | `bench_fps_cap`'s `p99` (the frame interval 99 % of frames stay under, 0.01 ms) and `HIST`; `bench_draws` `present`'s `frame_p99_ms`; in a game, `STATS`'s `ms=avg/p99/max` per second |
+| Hitches, frames over 33 and 50 ms | in a game, `STATS`'s `slow33`/`slow50` (frames over 33.4 and 50 ms) and the `HITCH` lines (d9mt's share or the game's); `bench_fps_cap`'s `HIST` counts them to 1 ms (bins up to 200 ms; `max` shows a longer one), and its `long` counts frames over 1.5x the median, not over 33 or 50 ms |
+| The present interval's spread | `bench_fps_cap`'s `sd`; in a game, `PACE`'s `sd` (the interval between the game's Present calls) |
+
+- The benchmark numbers come from the `bench_fps_cap` and `bench_draws` `present` runs above, as
+  paired rounds against the last stable (§2.2), with `--metric p99`, `sd` or `frame_p99_ms`
+  (§2.3); compare `long` and the `HIST` counts per round.
+- `STATS`, `PACE` and `HITCH` need `D9MT_PROFILE`, which changes the regime (§2.1): compare both
+  builds under the same setting, in the same scene on a real display (§2.6), and don't read their
+  frame rate as the player's.
+- _Open:_ no bench prints the 1 % lows as the mean of the slowest 1 % of frames (`HIST` gives it
+  only to 1 ms), and there is no scripted game scene in this repository, so the in-game side of
+  the comparison isn't repeatable yet.
