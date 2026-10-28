@@ -21,7 +21,8 @@
  * before a new page's first icon is filled (2), PK_CHECK (1), PK_SPIN_US of CPU work per frame on
  * the render thread (0), PK_KINDS a mask of the kinds above (15), PK_W x PK_H the back buffer
  * (1920 x 1200: over the 8 MiB at which d9mt's early commit, G1, applies), PK_HEAVY rows of a
- * long-running pixel shader before the icons each frame (0), PK_THREAD (0). */
+ * long-running pixel shader before the icons each frame (0), PK_THREAD (0), PK_WRONG (0; n fills each
+ * icon with the colours of the icon n slots on: the checker's negative control, every check fails). */
 #include "t_xfer.h"
 
 #include <stdlib.h>
@@ -57,7 +58,7 @@ static Page pages[PAGES];
 static IDirect3DTexture9 *upload_argb, *upload_dxt5;
 static IDirect3DVertexShader9 *vs_texquad, *vs_pos;
 static IDirect3DPixelShader9 *ps_texquad, *ps_heavy;
-static int cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread;
+static int cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread, cfg_wrong;
 static int fail_garbage, fail_stale, fail_late, fail_magenta, frames_failed, printed, dumped;
 
 /* PK_THREAD: kind 0/1 icons waiting for their SYSTEMMEM texture */
@@ -169,7 +170,7 @@ static void create_icon(Icon *ic, int page, int slot, int countdown) {
   }
   if (cfg_thread && ic->kind <= 1) {
     EnterCriticalSection(&job_lock);
-    jobs[job_head++ % (PAGES * ICONS * 4)] = (Job){ic, page, slot};
+    jobs[job_head++ % (PAGES * ICONS * 4)] = (Job){ic, page, (slot + cfg_wrong) % ICONS};
     LeaveCriticalSection(&job_lock);
     ic->queued = 1;
     SetEvent(job_event);
@@ -179,6 +180,7 @@ static void create_icon(Icon *ic, int page, int slot, int countdown) {
 /* The loader's turn for this icon: returns 0 if (PK_THREAD) its source isn't ready yet. */
 static int fill_icon(Icon *ic, int page, int slot) {
   D3DLOCKED_RECT lr;
+  slot = (slot + cfg_wrong) % ICONS;
   switch (ic->kind) {
     case 0:
     case 1: {
@@ -415,6 +417,7 @@ int main(void) {
   cfg_h = env_int("PK_H", 1200);
   cfg_heavy = env_int("PK_HEAVY", 0);
   cfg_thread = env_int("PK_THREAD", 0);
+  cfg_wrong = env_int("PK_WRONG", 0);
   if (cfg_frames < 1 || cfg_frames > 600) cfg_frames = 480;
   if (cfg_flip < 1) cfg_flip = 6;
   if (cfg_load < 1) cfg_load = 1;
