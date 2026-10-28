@@ -60,11 +60,24 @@
 # variant gets its own AIR cache and PSO archives (warm after its first run) under caches/<8 hex
 # digits of its name's sha256>, a fixed length, so the environment doesn't either; the state cache
 # is off. --native sets no cache variables (only the --env ones). Each run's stderr (fd 2) goes to
-# logs/<tag>-<pid, 5 digits>-<the variant's 8-hex id>-<round, zero-padded>.err, a fixed length for
-# every variant and round of one call; the results header names each variant's id (cache= or id=).
-# scripts/test-perf-abba.sh checks this without Wine. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
+# logs/<the tag's 8-hex id>-<pid, 5 digits>-<the variant's 8-hex id>-<round, zero-padded>.err, a
+# fixed length for every variant and round, whatever the tag; the results header names each id.
+# Each run starts with `env -i` and an explicit environment after the cd (#96), so nothing of the
+# caller's reaches it, not even its cwd as OLDPWD: the user's HOME, USER, LOGNAME and TMPDIR from
+# the system, PATH and LANG fixed, PWD the run directory, OLDPWD=$WORK; a job runner's JOB_ID (8
+# digits) and JOB_ROOT (unchanged: keep it the same between compared calls) and a virtual display's
+# VD_BOUNDS, VD_X and VD_Y at a fixed width (each number %+06d);
+# then, sorted by name, the script's Wine and d9mt variables, the caller's D9MT_* switches and the
+# variant's --env (--env changes the Wine defaults but not the run's own cache, state-cache, pacing
+# and DLL-override settings, as before). Every descriptor above 2 is closed, and the
+# umask is 022; the header records the umask, nice and resource limits the runs inherit. The
+# results header gives each variant's launch=<count>:<digest of the names and value lengths>, so two
+# calls can be compared without a value being written. scripts/test-perf-abba.sh checks this without Wine. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
 # asleep unless the bench needs it awake.
 set -uo pipefail
+# the caller's d9mt switches (D9MT_FPS_CAP, …): the only variables of its own a run gets (#96)
+CALLER_D9MT=()
+for n in $(compgen -e); do case $n in D9MT_*) CALLER_D9MT+=("$n=${!n}") ;; esac; done
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 die() { echo "perf-abba: $*" >&2; exit 2; }
 : "${WORK:?set WORK to a scratch dir}"
@@ -105,9 +118,13 @@ REF="${REF:-${NAMES[0]}}"
 has "$REF" || die "--ref $REF is not a variant"
 [ -z "$CONTROL" ] || has "$CONTROL" || die "--control $CONTROL is not a variant"
 [ -z "$CONTROL" ] || [ "$CONTROL" != "$REF" ] || die "--control must differ from the reference"
+LAUNCH_NAMES=" HOME LANG LOGNAME PATH TMPDIR USER PWD OLDPWD JOB_ID JOB_ROOT VD_BOUNDS VD_X VD_Y "
 for e in ${ENVS[@]+"${ENVS[@]}"}; do
   has "${e%%:*}" || die "--env $e: ${e%%:*} is not a variant"
   [ "${e#*:}" != "$e" ] && [ "${e#*:*=}" != "${e#*:}" ] || die "--env $e: expected <name>:<VAR>=<value>"
+  v=${e#*:}; v=${v%%=*}
+  case $v in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) die "--env $e: $v isn't a variable name" ;; esac
+  case $LAUNCH_NAMES in *" $v "*) die "--env $e: the launch sets $v itself" ;; esac
 done
 
 if [ "$NATIVE" = 1 ]; then
@@ -132,6 +149,11 @@ case "$TAG" in ''|*[!A-Za-z0-9._-]*) die "tag '$TAG': letters, digits, . _ - onl
 
 mkdir -p "$WORK" || die "can't create $WORK"
 WORK="$(cd "$WORK" && pwd)" || die "can't enter $WORK"   # absolute: the runs cd into $RUN
+# env -i takes a word with "=" for an assignment, not for the program
+# RUN_WRAPPER split once into words at blanks, tabs and newlines, as its unquoted expansion did,
+# but without pathname expansion, and run as exactly these words
+IFS=$' \t\n' read -r -d '' -a WRAP <<< "${RUN_WRAPPER:-}" || true
+case "$WORK ${ENGINE:-} ${WRAP[0]:-}" in *=*) die "WORK, ENGINE and RUN_WRAPPER's command can't contain '='" ;; esac
 A="$WORK/abba"
 mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs"
 OUT="$WORK/results/$TAG-$(date +%Y%m%d-%H%M%S)-$$.txt"
@@ -184,6 +206,7 @@ RUN="$A/run"
 mkdir -p "$RUN" || die "can't create $RUN"
 [ "$NATIVE" = 1 ] || cp "$EXE" "$RUN/" || die "can't copy $EXE into $RUN"
 cid() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
+TID=$(cid "$TAG")   # the tag in the logs' names: a fixed length whatever the tag (#96)
 # IDS: each variant's fixed-length id (its stderr logs, and under Wine its caches); CIDS: the cache
 # ids, the same values, Wine only
 IDS=() CIDS=()
@@ -199,6 +222,59 @@ done
 # Each run's stderr log has a fixed-length name too (#71): the call's pid padded to 5 digits, the
 # variant's id, and the round padded to the width of --rounds.
 PID5=$(printf '%05d' $$) RW=${#ROUNDS}
+# Each run's whole environment (#96): LBASE in this order, then launch_env's rest sorted by name.
+fixw() {  # <integer of at most 5 digits>: %+06d (atoi and sscanf read it unchanged)
+  local s=1 n=$1
+  case $n in -*) s=-1 n=${n#-} ;; +*) n=${n#+} ;; esac
+  [[ $n =~ ^[0-9]{1,5}$ ]] || return 1
+  printf '%+06d' $((s * 10#$n))
+}
+U=$(id -un) && UHOME=$(python3 -I -S -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)') \
+  && UTMP=$(getconf DARWIN_USER_TEMP_DIR) || die "can't read the user's HOME and TMPDIR"
+LBASE=("HOME=$UHOME" "LANG=C.UTF-8" "LOGNAME=$U" "PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" "TMPDIR=$UTMP"
+       "USER=$U" "PWD=$RUN" "OLDPWD=$WORK")
+if [ -n "${JOB_ID:-}" ]; then
+  case $JOB_ID in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) LBASE+=("JOB_ID=$JOB_ID") ;; *) die "JOB_ID=$JOB_ID isn't 8 digits" ;; esac
+fi
+[ -z "${JOB_ROOT:-}" ] || LBASE+=("JOB_ROOT=$JOB_ROOT")
+if [ -n "${VD_BOUNDS:-}" ]; then
+  read -r a b c d x <<< "$VD_BOUNDS"
+  { [ -z "${x:-}" ] && a=$(fixw "$a") && b=$(fixw "${b:-}") && c=$(fixw "${c:-}") && d=$(fixw "${d:-}"); } \
+    || die "VD_BOUNDS '$VD_BOUNDS' isn't four integers"
+  LBASE+=("VD_BOUNDS=$a $b $c $d")
+fi
+for x in VD_X VD_Y; do
+  [ -z "${!x:-}" ] && continue
+  a=$(fixw "${!x}") || die "$x '${!x}' isn't an integer"
+  LBASE+=("$x=$a")
+done
+# launch_env <variant index>: LENV, its run's environment. Later entries win, in the order the
+# script always had: the caller's D9MT_*, the Wine defaults (WINEPREFIX, WINEDEBUG, WINEMSYNC and
+# the library path, which --env may change), the variant's --env, then the run's own settings
+# (WINEDLLOVERRIDES, the caches, the state cache, the background and stall pacing).
+launch_env() {
+  local i=$1 e n v all=(${CALLER_D9MT[@]+"${CALLER_D9MT[@]}"}) names
+  [ "$NATIVE" = 1 ] || all+=("DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH" "WINEDEBUG=-all" "WINEMSYNC=1"
+                             "WINEPREFIX=$WINEPREFIX")
+  for e in ${ENVS[@]+"${ENVS[@]}"}; do [ "${e%%:*}" = "${NAMES[$i]}" ] && all+=("${e#*:}"); done
+  if [ "$NATIVE" = 0 ]; then
+    all+=("WINEDLLOVERRIDES=d3d9=n,b" "D9MT_AIR_CACHE=$A/caches/${CIDS[$i]}/air-cache.sqlite3"
+          "D9MT_PSO_ARCHIVE_DIR=$A/caches/${CIDS[$i]}/pso" D9MT_STATE_CACHE=0 D9MT_BG_FPS=0 D9MT_STALL_PACE=0)
+  fi
+  LENV=("${LBASE[@]}")
+  [ ${#all[@]} -gt 0 ] || return 0
+  names=$(for e in "${all[@]}"; do echo "${e%%=*}"; done | LC_ALL=C sort -u)
+  for n in $names; do
+    for e in "${all[@]}"; do [ "${e%%=*}" != "$n" ] || v=${e#*=}; done
+    LENV+=("$n=$v")
+  done
+}
+launch_digest() {  # <variant index>: <count>:<16 hex of its names and value lengths in bytes>
+  local e v LC_ALL=C
+  launch_env "$1"
+  printf '%s:%s' "${#LENV[@]}" "$(for e in "${LENV[@]}"; do v=${e#*=}; echo "${e%%=*}=${#v}"; done | shasum -a 256 | cut -c1-16)"
+}
+
 # put <variant index>'s binary into the run directory (a temporary name, then a rename)
 place() {
   local i=$1
@@ -212,33 +288,38 @@ place() {
 echo "# $WHAT $* rounds=$ROUNDS variants=${NAMES[*]} ref=$REF${CONTROL:+ control=$CONTROL} $(date '+%F %T')" > "$OUT" || die "can't write $OUT"
 for i in "${!NAMES[@]}"; do
   if [ "$NATIVE" = 1 ]; then idf="id=${IDS[$i]}"; else idf="cache=${CIDS[$i]}"; fi
-  echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16)) $idf" >> "$OUT"
+  echo "#   ${NAMES[$i]} = ${DLLS[$i]} ($(shasum -a 256 "${DLLS[$i]}" | cut -c1-16)) $idf launch=$(launch_digest "$i")" >> "$OUT"
 done
 echo "#   run directory: $RUN (every variant)" >> "$OUT"
+lim=""; for o in c d f l m n s t u v; do lim="$lim $o=$(ulimit -S -$o)/$(ulimit -H -$o)"; done
+echo "#   process: umask 022, nice $(ps -o nice= -p $$ | tr -d ' '), limits${lim}" >> "$OUT"
 if [ "$NATIVE" = 1 ]; then idf="<id>"; else idf="<cache id>"; fi
-echo "#   stderr logs: $A/logs/$TAG-$PID5-$idf-<round %0${RW}d>.err" >> "$OUT"
+echo "#   tag: $TAG, id $TID" >> "$OUT"
+echo "#   stderr logs: $A/logs/$TID-$PID5-$idf-<round %0${RW}d>.err" >> "$OUT"
 echo "perf-abba: results in $OUT"
 OWN=$([ "$NATIVE" = 1 ] && echo 0 || echo 1)
 n=${#NAMES[@]} fails=0
 for r in $(seq "$ROUNDS"); do
   for k in $(seq 0 $((n - 1))); do
     i=$(( (k + r) % n )); v=${NAMES[$i]}
-    log="$A/logs/$TAG-$PID5-${IDS[$i]}-$(printf '%0*d' "$RW" "$r").err"
+    log="$A/logs/$TID-$PID5-${IDS[$i]}-$(printf '%0*d' "$RW" "$r").err"
     load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
     stop_own
     place "$i" || die "can't put ${NAMES[$i]}'s binary into $RUN"
     dirty=""; [ "$(servers)" -gt 0 ] && dirty=1   # before the launch: nothing of ours runs
+    launch_env "$i"
     (
-      for e in ${ENVS[@]+"${ENVS[@]}"}; do [ "${e%%:*}" = "$v" ] && export "${e#*:}"; done
       cd "$RUN" || exit 125
+      umask 022
+      for f in /dev/fd/*; do
+        f=${f##*/}
+        case $f in 0|1|2|*[!0-9]*) ;; *) eval "exec $f>&-" 2>/dev/null ;; esac
+      done
       if [ "$NATIVE" = 1 ]; then
-        exec ${RUN_WRAPPER:-} "$RUN/native-program" "$@"
+        exec /usr/bin/env -i "${LENV[@]}" ${WRAP[@]+"${WRAP[@]}"} "$RUN/native-program" "$@"
       fi
-      export WINEDLLOVERRIDES="d3d9=n,b"
-      export D9MT_AIR_CACHE="$A/caches/${CIDS[$i]}/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$A/caches/${CIDS[$i]}/pso"
-      export D9MT_STATE_CACHE=0 D9MT_BG_FPS=0 D9MT_STALL_PACE=0
-      exec ${RUN_WRAPPER:-} "$WINE" "$NAME_EXE" "$@"
-    ) > "$A/out" 2> "$log" &
+      exec /usr/bin/env -i "${LENV[@]}" ${WRAP[@]+"${WRAP[@]}"} "$WINE" "$NAME_EXE" "$@"
+    ) < /dev/null > "$A/out" 2> "$log" &
     CHILD=$! t=0
     while kill -0 "$CHILD" 2>/dev/null && [ "$t" -lt "$TIMEOUT" ]; do
       sleep 1; t=$((t + 1))

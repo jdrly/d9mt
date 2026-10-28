@@ -55,9 +55,19 @@ and what a release candidate is checked for. What isn't in this repository yet i
   faster than the original in every round of a bindbench run, under a variant name one character
   longer (#65). `scripts/perf-abba.sh` therefore runs every variant from one directory and, under
   Wine, with its caches under a fixed-length id, and gives each run's stderr log a name of fixed
-  length (#71: `logs/<tag>-<pid, 5 digits>-<id>-<round, zero-padded>.err`; the results header
-  names each variant's id). `scripts/test-perf-abba.sh` checks all three without Wine. That
-  covers the harness, not every layout effect. Switches set per variant (`--env`) should be set on every
+  length (#71: `logs/<tag id>-<pid, 5 digits>-<id>-<round, zero-padded>.err`; the results header
+  names each id). The same holds between two calls (#96): each run starts with `env -i` and an
+  explicit environment after the `cd`. The user's `HOME`, `USER`, `LOGNAME` and `TMPDIR` come from
+  the system, `PATH` and `LANG` are fixed, and `OLDPWD` is `WORK`, never the caller's cwd. A job
+  runner's `JOB_ID` and a virtual display's `VD_*` pass at a fixed width, its `JOB_ROOT` unchanged
+  (keep it the same between calls that are compared), and so do
+  the script's Wine and d9mt variables, the caller's `D9MT_*` switches and `--env`; nothing else of
+  the caller's gets through. The umask is 022, every descriptor above 2 is closed, and the tag
+  reaches the log names only as an 8-hex id. The results header gives each variant's launch
+  digest (names and value lengths) and the umask, nice and limits the runs inherit, so two calls
+  can be compared. Keep `WORK` the same between calls that are compared: its path is the run
+  directory's. `scripts/test-perf-abba.sh` checks all of this without Wine. That covers the
+  harness, not every layout effect. Switches set per variant (`--env`) should be set on every
   variant, with values of the same length (`D9MT_GPU_CANARY=0` on one, `=1` on the others).
 - **Clean builds only**: every measured `d3d9.dll` comes from a build from scratch.
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
@@ -85,8 +95,11 @@ D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh
   --control basecopy --rounds 10 bindbench 1060
 ```
 
-- `scripts/perf-abba.sh` runs the rounds rotated (§2.2), with `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`,
-  the state cache off, and the rest of the caller's environment. It doesn't reset
+- `scripts/perf-abba.sh` runs the rounds rotated (§2.2), with `D9MT_BG_FPS=0 D9MT_STALL_PACE=0`
+  and the state cache off. Of the caller's environment only the `D9MT_*` switches reach a run
+  (§2.1); anything else a variant needs goes in `--env`, which also changes the Wine defaults
+  (`WINEDEBUG`, `WINEMSYNC`, `WINEPREFIX`, the library path) but not the run's own settings
+  (`WINEDLLOVERRIDES`, the caches, the state cache, the pacing). It doesn't reset
   `D9MT_FPS_CAP`, so set `D9MT_FPS_CAP=0` for the call as above; an experiment with the cap sets
   it per variant with `--env <name>:D9MT_FPS_CAP=<fps>`. Each variant gets an AIR cache and PSO
   archives of its own (warm after its first run). The first variant is the reference unless `--ref`; `--env <name>:<VAR>=<value>`
