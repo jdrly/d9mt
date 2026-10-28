@@ -16,11 +16,17 @@
 #      OLDPWDs, PATHs, shell levels and virtual display positions, one with a secret-like variable:
 #      every run sees the same cwd, argv, environment (names, order, values; VD_* only the same
 #      length) and umask (the callers' are 077 and 022), fd 2 paths of the same length, no caller
-#      variable but D9MT_*, OLDPWD=WORK, and the results headers give the same launch digests.
+#      variable but D9MT_*, OLDPWD=WORK, and the results headers give the same launch digests;
+#   9. RUN_WRAPPER: a wrapper whose first word is an assignment (leading blank included) is refused
+#      and nothing runs; a real wrapper runs and adds nothing to the environment;
+#  10. precedence, as before #96: --env changes the Wine defaults (WINEDEBUG, WINEMSYNC) but not the
+#      run's own settings (WINEDLLOVERRIDES, D9MT_STATE_CACHE), and only for its variant;
+#  11. the launch digest counts bytes: a D9MT_* value of "a" and of "é" give different digests
+#      under a UTF-8 locale.
 # 08827cb's harness fails 1 (argv[0] is the variant's own program) and 2 (bin-<name> and
 # caches/<name>), and passes 3 and 4 (it runs each program in place, so 4 is a failed run there).
 # dbd9139's fails 5 and 6 (logs/<tag>-<pid>-<name>-<round>.err). 07d4a60's fails 7 and 8 (the
-# caller's environment and OLDPWD reach the run, the tag sets fd 2's length).
+# caller's environment and OLDPWD reach the run, the tag sets fd 2's length) and 9-11.
 #   scripts/test-perf-abba.sh [perf-abba.sh to test (default: this tree's)]
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -125,15 +131,17 @@ fd2 "wine, 10 rounds" "$D9MT_TEST_SEEN" "$T/w6" 20
 # 7./8. two calls of one WORK from different callers: only VD_*'s values (at a fixed width) and the
 # test's own D9MT_TEST_SEEN may differ
 twocalls() {  # <what> <work> <perf-abba args after --tag>
-  local what=$1 w=$2 d h1 h2; shift 2
+  local what=$1 w=$2 d h1 h2 r1 r2; shift 2
   mkdir -p "$T/c1" "$T/a/much/longer/caller/directory"
   export D9MT_TEST_SEEN="$T/seen-two-$what-1"
   (cd "$T/c1" && umask 077 && env OLDPWD=/x SHLVL=2 PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" SECRET_TOKEN=hunter2 \
      VD_BOUNDS="1920 0 1600 1400" VD_X=1980 VD_Y=60 WORK="$w" bash "$ABBA" --tag t "$@" >/dev/null 2>&1)
+  r1=$?
   export D9MT_TEST_SEEN="$T/seen-two-$what-2"
   (cd "$T/a/much/longer/caller/directory" && env OLDPWD=/a/much/longer/previous/directory SHLVL=7 \
      PATH="$PATH:/usr/local/bin" VD_BOUNDS="-1600 -220 1600 1400" VD_X=-1540 VD_Y=-160 WORK="$w" \
      bash "$ABBA" --tag a-much-longer-tag "$@" >/dev/null 2>&1)
+  r2=$?
   d=$(python3 -I - "$T/seen-two-$what-1" "$T/seen-two-$what-2" "$w" <<'CMP'
 import sys
 a, b, w = sys.argv[1:4]
@@ -154,24 +162,65 @@ for i, (x, y) in enumerate(zip(A, B)):
     for l, m in zip(x, y):
         if len(l) != len(m) or (l != m and not l.startswith(("VD_", "D9MT_TEST_SEEN="))):
             out.append("%s differs" % l.split("=", 1)[0])
-for f in ("", ".fd2"):
-    try:
-        la, lb = [len(l) for l in open(a + f)], [len(l) for l in open(b + f)]
-    except OSError:
-        la, lb = [], [0]
-    if la != lb:
-        out.append("the %s lengths differ" % ("fd 2 path" if f else "cwd, argv or shape"))
+try:
+    sa, sb = open(a).read().splitlines(), open(b).read().splitlines()
+    fa, fb = [len(l) for l in open(a + ".fd2")], [len(l) for l in open(b + ".fd2")]
+except OSError:
+    sa, sb, fa, fb = [], [1], [], [1]
+if len(sa) != 4 or sa != sb:
+    out.append("the runs' cwd, argv or environment shape differ (%d and %d runs)" % (len(sa), len(sb)))
+if len(fa) != 4 or fa != fb:
+    out.append("the fd 2 path lengths differ")
 print("; ".join(sorted(set(out))[:6]))
 CMP
 )
   h1=$(grep -ho 'launch=[^ ]*' "$w"/results/t-*.txt 2>/dev/null)
   h2=$(grep -ho 'launch=[^ ]*' "$w"/results/a-much-longer-tag-*.txt 2>/dev/null)
   { [ -n "$h1" ] && [ "$h1" = "$h2" ]; } || d="${d:+$d; }the headers' launch digests differ or are missing"
+  [ "$r1$r2" = 00 ] || d="${d:+$d; }exit $r1/$r2"
   if [ -z "$d" ]; then ok "$what, two callers (cwd, tag, OLDPWD, PATH, SHLVL, umask, a secret, VD_*): every run sees the same inputs, VD_* at a fixed width; the same launch digests"
   else bad "$what, two callers: $d"; fi
 }
 twocalls native "$T/w7" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 2 -- bench 5
 ENGINE="$T/engine" BENCH_DIR="$T/bench" twocalls wine "$T/w8" --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" --rounds 2 fake
+
+# 9. RUN_WRAPPER
+export D9MT_TEST_SEEN="$T/seen-wrap-bad"
+RUN_WRAPPER=' SECRET_TOKEN=x /usr/bin/env' WORK="$T/w9" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ] && [ "$(lines "$D9MT_TEST_SEEN")" = 0 ]; then ok "RUN_WRAPPER with an assignment for its first word (a leading blank): refused (exit 2), nothing runs"
+else bad "RUN_WRAPPER with an assignment: exit $rc, $(lines "$D9MT_TEST_SEEN") runs"; fi
+for wr in "" "/usr/bin/nice -n 0"; do
+  export D9MT_TEST_SEEN="$T/seen-wrap-${wr:+nice}"
+  RUN_WRAPPER="$wr" WORK="$T/w9b" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1
+done
+# the environments without the test's own D9MT_TEST_SEEN, whose file names differ
+envs() { grep -v '^D9MT_TEST_SEEN=' "$1" 2>/dev/null; }
+if [ "$(lines "$T/seen-wrap-nice")" = 2 ] && [ -n "$(envs "$T/seen-wrap-.env")" ] && [ "$(envs "$T/seen-wrap-.env")" = "$(envs "$T/seen-wrap-nice.env")" ]; then
+  ok "RUN_WRAPPER=\"/usr/bin/nice -n 0\": both runs execute and see the environment they see without it"
+else bad "RUN_WRAPPER nice: $(lines "$T/seen-wrap-nice") runs, environments $(diff "$T/seen-wrap-.env" "$T/seen-wrap-nice.env" 2>&1 | head -3 | tr '\n' ' ')"; fi
+
+# 10. precedence: --env over the Wine defaults, the run's own settings over --env (variant a only)
+export D9MT_TEST_SEEN="$T/seen-prec"
+ENGINE="$T/engine" WORK="$T/w10" BENCH_DIR="$T/bench" bash "$ABBA" --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" \
+  --env a:WINEDEBUG=+timestamp --env a:WINEMSYNC=0 --env a:WINEDLLOVERRIDES=d3d9=b --env a:D9MT_STATE_CACHE=1 --rounds 1 fake >/dev/null 2>&1
+# round 1 runs bbbb, then a
+p=$(awk 'BEGIN { RS = "--\n" } { n++; printf "%s:", n; split($0, l, "\n"); for (i in l) if (l[i] ~ /^(WINEDEBUG|WINEMSYNC|WINEDLLOVERRIDES|D9MT_STATE_CACHE)=/) printf " %s", l[i]; print "" }' "$D9MT_TEST_SEEN.env" 2>/dev/null | LC_ALL=C sort)
+want_b="1: $(printf '%s\n' D9MT_STATE_CACHE=0 WINEDEBUG=-all WINEDLLOVERRIDES=d3d9=n,b WINEMSYNC=1 | tr '\n' ' ' | sed 's/ $//')"
+want_a="2: $(printf '%s\n' D9MT_STATE_CACHE=0 WINEDEBUG=+timestamp WINEDLLOVERRIDES=d3d9=n,b WINEMSYNC=0 | tr '\n' ' ' | sed 's/ $//')"
+p1=$(echo "$p" | sed -n 1p | tr ' ' '\n' | sed 1d | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+p2=$(echo "$p" | sed -n 2p | tr ' ' '\n' | sed 1d | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+if [ "1: $p1" = "$want_b" ] && [ "2: $p2" = "$want_a" ]; then ok "precedence: --env sets variant a's WINEDEBUG and WINEMSYNC, not its WINEDLLOVERRIDES or D9MT_STATE_CACHE; bbbb keeps the defaults"
+else bad "precedence: bbbb '$p1', a '$p2'"; fi
+
+# 11. the launch digest counts bytes, not characters
+for v in a é; do
+  D9MT_TEST_PAD=$v LC_ALL=en_US.UTF-8 WORK="$T/w11-$([ "$v" = a ] && echo 1 || echo 2)" bash "$ABBA" --native --variant a="$T/prog-a" \
+    --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1
+done
+d1=$(grep -ho 'launch=[^ ]*' "$T"/w11-1/results/*.txt 2>/dev/null | head -1); d2=$(grep -ho 'launch=[^ ]*' "$T"/w11-2/results/*.txt 2>/dev/null | head -1)
+if [ -n "$d1" ] && [ -n "$d2" ] && [ "$d1" != "$d2" ]; then ok "the launch digest counts bytes: D9MT_TEST_PAD=a and =é differ under a UTF-8 locale"
+else bad "the launch digest under a UTF-8 locale: '$d1' and '$d2'"; fi
 
 [ "$fail" = 0 ] && echo "test-perf-abba: all passed ($ABBA)" || echo "test-perf-abba: $fail FAILED ($ABBA)"
 [ "$fail" = 0 ]

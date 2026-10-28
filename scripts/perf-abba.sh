@@ -67,7 +67,8 @@
 # the system, PATH and LANG fixed, PWD the run directory, OLDPWD=$WORK; a job runner's JOB_ID and
 # JOB_ROOT and a virtual display's VD_BOUNDS, VD_X and VD_Y at a fixed width (each number %+06d);
 # then, sorted by name, the script's Wine and d9mt variables, the caller's D9MT_* switches and the
-# variant's --env (the script's own win, then --env). Every descriptor above 2 is closed, and the
+# variant's --env (--env changes the Wine defaults but not the run's own cache, state-cache, pacing
+# and DLL-override settings, as before). Every descriptor above 2 is closed, and the
 # umask is 022; the header records the umask, nice and resource limits the runs inherit. The
 # results header gives each variant's launch=<count>:<digest of the names and value lengths>, so two
 # calls can be compared without a value being written. scripts/test-perf-abba.sh checks this without Wine. Benchmarks belong on a quiet machine: no other GPU or CPU load, and the display
@@ -148,7 +149,9 @@ case "$TAG" in ''|*[!A-Za-z0-9._-]*) die "tag '$TAG': letters, digits, . _ - onl
 mkdir -p "$WORK" || die "can't create $WORK"
 WORK="$(cd "$WORK" && pwd)" || die "can't enter $WORK"   # absolute: the runs cd into $RUN
 # env -i takes a word with "=" for an assignment, not for the program
-w=${RUN_WRAPPER:-}; case "$WORK ${ENGINE:-} ${w%% *}" in *=*) die "WORK, ENGINE and RUN_WRAPPER's command can't contain '='" ;; esac
+# RUN_WRAPPER split once into words (no pathname expansion), and run as exactly these words
+read -r -a WRAP <<< "${RUN_WRAPPER:-}"
+case "$WORK ${ENGINE:-} ${WRAP[0]:-}" in *=*) die "WORK, ENGINE and RUN_WRAPPER's command can't contain '='" ;; esac
 A="$WORK/abba"
 mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs"
 OUT="$WORK/results/$TAG-$(date +%Y%m%d-%H%M%S)-$$.txt"
@@ -243,12 +246,17 @@ for x in VD_X VD_Y; do
   a=$(fixw "${!x}") || die "$x '${!x}' isn't an integer"
   LBASE+=("$x=$a")
 done
-launch_env() {  # <variant index>: LENV, its run's environment (later entries win: the script's own last)
+# launch_env <variant index>: LENV, its run's environment. Later entries win, in the order the
+# script always had: the caller's D9MT_*, the Wine defaults (WINEPREFIX, WINEDEBUG, WINEMSYNC and
+# the library path, which --env may change), the variant's --env, then the run's own settings
+# (WINEDLLOVERRIDES, the caches, the state cache, the background and stall pacing).
+launch_env() {
   local i=$1 e n v all=(${CALLER_D9MT[@]+"${CALLER_D9MT[@]}"}) names
+  [ "$NATIVE" = 1 ] || all+=("DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH" "WINEDEBUG=-all" "WINEMSYNC=1"
+                             "WINEPREFIX=$WINEPREFIX")
   for e in ${ENVS[@]+"${ENVS[@]}"}; do [ "${e%%:*}" = "${NAMES[$i]}" ] && all+=("${e#*:}"); done
   if [ "$NATIVE" = 0 ]; then
-    all+=("DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH" "WINEDEBUG=-all" "WINEDLLOVERRIDES=d3d9=n,b"
-          "WINEMSYNC=1" "WINEPREFIX=$WINEPREFIX" "D9MT_AIR_CACHE=$A/caches/${CIDS[$i]}/air-cache.sqlite3"
+    all+=("WINEDLLOVERRIDES=d3d9=n,b" "D9MT_AIR_CACHE=$A/caches/${CIDS[$i]}/air-cache.sqlite3"
           "D9MT_PSO_ARCHIVE_DIR=$A/caches/${CIDS[$i]}/pso" D9MT_STATE_CACHE=0 D9MT_BG_FPS=0 D9MT_STALL_PACE=0)
   fi
   LENV=("${LBASE[@]}")
@@ -259,8 +267,8 @@ launch_env() {  # <variant index>: LENV, its run's environment (later entries wi
     LENV+=("$n=$v")
   done
 }
-launch_digest() {  # <variant index>: <count>:<16 hex of its names and value lengths>
-  local e v
+launch_digest() {  # <variant index>: <count>:<16 hex of its names and value lengths in bytes>
+  local e v LC_ALL=C
   launch_env "$1"
   printf '%s:%s' "${#LENV[@]}" "$(for e in "${LENV[@]}"; do v=${e#*=}; echo "${e%%=*}=${#v}"; done | shasum -a 256 | cut -c1-16)"
 }
@@ -306,9 +314,9 @@ for r in $(seq "$ROUNDS"); do
         case $f in 0|1|2|*[!0-9]*) ;; *) eval "exec $f>&-" 2>/dev/null ;; esac
       done
       if [ "$NATIVE" = 1 ]; then
-        exec /usr/bin/env -i "${LENV[@]}" ${RUN_WRAPPER:-} "$RUN/native-program" "$@"
+        exec /usr/bin/env -i "${LENV[@]}" ${WRAP[@]+"${WRAP[@]}"} "$RUN/native-program" "$@"
       fi
-      exec /usr/bin/env -i "${LENV[@]}" ${RUN_WRAPPER:-} "$WINE" "$NAME_EXE" "$@"
+      exec /usr/bin/env -i "${LENV[@]}" ${WRAP[@]+"${WRAP[@]}"} "$WINE" "$NAME_EXE" "$@"
     ) < /dev/null > "$A/out" 2> "$log" &
     CHILD=$! t=0
     while kill -0 "$CHILD" 2>/dev/null && [ "$t" -lt "$TIMEOUT" ]; do
