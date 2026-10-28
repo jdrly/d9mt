@@ -8,9 +8,12 @@ The documentation is the source of truth and should answer scope and design ques
 [README](README.md) and the design documents in [`docs/`](docs/). Look the answer up there before
 asking or choosing an approach of your own. `docs/dev-notes/` is historical, not a specification.
 
-- Correctness is the hash suite against the base commit; speed is “nothing measurably slower”
-  (ADR-0002), measured as [PERFORMANCE.md](PERFORMANCE.md) describes. Both need evidence in the
-  PR, not an argument.
+- Correctness on every supported Mac comes first (ADR-0005). Correctness is the hash suite
+  against the base commit; speed is “nothing measurably slower”, measured as
+  [PERFORMANCE.md](PERFORMANCE.md) describes. A fix merges unless a cost is established at the
+  measurable resolution; a new speed-only change shows identical rendering on other Mac
+  generations or goes in behind a switch that is off by default. Both need evidence in the PR,
+  not an argument.
 - Metal 4 doesn't retain resources: anything a command buffer uses lives until its serial retires
   (ADR-0001).
 - Don't touch `bridge/` unless the issue needs it: it changes `winemetal.so`'s LC_UUID and costs

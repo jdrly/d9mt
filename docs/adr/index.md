@@ -32,9 +32,10 @@ This table is the status source of truth. Update both it and the ADR's frontmatt
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-gpu-objects-live-until-retired.md) | Metal objects live until the GPU has retired the last command buffer that uses them | `accepted` |
-| [0002](0002-nothing-measurably-slower.md) | Nothing merges that is measurably slower | `accepted` |
+| [0002](0002-nothing-measurably-slower.md) | Nothing merges that is measurably slower | `superseded by ADR-0005` |
 | [0003](0003-pipeline-state-cache-in-d3d9.md) | A pipeline state cache in `d3d9.dll`, with a journal for the newest records | `accepted` |
 | [0004](0004-batch-bridge-changes.md) | Changes to `winemetal.so` are batched, because its LC_UUID keys every player's AIR cache | `accepted` |
+| [0005](0005-correctness-first-speed-proven.md) | Correctness on every supported Mac comes first, and a speed-only change proves itself or waits behind a switch | `accepted` |
 
 ## Candidates
 

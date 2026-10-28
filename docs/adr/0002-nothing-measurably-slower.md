@@ -1,10 +1,14 @@
 ---
-status: accepted
+status: superseded by ADR-0005
 date: 2026-10-21
 deciders: Jan Drlý
 ---
 
 # Nothing merges that is measurably slower
+
+Superseded by [ADR-0005](0005-correctness-first-speed-proven.md) on 2026-10-28: correctness on
+every supported Mac comes first, a speed-only change proves itself or waits behind a switch, and
+the release candidate gets a smoothness guard. The method below carries over.
 
 ## Context
 

@@ -145,6 +145,16 @@ A change is done only when all of these hold:
       unresolved (PERFORMANCE.md §2.4). The release candidate's whole-build comparison at default
       alignment is the binding check; a slowdown there gets a layout fix, not a revert. The full
       method, the benchmarks and the diagnostics are in [PERFORMANCE.md](PERFORMANCE.md).
+      - **A fix** (a change that prevents a bug or a GPU fault) merges when no cost is
+        established at the measurable resolution, the one the calibrated method actually
+        reaches (about ±1 % on bindbench today). A flag below it goes to a council and doesn't
+        hold the fix; a larger one is re-verified, and a cost that is established goes to the
+        maintainer (PERFORMANCE.md §1, §2.4).
+      - **A speed-only change** (its purpose is speed, not preventing a bug) also shows that it
+        renders identically on Mac generations other than the one it was measured on, a slower
+        and a fanless Mac among them, and the PR names them. Without that coverage it goes in
+        only behind a switch that is off by default, in the README's tables. This applies to
+        new speed-only changes; existing speed optimisations stay as they are (ADR-0005).
 - [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
       byte-identical to `main`'s. A change to the bridge changes its LC_UUID, the key of every
       player's AIR cache, so every player recompiles their shaders once: the PR says so, and
@@ -169,6 +179,8 @@ benchmarks run from the maintainer's workspace.
 - Push directly to `main`.
 - Merge a change that renders a frame differently from base without the issue asking for it.
 - Merge a change that is measurably slower, or measure while a game or anything else runs.
+- Merge a speed-only change that hasn't shown identical rendering on other Mac generations,
+  unless it is behind a switch that is off by default.
 - Release a Metal object the GPU may still use (ADR-0001).
 - Change `bridge/` in passing: it costs every player a shader recompile (ADR-0004).
 - Mix a driver and a bridge from different builds.

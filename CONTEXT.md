@@ -211,11 +211,11 @@ copy of base, run next to the variants as a control for the harness (CONTRIBUTIN
 
 **ABBA**
 Paired benchmark rounds in alternating order (base, branch, branch, base, …), so drift hits both
-sides equally (CONTRIBUTING; ADR-0002).
+sides equally (CONTRIBUTING; ADR-0005).
 
 **a64**
 The layout control: base and branch both built with `-falign-functions=64`; a gap that
-disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0002). It doesn't
+disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0005). It doesn't
 control data layout, and one block under a64 isn't a pass (PERFORMANCE.md §2.4).
 
 **Block**
@@ -236,12 +236,31 @@ the a64 pair, or a change and its identical-size placebo. Per PR, a cost is judg
 
 **Outcome**
 What a comparison of two binaries concludes: cost established, cost bounded below +0.25 % under
-stated conditions, or unresolved. A sign flip between blocks is unresolved (PERFORMANCE.md §2.4).
+stated conditions, or unresolved. A sign flip between blocks is unresolved. A fix needs no bound:
+only an established cost holds it (PERFORMANCE.md §2.4).
 
 **Council**
 Independent agent reviewers on different models who work on an unresolved flag alone, debate it
 and write one result for the maintainer (PERFORMANCE.md §2.4).
 
+**Fix, speed-only change**
+For the performance rule, a **fix** is a change that prevents a bug or a GPU fault; it merges
+when no cost is established at the measurable resolution. A **speed-only change** is one whose
+purpose is speed, not preventing a bug; it needs evidence of identical rendering on other Mac
+generations, a slower and a fanless Mac among them, or it goes in behind a switch that is off by
+default. That applies to new speed-only changes; existing speed optimisations stay as they are
+(PERFORMANCE.md §1; ADR-0005).
+
+**Measurable resolution**
+The smallest cost the calibrated method actually resolves between two binaries on a benchmark:
+about ±1 % on bindbench today. A fix is judged at it, not at the +0.25 % flag
+(PERFORMANCE.md §1, §2.4; ADR-0005).
+
+**Smoothness guard**
+The release candidate's comparison with the last stable release on what the player feels: 1 %
+lows, frames over 33 and 50 ms, frame-time p99 and the present interval's spread. A measurable
+regression goes to the maintainer before the release (PERFORMANCE.md §6.1; ADR-0005).
+
 **Quiet window**
 A time slot in which a benchmark runs alone on the Mac: no game, no other build or benchmark
-(ADR-0002).
+(ADR-0005).
