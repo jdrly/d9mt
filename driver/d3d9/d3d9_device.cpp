@@ -7071,8 +7071,9 @@ namespace dxvk {
     if (!IsVSSampler(Sampler) && Sampler >= 8u)
       return pTexture->GetSampleView(Srgb);
 
-    static int n = 0;
-    if (n++ < 8)
+    static std::atomic<uint32_t> s_logged = { 0u };
+    if (s_logged.load(std::memory_order_relaxed) < 8u
+     && s_logged.fetch_add(1u, std::memory_order_relaxed) < 8u)
       Logger::info(str::format("D9MT-UNWRITTEN sampler ", Sampler, " ",
         pTexture->Desc()->Width, "x", pTexture->Desc()->Height, " format ", pTexture->Desc()->Format,
         ": bound as null until its first write"));
@@ -8371,6 +8372,7 @@ namespace dxvk {
     }
 
     dstTextureInfo->MarkAllNeedReadback();
+    MarkTextureWritten(dstTextureInfo);
   }
 
 
