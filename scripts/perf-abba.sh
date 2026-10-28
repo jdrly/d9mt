@@ -64,8 +64,9 @@
 # fixed length for every variant and round, whatever the tag; the results header names each id.
 # Each run starts with `env -i` and an explicit environment after the cd (#96), so nothing of the
 # caller's reaches it, not even its cwd as OLDPWD: the user's HOME, USER, LOGNAME and TMPDIR from
-# the system, PATH and LANG fixed, PWD the run directory, OLDPWD=$WORK; a job runner's JOB_ID and
-# JOB_ROOT and a virtual display's VD_BOUNDS, VD_X and VD_Y at a fixed width (each number %+06d);
+# the system, PATH and LANG fixed, PWD the run directory, OLDPWD=$WORK; a job runner's JOB_ID (8
+# digits) and JOB_ROOT (unchanged: keep it the same between compared calls) and a virtual display's
+# VD_BOUNDS, VD_X and VD_Y at a fixed width (each number %+06d);
 # then, sorted by name, the script's Wine and d9mt variables, the caller's D9MT_* switches and the
 # variant's --env (--env changes the Wine defaults but not the run's own cache, state-cache, pacing
 # and DLL-override settings, as before). Every descriptor above 2 is closed, and the
@@ -149,8 +150,9 @@ case "$TAG" in ''|*[!A-Za-z0-9._-]*) die "tag '$TAG': letters, digits, . _ - onl
 mkdir -p "$WORK" || die "can't create $WORK"
 WORK="$(cd "$WORK" && pwd)" || die "can't enter $WORK"   # absolute: the runs cd into $RUN
 # env -i takes a word with "=" for an assignment, not for the program
-# RUN_WRAPPER split once into words (no pathname expansion), and run as exactly these words
-read -r -a WRAP <<< "${RUN_WRAPPER:-}"
+# RUN_WRAPPER split once into words at blanks, tabs and newlines, as its unquoted expansion did,
+# but without pathname expansion, and run as exactly these words
+IFS=$' \t\n' read -r -d '' -a WRAP <<< "${RUN_WRAPPER:-}" || true
 case "$WORK ${ENGINE:-} ${WRAP[0]:-}" in *=*) die "WORK, ENGINE and RUN_WRAPPER's command can't contain '='" ;; esac
 A="$WORK/abba"
 mkdir -p "$WORK/results" "$A/logs" || die "can't create $WORK/results or $A/logs"

@@ -18,7 +18,8 @@
 #      length) and umask (the callers' are 077 and 022), fd 2 paths of the same length, no caller
 #      variable but D9MT_*, OLDPWD=WORK, and the results headers give the same launch digests;
 #   9. RUN_WRAPPER: a wrapper whose first word is an assignment (leading blank included) is refused
-#      and nothing runs; a real wrapper runs and adds nothing to the environment;
+#      and nothing runs; a real wrapper (nice -n 3) runs whole and adds nothing to the environment,
+#      also when its words are split by newlines (one leading), so none of it is dropped;
 #  10. precedence, as before #96: --env changes the Wine defaults (WINEDEBUG, WINEMSYNC) but not the
 #      run's own settings (WINEDLLOVERRIDES, D9MT_STATE_CACHE), and only for its variant;
 #  11. the launch digest counts bytes: a D9MT_* value of "a" and of "é" give different digests
@@ -45,7 +46,7 @@ lines() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 cat > "$T/seen.sh" <<'EOF'
 #!/usr/bin/env bash
 SEEN=$D9MT_TEST_SEEN
-{ env; echo "umask $(umask)"; echo --; } >> "$SEEN.env"
+{ env; echo "umask $(umask)"; echo "nice $(ps -o nice= -p $$ | tr -d ' ')"; echo --; } >> "$SEEN.env"
 env_shape=$(env | LC_ALL=C sort | awk -F= '{ n = $1; v = substr($0, length(n) + 2); print n "=" length(v) }' | shasum -a 256 | cut -c1-16)
 echo "$(pwd -P)|$0|$*|$env_shape" >> "$SEEN"
 # the file fd 2 points to (fcntl F_GETPATH)
@@ -190,15 +191,21 @@ RUN_WRAPPER=' SECRET_TOKEN=x /usr/bin/env' WORK="$T/w9" bash "$ABBA" --native --
 rc=$?
 if [ "$rc" = 2 ] && [ "$(lines "$D9MT_TEST_SEEN")" = 0 ]; then ok "RUN_WRAPPER with an assignment for its first word (a leading blank): refused (exit 2), nothing runs"
 else bad "RUN_WRAPPER with an assignment: exit $rc, $(lines "$D9MT_TEST_SEEN") runs"; fi
-for wr in "" "/usr/bin/nice -n 0"; do
-  export D9MT_TEST_SEEN="$T/seen-wrap-${wr:+nice}"
-  RUN_WRAPPER="$wr" WORK="$T/w9b" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1
-done
-# the environments without the test's own D9MT_TEST_SEEN, whose file names differ
+# the environments (and umask, nice) without the test's own D9MT_TEST_SEEN, whose file names differ
 envs() { grep -v '^D9MT_TEST_SEEN=' "$1" 2>/dev/null; }
-if [ "$(lines "$T/seen-wrap-nice")" = 2 ] && [ -n "$(envs "$T/seen-wrap-.env")" ] && [ "$(envs "$T/seen-wrap-.env")" = "$(envs "$T/seen-wrap-nice.env")" ]; then
-  ok "RUN_WRAPPER=\"/usr/bin/nice -n 0\": both runs execute and see the environment they see without it"
-else bad "RUN_WRAPPER nice: $(lines "$T/seen-wrap-nice") runs, environments $(diff "$T/seen-wrap-.env" "$T/seen-wrap-nice.env" 2>&1 | head -3 | tr '\n' ' ')"; fi
+k=0
+# nice 3: a wrapper that is dropped (nice 0) or cut after its first word (nice's default, 10) shows
+for wr in "" "/usr/bin/nice -n 3" $'/usr/bin/nice\n-n 3' $'\n/usr/bin/nice -n 3'; do
+  export D9MT_TEST_SEEN="$T/seen-wrap-$k"
+  RUN_WRAPPER="$wr" WORK="$T/w9b" bash "$ABBA" --native --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 -- bench 5 >/dev/null 2>&1
+  if [ "$k" -gt 0 ]; then
+    if [ "$(lines "$D9MT_TEST_SEEN")" = 2 ] && [ -n "$(envs "$T/seen-wrap-0.env")" ] \
+       && [ "$(envs "$T/seen-wrap-0.env" | sed 's/^nice 0$/nice 3/')" = "$(envs "$D9MT_TEST_SEEN.env")" ]; then
+      ok "RUN_WRAPPER=$(printf '%q' "$wr"): both runs execute, at nice 3, and see what they see without it"
+    else bad "RUN_WRAPPER=$(printf '%q' "$wr"): $(lines "$D9MT_TEST_SEEN") runs, $(diff <(envs "$T/seen-wrap-0.env") <(envs "$D9MT_TEST_SEEN.env") 2>&1 | grep '^[<>]' | head -3 | tr '\n' ' ')"; fi
+  fi
+  k=$((k + 1))
+done
 
 # 10. precedence: --env over the Wine defaults, the run's own settings over --env (variant a only)
 export D9MT_TEST_SEEN="$T/seen-prec"
