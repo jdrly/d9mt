@@ -16,9 +16,10 @@
  * Frames are read back (GetRenderTargetData) when PK_CHECK divides them. A failed texel is
  * garbage (an empty icon that isn't blank, or a filled one that is no icon's colour), stale
  * (another icon's colour) or late (a filled icon still blank). The first failing frame is written
- * to pk_fail.ppm in the working directory. Exit code 1 if any check failed.
- * Knobs (environment): PK_FRAMES (480, at most 600), PK_FLIP frames per page (6), PK_LOAD frames
- * before a new page's first icon is filled (2), PK_CHECK (1), PK_SPIN_US of CPU work per frame on
+ * to pk_fail.ppm in the working directory. Run alone, it exits with 1 if any check failed; under
+ * the hash harness (d9h.h) the FAIL lines count.
+ * Knobs (environment): PK_FRAMES (480, at most 600), PK_FLIP frames per page (6; 1 under d9h.h),
+ * PK_LOAD frames before a new page's first icon is filled (2), PK_CHECK (1), PK_SPIN_US of CPU work per frame on
  * the render thread (0), PK_KINDS a mask of the kinds above (15), PK_W x PK_H the back buffer
  * (1920 x 1200: over the 8 MiB at which d9mt's early commit, G1, applies), PK_HEAVY rows of a
  * long-running pixel shader before the icons each frame (0), PK_THREAD (0), PK_WRONG (0; n fills each
@@ -440,7 +441,13 @@ static void frame(int n) {
 
 int main(void) {
   cfg_frames = env_int("PK_FRAMES", 480);
+  /* under the hash harness (d9h.h ends the process after D9H_FRAMES, five) a page a frame, so
+   * those frames include an eviction */
+#ifdef D9H_FRAMES
+  cfg_flip = env_int("PK_FLIP", 1);
+#else
   cfg_flip = env_int("PK_FLIP", 6);
+#endif
   cfg_load = env_int("PK_LOAD", 2);
   cfg_check = env_int("PK_CHECK", 1);
   cfg_spin_us = env_int("PK_SPIN_US", 0);
