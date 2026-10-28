@@ -521,7 +521,7 @@ before the release, with both builds' numbers** (ADR-0005).
 | What the player feels | Where the number comes from |
 |---|---|
 | 1 % lows and frame-time p99 | `bench_fps_cap`'s `low1_ms`/`low1_fps` (the 1 % low: the mean of the slowest 1 % of frames, at least one) and `p99` (the frame interval 99 % of frames stay under, 0.01 ms); `bench_draws` `present`'s `frame_low1_ms`/`frame_low1_fps` and `frame_p99_ms`; in a game, `STATS`'s `ms=avg/p99/max` per second |
-| Hitches, frames over 33 and 50 ms | `bench_fps_cap`'s `slow33`/`slow50` (frames over 33.4 and 50 ms, as `STATS` counts them), and its worst frames: `HIST` in 1 ms bins up to 200 ms and `TAIL` every frame of 201 ms or more, so together every frame (its `long` counts frames over 1.5x the median, not over 33 or 50 ms); `bench_draws` `present`'s `frame_max_ms`; in a game, `STATS`'s `slow33`/`slow50` and the `HITCH` lines (d9mt's share or the game's) |
+| Hitches, frames over 33 and 50 ms | `bench_fps_cap`'s `slow33`/`slow50` (frames over 33.4 and 50 ms, as `STATS` counts them), and its worst frames: `HIST` in 1 ms bins up to 200 ms and `TAIL` every frame of 201 ms or more, so together every stored frame (the first 200 000 of the run; its `long` counts frames over 1.5x the median, not over 33 or 50 ms); `bench_draws` `present`'s `frame_max_ms`; in a game, `STATS`'s `slow33`/`slow50` and the `HITCH` lines (d9mt's share or the game's) |
 | The present interval's spread | `bench_fps_cap`'s `sd`; in a game, `PACE`'s `sd` (the interval between the game's Present calls) |
 
 - The benchmark numbers come from the `bench_fps_cap` and `bench_draws` `present` runs above, as
