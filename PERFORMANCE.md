@@ -520,8 +520,8 @@ before the release, with both builds' numbers** (ADR-0005).
 
 | What the player feels | Where the number comes from |
 |---|---|
-| 1 % lows and frame-time p99 | `bench_fps_cap`'s `p99` (the frame interval 99 % of frames stay under, 0.01 ms) and `HIST`; `bench_draws` `present`'s `frame_p99_ms`; in a game, `STATS`'s `ms=avg/p99/max` per second |
-| Hitches, frames over 33 and 50 ms | in a game, `STATS`'s `slow33`/`slow50` (frames over 33.4 and 50 ms) and the `HITCH` lines (d9mt's share or the game's); `bench_fps_cap`'s `HIST` counts them to 1 ms (bins up to 200 ms; `max` shows a longer one), and its `long` counts frames over 1.5x the median, not over 33 or 50 ms |
+| 1 % lows and frame-time p99 | `bench_fps_cap`'s `p99` (the frame interval 99 % of frames stay under, 0.01 ms); `bench_draws` `present`'s `frame_p99_ms`; in a game, `STATS`'s `ms=avg/p99/max` per second |
+| Hitches, frames over 33 and 50 ms | in a game, `STATS`'s `slow33`/`slow50` (frames over 33.4 and 50 ms) and the `HITCH` lines (d9mt's share or the game's); `bench_fps_cap`'s `HIST` counts them in 1 ms bins, but only up to 200 ms: it omits every frame of 201 ms or more, of which `max` shows only the longest, and its `long` counts frames over 1.5x the median, not over 33 or 50 ms |
 | The present interval's spread | `bench_fps_cap`'s `sd`; in a game, `PACE`'s `sd` (the interval between the game's Present calls) |
 
 - The benchmark numbers come from the `bench_fps_cap` and `bench_draws` `present` runs above, as
@@ -530,6 +530,8 @@ before the release, with both builds' numbers** (ADR-0005).
 - `STATS`, `PACE` and `HITCH` need `D9MT_PROFILE`, which changes the regime (§2.1): compare both
   builds under the same setting, in the same scene on a real display (§2.6), and don't read their
   frame rate as the player's.
-- _Open:_ no bench prints the 1 % lows as the mean of the slowest 1 % of frames (`HIST` gives it
-  only to 1 ms), and there is no scripted game scene in this repository, so the in-game side of
-  the comparison isn't repeatable yet.
+- _Open:_ no bench prints the 1 % lows as the mean of the slowest 1 % of frames, and none of
+  the output reconstructs it in general: `HIST` omits frames of 201 ms or more, so a run with
+  long stalls loses exactly that tail, and its hitch counts lose it too. There is no scripted
+  game scene in this repository either, so the in-game side of the comparison isn't repeatable
+  yet.
