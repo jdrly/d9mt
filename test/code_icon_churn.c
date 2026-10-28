@@ -3,9 +3,9 @@
  * change; Windows and wined3d show a blank flash). Four pages of 48 64x64 icons and a cache of
  * the last three: flipping 1-2-3-4-3-2-1 evicts a page, releases its textures and creates new
  * ones, which the loader fills a few frames later (staggered per icon). Until then the window
- * draws the new, empty texture, and the frame must show the background through it (a texture
- * nothing has written is zero: blank, as DXVK and Windows show it). Once filled, each icon must
- * show its own two colours. Four kinds of icon, by slot:
+ * draws a transparent placeholder (a texture written with zeros), and the frame must show the
+ * background there. Once filled, each icon must show its own two colours. Four kinds of icon, by
+ * slot:
  *   0  DEFAULT A8R8G8B8, filled by UpdateTexture from a SYSTEMMEM texture
  *   1  DEFAULT DXT5, the same way
  *   2  MANAGED A8R8G8B8, filled by LockRect
@@ -13,18 +13,24 @@
  * The device is created without D3DCREATE_MULTITHREADED, as SWTOR's is. With PK_THREAD=1 a
  * loader thread creates and fills each kind 0/1 icon's own SYSTEMMEM texture, as SWTOR's
  * streaming threads do, and the frame that finds it ready calls UpdateTexture.
- * Frames are read back (GetRenderTargetData) when PK_CHECK divides them. A failed texel is
- * garbage (an empty icon that isn't blank, or a filled one that is no icon's colour), stale
- * (another icon's colour) or late (a filled icon still blank). The first failing frame is written
- * to pk_fail.ppm in the working directory. Run alone, it exits with 1 if any check failed; under
- * the hash harness (d9h.h) the FAIL lines count.
+ * Frames are read back (GetRenderTargetData) when PK_CHECK divides them, at two points per icon
+ * (the middle of its top and its bottom half). A failed check is garbage (a pending icon that
+ * isn't blank, or a filled one that is no icon's colour), stale (another icon's colour) or late (a
+ * filled icon still blank). The first failing frame is written to pk_fail.ppm in the working
+ * directory. Run alone, it exits with 1 if any check failed; under the hash harness (d9h.h) the
+ * FAIL lines count.
+ * PK_UNWRITTEN=1, a diagnostic: pending icons draw their own new texture, which nothing has
+ * written. D3D9 doesn't define its contents, so that is no check: a point that isn't blank is a
+ * NOTE line, counted in the summary (unwritten=, of them magenta=), and its first frame is written
+ * to pk_unwritten.ppm. (On Windows and DXVK such a texture reads as zero.)
  * Knobs (environment): PK_FRAMES (480, at most 600), PK_FLIP frames per page (6; 1 under d9h.h),
- * PK_LOAD frames before a new page's first icon is filled (2), PK_CHECK (1), PK_SPIN_US of CPU work per frame on
- * the render thread (0), PK_KINDS a mask of the kinds above (15), PK_W x PK_H the back buffer
- * (1920 x 1200: over the 8 MiB at which d9mt's early commit, G1, applies), PK_HEAVY rows of a
- * long-running pixel shader before the icons each frame (0), PK_THREAD (0), PK_WRONG (0; n fills each
- * icon with the colours of the icon n slots on: the checker's negative control, every check fails),
- * PK_CHURN noise textures per frame (0). */
+ * PK_LOAD frames before a new page's first icon is filled (2; 1 under d9h.h), PK_CHECK (1),
+ * PK_SPIN_US of CPU work per frame on the render thread (0), PK_KINDS a mask of the kinds above
+ * (15), PK_W x PK_H the back buffer (1920 x 1200: over the 8 MiB at which d9mt's early commit, G1,
+ * applies), PK_HEAVY rows of a long-running pixel shader before the icons each frame (0),
+ * PK_THREAD (0), PK_WRONG (0; n fills each icon with the colours of the icon n slots on: the
+ * checker's negative control, every filled icon's check fails), PK_CHURN noise textures per frame
+ * (0), PK_UNWRITTEN (0). */
 #include "t_xfer.h"
 
 #include <stdlib.h>
@@ -58,11 +64,12 @@ typedef struct {
 
 static Page pages[PAGES];
 static void quad_px(IDirect3DBaseTexture9 *t, int x0, int y0, int x1, int y1);
-static IDirect3DTexture9 *upload_argb, *upload_dxt5;
+static IDirect3DTexture9 *upload_argb, *upload_dxt5, *placeholder;
 static IDirect3DVertexShader9 *vs_texquad, *vs_pos;
 static IDirect3DPixelShader9 *ps_texquad, *ps_heavy;
 static int cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread, cfg_wrong, cfg_churn;
 static int fail_garbage, fail_stale, fail_late, fail_magenta, frames_failed, printed, dumped;
+static int cfg_unwritten, seen_unwritten, seen_unwritten_magenta, noted;
 
 /* PK_THREAD: kind 0/1 icons waiting for their SYSTEMMEM texture */
 typedef struct { Icon *icon; int page, slot; } Job;
@@ -264,8 +271,8 @@ static void show_page(int page, int n) {
 static int icon_x(int k) { return (k % 8) * 80 + 8; }
 static int icon_y(int k) { return (k / 8) * 80 + 8; }
 
-static void dump(const XReadback *r, int n) {
-  FILE *f = fopen("pk_fail.ppm", "wb");
+static void dump(const XReadback *r, int n, const char *name) {
+  FILE *f = fopen(name, "wb");
   if (!f)
     return;
   const UINT w = r->desc.Width < 640 ? r->desc.Width : 640, h = r->desc.Height < 480 ? r->desc.Height : 480;
@@ -277,7 +284,7 @@ static void dump(const XReadback *r, int n) {
       fwrite(rgb, 1, 3, f);
     }
   fclose(f);
-  printf("PK dumped frame %d to pk_fail.ppm\n", n);
+  printf("PK dumped frame %d to %s\n", n, name);
 }
 
 static void fail(const char *cls, int n, int page, int k, int half, DWORD got, DWORD want) {
@@ -302,9 +309,20 @@ static void check(int n, int page) {
       const DWORD got = x_pixel(&r, x, y) & 0x00ffffffu;
       x_checks++;
       if (ic->countdown != 0) {
-        if (!close_to(got, BG)) {
+        if (close_to(got, BG))
+          continue;
+        if (cfg_unwritten) {
+          seen_unwritten++;
+          if (magenta(got))
+            seen_unwritten_magenta++;
+          if (noted++ < 20)
+            printf("NOTE unwritten frame %d page %d icon %d kind %d half %d: %06lx\n",
+                   n, page + 1, k, k % 4, half, (unsigned long)got);
+          if (noted == 1)
+            dump(&r, n, "pk_unwritten.ppm");
+        } else {
           fail_garbage++;
-          fail("garbage-unfilled", n, page, k, half, got, BG);
+          fail("garbage-pending", n, page, k, half, got, BG);
         }
         continue;
       }
@@ -332,7 +350,7 @@ static void check(int n, int page) {
   if (x_failed != before) {
     frames_failed++;
     if (!dumped++)
-      dump(&r, n);
+      dump(&r, n, "pk_fail.ppm");
   }
   x_done(&r);
 }
@@ -419,8 +437,12 @@ static void frame(int n) {
   IDirect3DDevice9_BeginScene(x_dev);
   if (cfg_heavy > 0)
     heavy_band();
-  for (int k = 0; k < ICONS; k++)
-    quad_px((IDirect3DBaseTexture9 *)pages[page].icon[k].tex, icon_x(k), icon_y(k), icon_x(k) + ICON, icon_y(k) + ICON);
+  for (int k = 0; k < ICONS; k++) {
+    /* a pending icon: the placeholder, or (PK_UNWRITTEN) its own texture nothing has written */
+    const Icon *ic = &pages[page].icon[k];
+    IDirect3DTexture9 *t = ic->countdown != 0 && !cfg_unwritten ? placeholder : ic->tex;
+    quad_px((IDirect3DBaseTexture9 *)t, icon_x(k), icon_y(k), icon_x(k) + ICON, icon_y(k) + ICON);
+  }
   if (cfg_churn > 0)
     churn();
   IDirect3DDevice9_EndScene(x_dev);
@@ -430,9 +452,10 @@ static void frame(int n) {
 
   if (n == cfg_frames) {
     printf("PK frames=%d flip=%d load=%d check=%d spin_us=%d kinds=%d size=%dx%d heavy=%d thread=%d: "
-           "churn=%d frames_failed=%d garbage=%d stale=%d late=%d magenta=%d\n",
+           "churn=%d unwritten=%d: frames_failed=%d garbage=%d stale=%d late=%d magenta=%d; unwritten nonblank=%d magenta=%d\n",
            cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread,
-           cfg_churn, frames_failed, fail_garbage, fail_stale, fail_late, fail_magenta);
+           cfg_churn, cfg_unwritten, frames_failed, fail_garbage, fail_stale, fail_late, fail_magenta,
+           seen_unwritten, seen_unwritten_magenta);
     x_report("code_icon_churn");
     fflush(stdout);
     ExitProcess(x_failed ? 1 : 0);
@@ -448,7 +471,11 @@ int main(void) {
 #else
   cfg_flip = env_int("PK_FLIP", 6);
 #endif
+#ifdef D9H_FRAMES
+  cfg_load = env_int("PK_LOAD", 1);
+#else
   cfg_load = env_int("PK_LOAD", 2);
+#endif
   cfg_check = env_int("PK_CHECK", 1);
   cfg_spin_us = env_int("PK_SPIN_US", 0);
   cfg_kinds = env_int("PK_KINDS", 15);
@@ -458,6 +485,7 @@ int main(void) {
   cfg_thread = env_int("PK_THREAD", 0);
   cfg_wrong = env_int("PK_WRONG", 0);
   cfg_churn = env_int("PK_CHURN", 0);
+  cfg_unwritten = env_int("PK_UNWRITTEN", 0);
   if (cfg_frames < 1 || cfg_frames > 600) cfg_frames = 480;
   if (cfg_flip < 1) cfg_flip = 6;
   if (cfg_load < 1) cfg_load = 1;
@@ -513,6 +541,14 @@ int main(void) {
 
   X_CHECK(IDirect3DDevice9_CreateTexture(x_dev, ICON, ICON, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &upload_argb, NULL));
   X_CHECK(IDirect3DDevice9_CreateTexture(x_dev, ICON, ICON, 1, 0, D3DFMT_DXT5, D3DPOOL_SYSTEMMEM, &upload_dxt5, NULL));
+  {
+    D3DLOCKED_RECT lr;
+    X_CHECK(IDirect3DDevice9_CreateTexture(x_dev, ICON, ICON, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &placeholder, NULL));
+    X_CHECK(IDirect3DTexture9_LockRect(placeholder, 0, &lr, NULL, 0));
+    for (int y = 0; y < ICON; y++)
+      memset((BYTE *)lr.pBits + (size_t)y * lr.Pitch, 0, ICON * 4);
+    IDirect3DTexture9_UnlockRect(placeholder, 0);
+  }
   IDirect3DDevice9_SetRenderState(x_dev, D3DRS_ALPHABLENDENABLE, TRUE);
   IDirect3DDevice9_SetRenderState(x_dev, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
   IDirect3DDevice9_SetRenderState(x_dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
