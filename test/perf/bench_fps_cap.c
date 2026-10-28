@@ -17,17 +17,23 @@
  *     cpuMainFrame=<render thread CPU ms per frame> cpu_tick_ms=<the process CPU clock's smallest
  *     observed step> thread_tick_ms=<the thread CPU clock's> qpc_tick_ns=<the QPC tick>
  *     measured_frames=<frames in the measured interval> measured_s=<its length>
- *   Two cohorts: n, fps, avg_ms, the percentiles, sd, long and HIST describe the stored frame
- *   intervals, the first MAX_FRAMES of the measured interval; cpuProc, cpuMain and the *Frame values
- *   describe the whole measured interval, measured_frames frames over measured_s (the same frames
- *   unless the run exceeds MAX_FRAMES).
- *   Resolution: frame times have the QPC tick, plus their printed rounding (p50 0.01 ms, p50_ms and
- *   the *Frame values 0.0001 ms). The CPU clocks' steps are observed at startup (0: none observed,
+ *     low1_ms=<the 1 % low: the mean of the slowest 1 % of frames, at least one, 4 decimals>
+ *     low1_fps=<1000 / low1_ms> slow33=<frames over 33.4 ms> slow50=<frames over 50 ms>
+ *     (slow33/slow50 as D9MT_PROFILE's STATS counts them; these four come last, after the older
+ *     fields, so existing parsers read the line unchanged)
+ *   Two cohorts: n, fps, avg_ms, the percentiles, sd, long, low1_*, slow*, HIST and TAIL describe
+ *   the stored frame intervals, the first MAX_FRAMES of the measured interval; cpuProc, cpuMain and
+ *   the *Frame values describe the whole measured interval, measured_frames frames over measured_s
+ *   (the same frames unless the run exceeds MAX_FRAMES).
+ *   Resolution: frame times have the QPC tick, plus their printed rounding (p50 0.01 ms, p50_ms,
+ *   low1_ms and the *Frame values 0.0001 ms). The CPU clocks' steps are observed at startup (0: none observed,
  *   so unknown, not exact). Each is an upper bound on the clock's granularity, not the granularity
  *   itself: a fine clock reads as the polling loop's interval. A coarse clock (Wine on macOS: 10 ms
  *   for the process) shows its tick, and then a CPU time can't resolve less than one tick over
  *   measured_s (cpuProc, cpuMain) or over measured_frames (*Frame). Neither bounds the other errors.
- *   HIST <ms bin>:<count> ...   (1 ms bins, non-empty only)
+ *   HIST <ms bin>:<count> ...   (1 ms bins, non-empty only, up to bin 200)
+ *   TAIL <ms> ...   (every frame of 201 ms or more, the ones HIST omits, slowest first, 0.01 ms;
+ *     empty when there are none: HIST and TAIL together hold every stored frame)
  * Not a hash test; one window (scripts/build-benches.sh's BENCH_INCLUDE can place it). */
 #include "t_common.h"
 #include "bench_window.h"
@@ -172,9 +178,18 @@ int main(int argc, char **argv) {
   for (int i = 0; i < n; i++) s[i] = dt[i];
   qsort(s, (size_t)n, sizeof(double), cmp);
   const double p50 = n ? pct(s, n, 50.0) : 0.0;
-  int longFrames = 0;
-  for (int i = 0; i < n; i++)
+  int longFrames = 0, slow33 = 0, slow50 = 0;
+  for (int i = 0; i < n; i++) {
     if (dt[i] > 1.5 * p50) longFrames++;
+    if (dt[i] > 33.4) slow33++;
+    if (dt[i] > 50.0) slow50++;
+  }
+  /* the 1 % low: the mean of the slowest 1 % of the stored frames (at least one), from the
+   * unbinned intervals; HIST's 1 ms bins are too coarse for it */
+  const int nLow = (n + 99) / 100;
+  double lowSum = 0.0;
+  for (int i = n - nLow; i < n; i++) lowSum += s[i];
+  const double low1 = nLow ? lowSum / nLow : 0.0;
 
   if (!n) { printf("RESULT FAIL no measured frames\n"); return 1; }
   /* avg_ms: the mean frame time, lower is better (scripts/perf-compare.py's default metric); for
@@ -183,11 +198,13 @@ int main(int argc, char **argv) {
   printf("RESULT n=%d fps=%.2f avg_ms=%.4f p1=%.2f p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f sd=%.3f long=%d"
          " cpuProc=%.0f cpuMain=%.0f vsync=%d cpuWork=%.1f jitter=%.1f quads=%d gameCap=%.0f"
          " p50_ms=%.4f cpuProcFrame=%.4f cpuMainFrame=%.4f cpu_tick_ms=%.4f thread_tick_ms=%.4f"
-         " qpc_tick_ns=%.1f measured_frames=%d measured_s=%.3f\n",
+         " qpc_tick_ns=%.1f measured_frames=%d measured_s=%.3f"
+         " low1_ms=%.4f low1_fps=%.2f slow33=%d slow50=%d\n",
          n, 1000.0 / mean, mean, n ? pct(s, n, 1.0) : 0.0, p50, n ? pct(s, n, 95.0) : 0.0,
          n ? pct(s, n, 99.0) : 0.0, n ? s[0] : 0.0, n ? s[n - 1] : 0.0, sd, longFrames, cpuP, cpuM,
          vsync, cpuWork, jitter, quads, gameCap, p50, frames ? cpuPTotal / frames : 0.0,
-         frames ? cpuMTotal / frames : 0.0, procTick, threadTick, qpcTickNs, frames, wall);
+         frames ? cpuMTotal / frames : 0.0, procTick, threadTick, qpcTickNs, frames, wall,
+         low1, low1 > 0.0 ? 1000.0 / low1 : 0.0, slow33, slow50);
 
   /* 1 ms bins */
   printf("HIST");
@@ -198,6 +215,11 @@ int main(int argc, char **argv) {
     if (c)
       printf(" %d:%d", b, c);
   }
+  printf("\n");
+  /* the frames HIST omits (201 ms or more), slowest first */
+  printf("TAIL");
+  for (int i = n - 1; i >= 0 && s[i] >= 201.0; i--)
+    printf(" %.2f", s[i]);
   printf("\n");
   fflush(stdout);
   return 0;
