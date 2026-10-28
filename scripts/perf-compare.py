@@ -13,8 +13,10 @@ per-round paired differences (same round, so drift between rounds cancels), and 
 in how many paired rounds the variant was slower than the reference.
 
 `FLAG >0.25%`: a variant whose median or paired median is more than 0.25 % slower than the
-reference's (ms up, fps down), even inside the control's range (`~ noise`). It is re-verified
-before a merge (PERFORMANCE.md §2.4, ADR-0002); the flag doesn't change the exit code.
+reference's (ms up, fps down), even inside the control's range (`~ noise`). A fix re-verifies
+it before the merge only if it is larger than the measurable resolution; a smaller one goes to a
+council and doesn't hold the fix. Any other change, a speed-only one included, re-verifies it
+before a merge (PERFORMANCE.md §1, §2.4, ADR-0005). The flag doesn't change the exit code.
 
 --control: a variant expected to equal the reference (a byte copy of its DLL, or the same build
 from another path). Its paired differences are the noise floor: a variant whose paired median
@@ -35,7 +37,7 @@ import argparse, re, statistics, sys
 
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
 HIGHER_IS_BETTER = ("fps",)
-FLAG = 0.0025   # a median slowdown over 0.25 % is re-verified before a merge (ADR-0002)
+FLAG = 0.0025   # a median slowdown over 0.25 % is flagged; when it is re-verified: ADR-0005
 
 
 def over_flag(slowdown):
@@ -179,8 +181,10 @@ def main():
         rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
         print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
     if flagged:
-        print(f"FLAG: {', '.join(flagged)}: median slower than the reference by more than 0.25 %; "
-              "re-verify before a merge, even within the control's range (PERFORMANCE.md §2.4, ADR-0002)")
+        print(f"FLAG: {', '.join(flagged)}: median slower than the reference by more than 0.25 %, "
+              "even within the control's range. A fix: re-verify before the merge only if larger than "
+              "the measurable resolution, else a council, not a hold. Any other change, speed-only "
+              "included: re-verify before a merge (PERFORMANCE.md §1, §2.4, ADR-0005)")
     if clients:
         def sizes(v):
             c = clients.get(v, {})
