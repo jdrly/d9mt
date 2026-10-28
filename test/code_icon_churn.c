@@ -22,7 +22,8 @@
  * the render thread (0), PK_KINDS a mask of the kinds above (15), PK_W x PK_H the back buffer
  * (1920 x 1200: over the 8 MiB at which d9mt's early commit, G1, applies), PK_HEAVY rows of a
  * long-running pixel shader before the icons each frame (0), PK_THREAD (0), PK_WRONG (0; n fills each
- * icon with the colours of the icon n slots on: the checker's negative control, every check fails). */
+ * icon with the colours of the icon n slots on: the checker's negative control, every check fails),
+ * PK_CHURN noise textures per frame (0). */
 #include "t_xfer.h"
 
 #include <stdlib.h>
@@ -55,10 +56,11 @@ typedef struct {
 } Page;
 
 static Page pages[PAGES];
+static void quad_px(IDirect3DBaseTexture9 *t, int x0, int y0, int x1, int y1);
 static IDirect3DTexture9 *upload_argb, *upload_dxt5;
 static IDirect3DVertexShader9 *vs_texquad, *vs_pos;
 static IDirect3DPixelShader9 *ps_texquad, *ps_heavy;
-static int cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread, cfg_wrong;
+static int cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread, cfg_wrong, cfg_churn;
 static int fail_garbage, fail_stale, fail_late, fail_magenta, frames_failed, printed, dumped;
 
 /* PK_THREAD: kind 0/1 icons waiting for their SYSTEMMEM texture */
@@ -334,6 +336,34 @@ static void check(int n, int page) {
   x_done(&r);
 }
 
+/* PK_CHURN: textures of 64, 128 and 256 texels full of noise (incompressible), created, filled,
+ * drawn below the icons and released in the same frame, so the GPU driver has freed memory with
+ * other contents to hand to the next page's icons */
+static IDirect3DTexture9 *churn_src[3];
+static unsigned churn_seed = 12345u;
+
+static void churn(void) {
+  for (int i = 0; i < cfg_churn; i++) {
+    const int s = i % 3, size = 64 << s;
+    D3DLOCKED_RECT lr;
+    if (!churn_src[s])
+      X_CHECK(IDirect3DDevice9_CreateTexture(x_dev, size, size, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &churn_src[s], NULL));
+    X_CHECK(IDirect3DTexture9_LockRect(churn_src[s], 0, &lr, NULL, 0));
+    for (int y = 0; y < size; y++) {
+      DWORD *row = (DWORD *)((BYTE *)lr.pBits + (size_t)y * lr.Pitch);
+      for (int x = 0; x < size; x++)
+        row[x] = (churn_seed = churn_seed * 1664525u + 1013904223u) | 0xff000000u;
+    }
+    IDirect3DTexture9_UnlockRect(churn_src[s], 0);
+    IDirect3DTexture9 *t = NULL;
+    X_CHECK(IDirect3DDevice9_CreateTexture(x_dev, size, size, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &t, NULL));
+    X_CHECK(IDirect3DDevice9_UpdateTexture(x_dev, (IDirect3DBaseTexture9 *)churn_src[s], (IDirect3DBaseTexture9 *)t));
+    const int x0 = (i * 37) % (cfg_w - 64);
+    quad_px((IDirect3DBaseTexture9 *)t, x0, 500, x0 + 64, 564);
+    IDirect3DTexture9_Release(t);
+  }
+}
+
 static void spin(int us) {
   LARGE_INTEGER f, t0, t;
   QueryPerformanceFrequency(&f);
@@ -390,6 +420,8 @@ static void frame(int n) {
     heavy_band();
   for (int k = 0; k < ICONS; k++)
     quad_px((IDirect3DBaseTexture9 *)pages[page].icon[k].tex, icon_x(k), icon_y(k), icon_x(k) + ICON, icon_y(k) + ICON);
+  if (cfg_churn > 0)
+    churn();
   IDirect3DDevice9_EndScene(x_dev);
 
   if (n % cfg_check == 0)
@@ -397,9 +429,9 @@ static void frame(int n) {
 
   if (n == cfg_frames) {
     printf("PK frames=%d flip=%d load=%d check=%d spin_us=%d kinds=%d size=%dx%d heavy=%d thread=%d: "
-           "frames_failed=%d garbage=%d stale=%d late=%d magenta=%d\n",
+           "churn=%d frames_failed=%d garbage=%d stale=%d late=%d magenta=%d\n",
            cfg_frames, cfg_flip, cfg_load, cfg_check, cfg_spin_us, cfg_kinds, cfg_w, cfg_h, cfg_heavy, cfg_thread,
-           frames_failed, fail_garbage, fail_stale, fail_late, fail_magenta);
+           cfg_churn, frames_failed, fail_garbage, fail_stale, fail_late, fail_magenta);
     x_report("code_icon_churn");
     fflush(stdout);
     ExitProcess(x_failed ? 1 : 0);
@@ -418,6 +450,7 @@ int main(void) {
   cfg_heavy = env_int("PK_HEAVY", 0);
   cfg_thread = env_int("PK_THREAD", 0);
   cfg_wrong = env_int("PK_WRONG", 0);
+  cfg_churn = env_int("PK_CHURN", 0);
   if (cfg_frames < 1 || cfg_frames > 600) cfg_frames = 480;
   if (cfg_flip < 1) cfg_flip = 6;
   if (cfg_load < 1) cfg_load = 1;
