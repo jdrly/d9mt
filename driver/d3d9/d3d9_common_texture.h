@@ -256,6 +256,12 @@ namespace dxvk {
     void SetNeedsMipGen(bool value) { m_needsMipGen = value; }
     bool NeedsMipGen() const { return m_needsMipGen; }
 
+    // A DEFAULT 2D texture that nothing has written yet (no upload, no copy):
+    // it is bound as the null texture (zero) until its first write.
+    bool IsUnwritten() const { return m_unwritten; }
+    // Returns whether it was unwritten until now.
+    bool MarkWritten() { return std::exchange(m_unwritten, false); }
+
     DWORD ExposedMipLevels() const { return m_exposedMipLevels; }
 
     void SetMipFilter(D3DTEXTUREFILTERTYPE filter) { m_mipFilter = filter; }
@@ -369,6 +375,8 @@ namespace dxvk {
     DWORD                         m_exposedMipLevels = 0;
 
     bool                          m_needsMipGen = false;
+
+    bool                          m_unwritten = false;
 
     D3DTEXTUREFILTERTYPE          m_mipFilter = D3DTEXF_LINEAR;
 

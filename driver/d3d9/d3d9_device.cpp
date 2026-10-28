@@ -1426,6 +1426,7 @@ namespace dxvk {
     }
 
     dstTextureInfo->SetNeedsReadback(dst->GetSubresource(), true);
+    MarkTextureWritten(dstTextureInfo);
 
     if (dstTextureInfo->IsAutomaticMip())
       MarkTextureMipsDirty(dstTextureInfo);
@@ -5273,6 +5274,7 @@ namespace dxvk {
           cConvertFormat, cDstImage, cDstLayers, cSrcSlice);
       });
     }
+    MarkTextureWritten(pDestTexture);
     UnmapTextures();
     ConsiderFlush(GpuFlushType::ImplicitWeakHint);
   }
@@ -7059,13 +7061,34 @@ namespace dxvk {
   }
 
 
+  // A texture nothing has written yet: the null texture (zero) until
+  // MarkTextureWritten. Not in pixel slots 8-15, whose null is a cube
+  // (MtlContextImpl::nullTextureId). Out of line: BindTexture stays as it was.
+  static __attribute__((noinline, cold)) Rc<MtlTextureView> UnwrittenSampleView(
+          DWORD              Sampler,
+    const D3D9CommonTexture* pTexture,
+          bool               Srgb) {
+    if (!IsVSSampler(Sampler) && Sampler >= 8u)
+      return pTexture->GetSampleView(Srgb);
+
+    static int n = 0;
+    if (n++ < 8)
+      Logger::info(str::format("D9MT-UNWRITTEN sampler ", Sampler, " ",
+        pTexture->Desc()->Width, "x", pTexture->Desc()->Height, " format ", pTexture->Desc()->Format,
+        ": bound as null until its first write"));
+    return nullptr;
+  }
+
+
   void D3D9DeviceEx::BindTexture(DWORD StateSampler) {
     bool srgb = m_state.samplerStates[StateSampler][D3DSAMP_SRGBTEXTURE] & 0x1;
     D3D9CommonTexture* commonTex = GetCommonTexture(m_state.textures[StateSampler]);
 
     EmitCs([
       cSlot       = StateSampler,
-      cImageView  = commonTex->GetSampleView(srgb)
+      cImageView  = likely(!commonTex->IsUnwritten())
+        ? commonTex->GetSampleView(srgb)
+        : UnwrittenSampleView(StateSampler, commonTex, srgb)
     ](MtlContext* ctx) mutable {
       auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(cSlot);
       ctx->bindTexture(stage, slot, std::move(cImageView));
@@ -7111,6 +7134,18 @@ namespace dxvk {
 
     for (uint32_t i : bit::BitMask(m_textureSlotTracking.bound)) {
       if (m_state.textures[i] == texture)
+        m_textureSlotTracking.textureDirty |= 1u << i;
+    }
+  }
+
+
+  void D3D9DeviceEx::MarkTextureWritten(D3D9CommonTexture* pResource) {
+    if (likely(!pResource->MarkWritten()))
+      return;
+
+    // Its first write: the slots that bound it as null bind its view again.
+    for (uint32_t i : bit::BitMask(m_textureSlotTracking.bound)) {
+      if (GetCommonTexture(m_state.textures[i]) == pResource)
         m_textureSlotTracking.textureDirty |= 1u << i;
     }
   }
