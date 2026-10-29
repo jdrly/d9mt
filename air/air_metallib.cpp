@@ -1,6 +1,11 @@
 #include "air_metallib.h"
 #include "air_sha256.h"
 
+#include <cstdio>
+#include <cstdlib>
+
+#include <sys/sysctl.h>
+
 namespace d9mt::air {
 
 namespace {
@@ -117,6 +122,53 @@ void writeFunctionConstantRecord(
   s.patchU16(sizeFixup, uint16_t(s.tell() - sizeFixup - 2u));
 }
 
+/* "<major>[.<n>...]" with a major of 1 to 999; anything else is 0 (the
+   bitcode's own tag). */
+unsigned parseMacOSMajor(const char* s) {
+  unsigned major = 0u, digits = 0u;
+  for (; *s >= '0' && *s <= '9'; s++) {
+    if (++digits > 3u)
+      return 0u;
+    major = major * 10u + unsigned(*s - '0');
+  }
+  if (!digits)
+    return 0u;
+  while (*s == '.') {
+    if (*++s < '0' || *s > '9')
+      return 0u;
+    while (*s >= '0' && *s <= '9')
+      s++;
+  }
+  return *s ? 0u : major;
+}
+
+unsigned macOSMajor() {
+  const char* env = std::getenv("D9MT_AIR_MACOS");
+  if (env && *env)
+    return parseMacOSMajor(env);
+  char version[32] = {};
+  size_t size = sizeof(version) - 1u;
+  if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) != 0)
+    return 0u;
+  return parseMacOSMajor(version);
+}
+
+}
+
+MetallibVersions metallibTagVersions(const MetallibVersions& bitcode) {
+  static const unsigned major = [] {
+    unsigned m = macOSMajor();
+    std::fprintf(stderr, "d9mt: AIR metallibs tagged for macOS %u (%s)\n", m,
+      m >= 27u ? "AIR 2.9" : "the bitcode's AIR version");
+    return m;
+  }();
+
+  MetallibVersions v = bitcode;
+  if (major >= 27u) {
+    v.airMajor = 2u;
+    v.airMinor = 9u;
+  }
+  return v;
 }
 
 std::vector<uint8_t> writeMetallib(

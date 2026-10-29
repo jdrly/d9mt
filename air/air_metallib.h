@@ -55,19 +55,30 @@ struct MetallibFunction {
   std::vector<MetallibFunctionConstant> functionConstants;
 };
 
+/* What the AIR compiler's bitcode declares (target triple, air.version,
+   air.language_version). */
 struct MetallibVersions {
   uint16_t airMajor = 2u;
-  uint16_t airMinor = 9u;
+  uint16_t airMinor = 7u;
   uint16_t languageMajor = 3u;
   uint16_t languageMinor = 0u;
   uint16_t osMajor = 15u;
   uint16_t osMinor = 0u;
 };
 
+/* The versions to tag each function's VERS with on this Mac. Metal rejects
+   a VERS newer than the OS supports (macOS 26: AIR 2.8), so before macOS 27
+   it is the bitcode's own. macOS 27 and later keep AIR 2.9, the tag every
+   d9mt since e1dee55 wrote, so the metallibs stay byte-identical and Metal's
+   shader caches keep hitting. D9MT_AIR_MACOS=<major> overrides the macOS
+   version (tests); a version that doesn't parse gives the bitcode's own.
+   Decided once per process. */
+MetallibVersions metallibTagVersions(const MetallibVersions& bitcode);
+
 std::vector<uint8_t> writeMetallib(
         const void*                           bitcode,
         size_t                                bitcodeSize,
         const std::vector<MetallibFunction>&  functions,
-        const MetallibVersions&               versions = MetallibVersions());
+        const MetallibVersions&               versions);
 
 }
