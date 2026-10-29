@@ -27,7 +27,12 @@ const char* kDataLayout =
   "-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256"
   "-v512:512:512-v1024:1024:1024-n8:16:32";
 
-const char* kTriple = "air64-apple-macosx15.0.0";
+const d9mt::air::MetallibVersions kVersions;
+
+std::string targetTriple() {
+  return "air64-apple-macosx" + std::to_string(kVersions.osMajor) + "."
+    + std::to_string(kVersions.osMinor) + ".0";
+}
 
 constexpr unsigned kAsConstant = 2u;
 constexpr unsigned kAsTexture = 1u;
@@ -161,7 +166,7 @@ struct AirBuilderImpl {
     ctx.setOpaquePointers(false); /* AIR is pre-opaque-pointer LLVM */
     mod = std::make_unique<Module>("air_shader", ctx);
     mod->setDataLayout(kDataLayout);
-    mod->setTargetTriple(kTriple);
+    mod->setTargetTriple(targetTriple());
     b = std::make_unique<IRBuilder<>>(ctx);
 
     b->setFastMathFlags(mathFlags());
@@ -2233,9 +2238,10 @@ struct AirBuilderImpl {
     opts->addOperand(mdTuple({ mdString("air.compile.framebuffer_fetch_enable") }));
 
     mod->getOrInsertNamedMetadata("air.version")->addOperand(
-      mdTuple({ mdI32(2u), mdI32(7u), mdI32(0u) }));
+      mdTuple({ mdI32(kVersions.airMajor), mdI32(kVersions.airMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.language_version")->addOperand(
-      mdTuple({ mdString("Metal"), mdI32(3u), mdI32(0u), mdI32(0u) }));
+      mdTuple({ mdString("Metal"), mdI32(kVersions.languageMajor),
+                mdI32(kVersions.languageMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.source_file_name")->addOperand(
       mdTuple({ mdString("dxbc-spirv-air") }));
     mod->getOrInsertNamedMetadata("llvm.ident")->addOperand(
@@ -2350,7 +2356,8 @@ struct AirBuilderImpl {
     }
 
     return d9mt::air::writeMetallib(
-      bitcode.data(), bitcode.size(), { fn });
+      bitcode.data(), bitcode.size(), { fn },
+      d9mt::air::metallibTagVersions(kVersions));
   }
 };
 

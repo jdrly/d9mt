@@ -1,6 +1,12 @@
 #include "air_metallib.h"
 #include "air_sha256.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <sys/sysctl.h>
+
 namespace d9mt::air {
 
 namespace {
@@ -117,6 +123,34 @@ void writeFunctionConstantRecord(
   s.patchU16(sizeFixup, uint16_t(s.tell() - sizeFixup - 2u));
 }
 
+unsigned macOSMajor() {
+  if (const char* env = std::getenv("D9MT_AIR_MACOS")) {
+    if (*env && std::strspn(env, "0123456789") == std::strlen(env))
+      return unsigned(std::strtoul(env, nullptr, 10));
+  }
+  char version[32] = {};
+  size_t size = sizeof(version) - 1u;
+  if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) != 0)
+    return 0u;
+  return unsigned(std::strtoul(version, nullptr, 10));
+}
+
+}
+
+MetallibVersions metallibTagVersions(const MetallibVersions& bitcode) {
+  static const unsigned major = [] {
+    unsigned m = macOSMajor();
+    std::fprintf(stderr, "d9mt: AIR metallibs tagged for macOS %u (%s)\n", m,
+      m >= 27u ? "AIR 2.9" : "the bitcode's AIR version");
+    return m;
+  }();
+
+  MetallibVersions v = bitcode;
+  if (major >= 27u) {
+    v.airMajor = 2u;
+    v.airMinor = 9u;
+  }
+  return v;
 }
 
 std::vector<uint8_t> writeMetallib(

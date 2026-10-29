@@ -184,6 +184,13 @@ recording; it needs DXVK's native headers like `test-compile-mt.sh`.
 SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
 directory.
 
+`scripts/test-air-versions.sh` (after `scripts/build-bridge.sh`; needs Xcode's
+metal toolchain) compiles the AIR corpus through d9mtair for macOS 26, for
+macOS 27 and for this Mac (`D9MT_AIR_MACOS`). For macOS 26 each runtime
+metallib's OS version and VERS tags must equal what Apple's `metallib` writes
+for the same bitcode (a newer VERS makes Metal reject every game shader); for
+macOS 27 they keep AIR 2.9, and nothing else differs.
+
 `scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
 patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
 `ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
@@ -402,6 +409,7 @@ passes have their own load/store rules).
 | `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
 | `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
 | `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
+| `D9MT_AIR_MACOS=<major>` | the macOS version the AIR compiler tags its metallibs for (below 27: the bitcode's AIR version; 27 and later: AIR 2.9), instead of this Mac's. The choice is logged once (`d9mt: AIR metallibs tagged for macOS …`). Tests only |
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |
 | `D9MT_GPUCAPTURE=<n>\|trigger`, `D9MT_GPUCAPTURE_COMMITS` | Xcode GPU trace to `/tmp/d9mt.gputrace` |
 | `D9MT_PSO_FLUSH_EVERY` | pipelines between archive flushes (default 256) |
@@ -437,7 +445,11 @@ passes have their own load/store rules).
   builds with Xcode 27 embedded only MSL 4.1 metallibs, which Metal on
   macOS 26 rejects ("language version 4.1 … not supported"): a black
   screen. Checked on 26.6.2 in a VM, whose paravirtual GPU has no Metal 4,
-  so d9mt itself can't run there; no in-game test on 26 yet.
+  so d9mt itself can't run there. The AIR compiler's metallibs were tagged
+  AIR 2.9 (macOS 27's) until #109, so macOS 26 rejected every game shader
+  (black after the first loading screen, seen on a 26.6.2 M4). Before macOS
+  27 they now carry their bitcode's AIR 2.7; macOS 27 keeps 2.9, so its
+  shader caches stay valid.
 - **Gamma ramps** (`SetGammaRamp`, used by some brightness sliders) are
   ignored.
 - **Not implemented or unverified**, from code review: instance divisors
