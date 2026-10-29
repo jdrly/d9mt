@@ -171,6 +171,15 @@ int d9mtair_compile(d9mt_air_compile_params* p) {
   return compileImpl(p);
 }
 
+/* The AIR version this process tags VERS with, (major << 16) | minor: part
+   of the AIR cache's identity, so a cache never returns another tag. */
+__attribute__((visibility("default")))
+uint32_t d9mtair_vers_air(void) {
+  d9mt::air::MetallibVersions v =
+    d9mt::air::metallibTagVersions(d9mt::air::MetallibVersions());
+  return (uint32_t(v.airMajor) << 16) | v.airMinor;
+}
+
 __attribute__((visibility("default")))
 int d9mtair_free(d9mt_air_free_params* p) {
   std::free(reinterpret_cast<void*>(uintptr_t(p->ptr)));

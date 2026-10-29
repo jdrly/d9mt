@@ -5815,6 +5815,7 @@ struct d9mt_air_free_params;
 extern int d9mtair_version(struct d9mt_air_version_params *p);
 extern int d9mtair_compile(struct d9mt_air_compile_params *p);
 extern int d9mtair_free(struct d9mt_air_free_params *p);
+extern uint32_t d9mtair_vers_air(void);
 
 static NTSTATUS
 thunk_D9MTAirVersion(void *args) {
@@ -5825,8 +5826,9 @@ thunk_D9MTAirVersion(void *args) {
  * translated) otherwise reruns for every shader and every VS/PS linkage on
  * every launch. Key = SHA-256(build identity, ABI, flags, spec data, entry,
  * IR bytes); store = the DXMT-derived sqlite cache (cache.c), one table per
- * build of this .so (tables of other builds are dropped on open, so a rebuild
- * never reads stale metallibs and the file does not grow without bound).
+ * build of this .so and VERS tag (tables of others are dropped on open, so a
+ * rebuild or another macOS never reads stale metallibs and the file does not
+ * grow without bound).
  * Every failure degrades to a plain compile.
  *   D9MT_AIR_CACHE=0            disable
  *   D9MT_AIR_CACHE=<unix path>  database file (relative = under the macOS
@@ -5892,7 +5894,8 @@ air_cache_init(void) {
 
   uint64_t version;
   memcpy(&version, g_air_build_id, sizeof(version));
-  version = (version ^ ((uint64_t)D9MT_AIR_ABI_VERSION << 56)) & 0x7fffffffffffffffull;
+  version = (version ^ ((uint64_t)D9MT_AIR_ABI_VERSION << 56) ^ ((uint64_t)d9mtair_vers_air() << 24))
+            & 0x7fffffffffffffffull;
 
   NSString *path = env ? [NSString stringWithUTF8String:env] : @"d9mt/air-cache.sqlite3";
   if (!path)

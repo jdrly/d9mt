@@ -409,7 +409,7 @@ passes have their own load/store rules).
 | `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
 | `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
 | `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
-| `D9MT_AIR_MACOS=<major>` | the macOS version the AIR compiler tags its metallibs for (below 27: the bitcode's AIR version; 27 and later: AIR 2.9), instead of this Mac's. The choice is logged once (`d9mt: AIR metallibs tagged for macOS …`). Tests only |
+| `D9MT_AIR_MACOS=<major>` | the macOS version the AIR compiler tags its metallibs for (below 27: the bitcode's AIR version; 27 and later: AIR 2.9), instead of this Mac's (a value that isn't a version gives the bitcode's AIR version). The choice is logged once (`d9mt: AIR metallibs tagged for macOS …`). Tests only |
 | `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |
 | `D9MT_GPUCAPTURE=<n>\|trigger`, `D9MT_GPUCAPTURE_COMMITS` | Xcode GPU trace to `/tmp/d9mt.gputrace` |
 | `D9MT_PSO_FLUSH_EVERY` | pipelines between archive flushes (default 256) |

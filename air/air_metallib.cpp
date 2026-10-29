@@ -3,7 +3,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 
 #include <sys/sysctl.h>
 
@@ -123,16 +122,35 @@ void writeFunctionConstantRecord(
   s.patchU16(sizeFixup, uint16_t(s.tell() - sizeFixup - 2u));
 }
 
-unsigned macOSMajor() {
-  if (const char* env = std::getenv("D9MT_AIR_MACOS")) {
-    if (*env && std::strspn(env, "0123456789") == std::strlen(env))
-      return unsigned(std::strtoul(env, nullptr, 10));
+/* "<major>[.<n>...]" with a major of 1 to 999; anything else is 0 (the
+   bitcode's own tag). */
+unsigned parseMacOSMajor(const char* s) {
+  unsigned major = 0u, digits = 0u;
+  for (; *s >= '0' && *s <= '9'; s++) {
+    if (++digits > 3u)
+      return 0u;
+    major = major * 10u + unsigned(*s - '0');
   }
+  if (!digits)
+    return 0u;
+  while (*s == '.') {
+    if (*++s < '0' || *s > '9')
+      return 0u;
+    while (*s >= '0' && *s <= '9')
+      s++;
+  }
+  return *s ? 0u : major;
+}
+
+unsigned macOSMajor() {
+  const char* env = std::getenv("D9MT_AIR_MACOS");
+  if (env && *env)
+    return parseMacOSMajor(env);
   char version[32] = {};
   size_t size = sizeof(version) - 1u;
   if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) != 0)
     return 0u;
-  return unsigned(std::strtoul(version, nullptr, 10));
+  return parseMacOSMajor(version);
 }
 
 }

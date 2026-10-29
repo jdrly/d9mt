@@ -71,7 +71,8 @@ struct MetallibVersions {
    it is the bitcode's own. macOS 27 and later keep AIR 2.9, the tag every
    d9mt since e1dee55 wrote, so the metallibs stay byte-identical and Metal's
    shader caches keep hitting. D9MT_AIR_MACOS=<major> overrides the macOS
-   version (tests). Decided once per process. */
+   version (tests); a version that doesn't parse gives the bitcode's own.
+   Decided once per process. */
 MetallibVersions metallibTagVersions(const MetallibVersions& bitcode);
 
 std::vector<uint8_t> writeMetallib(

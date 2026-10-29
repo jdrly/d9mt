@@ -8,6 +8,8 @@
 #  - macOS 27: VERS AIR 2.9 with Apple's language version, the tag d9mt has always written there
 #    (Metal's shader caches keep their keys); the file differs from the macOS 26 one only there.
 #  - unset: byte-identical to the mode of the macOS this runs on.
+# Then, on the first shader, overrides that must parse (27.2, 26.6.2) and ones that must not
+# (27junk, -1, an overflow, 1000, "27."), which give the bitcode's own tag, as on macOS 26.
 # Needs build/airlib from scripts/build-bridge.sh (or build-d9mtair.sh) and Xcode's metal toolchain.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -80,6 +82,21 @@ EOF
     printf '%-24s FAIL (%s)\n' "$name" "$result"; fail=$((fail+1))
   fi
 done
+first="$(ls "$V2"/air/tests/bin/*.bin | head -1)"
+w="$WORK/$(basename "$first" .bin)"
+if [ -f "$w.26.metallib" ] && [ -f "$w.27.metallib" ]; then
+  for spec in 27.2:27 26.6.2:26 27junk:26 -1:26 99999999999999999999:26 1000:26 27.:26; do
+    value=${spec%:*} want=${spec##*:}
+    if D9MT_AIR_MACOS="$value" "$LOOP" "$OUT/d9mtair.so" "$first" "$w.override.metallib" >/dev/null 2>&1 \
+       && cmp -s "$w.override.metallib" "$w.$want.metallib"; then
+      printf '%-24s PASS (D9MT_AIR_MACOS=%s tags as macOS %s)\n' override "$value" "$want"; pass=$((pass+1))
+    else
+      printf '%-24s FAIL (D9MT_AIR_MACOS=%s does not tag as macOS %s)\n' override "$value" "$want"; fail=$((fail+1))
+    fi
+  done
+else
+  printf '%-24s FAIL (no macOS 26/27 files of %s)\n' override "$(basename "$first")"; fail=$((fail+1))
+fi
 echo "----"
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
