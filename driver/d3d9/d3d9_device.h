@@ -919,6 +919,8 @@ namespace dxvk {
 
     void MarkTextureBindingDirty(IDirect3DBaseTexture9* texture);
 
+    void MarkTextureWritten(D3D9CommonTexture* pResource);
+
     bool SamplerUsesBorderColor(DWORD Sampler) const;
 
     HRESULT STDMETHODCALLTYPE SetRenderTargetInternal(

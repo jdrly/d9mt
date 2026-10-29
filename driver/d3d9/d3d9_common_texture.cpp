@@ -3,6 +3,8 @@
 #include "d3d9_util.h"
 #include "d3d9_device.h"
 
+#include "../util/util_env.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -79,6 +81,16 @@ namespace dxvk {
       const bool isDS = m_desc.Usage & D3DUSAGE_DEPTHSTENCIL;
       if (!m_desc.IsAttachmentOnly || (!isRT && !isDS))
         CreateSampleView(0);
+
+      // D3D9 leaves a new texture's contents undefined; Windows reads zero.
+      // Attachment images get a clear (D3D9Initializer); the rest hold whatever
+      // memory the driver hands out, read through lossless-compression metadata
+      // nothing has initialised (an M4 showed magenta icons, field report
+      // 2026-10-27). D9MT_UNWRITTEN_NULL=0 samples them as they are (A/B).
+      static const bool s_unwrittenNull = env::getEnvVar("D9MT_UNWRITTEN_NULL") != "0";
+      m_unwritten = s_unwrittenNull
+        && ResourceType == D3DRTYPE_TEXTURE && m_desc.Pool == D3DPOOL_DEFAULT
+        && !(m_image->info().usage & MtlTextureUsageRenderTarget);
     }
 
     for (uint32_t i = 0; i < CountSubresources(); i++) {
