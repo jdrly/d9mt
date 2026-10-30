@@ -113,10 +113,11 @@ namespace dxvk {
 
     this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
 
-    // D9MT_FLUSH_CAP=1: the A/B switch for the flush cap (docs/g1-early-commit.md §7). Logged for
-    // the device's options only (the interface has its own, without a device).
-    this->flushCapStrong = env::getEnvVar("D9MT_FLUSH_CAP") == "1";
-    if (device != nullptr && this->flushCapStrong)
+    // D9MT_FLUSH_CAP=1: the A/B switch for the flush cap (docs/g1-early-commit.md §7), read for the
+    // device's options only (the interface's have no device and no flush tracker).
+    // reproducibleCommandStream takes precedence (GetMaxFlushType), so the log says what applies.
+    this->flushCapStrong = device != nullptr && env::getEnvVar("D9MT_FLUSH_CAP") == "1";
+    if (this->flushCapStrong && !this->reproducibleCommandStream)
       Logger::info("D9MT: flush cap ImplicitStrongHint (D9MT_FLUSH_CAP=1): weak flush hints don't submit");
   }
 
