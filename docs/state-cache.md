@@ -107,14 +107,14 @@ of the world. The bigger warm-path win is fixing the flush itself (§9).
 
 ## 2. What determines a d9mt PSO
 
-`RenderPsoKey` (`driver/backend/mtl_pso_cache.h:41`) is the complete build
-input. `RenderPsoCache::build` (`mtl_pso_cache.cpp:87`) turns it into a
+`RenderPsoKey` (`driver/backend/mtl_pso_key.h`) is the complete build
+input. `RenderPsoCache::build` (`mtl_pso_cache.cpp`) turns it into a
 `WMTMtl4RenderPipelineInfo` together with the two libraries and entry names.
 The struct is 320 bytes on x86_64:
 
 | Bytes | Field | Source | Stable across d9mt versions? |
 |---|---|---|---|
-| 0–15 | `vsCookie`, `fsCookie` | `MTLLibrary` handles (`resolvePso`, `mtl_context_transfer.cpp:173`) | **No.** Runtime pointers; replaced by the shader identity below |
+| 0–15 | `vsCookie`, `fsCookie` | `MTLLibrary` handles (`MtlContextImpl::resolvePso`, `mtl_context_transfer.cpp`) | **No.** Runtime pointers; replaced by the shader identity below |
 | 16–175 | `attrs[20]` (Metal vertex format, offset, buffer index) | D3D9 vertex declaration through `attributeFormat()` | Derived from D3D9 state; stable while the mapping is unchanged |
 | 176–255 | `layouts[20]` (stride, step function, buffer index in `pad`) | Declaration + live stream stride + instancing (`streamFreq`) | Derived |
 | 256–257 | `attrCount`, `layoutCount` | | Derived |
@@ -125,13 +125,13 @@ The struct is 320 bytes on x86_64:
 Shader identity, which is D3D9-side and stable:
 
 - **Programmable VS/PS**: `D3D9ShaderModuleKey` = stage + SHA-1(bytecode ‖
-  `D3D9ShaderOptions`) (`d3d9_device.cpp:7639`).
+  `D3D9ShaderOptions`) (`D3D9DeviceEx::CreateShaderModule`, `d3d9_device.cpp`).
   - It survives d9mt updates unless `D3D9ShaderOptions` itself changes, which
     would turn every recorded shader into a harmless miss.
 - **PS linkage**: a programmable PS is linked against the bound programmable VS
-  (`BindProgrammablePixelShaderLinkage`, `d3d9_device.cpp:7262`), or used
+  (`D3D9DeviceEx::BindProgrammablePixelShaderLinkage`, `d3d9_device.cpp`), or used
   standalone under the fixed-function VS. Its library is
-  `D3D9ShaderProgram::GetFunction(prevVs)` (`d3d9_shader.cpp:178`). So the PS
+  `D3D9ShaderProgram::GetFunction(prevVs)` (`d3d9_shader.cpp`). So the PS
   identity is (PS SHA-1, linked yes/no), with the VS SHA-1 as the link partner.
 - **Fixed function**: one VS and one FS ubershader from the embedded metallib
   (`D3D9FFShaderModuleSet`, entry names `ffVsMain`/`ffFsMain`). The identity
@@ -145,7 +145,7 @@ Shader identity, which is D3D9-side and stable:
 
 Specialization: D3D9 spec state (alpha test, fog, sampler types, bool
 constants) is **not** part of the PSO. It is read at run time from the SpecData
-CBV (`emitSpecConstant`, `d3d9_shader_compiler.cpp:619`; `spec_count = 0` at
+CBV (`emitSpecConstant`, `d3d9_shader_compiler.cpp`; `spec_count = 0` at
 the AIR compile). No spec constants need recording.
 
 Side observation, out of scope here: `build()` always overrides the topology

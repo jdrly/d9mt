@@ -1,12 +1,14 @@
 Upstream: DXMT (github.com/3Shain/dxmt) src/winemetal
 Commit:   964f1308aa4aefb897d6b55b8614e02075a038c2
 Date:     Mon Jun 22 09:51:15 2026 -0500
-Policy:   docs/rewrite/04-air-unixlib.md §Bridge policy — additive patches only,
-          formatted to stay cherry-pickable against upstream.
+Policy:   docs/dev-notes/SOURCE_OF_TRUTH.md §3 (the bridge) — additive patches
+          only, formatted to stay cherry-pickable against upstream.
 Local changes:
-  - airconv_thunks.{c,h} removed (call DXMT SM50* entry points we do not ship);
-    replaced by d9mtair_thunks.{c,h} in the same dispatch style, backed by the
-    v2/airlib compile core (AirBuilder + LLVM).
+  - airconv_thunks.{c,h} kept and still built into winemetal.dll, but their
+    DXMT SM50* entry points are unreachable: d9mt doesn't ship DXMT airconv,
+    and unix/dxso_stubs.c stubs them on the unix side (each returns failure).
+    Shaders compile through d9mtair_thunks.{c,h}, in the same dispatch style,
+    backed by the airlib/ compile core (AirBuilder + LLVM).
   - winemetal.h / winemetal_thunks.{c,h} / unix/winemetal_unix.c: additive
     ABI entries, appended to keep existing values stable:
       #1 vertex-descriptor-capable render PSO creation (unix call 153).
@@ -91,7 +93,7 @@ Local changes:
              fragmentFunctionDescriptor, and the compiler entry is
              -newRenderPipelineStateWithDescriptor:compilerTaskOptions:error:.
            - Queue commit is -commit:count: (no options variant needed).
-         Smoke: tests/bridge_smoke.cpp gains an MTL4 section — queue/allocator/
+         Smoke: bridge/tests/bridge_smoke.cpp gains an MTL4 section — queue/allocator/
          command buffer + argument table + residency set + MTL4Compiler PSO +
          a real render pass encoding one draw, commit, and shared-event
          completion wait.
