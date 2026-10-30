@@ -16,8 +16,10 @@ asking or choosing an approach of your own. `docs/dev-notes/` is historical, not
   not an argument.
 - Metal 4 doesn't retain resources: anything a command buffer uses lives until its serial retires
   (ADR-0001).
-- Don't touch `bridge/` unless the issue needs it: it changes `winemetal.so`'s LC_UUID and costs
-  every player a shader recompile (ADR-0004).
+- Don't touch the AIR codegen (`air/`, `airlib/`, dxbc-spirv, LLVM, `bridge/unix/air_cache.c`,
+  `bridge/unix/cache.c`) unless the issue needs it: it changes the AIR codegen id and costs every
+  player a shader recompile, unless a lineage with byte-identity evidence carries it (ADR-0006).
+  The driver and the bridge still ship from one commit.
 - Run benchmarks only in a quiet window the maintainer has granted, never while a game runs, and
   never open a test window on the maintainer's screen.
 - Work on a branch and open a pull request into `main`. Never push to `main`, and never create

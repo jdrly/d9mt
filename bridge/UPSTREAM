@@ -11,6 +11,11 @@ Local changes:
     no-ops).
     Shaders compile through d9mtair_thunks.{c,h}, in the same dispatch style,
     backed by the airlib/ compile core (AirBuilder + LLVM).
+  - unix/air_cache.c, unix/air_cache_lineage.{c,h} (d9mt's own): the AIR compile
+    thunks and the persistent AIR metallib cache in front of them, keyed on the
+    AIR codegen id (docs/adr/0006-air-cache-keyed-on-codegen.md). unix/cache.c
+    (DXMT's sqlite store) gains d9mt_cache_prepare: one transaction that adopts a
+    lineage's predecessor table and drops every other cache_<n> table.
   - winemetal.h / winemetal_thunks.{c,h} / unix/winemetal_unix.c: additive
     ABI entries, appended to keep existing values stable:
       #1 vertex-descriptor-capable render PSO creation (unix call 153).

@@ -125,8 +125,19 @@ content-addressed, so returning to earlier state (A → B → A) hits again
 
 **AIR cache**
 The persistent cache of compiled shaders, one sqlite file in the user cache folder
-(`air-cache.sqlite3`), shared by all games. Its key includes `winemetal.so`'s LC_UUID, so every
-bridge rebuild invalidates it ([configuration](docs/configuration.md#environment-variables); ADR-0004).
+(`air-cache.sqlite3`), shared by all games. Its identity is the AIR codegen id (or that id's
+lineage), so only a change to the AIR codegen invalidates it, not any other bridge change
+([configuration](docs/configuration.md#environment-variables); ADR-0006).
+
+**AIR codegen id**
+The digest of everything linked into `winemetal.so` that decides what an AIR compile or an AIR
+cache hit returns (`CODEGEN_OBJS` in `scripts/build-bridge.sh`, normalized by
+`scripts/air-codegen-id.py`); `build/bridge/air-codegen-id.txt` names it (ADR-0006).
+
+**Lineage**
+An entry in `bridge/unix/air_cache_lineage.c` that lets one exact AIR codegen id use an earlier
+build's AIR cache identity, backed by evidence that both write the same bytes; it can adopt that
+build's table once (ADR-0006).
 
 **PSO archive**
 The Metal 4 pipeline archives in `<user cache>/d9mt/pso/`, one per session, the last eight kept

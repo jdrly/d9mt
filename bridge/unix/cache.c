@@ -192,40 +192,82 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
 
 @end
 
-/* d9mt: drop every cache_<n> table except cache_<version> so per-build
- * tables don't accumulate. Best effort; any failure just leaves them. */
-void
-d9mt_cache_drop_other_versions(NSString *path, uint64_t version) {
+/* d9mt: before the reader and writer open cache_<version>. With adopt != 0
+ * and cache_<adopt> present, its rows move to cache_<version>: renamed if
+ * cache_<version> doesn't exist, else merged in (the rows already there win):
+ * a predecessor's metallibs kept under the same keys (ADR-0006). Every other
+ * cache_<n> table is dropped, so per-build tables don't accumulate. One write
+ * transaction: another process sees all of it or none. Returns 1 if the table
+ * was renamed, 2 if merged, 0 if there was none, -1 if nothing could be done
+ * (the file is as it was; the caller then uses no cache this session, so a
+ * predecessor table stays for the next start). */
+int
+d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
   NSString *dbPath = resolve_cache_dir(path, true);
   if (!dbPath || ![[NSFileManager defaultManager] fileExistsAtPath:dbPath])
-    return;
+    return 0;
   sqlite3 *db = NULL;
   if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) !=
       SQLITE_OK) {
     sqlite3_close(db);
-    return;
+    return -1;
   }
   sqlite3_busy_timeout(db, 2000);
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_close(db);
+    return -1;
+  }
   NSString *keep = [NSString stringWithFormat:@"cache_%llu", version];
+  NSString *from = adopt ? [NSString stringWithFormat:@"cache_%llu", adopt] : nil;
   NSMutableArray<NSString *> *drop = [NSMutableArray array];
+  bool have_keep = false, have_from = false;
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cache\\_%' ESCAPE '\\';",
                          -1, &stmt, NULL) == SQLITE_OK) {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       const unsigned char *name = sqlite3_column_text(stmt, 0);
       NSString *n = name ? [NSString stringWithUTF8String:(const char *)name] : nil;
-      if (n && ![n isEqualToString:keep])
+      if (!n)
+        continue;
+      if ([n isEqualToString:keep])
+        have_keep = true;
+      else if (from && [n isEqualToString:from])
+        have_from = true;
+      else
         [drop addObject:n];
     }
   }
   sqlite3_finalize(stmt);
+  /* The predecessor's rows: the whole table becomes cache_<version>, or, if
+   * cache_<version> already holds rows (written by a session that couldn't
+   * adopt), they're merged in, the rows already there kept. A failure keeps
+   * everything as it was for the next start. */
+  int adopted = 0;
+  if (have_from) {
+    NSString *sql = have_keep
+      ? [NSString stringWithFormat:@"INSERT OR IGNORE INTO \"%@\" (key, value) SELECT key, value FROM \"%@\"; "
+                                    "DROP TABLE \"%@\";", keep, from, from]
+      : [NSString stringWithFormat:@"ALTER TABLE \"%@\" RENAME TO \"%@\";", from, keep];
+    if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
+      sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+      sqlite3_close(db);
+      return -1;
+    }
+    adopted = have_keep ? 2 : 1;
+  }
   for (NSString *n in drop) {
     NSString *sql = [NSString stringWithFormat:@"DROP TABLE IF EXISTS \"%@\";", n];
     sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL);
   }
+  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    sqlite3_close(db);
+    return -1;
+  }
   if (drop.count)
     sqlite3_exec(db, "VACUUM;", NULL, NULL, NULL);
   sqlite3_close(db);
+  return adopted;
 }
 
 int

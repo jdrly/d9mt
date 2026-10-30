@@ -158,12 +158,12 @@ A change is done only when all of these hold:
         and a fanless Mac among them, and the PR names them. Without that coverage it goes in
         only behind a switch that is off by default, in the tables of `docs/configuration.md`. This applies to
         new speed-only changes; existing speed optimisations stay as they are (ADR-0005).
-- [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
-      byte-identical to `main`'s. A change to the bridge changes its LC_UUID, the key of every
-      player's AIR cache, so every player recompiles their shaders once: the PR says so, and
-      bridge changes are batched into one bundle per release (ADR-0004). A change to the
+- [ ] **AIR codegen id.** A PR that changes the bridge or the AIR codegen states its AIR codegen
+      id (`build/bridge/air-codegen-id.txt`) next to `main`'s. If it changes, every player's AIR
+      cache recompiles once: the PR says so, or adds a lineage entry with the evidence that the
+      new codegen writes byte-identical metallibs and reflection (ADR-0006). A change to the
       pipeline state cache's key signature resets every player's state cache and is called out
-      and batched the same way.
+      and batched into one release.
 - [ ] **Docs.** Every new environment variable or `dxvk.conf` option is in the tables of
       [docs/configuration.md](docs/configuration.md);
       a design that needs explaining has its document in `docs/`.
@@ -186,7 +186,7 @@ benchmarks (`test/perf/`, `test/bench_4k.c`, PERFORMANCE.md §3) are on `main`.
 - Merge a speed-only change that hasn't shown identical rendering on other Mac generations,
   unless it is behind a switch that is off by default.
 - Release a Metal object the GPU may still use (ADR-0001).
-- Change `bridge/` in passing: it costs every player a shader recompile (ADR-0004).
+- Change the AIR codegen in passing: it costs every player a shader recompile (ADR-0006).
 - Mix a driver and a bridge from different builds.
 - Commit game files, captures or logs with a player's account data.
 - Add a dependency without the maintainer's approval.

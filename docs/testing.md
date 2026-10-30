@@ -59,6 +59,18 @@ metallib's OS version and VERS tags must equal what Apple's `metallib` writes
 for the same bitcode (a newer VERS makes Metal reject every game shader); for
 macOS 27 they keep AIR 2.9, and nothing else differs.
 
+`scripts/test-air-cache-lineage.sh` (after `scripts/build-bridge.sh`) checks the
+AIR cache's identity (ADR-0006) on scratch caches, without Wine: the AIR codegen
+id ignores an object's SDK version stamp but not a byte of its code, a warm run
+hits every entry, a foreign table is dropped, and, when the build's id has a
+lineage that adopts a predecessor table, that table is adopted on macOS 27 with
+every row kept and every compile a hit (also next to a stray table), merged into
+a new table that already holds rows, left whole while another process holds the
+write lock (that session runs without the cache) and adopted by the next start,
+and dropped under `D9MT_AIR_MACOS=26`.
+`OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
+that bridge itself and compares it row by row first.
+
 `scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
 patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
 `ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
