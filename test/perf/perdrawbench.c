@@ -15,7 +15,9 @@
  *     D3DGETDATA_FLUSH every 20 us (as bench_draws flush does). So at most depth frames of GPU
  *     work are outstanding (depth 1: the GPU finishes every frame before the next starts), the
  *     uploads and draws are the same, and the drawable acquire, the present copy and the
- *     frame-latency wait are gone. D9MT_PDRW_DEPTH sets depth, 1 to 8 (unset: 2). The line is
+ *     frame-latency wait are gone. D9MT_PDRW_DEPTH sets depth, 1 to 8. Unset it is 3, D3D9's
+ *     default frame latency, and the depth at which d9mt's passes per frame match present mode's
+ *     (2.0 render passes, 1.0 loads; at depth 2 its flush heuristic splits more). The line is
  *     `RESULT perdrawbench mode=flush depth=<d> frames= avg_ms=`, and `PDRW waited= polls=`
  *     follows it: the frames that found that query not done yet, and the polls in all.
  * Any other value is a usage failure. Both modes print `MODE perdrawbench <mode>` first.
@@ -59,7 +61,7 @@ int main(int argc, char **argv) {
   if (frames <= 60) { printf("RESULT FAIL usage: frames must be more than the 60 warm-up frames\n"); return 2; }
   const char *mode = getenv("D9MT_PDRW_FLUSH"), *chk = getenv("D9MT_PDRW_CHECK"), *dep = getenv("D9MT_PDRW_DEPTH");
   const int flush = mode && !strcmp(mode, "1"), check = chk && !strcmp(chk, "1");
-  const int depth = dep ? atoi(dep) : 2;
+  const int depth = dep ? atoi(dep) : 3;
   if (mode && !flush && strcmp(mode, "0")) { printf("RESULT FAIL usage: D9MT_PDRW_FLUSH must be 0 or 1\n"); return 2; }
   if (depth < 1 || depth > PDRW_MAX_DEPTH) { printf("RESULT FAIL usage: D9MT_PDRW_DEPTH must be 1 to %d\n", PDRW_MAX_DEPTH); return 2; }
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "pdb";
