@@ -158,8 +158,9 @@ private:
   [[gnu::cold, gnu::noinline]] void parkHung();
 
   // waitFor after a slice the GPU didn't signal: 0 waits on; 1 returns (the wait was abandoned or
-  // parked, which returns only in a test); 2 gives the wait up (D9MT_GPU_HUNG=continue).
-  [[gnu::cold, gnu::noinline]] int stallEnds(uint64_t serial, uint32_t slices, uint32_t submittedSlices);
+  // parked, which returns only in a test); 2 gives the wait up (D9MT_GPU_HUNG=continue). Flattened:
+  // an out-of-line str::format would land among the shared template code and move all of it.
+  [[gnu::cold, gnu::noinline, gnu::flatten]] int stallEnds(uint64_t serial, uint32_t slices, uint32_t submittedSlices);
 
   void runDue(uint64_t completed);  // m_runMutex held
 
