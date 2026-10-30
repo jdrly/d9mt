@@ -26,9 +26,10 @@ clang++ -std=c++17 -O1 -arch x86_64 -I"$V2/third_party/dxbc-spirv" -I"$V2" -I"$V
 cp "$V2"/air/tests/bin/*.bin "$WORK/corpus/"
 for inc in "$V2"/test/*_bytecode.inc; do
   python3 -I - "$inc" "$WORK/corpus/test_$(basename "$inc" .inc).bin" <<'EOF'
-import sys
-d = open(sys.argv[1]).read().replace('\n', '').strip().strip(',')
-open(sys.argv[2], 'wb').write(bytes(int(x) for x in d.split(',') if x.strip()))
+import re, sys
+src = re.sub(r'/\*.*?\*/|//[^\n]*', '', open(sys.argv[1]).read(), flags=re.S)
+data = bytes(int(x, 0) for x in re.findall(r'0[xX][0-9a-fA-F]+|\d+', src))
+open(sys.argv[2], 'wb').write(data)
 EOF
 done
 
@@ -62,6 +63,14 @@ run() {
 tables() { cut -d' ' -f1 "$WORK/$1.rows" | sort -u | tr '\n' ' '; }
 rows_as() { sed "s/^[^ ]* /$2 /" "$WORK/$1.rows"; }  # rows_as <name> <table>: the rows, renamed
 table_of() { sed -n 's/.*AIR cache .* (table \(cache_[0-9]*\),.*/\1/p' "$WORK/$1.log" | head -1; }
+
+# 0. the corpus: every file converts to IR and compiles (an input that doesn't would shrink it silently)
+mkdir -p "$WORK/probe"
+AIR_THUNK=0 "$WORK/air_cache_test" "$SO" "$WORK/probe" "$WORK"/corpus/*.bin > "$WORK/probe.log" 2>&1 || true
+nbin=$(ls "$WORK"/corpus/*.bin | wc -l | tr -d ' ')
+nok=$(grep -c ' ok ' "$WORK/probe/manifest.txt" || true)
+check "corpus: every shader compiles with all six flag sets" \
+  "$([ "$nok" = $((nbin * 6)) ] && echo 1 || echo 0)" "$nbin shaders, $nok compiles"
 
 # 1. the id
 OBJ="$V2/build/airlib/obj/air_air_metallib.cpp.o"
