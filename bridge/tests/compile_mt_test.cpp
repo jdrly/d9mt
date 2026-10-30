@@ -2,7 +2,8 @@
 // driver's compile workers do through winemetal.so (no Wine): many threads
 // at once run the AIR thunk (sqlite cache), MTLDevice newLibrary and
 // MTL4Compiler render PSO builds (pipeline archive serializer attached,
-// flushed every few PSOs while other threads compile).
+// flushed every few PSOs while other threads compile, or with
+// D9MT_PSO_ASYNC_FLUSH=1 by the bridge's flush thread once builds pause).
 //
 //   compile_mt_test <winemetal.so> <workdir> <sm3 .bin>...
 //
@@ -11,7 +12,14 @@
 // PSO the first run built (recorded in <workdir>/results.txt).
 // Exit status 0 = no failure / mismatch. Build with -fsanitize=thread
 // against a TSan-built winemetal.so to check the unix side for races.
+//
+// MT_FORCE_MS=<n> with D9MT_PSO_ASYNC_FLUSH=1: the bridge's overdue deadline
+// becomes n ms (D9MT_PSO_FLUSH_FORCE_MS), and after the run every thread
+// rebuilds the PSOs that built, back to back, so g_pso_lock is held shared
+// without a gap; the overdue flush must still write an archive while they
+// build.
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -19,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fstream>
 #include <functional>
@@ -27,6 +36,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "../winemetal.h"
@@ -236,6 +246,9 @@ int main(int argc, char** argv) {
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
   setenv("D9MT_PSO_ARCHIVE_DIR", (work + "/pso").c_str(), 1);
   setenv("D9MT_PSO_FLUSH_EVERY", "5", 1);
+  const int forceMs = getenv("MT_FORCE_MS") ? atoi(getenv("MT_FORCE_MS")) : 0;
+  if (forceMs > 0)
+    setenv("D9MT_PSO_FLUSH_FORCE_MS", std::to_string(forceMs).c_str(), 1);
 
   void* bridge = dlopen(argv[1], RTLD_NOW);
   if (!bridge) { fprintf(stderr, "FAIL: dlopen: %s\n", dlerror()); return 1; }
@@ -268,6 +281,8 @@ int main(int argc, char** argv) {
   auto t0 = std::chrono::steady_clock::now();
   std::mutex resultMutex;
   std::map<std::string, std::string> results;
+  struct PsoKey { obj_handle_t vs, ps; uint32_t v; };
+  std::vector<PsoKey> builtPsos;
 
   {
     Pool pool(nThreads);
@@ -339,6 +354,7 @@ int main(int argc, char** argv) {
             (pso ? psoOk : psoFail)++;
             std::lock_guard<std::mutex> l(resultMutex);
             results["pso " + key] = pso ? "ok" : "fail";
+            if (pso) builtPsos.push_back({ vsLib, psLib, v });
           };
           pool.submit(psos.back().get(), true);
         }
@@ -352,6 +368,76 @@ int main(int argc, char** argv) {
   const double ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
+
+  // With D9MT_PSO_ASYNC_FLUSH=1 the bridge flushes the archive on its own
+  // thread once builds pause (2 s); this process must still run then. Wait
+  // for this session's archive (without it, builds flushed it already).
+  const std::string session = "-" + std::to_string(getpid()) + "-";
+  auto sessionArchives = [&] {
+    unsigned n = 0;
+    if (DIR* base = opendir((work + "/pso").c_str())) {
+      while (dirent* d = readdir(base)) {
+        if (strncmp(d->d_name, "os-", 3)) continue;
+        if (DIR* sub = opendir((work + "/pso/" + d->d_name).c_str())) {
+          while (dirent* f = readdir(sub)) {
+            const std::string name = f->d_name;
+            if (name.find(session) != std::string::npos && name.size() > 4 && name.compare(name.size() - 4, 4, ".sum") == 0)
+              n++;
+          }
+          closedir(sub);
+        }
+      }
+      closedir(base);
+    }
+    return n;
+  };
+  const auto tw = std::chrono::steady_clock::now();
+  bool flushed = false;
+  while (!flushed && std::chrono::steady_clock::now() - tw < std::chrono::seconds(15)) {
+    flushed = sessionArchives() > 0;
+    if (!flushed)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (flushed)
+    printf("archive flushed %.0f ms after the last build\n", std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - tw).count());
+  else
+    FAIL("no PSO archive of this session within 15 s of the last build");
+
+  // The overdue flush under builds without a gap (MT_FORCE_MS, above).
+  const char* async = getenv("D9MT_PSO_ASYNC_FLUSH");
+  if (forceMs > 0 && async && !strcmp(async, "1") && !builtPsos.empty()) {
+    const unsigned before = sessionArchives();
+    std::atomic<bool> stop = { false };
+    std::atomic<unsigned> rebuilt = { 0 };
+    std::vector<std::thread> builders;
+    const auto tf = std::chrono::steady_clock::now();
+    for (unsigned t = 0; t < nThreads; t++)
+      builders.emplace_back([&, t] {
+        for (size_t i = t % builtPsos.size(); !stop; i = (i + 1) % builtPsos.size()) {
+          const PsoKey& k = builtPsos[i];
+          obj_handle_t pso = buildPso(compiler, k.vs, k.ps, k.v);
+          if (pso) { g_funcs[1](&pso); rebuilt++; }
+        }
+      });
+    const auto limit = std::chrono::milliseconds(std::max(3000, 6 * forceMs));
+    double forcedMs = -1.0;
+    while (std::chrono::steady_clock::now() - tf < limit) {
+      if (sessionArchives() > before) {
+        forcedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tf).count();
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    stop = true;
+    for (auto& b : builders) b.join();
+    if (forcedMs >= 0)
+      printf("overdue flush during continuous builds: archive %.0f ms after they started (deadline %d ms, %u rebuilds)\n",
+        forcedMs, forceMs, rebuilt.load());
+    else
+      FAIL("no overdue flush within %lld ms of continuous builds (deadline %d ms, %u rebuilds)",
+        (long long)limit.count(), forceMs, rebuilt.load());
+  }
 
   // Compare with the first run on this workdir: metallibs must be
   // byte-identical (AIR cache hits included) and no PSO that built before

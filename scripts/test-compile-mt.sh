@@ -2,7 +2,7 @@
 # Native (no Wine) concurrency tests: the driver's compile task / worker
 # pool under TSan (driver/mtl/tests/mtl_compile_test.cpp), then the bridge
 # compile path (bridge/tests/compile_mt_test.cpp). Runs the harness twice (cold, then warm
-# AIR cache + PSO archives) against build/bridge/winemetal.so, then again
+# AIR cache + PSO archives) against build/bridge/winemetal.so for each PSO flush mode, then again
 # against a ThreadSanitizer build of the unix side (TSAN=0 skips that).
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
 # Heavy (GPU compiler service + LLVM on 6 threads): prefix with
@@ -22,13 +22,21 @@ DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 # MT_BINS="a.bin b.bin" limits the shader set (all of air/tests/bin by default)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
 
+# PSO_ASYNC="0 1 1f" (the default) runs each pair with D9MT_PSO_ASYNC_FLUSH=0 (archives flushed by the
+# builds), =1 (by the bridge's flush thread at its normal deadlines) and 1f (=1 with the overdue
+# deadline cut to MT_FORCE_MS, default 500 ms, which also checks the overdue flush under back-to-back
+# builds after the run), each on its own workdir.
 run_pair() { # <harness> <winemetal.so> <workdir>
-  rm -rf "$3"; mkdir -p "$3"
-  echo "--- $(basename "$1"): cold"
-  "$1" "$2" "$3" "${BINS[@]}"
-  echo "--- $(basename "$1"): warm"
-  "$1" "$2" "$3" "${BINS[@]}"
-  ls "$3/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  local m a f
+  for m in ${PSO_ASYNC:-0 1 1f}; do
+    a=${m%f}; f=; [ "$m" = "${a}f" ] && f=${MT_FORCE_MS:-500}
+    rm -rf "$3-async$m"; mkdir -p "$3-async$m"
+    echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a${f:+ MT_FORCE_MS=$f}: cold"
+    D9MT_PSO_ASYNC_FLUSH=$a MT_FORCE_MS=$f "$1" "$2" "$3-async$m" "${BINS[@]}"
+    echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a${f:+ MT_FORCE_MS=$f}: warm"
+    D9MT_PSO_ASYNC_FLUSH=$a MT_FORCE_MS=$f "$1" "$2" "$3-async$m" "${BINS[@]}"
+    ls "$3-async$m/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  done
 }
 
 # Needs DXVK's native Windows headers (include/native/{windows,directx} of a
