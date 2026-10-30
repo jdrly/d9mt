@@ -101,7 +101,7 @@ check "codegen id: the SDK version stamp doesn't change it" "$([ "$ida" = "$idb"
 check "codegen id: one byte of code does" "$([ "$ida" != "$idc" ] && echo 1 || echo 0)"
 ID=$(sed -n 's/^AIR codegen \([0-9a-f]\{64\}\) .*/\1/p' "$BR/air-codegen-id.txt")
 check "codegen id: winemetal.so carries the build's id" \
-  "$([ -n "$ID" ] && strings -a "$SO" | grep -qx "D9MT-AIR-CODEGEN-ID $ID" && echo 1 || echo 0)" "${ID:0:12}"
+  "$([ -n "$ID" ] && strings -a "$SO" | grep -x "D9MT-AIR-CODEGEN-ID $ID" >/dev/null && echo 1 || echo 0)" "${ID:0:12}"
 
 # 2. the cache: cold, warm, a foreign table
 C=$WORK/caches
