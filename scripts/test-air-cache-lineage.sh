@@ -9,8 +9,9 @@
 #  - If the id has a lineage that adopts a predecessor table: a cache holding that table (made by
 #    renaming this build's own macOS 27 table, whose keys and values are the predecessor's when the
 #    lineage holds; with OLD_BRIDGE=<0.1.5.1's winemetal.so>, made by that bridge itself and compared
-#    row by row first) is adopted under macOS 27 with every row kept and every compile a hit, with a
-#    stray table next to it too, and dropped under D9MT_AIR_MACOS=26 (VERS 2.7 rows instead).
+#    row by row first) is adopted under macOS 27 with every row kept and every compile a hit, also
+#    with a stray table or an empty new table next to it, and dropped under D9MT_AIR_MACOS=26
+#    (VERS 2.7 rows instead).
 # Needs build/bridge from scripts/build-bridge.sh.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -129,8 +130,9 @@ else
     sqlite3 "$C/legacy/air-cache.sqlite3" "ALTER TABLE $T27 RENAME TO $LEG;"
     dump "$C/legacy/air-cache.sqlite3" > "$WORK/old.rows"
   fi
-  for d in a27 a26 stray; do cp -R "$C/legacy" "$C/$d"; done
+  for d in a27 a26 stray empty; do cp -R "$C/legacy" "$C/$d"; done
   sqlite3 "$C/stray/air-cache.sqlite3" "CREATE TABLE cache_123 (key BLOB PRIMARY KEY, value BLOB NOT NULL);"
+  sqlite3 "$C/empty/air-cache.sqlite3" "CREATE TABLE $T27 (key BLOB PRIMARY KEY, value BLOB NOT NULL);"
   run a27 "$SO" "$C/a27" host
   check "macOS 27: $LNAME's table adopted (log)" "$(grep -q "kept $LNAME's table $LEG as $T27" "$WORK/a27.log" && echo 1 || echo 0)"
   check "macOS 27: every row kept as it was (rowid, key, value), no row written" \
@@ -139,6 +141,9 @@ else
   run stray "$SO" "$C/stray" host
   check "macOS 27, a stray table next to it: adopted, the stray dropped" \
     "$([ "$(rows_as old "$T27")" = "$(cat "$WORK/stray.rows")" ] && echo 1 || echo 0)" "$(tables stray)"
+  run empty "$SO" "$C/empty" host
+  check "macOS 27, an empty new table already there: adopted all the same" \
+    "$([ "$(rows_as old "$T27")" = "$(cat "$WORK/empty.rows")" ] && echo 1 || echo 0)" "$(tables empty)"
   run a26 "$SO" "$C/a26" 26
   T26=$(table_of a26)
   check "macOS 26: not adopted, $LNAME's table dropped" \

@@ -193,12 +193,13 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
 @end
 
 /* d9mt: before the reader and writer open cache_<version>. With adopt != 0,
- * if cache_<version> doesn't exist and cache_<adopt> does, cache_<adopt> is
- * renamed to cache_<version>: a predecessor's metallibs kept under the same
- * keys (ADR-0006). Every other cache_<n> table is dropped, so per-build tables
- * don't accumulate. One write transaction: another process sees all of it or
- * none. Returns 1 if a table was adopted, 0 if not, -1 if nothing could be
- * done (the tables are then left as they are; the writer creates its own). */
+ * if cache_<adopt> exists and cache_<version> doesn't (or is empty),
+ * cache_<adopt> is renamed to cache_<version>: a predecessor's metallibs kept
+ * under the same keys (ADR-0006). Every other cache_<n> table is dropped, so
+ * per-build tables don't accumulate. One write transaction: another process
+ * sees all of it or none. Returns 1 if a table was adopted, 0 if not, -1 if
+ * nothing could be done (the tables are then left as they are; the writer
+ * creates its own). */
 int
 d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
   NSString *dbPath = resolve_cache_dir(path, true);
@@ -236,6 +237,18 @@ d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
     }
   }
   sqlite3_finalize(stmt);
+  /* An empty cache_<version> (a first start that couldn't take the write lock
+   * and created it) doesn't stand in the way. */
+  if (have_from && have_keep) {
+    NSString *sql = [NSString stringWithFormat:@"SELECT 1 FROM \"%@\" LIMIT 1;", keep];
+    bool empty = false;
+    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL) == SQLITE_OK)
+      empty = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    NSString *dropKeep = [NSString stringWithFormat:@"DROP TABLE \"%@\";", keep];
+    if (empty && sqlite3_exec(db, dropKeep.UTF8String, NULL, NULL, NULL) == SQLITE_OK)
+      have_keep = false;
+  }
   int adopted = 0;
   if (have_from && !have_keep) {
     NSString *sql = [NSString stringWithFormat:@"ALTER TABLE \"%@\" RENAME TO \"%@\";", from, keep];

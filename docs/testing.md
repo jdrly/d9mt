@@ -64,7 +64,8 @@ AIR cache's identity (ADR-0006) on scratch caches, without Wine: the AIR codegen
 id ignores an object's SDK version stamp but not a byte of its code, a warm run
 hits every entry, a foreign table is dropped, and, when the build's id has a
 lineage that adopts a predecessor table, that table is adopted on macOS 27 with
-every row kept and every compile a hit, and dropped under `D9MT_AIR_MACOS=26`.
+every row kept and every compile a hit (also next to a stray or an empty new
+table), and dropped under `D9MT_AIR_MACOS=26`.
 `OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
 that bridge itself and compares it row by row first.
 

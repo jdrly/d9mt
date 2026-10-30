@@ -51,7 +51,8 @@ Jan's requirement for 0.1.6: players keep their shader caches; a release must no
 - **0.1.5.1's cache is adopted on macOS 27 and later.** The one entry maps 0.1.6's codegen id to
   0.1.5.1's LC_UUID bytes and adopts 0.1.5.1's table (`cache_6138817854601476907`) when this
   process tags VERS AIR 2.9. In one sqlite write transaction, before the reader and writer open,
-  that table is renamed to the new one if the new one doesn't exist yet. Before macOS 27 the tag
+  that table is renamed to the new one if the new one doesn't exist yet or is empty (a first start
+  that couldn't take the write lock). Before macOS 27 the tag
   is 2.7 (#110): 0.1.5.1's metallibs say 2.9, which is the macOS 26 black screen, so its table is
   dropped there and the cache starts cold. Any failure leaves a cold cache.
 - **Carried over from ADR-0004:** the driver and the bridge are built, tested and shipped from the
