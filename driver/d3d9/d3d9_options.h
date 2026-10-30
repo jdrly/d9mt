@@ -125,6 +125,11 @@ namespace dxvk {
 
     bool reproducibleCommandStream;
 
+    /// D9MT_FLUSH_CAP=1: cap heuristic flushes at ImplicitStrongHint, as upstream does on
+    /// tiling GPUs (GetMaxFlushType; reproducibleCommandStream takes precedence). Off by
+    /// default. Kept next to reproducibleCommandStream, in its padding.
+    bool flushCapStrong;
+
     int32_t drefScaling;
 
     bool extraFrontbuffer;
