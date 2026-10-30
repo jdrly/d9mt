@@ -389,6 +389,7 @@ passes have their own load/store rules).
 | `D9MT_STATE_CACHE_MAX` | `1024` | most pipelines kept per game (least recently used dropped first), `64`–`16384`; every session's PSO archive holds every prewarmed pipeline, ≈ 45 KB each |
 | `D9MT_STATE_CACHE_THREADS` | `2` | background prewarm threads (lowest priority, the second one only for long queues), `0`–`4`; `0` records and loads but never prewarms |
 | `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
+| `D9MT_COMPILE_MAXCONC` | `0` | `1` asks Metal at device creation to maximize concurrent pipeline compilation (`MTLDevice.shouldMaximizeConcurrentCompilation`): more of Metal's own compiler threads, which can compete with the game on Macs with few performance cores. A scheduling request, not guaranteed parallelism; an A/B switch. Independent of `D9MT_COMPILE_THREADS` |
 | `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
 | `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
 | `D9MT_PSO_WAIT_MS` | off | wait at most this many ms per frame for pending pipelines, then skip (see `d9mt.pipelineWaitBudgetMs`); `off` or `-1` overrides a `dxvk.conf` value |

@@ -134,6 +134,13 @@ namespace dxvk::backend {
       Logger::err("MtlDeviceImpl: no Metal device");
       return;
     }
+    // D9MT_COMPILE_MAXCONC=1: ask Metal for more compiler threads (shouldMaximizeConcurrentCompilation),
+    // before the compiler exists. A scheduling request, not guaranteed parallelism, and those threads
+    // can compete with the game on Macs with few performance cores: off by default, an A/B switch.
+    if (env::getEnvVar("D9MT_COMPILE_MAXCONC") == "1") {
+      MTLDevice_setShouldMaximizeConcurrentCompilation(m_device.handle(), true);
+      Logger::info("D9MT: maximize concurrent compilation requested (D9MT_COMPILE_MAXCONC=1)");
+    }
     m_queue = WmtQueue::adopt(MTLDevice_newMTL4CommandQueue(m_device.handle()));
     m_compiler = WmtCompiler::adopt(MTLDevice_newMTL4Compiler(m_device.handle()));
 
