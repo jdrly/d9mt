@@ -18,8 +18,12 @@
  *     frame-latency wait are gone. D9MT_PDRW_DEPTH sets depth, 1 to 8. Unset it is 3, D3D9's
  *     default frame latency, and the depth at which d9mt's passes per frame match present mode's
  *     (2.0 render passes, 1.0 loads; at depth 2 its flush heuristic splits more). The line is
- *     `RESULT perdrawbench mode=flush depth=<d> frames= avg_ms=`, and `PDRW waited= polls=`
- *     follows it: the frames that found that query not done yet, and the polls in all.
+ *     `RESULT perdrawbench mode=flush depth=<d> frames= avg_ms= busy_ms=`: busy_ms leaves out
+ *     the time in those waits (from the first GetData to the last), so it is the bench thread's
+ *     own work per frame (the draws, UploadPerDrawData's copies, Clear, the query's Issue). avg_ms is the frame time,
+ *     set by the slowest of the bench thread, d9mt's CS thread and the GPU: when that isn't the
+ *     bench thread, a change in its work moves busy_ms and not avg_ms. `PDRW waited= polls=`
+ *     follows: the timed frames that found their query not done yet, and their polls.
  * Any other value is a usage failure. Both modes print `MODE perdrawbench <mode>` first.
  *
  * D9MT_PDRW_CHECK=1 (validation runs only, never timed ones) adds the semantics check: an
@@ -42,8 +46,8 @@ struct V { float x, y, z, rhw; float psize; DWORD c; };   /* 24 bytes */
 #define PDRW_MAX_DEPTH 8
 
 /* Polls q with D3DGETDATA_FLUSH every 20 us until it signals; 0 when it did, -1 on an error or
- * after 5 s. *polls counts the polls that found it not done. */
-static int wait_query(IDirect3DQuery9 *q, LONGLONG freq, unsigned long long *polls) {
+ * after 5 s. *polls counts the polls that found it not done, *ticks adds the QPC ticks of the call. */
+static int wait_query(IDirect3DQuery9 *q, LONGLONG freq, unsigned long long *polls, LONGLONG *ticks) {
   LARGE_INTEGER s, p0, p1;
   HRESULT hr;
   QueryPerformanceCounter(&s);
@@ -53,6 +57,8 @@ static int wait_query(IDirect3DQuery9 *q, LONGLONG freq, unsigned long long *pol
     do QueryPerformanceCounter(&p1); while ((p1.QuadPart - p0.QuadPart) * 50000 < freq);
     if (p1.QuadPart - s.QuadPart > 5 * freq) return -1;
   }
+  QueryPerformanceCounter(&p1);
+  *ticks += p1.QuadPart - s.QuadPart;
   return hr == S_OK ? 0 : -1;
 }
 
@@ -116,11 +122,12 @@ int main(int argc, char **argv) {
   LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f);
   MSG msg;
   unsigned long long polls = 0;
+  LONGLONG wait_ticks = 0, scratch = 0;
   int waited = 0;
   if (flush && check && FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL check present\n"); return 1; }
   for (int n = 1; n <= frames; n++) {
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
-    if (n == 61) { bench_timed_mark(); QueryPerformanceCounter(&t0); }
+    if (n == 61) { bench_timed_mark(); QueryPerformanceCounter(&t0); wait_ticks = 0; polls = 0; waited = 0; }
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
     if (check) IDirect3DQuery9_Issue(occ[n], D3DISSUE_BEGIN);
@@ -141,7 +148,7 @@ int main(int argc, char **argv) {
       if (FAILED(IDirect3DQuery9_Issue(ev[n % depth], D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", n); return 1; }
       if (n >= depth) {
         const unsigned long long before = polls;
-        if (wait_query(ev[(n + 1) % depth], f.QuadPart, &polls)) { printf("RESULT FAIL getdata frame=%d\n", n); return 1; }
+        if (wait_query(ev[(n + 1) % depth], f.QuadPart, &polls, &wait_ticks)) { printf("RESULT FAIL getdata frame=%d\n", n); return 1; }
         waited += polls != before;
       }
     } else if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
@@ -149,7 +156,9 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1);
   bench_timed_print("perdrawbench");
   if (flush) {
-    printf("RESULT perdrawbench mode=flush depth=%d frames=%d avg_ms=%.4f\n", depth, frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
+    printf("RESULT perdrawbench mode=flush depth=%d frames=%d avg_ms=%.4f busy_ms=%.4f\n", depth, frames - 60,
+           (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60),
+           (double)(t1.QuadPart - t0.QuadPart - wait_ticks) * 1000.0 / f.QuadPart / (frames - 60));
     printf("PDRW waited=%d polls=%llu\n", waited, polls);
   } else {
     printf("RESULT perdrawbench frames=%d avg_ms=%.4f\n", frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
@@ -158,7 +167,7 @@ int main(int argc, char **argv) {
     unsigned long long samples = 0, dummy = 0;
     for (int n = 1; n <= frames; n++) {
       DWORD s = 0;
-      if (wait_query(occ[n], f.QuadPart, &dummy) || IDirect3DQuery9_GetData(occ[n], &s, sizeof(s), 0) != S_OK) { printf("CHECK FAIL occlusion frame=%d\n", n); return 1; }
+      if (wait_query(occ[n], f.QuadPart, &dummy, &scratch) || IDirect3DQuery9_GetData(occ[n], &s, sizeof(s), 0) != S_OK) { printf("CHECK FAIL occlusion frame=%d\n", n); return 1; }
       samples += s;
     }
     D3DLOCKED_RECT lr;
@@ -173,7 +182,7 @@ int main(int argc, char **argv) {
     IDirect3DSurface9_UnlockRect(rb);
     if (flush) {  /* for d9mt's STATS: the flush frames' work into one window, a second apart */
       for (int k = 0; k < 3; k++) {
-        if (wait_query(ev[frames % depth], f.QuadPart, &dummy)) { printf("CHECK FAIL idle\n"); return 1; }
+        if (wait_query(ev[frames % depth], f.QuadPart, &dummy, &scratch)) { printf("CHECK FAIL idle\n"); return 1; }
         Sleep(1100);
         if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("CHECK FAIL present\n"); return 1; }
         IDirect3DQuery9_Issue(ev[frames % depth], D3DISSUE_END);
