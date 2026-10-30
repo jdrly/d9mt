@@ -203,7 +203,7 @@ A frame longer than `D9MT_HITCH_MS` (default 50 ms), attributed to d9mt or to th
 **Hash suite**
 The D3D9 test programs `test/code_*.c` (except `code_sm3_ref` and `code_statecache`, which have
 harnesses of their own), five frames each, whose frame hashes are compared with the base commit's; the correctness gate of every PR (CONTRIBUTING, *Definition of Done*).
-_Open:_ its runner is on the branch `chore/test-runner`, not on `main` yet.
+_Open:_ its runner (`scripts/run-hash-tests.sh`) is on the branch `chore/test-runner`, not on `main` yet.
 
 **Base, basecopy**
 **Base** is the commit a change is measured and hashed against. **Basecopy** is a byte-identical
