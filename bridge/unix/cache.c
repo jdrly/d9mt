@@ -192,40 +192,73 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
 
 @end
 
-/* d9mt: drop every cache_<n> table except cache_<version> so per-build
- * tables don't accumulate. Best effort; any failure just leaves them. */
-void
-d9mt_cache_drop_other_versions(NSString *path, uint64_t version) {
+/* d9mt: before the reader and writer open cache_<version>. With adopt != 0,
+ * if cache_<version> doesn't exist and cache_<adopt> does, cache_<adopt> is
+ * renamed to cache_<version>: a predecessor's metallibs kept under the same
+ * keys (ADR-0006). Every other cache_<n> table is dropped, so per-build tables
+ * don't accumulate. One write transaction: another process sees all of it or
+ * none. Returns 1 if a table was adopted, 0 if not, -1 if nothing could be
+ * done (the tables are then left as they are; the writer creates its own). */
+int
+d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
   NSString *dbPath = resolve_cache_dir(path, true);
   if (!dbPath || ![[NSFileManager defaultManager] fileExistsAtPath:dbPath])
-    return;
+    return 0;
   sqlite3 *db = NULL;
   if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) !=
       SQLITE_OK) {
     sqlite3_close(db);
-    return;
+    return -1;
   }
   sqlite3_busy_timeout(db, 2000);
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_close(db);
+    return -1;
+  }
   NSString *keep = [NSString stringWithFormat:@"cache_%llu", version];
+  NSString *from = adopt ? [NSString stringWithFormat:@"cache_%llu", adopt] : nil;
   NSMutableArray<NSString *> *drop = [NSMutableArray array];
+  bool have_keep = false, have_from = false;
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cache\\_%' ESCAPE '\\';",
                          -1, &stmt, NULL) == SQLITE_OK) {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       const unsigned char *name = sqlite3_column_text(stmt, 0);
       NSString *n = name ? [NSString stringWithUTF8String:(const char *)name] : nil;
-      if (n && ![n isEqualToString:keep])
+      if (!n)
+        continue;
+      if ([n isEqualToString:keep])
+        have_keep = true;
+      else if (from && [n isEqualToString:from])
+        have_from = true;
+      else
         [drop addObject:n];
     }
   }
   sqlite3_finalize(stmt);
+  int adopted = 0;
+  if (have_from && !have_keep) {
+    NSString *sql = [NSString stringWithFormat:@"ALTER TABLE \"%@\" RENAME TO \"%@\";", from, keep];
+    if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) == SQLITE_OK)
+      adopted = 1;
+    else
+      [drop addObject:from];
+  } else if (have_from) {
+    [drop addObject:from];
+  }
   for (NSString *n in drop) {
     NSString *sql = [NSString stringWithFormat:@"DROP TABLE IF EXISTS \"%@\";", n];
     sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL);
   }
+  if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    sqlite3_close(db);
+    return -1;
+  }
   if (drop.count)
     sqlite3_exec(db, "VACUUM;", NULL, NULL, NULL);
   sqlite3_close(db);
+  return adopted;
 }
 
 int

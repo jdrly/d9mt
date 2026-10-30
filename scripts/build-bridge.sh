@@ -52,7 +52,8 @@ clang++ "${CXXFLAGS_UNIX[@]}" \
   -c "$V2/airlib/unix.cpp" -o "$OBJ/airlib_unix_renamed.o"
 
 echo "[bridge] unix winemetal.so"
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" \
+           "$BR/unix/air_cache.c" "$BR/unix/air_cache_lineage.c"; do
   obj="$OBJ/$(basename "$src").o"
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
     echo "[cc] ${src#$BR/}"
@@ -69,14 +70,23 @@ _d9mtair_compile
 _d9mtair_free
 EOF
 
+# The AIR codegen: everything that decides the bytes an AIR compile (or an AIR
+# cache hit) returns, linked from this one array. Its normalized digest is the
+# AIR codegen id, the AIR cache's identity (ADR-0006): winemetal_unix.c, the
+# lineage table and the id itself are outside it, so a change there keeps every
+# player's AIR cache, and a change inside it gives a cold cache, never a stale one.
+CODEGEN_OBJS=("$OBJ/airlib_unix_renamed.o" "$OBJ/air_cache.c.o" "$OBJ/cache.c.o" \
+              $(ls "$AIRLIB_OUT"/obj/third_party_dxbc-spirv_ir_*.o) \
+              $(ls "$AIRLIB_OUT"/obj/third_party_dxbc-spirv_util_*.o 2>/dev/null || true) \
+              "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
+              "${LLVM_LIBS[@]}")
+AIR_ID=$(python3 -I "$V2/scripts/air-codegen-id.py" --c "$OBJ/air_codegen_id.c" "${CODEGEN_OBJS[@]}")
+clang "${CFLAGS_UNIX[@]}" -c "$OBJ/air_codegen_id.c" -o "$OBJ/air_codegen_id.c.o"
+
 clang++ -arch x86_64 -dynamiclib \
   -o "$OUT/winemetal.so" \
-  "$OBJ/winemetal_unix.c.o" "$OBJ/cache.c.o" "$OBJ/dxso_stubs.c.o" \
-  "$OBJ/airlib_unix_renamed.o" \
-  $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_ir_*.o) \
-  $(ls $AIRLIB_OUT/obj/third_party_dxbc-spirv_util_*.o 2>/dev/null || true) \
-  "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
-  "${LLVM_LIBS[@]}" \
+  "$OBJ/winemetal_unix.c.o" "$OBJ/dxso_stubs.c.o" "$OBJ/air_cache_lineage.c.o" "$OBJ/air_codegen_id.c.o" \
+  "${CODEGEN_OBJS[@]}" \
   -install_name @rpath/winemetal.so \
   -Wl,-exported_symbols_list,"$OUT/exports.list" \
   -Wl,-U,_NtSetEvent -Wl,-U,_macdrv_get_metal_layer \
@@ -86,6 +96,15 @@ clang++ -arch x86_64 -dynamiclib \
   -weak_framework QuartzCore -weak_framework ColorSync -weak_framework Cocoa \
   -framework MetalFX \
   -lsqlite3 -lm -lpthread
+# The id the library carries is the digest of what it links.
+[ "$(strings -a "$OUT/winemetal.so" | sed -n 's/^D9MT-AIR-CODEGEN-ID //p')" = "$AIR_ID" ] \
+  || { echo "FATAL: winemetal.so does not carry AIR codegen id $AIR_ID" >&2; exit 1; }
+if grep -q "\"$AIR_ID\"" "$BR/unix/air_cache_lineage.c"; then
+  AIR_LINEAGE="lineage $(grep -A3 "\"$AIR_ID\"" "$BR/unix/air_cache_lineage.c" | sed -n 's/.*"\([^"]*\)" *},.*/\1/p' | head -1): players keep their AIR caches"
+else
+  AIR_LINEAGE="no lineage: a new AIR codegen, every player's AIR cache recompiles once"
+fi
+echo "AIR codegen $AIR_ID ($AIR_LINEAGE)" | tee "$OUT/air-codegen-id.txt"
 echo "  -> $OUT/winemetal.so ($(wc -c < "$OUT/winemetal.so") bytes)"
 
 echo "[bridge] ntdll import libs"

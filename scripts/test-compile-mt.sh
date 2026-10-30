@@ -60,7 +60,8 @@ run_pair "$OUT/compile_mt_test" "$V2/build/bridge/winemetal.so" "$OUT/work"
 echo "[compile-mt] ThreadSanitizer build of the unix side"
 TS=(-fsanitize=thread -g -O1)
 CFLAGS_UNIX=(-ObjC -arch x86_64 -I"$BR" -I"$BR/unix" -I"$V2/airlib")
-for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c"; do
+for src in "$BR/unix/winemetal_unix.c" "$BR/unix/cache.c" "$BR/unix/dxso_stubs.c" \
+           "$BR/unix/air_cache.c" "$BR/unix/air_cache_lineage.c"; do
   clang "${CFLAGS_UNIX[@]}" "${TS[@]}" -c "$src" -o "$OUT/$(basename "$src").tsan.o"
 done
 clang++ "${INC[@]}" "${TS[@]}" -fvisibility=hidden \
@@ -70,12 +71,16 @@ clang++ "${INC[@]}" "${TS[@]}" -fvisibility=hidden \
 printf '%s\n' ___wine_unix_call_funcs ___wine_unix_call_wow64_funcs _d9mtair_version _d9mtair_compile _d9mtair_free \
   > "$OUT/exports.list"
 # AirBuilder/LLVM/dxbc-spirv stay uninstrumented (prebuilt): TSan still sees
-# every lock and shared access in the bridge code that drives them.
-clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
-  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/cache.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT/airlib_unix.tsan.o" \
+# every lock and shared access in the bridge code that drives them. The AIR codegen
+# id is this build's own (ADR-0006), as build-bridge.sh computes it.
+TSAN_CODEGEN=("$OUT/airlib_unix.tsan.o" "$OUT"/air_cache.c.tsan.o "$OUT"/cache.c.tsan.o \
   "$AIRLIB_OBJ"/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OBJ"/third_party_dxbc-spirv_util_*.o \
-  "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" \
-  "$LLVM"/lib/libLLVM*.a \
+  "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" "$LLVM"/lib/libLLVM*.a)
+python3 -I "$V2/scripts/air-codegen-id.py" --c "$OUT/air_codegen_id.tsan.c" "${TSAN_CODEGEN[@]}" >/dev/null
+clang "${CFLAGS_UNIX[@]}" -c "$OUT/air_codegen_id.tsan.c" -o "$OUT/air_codegen_id.tsan.o"
+clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
+  "$OUT"/winemetal_unix.c.tsan.o "$OUT"/dxso_stubs.c.tsan.o "$OUT"/air_cache_lineage.c.tsan.o \
+  "$OUT/air_codegen_id.tsan.o" "${TSAN_CODEGEN[@]}" \
   -install_name @rpath/winemetal.so -Wl,-exported_symbols_list,"$OUT/exports.list" \
   -Wl,-U,_NtSetEvent -Wl,-U,_macdrv_get_metal_layer -undefined dynamic_lookup \
   -weak_framework CoreFoundation -weak_framework Metal -weak_framework Foundation \
