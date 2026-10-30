@@ -1029,8 +1029,9 @@ namespace dxvk {
     void SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits);
     void SetPixelBoolBitfield (uint32_t idx, uint32_t mask, uint32_t bits);
 
-    /* AllowDefer: a pure heuristic flush (CS chunk full, render target / depth change,
-     * EndScene) that nothing waits on. The backend may then commit the work recorded before
+    /* AllowDefer: a pure heuristic flush (CS chunk full, EndScene) that nothing waits on.
+     * Render target and depth changes don't pass it: their pass ends at the next draw anyway
+     * (docs/g1-early-commit.md §4.4). The backend may then commit the work recorded before
      * the open pass and keep the pass open (docs/g1-early-commit.md, D9MT_EARLY_COMMIT=0
      * turns that off); the next flush that isn't deferrable completes it. */
     void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);

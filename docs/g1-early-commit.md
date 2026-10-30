@@ -317,3 +317,59 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   from carry effects, and the start/end pair controls drift.
 - If code+layout shows a cost, the first step is to move the new members to the end of the
   class (cold) and put the refusal counters behind `prof::g_profEnabled`. They are already.
+
+## 7. The flush cap on tilers (#82)
+
+### The decision
+- **Upstream DXVK** caps the flush tracker at `ImplicitStrongHint` on tiling GPUs (MoltenVK and
+  Honeykrisp included): `GetMaxFlushType` returns it when `perfHints().preferRenderPassOps` is
+  set (upstream c2f9dfca `src/d3d9/d3d9_device.cpp:9118-9125`, `src/dxvk/dxvk_device.cpp:719-731`).
+  Weak hints then never submit, unless their estimated cost reaches `MaxCostPerSubmission`.
+- **d9mt** keeps `ImplicitWeakHint`, the cap of non-tiling GPUs (`GetMaxFlushType`,
+  `driver/d3d9/d3d9_device.cpp`). `d3d9.reproducibleCommandStream` still caps at
+  `ExplicitFlush` and takes precedence over everything below.
+- **Why the default stays weak:** no A/B has shown that the strong cap is faster on Apple GPUs,
+  and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
+  cost +35–64 % in "wait every frame" by starving an idle GPU (§2). The strong cap is the same
+  kind of change: a later GPU start for the work recorded before the next strong hint.
+- **What a weak hint is** (`driver/d3d9`): a full CS chunk (`EmitCs`, `EmitCsCmd`, the one
+  deferrable weak site, §4.4), `SetRenderTarget` on an index other than 0,
+  `SetDepthStencilSurface`, `UpdateTexture`, `UpdateTextureFromBuffer`, `FlushBuffer`, the
+  `D3DLOCK_DONOTWAIT` poll on a busy resource, and `End` of a stalling occlusion query.
+  `EndScene`, `SetRenderTarget(0, …)` and `End` of an event query are strong hints;
+  the staging throttle is `ImplicitSynchronization` or `ExplicitFlush`; Present, waits and
+  GetData(FLUSH) flush as before. None of those change with the cap.
+
+### What is measured (before the switch)
+- At vsync in the maintainer's 0.1.5 session (M5 Max, 4K), all 3.79 mid-pass submits a frame
+  (`splitSubmit`) were refused carries (`carryRefused` 3.80): the backlog gate (§4.2) saw an
+  idle GPU, so G1 couldn't remove those splits. In total 3.9 of 7.7 splits a frame came with a
+  submit, and splits reloaded 452 MiB a frame.
+- A strong cap would remove the chunk-full submits outright. The bound on a gain is GPU
+  bandwidth and power from those submit splits (not all pass traffic), and fewer command
+  buffers a frame. It is not an fps promise: at vsync with GPU headroom the frame time doesn't
+  move, and in GPU-bound frames the risk is the starvation above.
+
+### The switch
+- `D9MT_FLUSH_CAP=1` sets the cap to `ImplicitStrongHint`; unset, `0` or anything else keeps
+  `ImplicitWeakHint`. The device's `D3D9Options` reads it once at device creation
+  (`flushCapStrong`), and `GetMaxFlushType` tests that bool after `reproducibleCommandStream`.
+  The read stays out of `d3d9_device.cpp`: an env read there changed GCC's code for other
+  functions of that file. The same DLL serves both arms of an A/B, so they compare the same code
+  and layout (both arms set the variable, `0` and `1`, at equal width).
+- Unchanged with the switch on: `GpuFlushTracker` itself (`driver/util/util_flush.cpp`, with
+  its estimated-cost escape, which d3d9's hints pass as 0), explicit flushes, synchronization,
+  the `reproducibleCommandStream` precedence, and every G1 rule of §4 (G1 still carries a
+  strong hint at `EndScene`; the polls of §4.5 complete an open carry as before).
+- **Risk with the switch on:** a weak hint that used to start the GPU no longer does. A game
+  that polls `D3DLOCK_DONOTWAIT` without calling anything that flushes waits for its next
+  strong hint or Present, as it does upstream on tilers. `code_g1_hang` (§5) guards the polls.
+
+### The A/B
+- Guards: §6's bench_4k plain, `wait` (bench_4kw) and balanced `8` (PERFORMANCE.md §3), and
+  `code_g1_hang`, with `D9MT_FLUSH_CAP=0` against `=1` in the same DLL, plus main and a basecopy.
+  Starvation and latency are reported, not only `cb`.
+- In game: STATS `cb`, `splitSubmit` and `splitMiB` with the switch off and on, in the same
+  scene.
+- Results: pending. The default changes only with them and ADR-0005's cross-hardware evidence;
+  the decision is the maintainer's.

@@ -8891,8 +8891,14 @@ namespace dxvk {
 
 
   GpuFlushType D3D9DeviceEx::GetMaxFlushType() const {
+    /* D9MT_FLUSH_CAP=1 (flushCapStrong): upstream's cap on tiling GPUs. Weak hints (a full CS
+     * chunk, SetDepthStencilSurface, the DONOTWAIT poll, ...) then no longer submit, except
+     * through GpuFlushTracker's estimated-cost escape. An A/B switch, off by default
+     * (docs/g1-early-commit.md §7). */
     if (m_d3d9Options.reproducibleCommandStream)
       return GpuFlushType::ExplicitFlush;
+    else if (m_d3d9Options.flushCapStrong)
+      return GpuFlushType::ImplicitStrongHint;
     else
       return GpuFlushType::ImplicitWeakHint;
   }
