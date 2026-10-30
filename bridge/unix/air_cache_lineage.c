@@ -20,7 +20,7 @@ const struct d9mt_air_lineage d9mt_air_lineages[] = {
    * Evidence (d9mt PR "AIR cache: key it on the codegen, keep 0.1.5.1's
    * metallibs"): this id's metallibs and reflection are byte-identical to the
    * shipped 0.1.5.1 bridge's on macOS 27. */
-  { "fb861d4c7f66cbaab4949453336b125392bf9ada80c64409f6edc401cd01488b",
+  { "42e211ea7fa1a6cb8ec16c8dcc3adaef6bd9ed9ccf4df2a326457f32754e3ec6",
     { 0x2b, 0xbb, 0x58, 0x5c, 0x50, 0x76, 0x31, 0x57, 0x9a, 0x6a, 0xba, 0xe4, 0x94, 0xb0, 0x0a, 0xcc },
     6138817854601476907ull, 0x00020009u, "0.1.5.1" },
 };
