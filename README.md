@@ -164,7 +164,7 @@ A binary release must carry the notices listed in
 Native unit tests (no Wine or GPU needed), from the repo root:
 
 ```bash
-scripts/run-native-tests.sh   # the 12 host clang++ tests in test/native/; never starts Wine
+scripts/run-native-tests.sh   # the 13 host clang++ tests in test/native/; never starts Wine
 scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
 ```
 
