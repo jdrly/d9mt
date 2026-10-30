@@ -11,12 +11,13 @@
  *   D9MT_PDRW_FLUSH unset or 0: each frame ends with Present (`RESULT perdrawbench frames= avg_ms=`).
  *   D9MT_PDRW_FLUSH=1: no Present. Each frame ends with an event query instead; d9mt submits the
  *     frame's work at the query's end (or at the next FLUSH poll), and before the next frame the
- *     bench waits until the previous frame's query has signaled, polling with D3DGETDATA_FLUSH
- *     every 20 us (as bench_draws flush does). So at most PDRW_DEPTH (2) frames of GPU work are
- *     outstanding, the uploads and draws are the same, and the drawable acquire, the present
- *     copy and the frame-latency wait are gone. The line is
- *     `RESULT perdrawbench mode=flush depth=2 frames= avg_ms=`, and `PDRW waited= polls=`
- *     follows it: the frames whose previous frame wasn't done yet, and the polls in all.
+ *     bench waits until the query of the frame depth - 1 frames back has signaled, polling with
+ *     D3DGETDATA_FLUSH every 20 us (as bench_draws flush does). So at most depth frames of GPU
+ *     work are outstanding (depth 1: the GPU finishes every frame before the next starts), the
+ *     uploads and draws are the same, and the drawable acquire, the present copy and the
+ *     frame-latency wait are gone. D9MT_PDRW_DEPTH sets depth, 1 to 8 (unset: 2). The line is
+ *     `RESULT perdrawbench mode=flush depth=<d> frames= avg_ms=`, and `PDRW waited= polls=`
+ *     follows it: the frames that found that query not done yet, and the polls in all.
  * Any other value is a usage failure. Both modes print `MODE perdrawbench <mode>` first.
  *
  * D9MT_PDRW_CHECK=1 (validation runs only, never timed ones) adds the semantics check: an
@@ -36,7 +37,7 @@
 struct V { float x, y, z, rhw; float psize; DWORD c; };   /* 24 bytes */
 #define FVF (D3DFVF_XYZRHW | D3DFVF_PSIZE | D3DFVF_DIFFUSE)
 #define NV 768
-#define PDRW_DEPTH 2
+#define PDRW_MAX_DEPTH 8
 
 /* Polls q with D3DGETDATA_FLUSH every 20 us until it signals; 0 when it did, -1 on an error or
  * after 5 s. *polls counts the polls that found it not done. */
@@ -56,13 +57,15 @@ static int wait_query(IDirect3DQuery9 *q, LONGLONG freq, unsigned long long *pol
 int main(int argc, char **argv) {
   int frames = argc > 1 ? atoi(argv[1]) : 560;
   if (frames <= 60) { printf("RESULT FAIL usage: frames must be more than the 60 warm-up frames\n"); return 2; }
-  const char *mode = getenv("D9MT_PDRW_FLUSH"), *chk = getenv("D9MT_PDRW_CHECK");
+  const char *mode = getenv("D9MT_PDRW_FLUSH"), *chk = getenv("D9MT_PDRW_CHECK"), *dep = getenv("D9MT_PDRW_DEPTH");
   const int flush = mode && !strcmp(mode, "1"), check = chk && !strcmp(chk, "1");
+  const int depth = dep ? atoi(dep) : 2;
   if (mode && !flush && strcmp(mode, "0")) { printf("RESULT FAIL usage: D9MT_PDRW_FLUSH must be 0 or 1\n"); return 2; }
+  if (depth < 1 || depth > PDRW_MAX_DEPTH) { printf("RESULT FAIL usage: D9MT_PDRW_DEPTH must be 1 to %d\n", PDRW_MAX_DEPTH); return 2; }
   WNDCLASSA wc = { 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL); wc.lpszClassName = "pdb";
   RegisterClassA(&wc);
   HWND hwnd = bench_window("pdb", "perdrawbench", 320, 240);
-  if (flush) printf("MODE perdrawbench flush depth=%d%s\n", PDRW_DEPTH, check ? " check" : "");
+  if (flush) printf("MODE perdrawbench flush depth=%d%s\n", depth, check ? " check" : "");
   else printf("MODE perdrawbench present%s\n", check ? " check" : "");
   IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
   D3DPRESENT_PARAMETERS pp = { 0 };
@@ -92,9 +95,9 @@ int main(int argc, char **argv) {
     IDirect3DIndexBuffer9_Unlock(ib);
   }
   /* flush mode: one event query per outstanding frame; check: one occlusion query per frame */
-  IDirect3DQuery9 *ev[PDRW_DEPTH] = { 0 }, **occ = NULL;
+  IDirect3DQuery9 *ev[PDRW_MAX_DEPTH] = { 0 }, **occ = NULL;
   IDirect3DSurface9 *rt = NULL, *rb = NULL;
-  for (int k = 0; flush && k < PDRW_DEPTH; k++)
+  for (int k = 0; flush && k < depth; k++)
     if (FAILED(IDirect3DDevice9_CreateQuery(dev, D3DQUERYTYPE_EVENT, &ev[k]))) { printf("RESULT FAIL event query\n"); return 1; }
   if (check) {
     occ = calloc(frames + 1, sizeof(*occ));
@@ -131,12 +134,12 @@ int main(int argc, char **argv) {
     IDirect3DDevice9_EndScene(dev);
     if (check && n == frames && FAILED(IDirect3DDevice9_GetRenderTargetData(dev, rt, rb))) { printf("RESULT FAIL readback\n"); return 1; }
     if (flush) {
-      /* end the frame with its event query, then bound the GPU backlog: the previous frame's
-       * query must have signaled before the next frame starts */
-      if (FAILED(IDirect3DQuery9_Issue(ev[n % PDRW_DEPTH], D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", n); return 1; }
-      if (n > 1) {
+      /* end the frame with its event query, then bound the GPU backlog: frame n - depth + 1's
+       * query (the slot frame n + 1 reuses) must have signaled before the next frame starts */
+      if (FAILED(IDirect3DQuery9_Issue(ev[n % depth], D3DISSUE_END))) { printf("RESULT FAIL issue frame=%d\n", n); return 1; }
+      if (n >= depth) {
         const unsigned long long before = polls;
-        if (wait_query(ev[(n - 1) % PDRW_DEPTH], f.QuadPart, &polls)) { printf("RESULT FAIL getdata frame=%d\n", n); return 1; }
+        if (wait_query(ev[(n + 1) % depth], f.QuadPart, &polls)) { printf("RESULT FAIL getdata frame=%d\n", n); return 1; }
         waited += polls != before;
       }
     } else if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL present frame=%d\n", n); return 1; }
@@ -144,7 +147,7 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1);
   bench_timed_print("perdrawbench");
   if (flush) {
-    printf("RESULT perdrawbench mode=flush depth=%d frames=%d avg_ms=%.4f\n", PDRW_DEPTH, frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
+    printf("RESULT perdrawbench mode=flush depth=%d frames=%d avg_ms=%.4f\n", depth, frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
     printf("PDRW waited=%d polls=%llu\n", waited, polls);
   } else {
     printf("RESULT perdrawbench frames=%d avg_ms=%.4f\n", frames - 60, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60));
@@ -168,10 +171,10 @@ int main(int argc, char **argv) {
     IDirect3DSurface9_UnlockRect(rb);
     if (flush) {  /* for d9mt's STATS: the flush frames' work into one window, a second apart */
       for (int k = 0; k < 3; k++) {
-        if (wait_query(ev[frames % PDRW_DEPTH], f.QuadPart, &dummy)) { printf("CHECK FAIL idle\n"); return 1; }
+        if (wait_query(ev[frames % depth], f.QuadPart, &dummy)) { printf("CHECK FAIL idle\n"); return 1; }
         Sleep(1100);
         if (FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("CHECK FAIL present\n"); return 1; }
-        IDirect3DQuery9_Issue(ev[frames % PDRW_DEPTH], D3DISSUE_END);
+        IDirect3DQuery9_Issue(ev[frames % depth], D3DISSUE_END);
       }
     }
     printf("CHECK perdrawbench mode=%s frames=%d draws=%d samples=%llu rt_hash=%08x rt_lit=%u\n",
@@ -180,7 +183,7 @@ int main(int argc, char **argv) {
     free(occ);
     IDirect3DSurface9_Release(rb); IDirect3DSurface9_Release(rt);
   }
-  for (int k = 0; flush && k < PDRW_DEPTH; k++) IDirect3DQuery9_Release(ev[k]);
+  for (int k = 0; flush && k < depth; k++) IDirect3DQuery9_Release(ev[k]);
   for (int b = 0; b < 4; b++) IDirect3DVertexBuffer9_Release(vb[b]);
   IDirect3DIndexBuffer9_Release(ib);
   IDirect3DDevice9_Release(dev); IDirect3D9_Release(d3d);
