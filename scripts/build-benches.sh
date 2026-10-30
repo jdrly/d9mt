@@ -12,7 +12,7 @@
 # Benches (sources in test/perf/, bench_4k in test/):
 #   bindbench      5000 draws per frame, each rebinding one of 64 textures (texture binds)
 #   perdrawbench   2000 indexed draws per frame from SYSTEMMEM + DYNAMIC vertex buffers, each
-#                  copied into an upload slice (UploadPerDrawData)
+#                  copied into an upload slice (UploadPerDrawData); D9MT_PDRW_FLUSH=1: no Present
 #   churnbench     125 new textures per frame plus 3000 rebinding draws (texture churn)
 #   psobench       3000 draws switching PSO state on A->B->A: topo|blend|blend2|blendop|blend4|none
 #   bench_draws    many small draws with constant updates and a state change: present|flush|spinflush
