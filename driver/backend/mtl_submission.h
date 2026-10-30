@@ -116,10 +116,11 @@ public:
 
   // Tests only: a shorter slice; an observer called instead of TerminateProcess; and the
   // parking of a wait after a hang, which by default never returns (a test's may block and then
-  // return, to end the test).
-  static inline uint32_t s_sliceMs = 2000u;
-  static inline void (*s_terminate)(unsigned exitCode) = nullptr;
-  static inline void (*s_park)() = nullptr;
+  // return, to end the test). Defined in mtl_submission.cpp, not inline: an inline variable is a
+  // section of its own, sorted by name among every other one, and moves the ones after it.
+  static uint32_t s_sliceMs;
+  static void (*s_terminate)(unsigned exitCode);
+  static void (*s_park)();
 
 private:
 
@@ -151,9 +152,13 @@ private:
 
   void pumpThread();
 
-  void hung(uint64_t serial);
+  // The GPU-hang paths run at most once, at the end of a process. Cold: GCC puts them in
+  // .text.unlikely, which the linker places after all other code, so they move no other function.
+  [[gnu::cold, gnu::noinline]] void hung(uint64_t serial);
 
-  void parkHung();
+  [[gnu::cold, gnu::noinline]] void parkHung();
+
+  [[gnu::cold, gnu::noinline]] void abandonUnsubmitted(uint64_t serial, uint32_t slices);
 
   void runDue(uint64_t completed);  // m_runMutex held
 

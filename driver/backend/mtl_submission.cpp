@@ -14,8 +14,17 @@
 
 namespace dxvk::backend {
 
+uint32_t SubmissionTracker::s_sliceMs = 2000u;
+void (*SubmissionTracker::s_terminate)(unsigned exitCode) = nullptr;
+void (*SubmissionTracker::s_park)() = nullptr;
+
+// D9MT_GPU_HUNG unset (not "continue"); read once per tracker, cold like the hang paths
+[[gnu::cold, gnu::noinline]] static bool gpuHungEndsGame() {
+  return env::getEnvVar("D9MT_GPU_HUNG") != "continue";
+}
+
 SubmissionTracker::SubmissionTracker(obj_handle_t device)
-: m_failFast(env::getEnvVar("D9MT_GPU_HUNG") != "continue") {
+: m_failFast(gpuHungEndsGame()) {
   m_event = WmtSharedEvent::adopt(MTLDevice_newSharedEvent(device));
   m_pump = dxvk::thread([this] { pumpThread(); });
 }
@@ -258,11 +267,8 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     // D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, submitted or not
     if (m_failFast ? submittedSlices >= 5u : slices >= 5u)
       break;
-    if (m_failFast && slices >= 5u && serial >= nextSerial()) {
-      Logger::err(str::format("SubmissionTracker: serial ", serial, " still not submitted after ",
-        slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ") — abandoning wait"));
-      return;
-    }
+    if (m_failFast && slices >= 5u && serial >= nextSerial())
+      return abandonUnsubmitted(serial, slices);
   }
   if (!m_failFast) {
     Logger::err(str::format("SubmissionTracker: GPU never signalled serial ",
@@ -270,6 +276,11 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     return;
   }
   hung(serial);
+}
+
+void SubmissionTracker::abandonUnsubmitted(uint64_t serial, uint32_t slices) {
+  Logger::err(str::format("SubmissionTracker: serial ", serial, " still not submitted after ",
+    slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ") — abandoning wait"));
 }
 
 // The GPU stopped: rendering on (as before) leaves the game frozen, its dead GPU context
@@ -284,6 +295,13 @@ void SubmissionTracker::hung(uint64_t serial) {
     return;
   if (m_gpuHung.exchange(true, std::memory_order_acq_rel))
     return parkHung();
+  // Looked up here, not imported: a new import adds its thunk among the code linked after the
+  // driver's own and moves all of it.
+  const HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+  const auto getStdHandle = reinterpret_cast<HANDLE (WINAPI*)(DWORD)>(
+    reinterpret_cast<void*>(GetProcAddress(kernel32, "GetStdHandle")));
+  const auto terminateProcess = reinterpret_cast<BOOL (WINAPI*)(HANDLE, UINT)>(
+    reinterpret_cast<void*>(GetProcAddress(kernel32, "TerminateProcess")));
   const std::string line = str::format("D9MT-GPU-HUNG: serial ", serial, " not signalled after ",
     5u * s_sliceMs / 1000u, " s on the GPU (completed ", completed, ", submitted ", lastSubmittedSerial(),
     "): the GPU stopped and its queue won't recover; ending the game (exit code ", kGpuHungExitCode,
@@ -295,7 +313,7 @@ void SubmissionTracker::hung(uint64_t serial) {
     Logger::err(line);
   } else {
     const std::string out = "err:   " + line + "\n";
-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    HANDLE h = getStdHandle ? getStdHandle(STD_ERROR_HANDLE) : nullptr;
     DWORD written = 0u;
     if (h && h != INVALID_HANDLE_VALUE) {
       WriteFile(h, out.data(), DWORD(out.size()), &written, nullptr);
@@ -304,8 +322,8 @@ void SubmissionTracker::hung(uint64_t serial) {
   }
   if (s_terminate)
     s_terminate(kGpuHungExitCode);
-  else
-    TerminateProcess(GetCurrentProcess(), kGpuHungExitCode);
+  else if (terminateProcess)
+    terminateProcess(GetCurrentProcess(), kGpuHungExitCode);
   parkHung();
 }
 
