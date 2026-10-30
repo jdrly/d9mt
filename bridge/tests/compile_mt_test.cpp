@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
     const auto tf = std::chrono::steady_clock::now();
     for (unsigned t = 0; t < nThreads; t++)
       builders.emplace_back([&, t] {
-        for (size_t i = t; !stop; i = (i + 1) % builtPsos.size()) {
+        for (size_t i = t % builtPsos.size(); !stop; i = (i + 1) % builtPsos.size()) {
           const PsoKey& k = builtPsos[i];
           obj_handle_t pso = buildPso(compiler, k.vs, k.ps, k.v);
           if (pso) { g_funcs[1](&pso); rebuilt++; }
