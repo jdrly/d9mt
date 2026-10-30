@@ -97,6 +97,7 @@ player's smoothness at release: small costs that no single PR resolves can add u
 - How much hardware coverage is enough (how many generations, which Macs) isn't set beyond “a
   slower and a fanless Mac among them”.
 - Whether #18 causes the M4 Air's magenta icons (the field test is pending).
-- No benchmark prints the 1 % lows directly, and there is no scripted game scene in this
-  repository for the smoothness guard (PERFORMANCE.md §6).
+- Since #107 the benchmarks print the 1 % lows directly (`bench_fps_cap`'s `low1_ms`, `bench_draws`
+  `present`'s `frame_low1_*`), but there is no scripted game scene in this repository for the
+  smoothness guard (PERFORMANCE.md §6).
 - The measurable resolution is bindbench's; the other benchmarks' aren't calibrated yet.
