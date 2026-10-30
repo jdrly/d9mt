@@ -164,17 +164,18 @@ A binary release must carry the notices listed in
 Native unit tests (no Wine or GPU needed), from the repo root:
 
 ```bash
-clang++ -std=c++17 -I driver/d3d9 -I driver/mtl test/native/buffer_tracking_test.cpp -o /tmp/btt && /tmp/btt
-clang++ -std=c++17 -I driver/util test/native/fenced_pool_test.cpp -o /tmp/fpt && /tmp/fpt
-clang++ -std=c++17 -I driver/d3d9 test/native/hitch_test.cpp -o /tmp/ht && /tmp/ht
-clang++ -std=c++17 -I driver/mtl test/native/memory_profile_test.cpp -o /tmp/mpt && /tmp/mpt
-clang++ -std=c++17 -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp -o /tmp/urt && /tmp/urt
-clang++ -std=c++17 -I driver/backend test/native/attachment_opt_test.cpp -o /tmp/aot && /tmp/aot
-clang++ -std=c++17 -I driver/d3d9 test/native/stats_test.cpp -o /tmp/st && /tmp/st
-clang++ -std=c++17 -I driver/d3d9 test/native/pace_test.cpp -o /tmp/pt && /tmp/pt
-clang++ -std=c++17 -I driver/d3d9 test/native/frame_cap_test.cpp -o /tmp/fct && /tmp/fct
+scripts/run-native-tests.sh   # the 12 host clang++ tests in test/native/; never starts Wine
 scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
 ```
+
+`scripts/run-native-tests.sh` builds and runs every `test/native/*_test.cpp` that
+needs only the host's clang++ (each source's first lines give its own command), and
+names the runner of each of the other six: `state_cache_test`
+(`scripts/test-state-cache.sh`), `pso_key_hash_test` (`scripts/test-pso-key-hash.sh`),
+`upload_copy_test` (`scripts/test-upload-copy.sh`), and `lifetime_check_test`,
+`submission_retire_test` and `submission_tracker_test`, which are mingw programs run
+by hand under Wine (the build line is in each source). A test in neither list fails
+the run, and so does any failing or unbuildable test (exit status 1).
 
 `scripts/test-state-cache.sh` runs the pipeline state cache tests (file
 format, corruption, versions, cap, record → load → prewarm with a fake
@@ -217,6 +218,12 @@ finish within the timeout:
 ```bash
 ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
 ```
+
+The benchmarks are in `test/perf/` (bindbench, perdrawbench, churnbench,
+psobench, bench_draws, bench_upload, bench_getdata, bench_fps_cap) and
+`test/bench_4k.c`; `scripts/build-benches.sh` builds them, and
+[PERFORMANCE.md](PERFORMANCE.md) §3 describes each. The hash suite's runner is
+not on `main` yet (CONTRIBUTING, *Definition of Done*).
 
 ### Performance
 

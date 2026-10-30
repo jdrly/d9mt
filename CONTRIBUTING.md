@@ -129,7 +129,8 @@ A change is done only when all of these hold:
 - [ ] **A regression test that fails without the fix.** A bug fix adds or extends a `test/`
       program or a `test/native/` test, and the PR shows it failing on the base commit and
       passing on the branch.
-- [ ] **Native tests.** `test/native/` passes (README, *Tests*); a change to threading runs the
+- [ ] **Native tests.** `scripts/run-native-tests.sh` passes, and a change that a test it skips
+      covers runs that test's own runner (README, *Tests*); a change to threading runs the
       affected tests under ThreadSanitizer (`scripts/test-state-cache.sh`,
       `scripts/test-compile-mt.sh`), a change to memory handling under ASan/UBSan.
 - [ ] **Nothing measurably slower.** Benchmarks run uncapped (`D9MT_BG_FPS=0
@@ -169,10 +170,10 @@ A change is done only when all of these hold:
       its verdict is in the PR.
 - [ ] The issue's UAT scenario has been played through and ticked off in the issue.
 
-_Open:_ the hash suite's runner (`scripts/run-hash-tests.sh`, `scripts/run-native-tests.sh`,
-`test/expected-failures.txt`) is on the branch `chore/test-runner` and not on `main` yet, and of
-the benchmarks only `test/bench_4k.c` is in the repository; until they land, the suite and the
-benchmarks run from the maintainer's workspace.
+_Open:_ the hash suite's runner (`scripts/run-hash-tests.sh`, `test/expected-failures.txt`) is on
+the branch `chore/test-runner` and not on `main` yet; until it lands, the suite runs from the
+maintainer's workspace. The native tests' runner (`scripts/run-native-tests.sh`) and the
+benchmarks (`test/perf/`, `test/bench_4k.c`, PERFORMANCE.md §3) are on `main`.
 
 ## Never do these things
 
