@@ -92,6 +92,64 @@ fanless one among them.
 
 ## How it works
 
+```mermaid
+flowchart TD
+  game["Game under Wine<br>x86 Windows code via Rosetta 2"]
+  subgraph dll["d3d9.dll"]
+    fe["D3D9 front-end<br>driver/d3d9"]
+    sm3["Shader parser<br>dxbc-spirv sm3 → IR"]
+    cs["CS thread<br>driver/cs"]
+    be["Metal 4 backend<br>driver/backend"]
+    pso["PSO cache<br>mtl_pso_cache"]
+    stc["Pipeline state cache<br>driver/mtl"]
+  end
+  subgraph br["bridge/"]
+    pe["winemetal.dll<br>PE side"]
+    so["winemetal.so<br>unix side"]
+  end
+  air["AIR compiler<br>air/, airlib/"]
+  aircache[("AIR cache<br>sqlite")]
+  archive[("PSO archives")]
+  metal["Metal 4"]
+  gpu["Apple GPU"]
+
+  game -->|"D3D9 calls"| fe
+  fe -->|"shader bytecode"| sm3
+  sm3 -->|"serialized IR"| be
+  fe -->|"command chunks"| cs
+  cs --> be
+  be --- pso
+  stc -->|"prewarm"| pso
+  be --> pe
+  pe -->|"Wine unix call"| so
+  so -->|"IR"| air
+  air -->|"metallib"| aircache
+  so --- archive
+  so --> metal
+  metal --> gpu
+```
+
+One frame, from the game's calls to the GPU and back:
+
+```mermaid
+sequenceDiagram
+  participant game as Game thread
+  participant cs as CS thread
+  participant gpu as GPU
+  participant ret as d9mt-retire thread
+  game->>game: D3D9DeviceEx records each call with EmitCs into a DxvkCsChunk
+  game->>cs: FlushCsChunk hands the chunk to DxvkCsThread
+  cs->>cs: MtlContextImpl encodes render passes into an MTL4 command buffer
+  cs->>gpu: submit() arms the canary and commits under the next serial
+  cs->>gpu: Present copies the frame into the drawable, MtlPresenter present()
+  gpu-->>ret: the serial is signalled on the MTLSharedEvent
+  ret->>ret: SubmissionTracker retires what the serial used
+  cs->>cs: checkCanaries() logs D9MT-GPU-LOST for a completed serial without its mark
+  Note over cs,gpu: a wait on a submitted serial that stays unsignalled for 10 s calls SubmissionTracker hung(), which logs D9MT-GPU-HUNG and exits with 0xD9D9
+```
+
+The same stack as text:
+
 ```
 YourGame.exe   32- or 64-bit Windows PE, x86 code under Rosetta 2
    │  loads
@@ -230,10 +288,12 @@ frame cap, the GPU canary and the diagnostic switches such as `D9MT_PROFILE`.
 
 ## Tests
 
-The hash suite is the correctness gate of every pull request. Each D3D9 test program in
-`test/code_*.c` renders five frames, and the frame hashes must equal the base commit's, also
-under the Metal API validation layer and `D9MT_LIFETIME_CHECK=1`. Its runner is on the branch
-`chore/test-runner` and not on `main` yet.
+The hash suite is the correctness gate of every pull request. It runs the D3D9 test programs
+in `test/code_*.c`, five frames each for most of them, and compares their frame hashes with the
+base commit's, also under the Metal API validation layer and `D9MT_LIFETIME_CHECK=1`.
+[docs/testing.md](docs/testing.md#hash-suite) names the programs that run elsewhere, end early
+or differ from run to run. The suite's runner is on the branch `chore/test-runner` and not on
+`main` yet.
 
 The native unit tests need no Wine and no GPU:
 

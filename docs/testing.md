@@ -6,9 +6,19 @@ these a pull request runs.
 
 ## Hash suite
 
-The correctness gate of every pull request. Each D3D9 test program `test/code_*.c` (except
-`code_sm3_ref` and `code_statecache`, which have harnesses of their own) renders five frames,
-and their hashes must equal the base commit's. The suite also runs with `MTL_DEBUG_LAYER=1`,
+The correctness gate of every pull request. It runs the D3D9 test programs `test/code_*.c` and
+compares their frame hashes with the base commit's. Each program renders five frames, with these
+exceptions:
+
+- `code_sm3_ref` and `code_statecache` aren't part of the suite. Their own runners are
+  `scripts/sm3_ref_test.py` and `scripts/run-statecache-bench.sh`.
+- `code_readback` ends after one frame and `code_updatetex` after two, on every side.
+- `code_mtlock` isn't deterministic. Its frames differ between two runs of the same commit
+  because of thread timing, so a pull request compares it with an A/A run of base instead of
+  requiring identical frames (#117, [gpu-4k.md](gpu-4k.md) §8). Its own runner is
+  `scripts/run-hang-test.sh`.
+
+The suite also runs with `MTL_DEBUG_LAYER=1`,
 `D9MT_NO_ATTACHMENT_OPT=1` and `d3d9.reproducibleCommandStream=True`, with
 `D9MT_EARLY_COMMIT=always` for a change to the submission path, and `D9MT_LIFETIME_CHECK=1`
 must find no violation. Its runner, `scripts/run-hash-tests.sh`, is on the branch
