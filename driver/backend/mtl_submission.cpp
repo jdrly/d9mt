@@ -42,14 +42,15 @@ namespace {
   const char kGetStdHandle[] D9MT_HANG_RDATA = "GetStdHandle";
   const char kTerminateProcess[] D9MT_HANG_RDATA = "TerminateProcess";
 
-  // D9MT_GPU_HUNG unset (not "continue"). Read when a stall reaches its budget, not when the
-  // tracker is made: the constructor stays as it was before #53.
+  // D9MT_GPU_HUNG unset (not "continue"); read once, by the tracker's constructor (#53's policy).
+  // Cold and out of line, so the environment lookup isn't inlined into the constructor.
   [[gnu::cold, gnu::noinline]] bool gpuHungEndsGame() {
     return env::getEnvVar(kEnvGpuHung) != kContinue;
   }
 }
 
-SubmissionTracker::SubmissionTracker(obj_handle_t device) {
+SubmissionTracker::SubmissionTracker(obj_handle_t device)
+: m_failFast(gpuHungEndsGame()) {
   m_event = WmtSharedEvent::adopt(MTLDevice_newSharedEvent(device));
   m_pump = dxvk::thread([this] { pumpThread(); });
 }
@@ -316,7 +317,7 @@ int SubmissionTracker::stallEnds(uint64_t serial, uint32_t slices, uint32_t subm
   }
   if (slices < 5u)
     return 0;
-  if (!gpuHungEndsGame())
+  if (!m_failFast)
     return 2;
   if (submittedSlices < 5u) {
     if (serial < nextSerial())

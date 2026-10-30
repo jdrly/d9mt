@@ -145,6 +145,7 @@ private:
   bool m_stop = false;
   bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
 
+  const bool m_failFast;   // D9MT_GPU_HUNG unset (not "continue"), when the tracker was made
   std::atomic<bool> m_gpuHung = { false };
 
   dxvk::thread m_pump;
