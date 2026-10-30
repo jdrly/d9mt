@@ -6092,9 +6092,10 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    anything is pending and no build ran for 10 s (the end of a session:
  *    there is no flush at exit, which crashed or hung there when exiting
  *    threads held Metal's or libc's locks). A flush due for 60 s without a
- *    quiet moment goes in between two builds. A build that arrives during
- *    a flush still waits for it, and PSOs built in a session's last 10 s are
- *    not saved;
+ *    quiet moment goes in between two builds: new builds hold off until it
+ *    has the lock, the ones in flight finish first. A build that arrives
+ *    during a flush still waits for it, and PSOs built in a session's last
+ *    10 s are not saved;
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum (size + SHA-256) written
  *    after it and is only loaded when that matches; anything else is deleted.
@@ -6105,7 +6106,9 @@ _MTLDevice_newArgumentTable(void *obj) {
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
  *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256)
- *   D9MT_PSO_ASYNC_FLUSH=1          flush on the flush thread (default 0) */
+ *   D9MT_PSO_ASYNC_FLUSH=1          flush on the flush thread (default 0)
+ *   D9MT_PSO_FLUSH_FORCE_MS=<n>     the flush thread's overdue deadline (default
+ *                                   60000; tests only) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
 #define D9MT_PSO_FLUSH_DEFAULT 256u
@@ -6121,11 +6124,14 @@ static _Atomic unsigned                  g_pso_pending;
 static _Atomic uint64_t                  g_pso_last_build;   /* CLOCK_UPTIME_RAW ns */
 static pthread_mutex_t                   g_pso_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t                    g_pso_flush_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic bool                      g_pso_flush_gate;   /* an overdue flush waits for g_pso_lock */
+static pthread_cond_t                    g_pso_gate_cond = PTHREAD_COND_INITIALIZER;
 
 #define D9MT_PSO_QUIET_NS (2000000000ull)
 #define D9MT_PSO_IDLE_NS  (10000000000ull)
 #define D9MT_PSO_FORCE_NS (60000000000ull)
 #define D9MT_PSO_RETRY_NS (50000000ull)
+static uint64_t                          g_pso_force_ns = D9MT_PSO_FORCE_NS;
 
 static NSString *
 pso_sum_text(NSString *path) {
@@ -6216,11 +6222,28 @@ pso_flush_thread(void *arg) {
     const bool due = pending >= g_pso_flush_every;
     if (due && !due_since)
       due_since = now;
+    const bool forced = due && now - due_since >= g_pso_force_ns;
     uint64_t wait;
-    if ((due && (quiet >= D9MT_PSO_QUIET_NS || now - due_since >= D9MT_PSO_FORCE_NS))
-     || quiet >= D9MT_PSO_IDLE_NS) {
-      pthread_mutex_unlock(&g_pso_flush_mutex);
-      const bool locked = !pthread_rwlock_trywrlock(&g_pso_lock);
+    if (forced || (due && quiet >= D9MT_PSO_QUIET_NS) || quiet >= D9MT_PSO_IDLE_NS) {
+      bool locked;
+      if (forced) {
+        /* Overdue: builds that keep the lock shared without a gap (one
+         * after another, or overlapping) would keep trywrlock out forever,
+         * and pthread rwlocks don't promise a waiting writer precedence.
+         * New builds wait at the gate (pso_build_gate) while the builds in
+         * flight drain, then wait for the flush on the lock itself. */
+        atomic_store(&g_pso_flush_gate, true);
+        pthread_mutex_unlock(&g_pso_flush_mutex);
+        pthread_rwlock_wrlock(&g_pso_lock);
+        pthread_mutex_lock(&g_pso_flush_mutex);
+        atomic_store(&g_pso_flush_gate, false);
+        pthread_cond_broadcast(&g_pso_gate_cond);
+        pthread_mutex_unlock(&g_pso_flush_mutex);
+        locked = true;
+      } else {
+        pthread_mutex_unlock(&g_pso_flush_mutex);
+        locked = !pthread_rwlock_trywrlock(&g_pso_lock);
+      }
       if (locked) {
         @autoreleasepool {
           pso_flush_locked();
@@ -6236,8 +6259,8 @@ pso_flush_thread(void *arg) {
       wait = D9MT_PSO_RETRY_NS;
     } else if (due) {
       wait = D9MT_PSO_QUIET_NS - quiet;
-      if (D9MT_PSO_FORCE_NS - (now - due_since) < wait)
-        wait = D9MT_PSO_FORCE_NS - (now - due_since);
+      if (g_pso_force_ns - (now - due_since) < wait)
+        wait = g_pso_force_ns - (now - due_since);
     } else {
       wait = D9MT_PSO_IDLE_NS - quiet;
     }
@@ -6273,6 +6296,9 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_flush_every = (unsigned)atoi(every);
   const char *async = getenv("D9MT_PSO_ASYNC_FLUSH");
   const bool want_async = async && !strcmp(async, "1");
+  const char *force = getenv("D9MT_PSO_FLUSH_FORCE_MS");
+  if (force && atoi(force) > 0)
+    g_pso_force_ns = (uint64_t)atoi(force) * 1000000ull;
 
   NSString *base;
   if (env) {
@@ -6390,6 +6416,18 @@ pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
   pthread_mutex_unlock(&init_mutex);
   if (g_pso_serializer)
     desc.pipelineDataSetSerializer = g_pso_serializer;
+}
+
+/* With the flush thread, before a build takes g_pso_lock shared: while an
+ * overdue flush waits for the lock, wait until it has it (pso_flush_thread). */
+static void
+pso_build_gate(void) {
+  if (!atomic_load(&g_pso_flush_gate))
+    return;
+  pthread_mutex_lock(&g_pso_flush_mutex);
+  while (atomic_load(&g_pso_flush_gate))
+    pthread_cond_wait(&g_pso_gate_cond, &g_pso_flush_mutex);
+  pthread_mutex_unlock(&g_pso_flush_mutex);
 }
 
 /* After each build: counts it and flushes when a flush is due, or with the
@@ -6891,6 +6929,8 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
   descriptor.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)info->input_primitive_topology;
 
   NSError *err = NULL;
+  if (g_pso_async_flush)
+    pso_build_gate();
   pthread_rwlock_rdlock(&g_pso_lock);
   params->ret_pso = (obj_handle_t)[(id<MTL4Compiler>)params->compiler newRenderPipelineStateWithDescriptor:descriptor
                                                                                      compilerTaskOptions:g_pso_task_options

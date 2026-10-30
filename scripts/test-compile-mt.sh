@@ -23,15 +23,16 @@ DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
 
 # PSO_ASYNC="0 1" (the default) runs each pair with D9MT_PSO_ASYNC_FLUSH=0 (archives flushed by the
-# builds) and =1 (by the bridge's flush thread), each on its own workdir.
+# builds) and =1 (by the bridge's flush thread), each on its own workdir. With 1 each run also checks
+# the overdue flush under back-to-back builds, its deadline cut to MT_FORCE_MS (default 500 ms).
 run_pair() { # <harness> <winemetal.so> <workdir>
   local a
   for a in ${PSO_ASYNC:-0 1}; do
     rm -rf "$3-async$a"; mkdir -p "$3-async$a"
     echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a: cold"
-    D9MT_PSO_ASYNC_FLUSH=$a "$1" "$2" "$3-async$a" "${BINS[@]}"
+    D9MT_PSO_ASYNC_FLUSH=$a MT_FORCE_MS=${MT_FORCE_MS:-500} "$1" "$2" "$3-async$a" "${BINS[@]}"
     echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a: warm"
-    D9MT_PSO_ASYNC_FLUSH=$a "$1" "$2" "$3-async$a" "${BINS[@]}"
+    D9MT_PSO_ASYNC_FLUSH=$a MT_FORCE_MS=${MT_FORCE_MS:-500} "$1" "$2" "$3-async$a" "${BINS[@]}"
     ls "$3-async$a/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
   done
 }
