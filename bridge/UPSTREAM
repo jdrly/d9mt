@@ -5,7 +5,7 @@ Policy:   docs/dev-notes/SOURCE_OF_TRUTH.md §3 (the bridge) — additive patche
           only, formatted to stay cherry-pickable against upstream.
 Local changes:
   - airconv_thunks.{c,h} kept and still built into winemetal.dll, but their
-    DXMT SM50* entry points are unreachable: d9mt doesn't ship DXMT airconv,
+    DXMT SM50*/DXSO* entry points are unreachable: d9mt doesn't ship DXMT airconv,
     and unix/dxso_stubs.c stubs them on the unix side (initialization and
     compilation return failure, SM50GetErrorMessage returns 0, the rest are
     no-ops).
