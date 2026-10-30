@@ -352,8 +352,11 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
 
 ### The switch
 - `D9MT_FLUSH_CAP=1` sets the cap to `ImplicitStrongHint`; unset, `0` or anything else keeps
-  `ImplicitWeakHint`. Read once at device creation, in the same DLL, so an A/B compares the
-  same code and layout (both arms set the variable, `0` and `1`, at equal width).
+  `ImplicitWeakHint`. The device's `D3D9Options` reads it once at device creation
+  (`flushCapStrong`), and `GetMaxFlushType` tests that bool after `reproducibleCommandStream`.
+  The read stays out of `d3d9_device.cpp`: an env read there changed GCC's code for other
+  functions of that file. The same DLL serves both arms of an A/B, so they compare the same code
+  and layout (both arms set the variable, `0` and `1`, at equal width).
 - Unchanged with the switch on: `GpuFlushTracker` itself (`driver/util/util_flush.cpp`, with
   its estimated-cost escape, which d3d9's hints pass as 0), explicit flushes, synchronization,
   the `reproducibleCommandStream` precedence, and every G1 rule of §4 (G1 still carries a
