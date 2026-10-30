@@ -192,14 +192,15 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
 
 @end
 
-/* d9mt: before the reader and writer open cache_<version>. With adopt != 0,
- * if cache_<adopt> exists and cache_<version> doesn't (or is empty),
- * cache_<adopt> is renamed to cache_<version>: a predecessor's metallibs kept
- * under the same keys (ADR-0006). Every other cache_<n> table is dropped, so
- * per-build tables don't accumulate. One write transaction: another process
- * sees all of it or none. Returns 1 if a table was adopted, 0 if not, -1 if
- * nothing could be done (the tables are then left as they are; the writer
- * creates its own). */
+/* d9mt: before the reader and writer open cache_<version>. With adopt != 0
+ * and cache_<adopt> present, its rows move to cache_<version>: renamed if
+ * cache_<version> doesn't exist, else merged in (the rows already there win):
+ * a predecessor's metallibs kept under the same keys (ADR-0006). Every other
+ * cache_<n> table is dropped, so per-build tables don't accumulate. One write
+ * transaction: another process sees all of it or none. Returns 1 if the table
+ * was renamed, 2 if merged, 0 if there was none, -1 if nothing could be done
+ * (the file is as it was; the caller then uses no cache this session, so a
+ * predecessor table stays for the next start). */
 int
 d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
   NSString *dbPath = resolve_cache_dir(path, true);
@@ -237,27 +238,22 @@ d9mt_cache_prepare(NSString *path, uint64_t version, uint64_t adopt) {
     }
   }
   sqlite3_finalize(stmt);
-  /* An empty cache_<version> (a first start that couldn't take the write lock
-   * and created it) doesn't stand in the way. */
-  if (have_from && have_keep) {
-    NSString *sql = [NSString stringWithFormat:@"SELECT 1 FROM \"%@\" LIMIT 1;", keep];
-    bool empty = false;
-    if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL) == SQLITE_OK)
-      empty = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    NSString *dropKeep = [NSString stringWithFormat:@"DROP TABLE \"%@\";", keep];
-    if (empty && sqlite3_exec(db, dropKeep.UTF8String, NULL, NULL, NULL) == SQLITE_OK)
-      have_keep = false;
-  }
+  /* The predecessor's rows: the whole table becomes cache_<version>, or, if
+   * cache_<version> already holds rows (written by a session that couldn't
+   * adopt), they're merged in, the rows already there kept. A failure keeps
+   * everything as it was for the next start. */
   int adopted = 0;
-  if (have_from && !have_keep) {
-    NSString *sql = [NSString stringWithFormat:@"ALTER TABLE \"%@\" RENAME TO \"%@\";", from, keep];
-    if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) == SQLITE_OK)
-      adopted = 1;
-    else
-      [drop addObject:from];
-  } else if (have_from) {
-    [drop addObject:from];
+  if (have_from) {
+    NSString *sql = have_keep
+      ? [NSString stringWithFormat:@"INSERT OR IGNORE INTO \"%@\" (key, value) SELECT key, value FROM \"%@\"; "
+                                    "DROP TABLE \"%@\";", keep, from, from]
+      : [NSString stringWithFormat:@"ALTER TABLE \"%@\" RENAME TO \"%@\";", from, keep];
+    if (sqlite3_exec(db, sql.UTF8String, NULL, NULL, NULL) != SQLITE_OK) {
+      sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+      sqlite3_close(db);
+      return -1;
+    }
+    adopted = have_keep ? 2 : 1;
   }
   for (NSString *n in drop) {
     NSString *sql = [NSString stringWithFormat:@"DROP TABLE IF EXISTS \"%@\";", n];

@@ -10,8 +10,9 @@
 #    renaming this build's own macOS 27 table, whose keys and values are the predecessor's when the
 #    lineage holds; with OLD_BRIDGE=<0.1.5.1's winemetal.so>, made by that bridge itself and compared
 #    row by row first) is adopted under macOS 27 with every row kept and every compile a hit, also
-#    with a stray table or an empty new table next to it, and dropped under D9MT_AIR_MACOS=26
-#    (VERS 2.7 rows instead).
+#    with a stray table next to it; merged into a new table that already holds rows (empty or not);
+#    left whole while another process holds the write lock (no cache that session) and adopted by
+#    the next start; and dropped under D9MT_AIR_MACOS=26 (VERS 2.7 rows instead).
 # Needs build/bridge from scripts/build-bridge.sh.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -139,9 +140,13 @@ else
     sqlite3 "$C/legacy/air-cache.sqlite3" "ALTER TABLE $T27 RENAME TO $LEG;"
     dump "$C/legacy/air-cache.sqlite3" > "$WORK/old.rows"
   fi
-  for d in a27 a26 stray empty; do cp -R "$C/legacy" "$C/$d"; done
+  for d in a27 a26 stray empty partial busy; do cp -R "$C/legacy" "$C/$d"; done
   sqlite3 "$C/stray/air-cache.sqlite3" "CREATE TABLE cache_123 (key BLOB PRIMARY KEY, value BLOB NOT NULL);"
   sqlite3 "$C/empty/air-cache.sqlite3" "CREATE TABLE $T27 (key BLOB PRIMARY KEY, value BLOB NOT NULL);"
+  # a session that couldn't adopt and wrote some rows of its own: a third of the keys
+  sqlite3 "$C/partial/air-cache.sqlite3" "CREATE TABLE $T27 (key BLOB PRIMARY KEY, value BLOB NOT NULL);
+    INSERT INTO $T27 SELECT key, value FROM $LEG WHERE (rowid % 3) = 0;"
+  kv() { cut -d' ' -f3- "$1" | sort; }  # key, value and VERS, without table and rowid
   run a27 "$SO" "$C/a27" host
   check "macOS 27: $LNAME's table adopted (log)" "$(grep -q "kept $LNAME's table $LEG as $T27" "$WORK/a27.log" && echo 1 || echo 0)"
   check "macOS 27: every row kept as it was (rowid, key, value), no row written" \
@@ -151,8 +156,37 @@ else
   check "macOS 27, a stray table next to it: adopted, the stray dropped" \
     "$([ "$(rows_as old "$T27")" = "$(cat "$WORK/stray.rows")" ] && echo 1 || echo 0)" "$(tables stray)"
   run empty "$SO" "$C/empty" host
-  check "macOS 27, an empty new table already there: adopted all the same" \
-    "$([ "$(rows_as old "$T27")" = "$(cat "$WORK/empty.rows")" ] && echo 1 || echo 0)" "$(tables empty)"
+  check "macOS 27, an empty new table already there: every row merged in" \
+    "$([ "$(tables empty)" = "$T27 " ] && [ "$(kv "$WORK/old.rows")" = "$(kv "$WORK/empty.rows")" ] && echo 1 || echo 0)"
+  run partial "$SO" "$C/partial" host
+  check "macOS 27, a new table with some rows: the rest merged in (log)" \
+    "$(grep -q "kept $LNAME's table $LEG merged into $T27" "$WORK/partial.log" && echo 1 || echo 0)"
+  check "macOS 27, a new table with some rows: every row there, no compile missed" \
+    "$([ "$(tables partial)" = "$T27 " ] && [ "$(kv "$WORK/old.rows")" = "$(kv "$WORK/partial.rows")" ] \
+       && cmp -s "$WORK/cold/manifest.txt" "$WORK/partial/manifest.txt" && echo 1 || echo 0)"
+  # another process holds the write lock past the 2 s busy timeout: no cache this session, and the
+  # predecessor's table stays whole for the next start, which adopts it
+  rm -f "$WORK/busy.ready"
+  python3 -I - "$C/busy/air-cache.sqlite3" "$WORK/busy.ready" <<'EOF' &
+import sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1], isolation_level=None)
+db.execute('BEGIN IMMEDIATE')
+open(sys.argv[2], 'w').close()
+time.sleep(8)
+db.execute('ROLLBACK')
+EOF
+  holder=$!
+  for i in $(seq 1 50); do [ -f "$WORK/busy.ready" ] && break; sleep 0.1; done
+  run busy "$SO" "$C/busy" host
+  wait "$holder"
+  dump "$C/busy/air-cache.sqlite3" > "$WORK/busy.rows"
+  check "write lock held elsewhere: cache off this session, compiles still right" \
+    "$(grep -q 'AIR cache disabled this session' "$WORK/busy.log" && cmp -s "$WORK/cold/manifest.txt" "$WORK/busy/manifest.txt" && echo 1 || echo 0)"
+  check "write lock held elsewhere: $LNAME's table untouched, no new table" \
+    "$([ "$(cat "$WORK/old.rows")" = "$(cat "$WORK/busy.rows")" ] && echo 1 || echo 0)" "$(tables busy)"
+  run busy2 "$SO" "$C/busy" host
+  check "write lock held elsewhere: the next start adopts it whole" \
+    "$(grep -q "kept $LNAME's table $LEG as $T27" "$WORK/busy2.log" && [ "$(rows_as old "$T27")" = "$(cat "$WORK/busy2.rows")" ] && echo 1 || echo 0)"
   run a26 "$SO" "$C/a26" 26
   T26=$(table_of a26)
   check "macOS 26: not adopted, $LNAME's table dropped" \

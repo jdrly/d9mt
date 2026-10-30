@@ -51,10 +51,12 @@ Jan's requirement for 0.1.6: players keep their shader caches; a release must no
 - **0.1.5.1's cache is adopted on macOS 27 and later.** The one entry maps 0.1.6's codegen id to
   0.1.5.1's LC_UUID bytes and adopts 0.1.5.1's table (`cache_6138817854601476907`) when this
   process tags VERS AIR 2.9. In one sqlite write transaction, before the reader and writer open,
-  that table is renamed to the new one if the new one doesn't exist yet or is empty (a first start
-  that couldn't take the write lock). Before macOS 27 the tag
-  is 2.7 (#110): 0.1.5.1's metallibs say 2.9, which is the macOS 26 black screen, so its table is
-  dropped there and the cache starts cold. Any failure leaves a cold cache.
+  that table is renamed to the new one, or merged into it if the new one already holds rows (the
+  rows there win). Before macOS 27 the tag is 2.7 (#110): 0.1.5.1's metallibs say 2.9, which is
+  the macOS 26 black screen, so its table is dropped there and the cache starts cold.
+- **No cache for a session whose open fails.** If that transaction can't run (another process
+  holds the write lock past the 2 s busy timeout, a damaged file), the session compiles without
+  the AIR cache and writes no table, so a predecessor's table stays whole for the next start.
 - **Carried over from ADR-0004:** the driver and the bridge are built, tested and shipped from the
   same commit (there is no version handshake); a change to the pipeline state cache's key
   signature resets every player's state cache and is batched into one release.

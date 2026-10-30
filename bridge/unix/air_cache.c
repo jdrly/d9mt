@@ -128,6 +128,12 @@ air_cache_init(void) {
   if (!path)
     return;
   const int adopted = d9mt_cache_prepare(path, version, adopt);
+  if (adopted < 0) {
+    /* Another process held the file, or it is damaged: a table created now
+     * could hide a predecessor's rows from the next start's adoption. */
+    fprintf(stderr, "d9mt: AIR cache disabled this session (could not prepare %s)\n", path.UTF8String);
+    return;
+  }
   g_air_cache_writer = [[CacheWriter alloc] initWithPath:path version:version];
   if (g_air_cache_writer)
     g_air_cache_reader = [[CacheReader alloc] initWithPath:path version:version];
@@ -137,8 +143,8 @@ air_cache_init(void) {
             (unsigned long long)version, d9mt_air_codegen_id + sizeof(D9MT_AIR_CODEGEN_PREFIX) - 1u,
             lineage ? "lineage " : "no lineage", lineage ? lineage->name : "");
     if (adopted > 0)
-      fprintf(stderr, "d9mt: AIR cache kept %s's table cache_%llu as cache_%llu\n", lineage->name,
-              (unsigned long long)adopt, (unsigned long long)version);
+      fprintf(stderr, "d9mt: AIR cache kept %s's table cache_%llu %s cache_%llu\n", lineage->name,
+              (unsigned long long)adopt, adopted == 1 ? "as" : "merged into", (unsigned long long)version);
   } else {
     [g_air_cache_writer release];
     [g_air_cache_reader release];
