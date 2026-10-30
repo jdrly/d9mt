@@ -38,7 +38,7 @@ player's smoothness at release: small costs that no single PR resolves can add u
   preventing a bug, needs evidence that it renders identically on Mac generations other than the
   one it was measured on, a slower and a fanless Mac among them, not only a faster benchmark.
   Without that coverage it goes in only behind a switch that is **off by default**, documented in
-  the README's tables; a later PR that brings the coverage turns it on. Existing speed
+  the tables of `docs/configuration.md`; a later PR that brings the coverage turns it on. Existing speed
   optimisations stay as they are; this applies to new speed-only changes.
 - **+0.25 % stays a flag, not a hard stop.** Every median slowdown over +0.25 % (ms up, fps down;
   the median or the paired median against base) is flagged, as before. A real, established cost

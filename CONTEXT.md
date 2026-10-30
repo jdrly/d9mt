@@ -4,8 +4,8 @@ The glossary of d9mt, the Direct3D 9 → Metal 4 driver for Wine on Apple Silico
 in issues, pull requests, code, comments, log lines and design documents.
 
 This glossary defines **language, not implementation**. ADRs in [`docs/adr/`](docs/adr/index.md)
-own the decisions; the README and the design documents in `docs/` describe the behaviour in
-detail. If a term you need is missing, add it here in the same pull request and say so in the PR
+own the decisions; the README, [configuration](docs/configuration.md) and the design documents
+in `docs/` describe the behaviour in detail. If a term you need is missing, add it here in the same pull request and say so in the PR
 description. Every definition names its source; what is not decided is marked _Open_.
 
 ## Architecture
@@ -45,7 +45,7 @@ _Avoid_: “MSL compiler”, “shader translator”.
 **Compat metallib**
 The second build of each embedded metallib (fixed-function shaders, blit), for the minimum macOS
 version: the driver loads the newest Metal language and falls back to Compat where Metal rejects
-it (MSL 4.1 on macOS 26) (README, *Build*).
+it (MSL 4.1 on macOS 26) ([building](docs/building.md#toolchain-and-targets)).
 
 ## Submission and lifetime
 
@@ -72,7 +72,7 @@ buffer refers to may be released before its serial retires (ADR-0001;
 **Lifetime check**
 `D9MT_LIFETIME_CHECK`: stamps every texture handle put into a command buffer with that command
 buffer's serial and reports (`D9MT-LIFETIME`) a release before the GPU is past it, on any Mac,
-without needing the GPU to fault (`driver/backend/mtl_lifetime.h`; README).
+without needing the GPU to fault (`driver/backend/mtl_lifetime.h`; [configuration](docs/configuration.md#developer-and-diagnostic-switches)).
 
 **Drawable**
 The `CAMetalLayer` image d9mt acquires for each present and copies the frame into. It is kept
@@ -89,8 +89,7 @@ into the drawable in its own encoder; a present that isn't a copy (a scaled blit
 encoder of its own every frame; a command buffer that doesn't present in an encoder of its own on
 every fourth, and only if no canary ran for 250 ms (`driver/backend/mtl_canary_gate.h`); a marked command
 buffer that completes without its mark was discarded by the GPU (after a page fault), which logs
-`D9MT-GPU-LOST` (the first 20, then a summary at most every 10 s) (README, *Environment
-variables*; #27).
+`D9MT-GPU-LOST` (the first 20, then a summary at most every 10 s) ([configuration](docs/configuration.md#environment-variables); #27).
 
 **GPU hang**
 A submitted command buffer the GPU never finishes: no serial completes after it, the GPU's
@@ -127,11 +126,11 @@ content-addressed, so returning to earlier state (A → B → A) hits again
 **AIR cache**
 The persistent cache of compiled shaders, one sqlite file in the user cache folder
 (`air-cache.sqlite3`), shared by all games. Its key includes `winemetal.so`'s LC_UUID, so every
-bridge rebuild invalidates it (README, *Environment variables*; ADR-0004).
+bridge rebuild invalidates it ([configuration](docs/configuration.md#environment-variables); ADR-0004).
 
 **PSO archive**
 The Metal 4 pipeline archives in `<user cache>/d9mt/pso/`, one per session, the last eight kept
-(README, *Environment variables*).
+([configuration](docs/configuration.md#environment-variables)).
 
 **Pipeline state cache**
 The record of the pipelines a game used (shader identities plus the derived key), rebuilt in the
@@ -153,25 +152,25 @@ file's entries, so a bump resets every player's state cache (`docs/state-cache.m
 
 **Pipeline wait budget**
 `d9mt.pipelineWaitBudgetMs`: the most the render thread waits per frame for compiles still
-running before it skips the draws that need them (README, *Pipeline wait budget*).
+running before it skips the draws that need them ([configuration](docs/configuration.md#pipeline-wait-budget)).
 
 ## Memory and render passes
 
 **Memory profile**
 `auto`, `low`, `medium`, `high`, `ultra` or `unlimited`: the reported video memory and pool sizes,
-picked from the Mac's RAM by `auto` (README, *Memory profiles*).
+picked from the Mac's RAM by `auto` ([configuration](docs/configuration.md#memory-profiles)).
 
 **Attachment optimization**
 The load/store decisions per render pass: a known clear is Clear-loaded, an unwritten attachment's
-store is skipped (README, *Attachment load/store optimization*).
+store is skipped ([configuration](docs/configuration.md#attachment-loadstore-optimization)).
 
 **Restore**
 The re-clear that gives a reader the contents of an attachment whose store was skipped (`restore`
-in `STATS`, `RESTORE` lines) (README).
+in `STATS`, `RESTORE` lines) ([configuration](docs/configuration.md#attachment-loadstore-optimization)).
 
 **Rules B, C, E, F**
 The frame-pass rules of the experimental `D9MT_DEFERRED` mode (`flushFramePasses` in
-`driver/backend/mtl_context_record.cpp`; `D9MT_NO_RULE_{B,C,E,F}` in the README). _Open:_ they are
+`driver/backend/mtl_context_record.cpp`; `D9MT_NO_RULE_{B,C,E,F}` in [configuration](docs/configuration.md#developer-and-diagnostic-switches)). _Open:_ they are
 defined only in code.
 
 ## Presentation and pacing
@@ -180,7 +179,7 @@ defined only in code.
 `D9MT_FPS_CAP`: Present returns on a fixed cadence for a set frame rate. With vsync on and a rate
 that divides the refresh rate it is **vsync-aligned**: every frame stays on screen for the same
 number of refreshes (`presentAfterMinimumDuration`); otherwise it is a plain timer
-(`driver/d3d9/d3d9_frame_cap.h`; README, *Environment variables*; #44).
+(`driver/d3d9/d3d9_frame_cap.h`; [configuration](docs/configuration.md#environment-variables); #44).
 _Avoid_: “FPS limiter” for d9mt's cap (SWTOR on Mac's *Frame Rate Limit* is the setting that
 turns it on); DXVK's `d3d9.maxFrameRate` is the **DXVK limiter**.
 
@@ -188,7 +187,7 @@ turns it on); DXVK's `d3d9.maxFrameRate` is the **DXVK limiter**.
 `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED`: while the window is hidden or minimized, d9mt skips the
 presents and Present sleeps to this rate (default 30 / 10 fps); for the first second after the
 window disappears, or while there is no drawable, it paces to the display rate instead
-(`driver/d3d9/d3d9_swapchain.cpp`; README).
+(`driver/d3d9/d3d9_swapchain.cpp`; [configuration](docs/configuration.md#environment-variables)).
 
 **Sleeper**
 The sleep of the frame cap and the background throttle: the system's sleep in halves down to a

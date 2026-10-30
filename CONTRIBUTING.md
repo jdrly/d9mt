@@ -27,7 +27,9 @@ review.
    target contract even when the code differs. Record the difference as a gap; **don't weaken an
    ADR to match the current code**.
 3. **[README.md](README.md)**: what d9mt does today, how to build, test, install and configure
-   it, its known issues.
+   it, its known issues. [docs/configuration.md](docs/configuration.md) lists every option and
+   switch, [docs/building.md](docs/building.md) and [docs/testing.md](docs/testing.md) the build
+   and test details.
 4. **The design documents in [docs/](docs/)** (`state-cache.md`, `state-cache-journal.md`,
    `g1-early-commit.md`, `gpu-4k.md`, `pso-key-hash.md`, …): the design and the measurements of
    a feature. `docs/dev-notes/` is neo773's historical material from v2's development, not
@@ -130,7 +132,7 @@ A change is done only when all of these hold:
       program or a `test/native/` test, and the PR shows it failing on the base commit and
       passing on the branch.
 - [ ] **Native tests.** `scripts/run-native-tests.sh` passes, and a change that a test it skips
-      covers runs that test's own runner (README, *Tests*); a change to threading runs the
+      covers runs that test's own runner ([docs/testing.md](docs/testing.md)); a change to threading runs the
       affected tests under ThreadSanitizer (`scripts/test-state-cache.sh`,
       `scripts/test-compile-mt.sh`), a change to memory handling under ASan/UBSan.
 - [ ] **Nothing measurably slower.** Benchmarks run uncapped (`D9MT_BG_FPS=0
@@ -154,7 +156,7 @@ A change is done only when all of these hold:
       - **A speed-only change** (its purpose is speed, not preventing a bug) also shows that it
         renders identically on Mac generations other than the one it was measured on, a slower
         and a fanless Mac among them, and the PR names them. Without that coverage it goes in
-        only behind a switch that is off by default, in the README's tables. This applies to
+        only behind a switch that is off by default, in the tables of `docs/configuration.md`. This applies to
         new speed-only changes; existing speed optimisations stay as they are (ADR-0005).
 - [ ] **winemetal.so identity.** A PR that doesn't change `bridge/` states that `winemetal.so` is
       byte-identical to `main`'s. A change to the bridge changes its LC_UUID, the key of every
@@ -162,7 +164,8 @@ A change is done only when all of these hold:
       bridge changes are batched into one bundle per release (ADR-0004). A change to the
       pipeline state cache's key signature resets every player's state cache and is called out
       and batched the same way.
-- [ ] **Docs.** Every new environment variable or `dxvk.conf` option is in the README's tables;
+- [ ] **Docs.** Every new environment variable or `dxvk.conf` option is in the tables of
+      [docs/configuration.md](docs/configuration.md);
       a design that needs explaining has its document in `docs/`.
 - [ ] Terms follow `CONTEXT.md`; a new term is added in the same PR.
 - [ ] A changed decision has an ADR in the same PR, or links an existing `accepted` ADR.
