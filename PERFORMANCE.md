@@ -338,9 +338,13 @@ visible and its presents run (#52).
 So read a run's present path from its line, not from where it ran: `scripts/perf-abba.sh`
 compares the bridge's visibility changes with the bench's timed start (`TIMED <bench>
 HH:MM:SS.mmm`) and records `visible=0` (occluded from before the timed start), `visible=nolog`
-(no change logged: visible throughout in a bench that presents every frame), or the changes in
-order (`1>0`, `0>1`, ...) and `?` when it can't tell; `scripts/perf-compare.py` warns about runs
-that changed and about occluded runs mixed with others. The scaling blit costs only in visible
+(no change logged: visible throughout in a bench that presents every frame), `visible=pre:0>1`
+(every change came before the timed start and left the window visible: visible throughout the
+timed interval), or the changes in order (`1>0`, `0>1`, ...) when one came at or after the timed
+start, and `?` when it can't tell. `vis_ms=` lists each change's time against the timed start.
+`scripts/perf-compare.py` warns about runs that changed and about occluded runs mixed with others.
+A window often logs `0>1` as it is created (its first occlusion reading, flipped a few ms later):
+that settles during the bench's warm-up frames and reads `pre:0>1`. The scaling blit costs only in visible
 runs.
 
 On a virtual display `nextDrawable` takes much longer than a frame, so it can't answer

@@ -29,8 +29,9 @@ Run metadata, never a metric: client=<W>x<H> (the bench's window client area, pe
 listed per variant (unknown for runs without it), with a warning when it isn't the back buffer's
 size (client=<W>x<H>!=<back buffer>: a visible window's presents need the presenter's scaling
 blit) or when a paired round compares different client areas. visible= (0: occluded from before
-the timed start; nolog: no change logged, visible throughout if the bench presented; 1>0, 0>1
-etc.: changed; ? or ?>...: not established) is counted per variant, with a warning about runs that changed or are
+the timed start; nolog: no change logged, visible throughout if the bench presented; pre:0>1
+etc.: every change before the timed start, visible from it on; 1>0, 0>1 etc.: changed at or after
+the timed start; ? or ?>...: not established) is counted per variant, with a warning about runs that changed or are
 unknown, and when occluded runs are mixed with others (an occluded window's presents are
 skipped, so the two measure different things).
 """
@@ -206,10 +207,13 @@ def main():
         def kind(x):
             if x is None or x.startswith("?"):
                 return "unknown"
+            if x.startswith("pre:") and x.endswith("1"):
+                return "settled before timing"
             return {"0": "occluded", "nolog": "no change logged"}.get(x, "changed")
         def vis(v):
             ks = [kind(visible.get(v, {}).get(k)) for k in vals[v]]
-            return f"{v} " + ", ".join(f"{ks.count(w)} {w}" for w in ("occluded", "no change logged", "changed", "unknown") if w in ks)
+            return f"{v} " + ", ".join(f"{ks.count(w)} {w}" for w in ("occluded", "no change logged", "settled before timing",
+                                                                        "changed", "unknown") if w in ks)
         print("window visibility: " + "; ".join(vis(v) for v in vals))
         kinds = {kind(visible.get(v, {}).get(k)) for v in vals for k in vals[v]}
         odd = sorted({x for v in vals for k in vals[v] for x in [visible.get(v, {}).get(k, "?")]
