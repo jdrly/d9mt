@@ -84,8 +84,10 @@ The Metal 4 set that makes resources resident for the GPU; removals wait until t
 the referencing serial (`driver/backend/mtl_residency.h`).
 
 **GPU canary**
-`D9MT_GPU_CANARY`, on by default: the present copy's encoder, and an encoder of its own in every
-fourth other command buffer, marks the command buffer's slot in a small buffer; a marked command
+`D9MT_GPU_CANARY`, on by default, marks a command buffer's slot in a small buffer: a present copy
+into the drawable in its own encoder; a present that isn't a copy (a scaled blit, MetalFX) in an
+encoder of its own every frame; a command buffer that doesn't present in an encoder of its own on
+every fourth, and only if no canary ran for 250 ms (`driver/backend/mtl_canary_gate.h`); a marked command
 buffer that completes without its mark was discarded by the GPU (after a page fault), which logs
 `D9MT-GPU-LOST` (the first 20, then a summary at most every 10 s) (README, *Environment
 variables*; #27).
