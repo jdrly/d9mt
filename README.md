@@ -1,535 +1,290 @@
-# d9mt — D3D9 on Metal 4 for Apple Silicon
+# d9mt
 
-A **Direct3D 9 → Metal 4** driver for Wine/CrossOver on Apple Silicon.
-**No Vulkan, no MoltenVK**: D3D9 calls are translated to Metal directly, for
-32-bit and 64-bit games.
+d9mt is a Direct3D 9 driver for Wine on Apple silicon that renders with Metal 4. A Windows game
+loads it as its `d3d9.dll`, 32-bit or 64-bit, and d9mt turns the game's D3D9 calls into Metal
+calls. There is no Vulkan or MoltenVK layer in between.
 
-It pairs DXVK's D3D9 front-end (state tracking, resources, the whole D3D9 API
-surface) with a Metal 4 backend and its own shader compiler, which turns D3D9
-shader bytecode straight into Apple's AIR, so no Metal toolchain or MSL is
-involved at runtime. Metal is reached through a fork of DXMT's `winemetal`
-bridge.
+It joins DXVK's D3D9 front-end to a Metal 4 backend and a shader compiler of its own. The
+compiler turns D3D9 shader bytecode into Apple's AIR, the LLVM bitcode inside a metallib, so
+nothing compiles MSL at runtime. Metal calls cross from the game's Windows code to macOS through
+a fork of DXMT's `winemetal` bridge.
 
-> **Fork.** This is a fork of [neo773/d9mt-v2](https://github.com/neo773/d9mt-v2),
-> the successor of [neo773/d9mt](https://github.com/neo773/d9mt). neo773 wrote
-> d9mt and d9mt-v2, archived the original and permitted this fork. The fork
-> adds 64-bit (x64) builds, macOS 27 fixes, rendering fixes, persistent shader
-> and pipeline caches, asynchronous shader compilation and memory profiles.
-> Its full history, neo773's included, is in this repository.
+Two free apps ship d9mt at a pinned commit:
+[SWTOR on Mac](https://github.com/jdrly/swtor-on-mac) and
+[SWGL on Mac](https://github.com/jdrly/swgl-on-mac). d9mt is an independent project, not
+affiliated with or endorsed by the publishers or operators of any game it runs. All trademarks
+belong to their owners.
 
-> **Tested with a handful of games.** It has been run with:
->
-> - **GTA IV** (32-bit): neo773's target while developing d9mt and d9mt-v2
-> - **Star Wars: The Old Republic** (64-bit): this fork's main test target
-> - **Star Wars Galaxies: Legends** (32-bit, community server)
->
-> Nothing else has been tried yet, so expect unimplemented paths on other
-> games. d9mt is not affiliated with or endorsed by the publishers or
-> operators of these games; all trademarks belong to their owners.
-
-```
-YourGame.exe  (32- or 64-bit Windows PE, x86 code under Rosetta 2)
-   │  loads
-   ▼
-d3d9.dll      ← THIS PROJECT (mingw PE): DXVK D3D9 front-end + d9mt Metal 4 backend
-   │            DXSO bytecode → dxbc-spirv IR (sm3 parser) → serialized to the bridge
-   ▼
-winemetal.dll ← THIS PROJECT (fork of DXMT's bridge, PE side, Wine builtin)
-   │  Wine unix call
-   ▼
-winemetal.so  ← THIS PROJECT (x86_64 Mach-O, Wine's unix side):
-                IR → AIR (LLVM 15 bitcode) → metallib, AIR + pipeline disk caches,
-                Metal 4 command path  ──►  Metal  ──►  CAMetalLayer
-```
+This repository is a fork of [neo773/d9mt-v2](https://github.com/neo773/d9mt-v2), the successor
+of [neo773/d9mt](https://github.com/neo773/d9mt). neo773 wrote both, archived the original and
+permitted this fork. Their full history is in this repository. The fork adds 64-bit builds,
+macOS 27 fixes, rendering fixes, persistent shader and pipeline caches, asynchronous shader
+compilation and memory profiles.
 
 ## Status
 
-- **Experimental, but playable** in the games above. In our testing, the
-  64-bit MMO renders correctly and holds 60 fps with vsync at 4K on an
-  M5 Max.
-- **Metal 4 only**: MTL4 command queues, allocators, argument tables,
-  residency sets and the MTL4 compiler. There is no Metal 3 path.
-- **Shader compiler**: SM1–3 bytecode is parsed with dxbc-spirv and compiled
-  to AIR by d9mt's own LLVM-based writer (`air/`) on Wine's unix side. The
-  fixed-function pipeline uses DXVK's ubershaders, precompiled into an
-  embedded metallib.
-- **Caches**: compiled shaders go to a persistent AIR cache and pipelines to
-  Metal 4 pipeline archives, so a second visit to an area is much smoother
-  than the first. Shaders and pipelines compile on worker threads. A
-  pipeline state cache records which pipelines the game used and rebuilds
-  them in the background in later sessions, as soon as the game has created
-  their shaders, including after a d9mt or macOS update that invalidates the
-  other caches ([docs/state-cache.md](docs/state-cache.md)).
-- **Memory profiles** pick pool sizes and reported video memory from the
-  Mac's RAM (8/16/24 GB Macs get smaller pools).
-- This is research-grade software for one platform (Apple Silicon + a
-  CrossOver-based Wine). Expect rough edges.
+d9mt is experimental. It has run three games:
+
+- Star Wars: The Old Republic, 64-bit, this fork's main target. On an M5 Max it renders
+  correctly and holds 60 fps with vsync at 4K.
+- Star Wars Galaxies: Legends, 32-bit, on a community server.
+- GTA IV, 32-bit, the game neo773 developed d9mt and d9mt-v2 against.
+
+Nobody has tried other games yet. Expect them to reach code paths d9mt doesn't implement.
+
+d9mt uses Metal 4 only: MTL4 command queues, allocators, argument tables, residency sets and
+the MTL4 compiler. It has no Metal 3 path, so it needs macOS 26 or later. Most testing has been
+on macOS 27.
+
+### Recent fixes
+
+- On macOS 26, Metal rejected every game shader, which left the screen black after the first
+  loading screen. The AIR compiler had tagged its metallibs with macOS 27's AIR version, 2.9.
+  It now writes the AIR 2.7 its bitcode declares on macOS 26 and keeps 2.9 on macOS 27, so
+  Metal's shader caches there stay valid.
+  [#110](https://github.com/jdrly/d9mt/pull/110)
+- A DEFAULT-pool texture that the game sampled before writing it showed undefined memory. An
+  M4 decoded it as magenta icons. d9mt now binds a null texture until the first write, and a
+  player confirmed the fix on an M4 MacBook Air.
+  [#105](https://github.com/jdrly/d9mt/pull/105)
+- After a GPU hang, the game stayed frozen with its GPU context alive. Now a submitted command
+  buffer that doesn't finish within 10 s ends the game with a `D9MT-GPU-HUNG` log line and exit
+  code 0xD9D9. [#53](https://github.com/jdrly/d9mt/pull/53)
+- A per-draw vertex upload could read past the end of a vertex buffer's CPU copy and
+  page-fault. d9mt now clamps the copy from the first vertex the draw reads.
+  [#57](https://github.com/jdrly/d9mt/pull/57)
+- The GPU canary detects command buffers that the GPU dropped after a page fault and logs them
+  as `D9MT-GPU-LOST`. It now marks every presented frame, scaled and MetalFX presents included.
+  [#67](https://github.com/jdrly/d9mt/pull/67)
+
+Three switches merged on 2026-10-30 and stay off by default until testers' measurements back
+them. Under [ADR-0005](docs/adr/0005-correctness-first-speed-proven.md), a change made for speed
+stays behind a switch until it renders identically on other Mac generations, a slower and a
+fanless one among them.
+
+- `D9MT_FLUSH_CAP=1` stops weak flush hints from submitting a command buffer mid-frame, as
+  upstream DXVK does on tiling GPUs. [#113](https://github.com/jdrly/d9mt/pull/113)
+- `D9MT_PSO_ASYNC_FLUSH=1` writes the Metal pipeline archive on a thread of its own. With the
+  switch off, the pipeline build that makes a flush due writes it, usually on the render thread,
+  which stalled for 0.5 to 0.67 s once per session in measured sessions.
+  [#114](https://github.com/jdrly/d9mt/pull/114)
+- `D9MT_COMPILE_MAXCONC=1` asks Metal to maximize concurrent pipeline compilation.
+  [#117](https://github.com/jdrly/d9mt/pull/117)
+
+### Known issues
+
+- d9mt's bridge replaces the Wine engine's `winemetal`, which DXMT also uses for D3D10 and
+  D3D11. DXMT games break on an engine with d9mt installed, so give d9mt a copy of the engine.
+- The driver and the bridge have no version handshake. Install both from the same build, since
+  a mismatched pair can crash.
+- New areas stutter the first time while their shaders and pipelines compile. Compiles run on
+  worker threads and go to disk caches, so later visits are smoother. `D9MT_ASYNC_SKIP=1` trades
+  the stutter for pop-in, and `d9mt.pipelineWaitBudgetMs` caps it.
+- The AIR cache and the pipeline archives have no size cap. The pipeline state cache keeps at
+  most 1024 pipelines per game, about 390 KB.
+- macOS 26 has had little testing. `scripts/test-air-versions.sh` checks that d9mt's metallibs
+  carry the same version tags Apple's `metallib` writes for the same bitcode.
+- A selector bug breaks MetalFX upscaling, `D9MT_METALFX`.
+- d9mt ignores `SetGammaRamp`, so brightness sliders that use it do nothing.
+- Code review found these unimplemented or unverified: instance divisors above 1, indexed
+  triangle fans and stride-0 vertex streams. d9mt rejects hardware vertex shaders that address
+  more than 256 float constants, as DXVK does.
+
+## How it works
+
+```
+YourGame.exe   32- or 64-bit Windows PE, x86 code under Rosetta 2
+   │  loads
+   ▼
+d3d9.dll       this project, mingw PE: DXVK's D3D9 front-end + d9mt's Metal 4 backend
+   │           shader bytecode → dxbc-spirv IR, serialized for the bridge
+   ▼
+winemetal.dll  this project, fork of DXMT's bridge, PE side, Wine builtin
+   │  Wine unix call
+   ▼
+winemetal.so   this project, x86_64 Mach-O on Wine's unix side:
+               IR → AIR (LLVM 15 bitcode) → metallib, shader and pipeline caches,
+               Metal 4 command path  ──►  Metal  ──►  CAMetalLayer
+```
+
+The front-end in `driver/d3d9` is DXVK's D3D9 code with Vulkan removed. It tracks all D3D9
+state and records work through DXVK's command-stream thread into the interface in `driver/mtl`.
+[`driver/UPSTREAM`](driver/UPSTREAM) and [`driver/EXTRACTION-LOG.md`](driver/EXTRACTION-LOG.md)
+record what came from DXVK and what changed.
+
+The backend in `driver/backend` implements that interface on Metal 4. It owns the argument
+tables, residency sets, command buffers and allocators, encoders, pipeline compilation, the
+upload ring and presentation to the window's `CAMetalLayer`. Metal 4 command buffers don't
+retain what they use, so every object lives until the GPU has finished the last command buffer
+that uses it ([ADR-0001](docs/adr/0001-gpu-objects-live-until-retired.md)).
+
+dxbc-spirv's `sm3` front-end parses the game's SM1 to SM3 shaders into dxbc-spirv's IR inside
+`d3d9.dll`. The bridge carries the IR to Wine's unix side, where `airlib/` and `air/` lower it
+to AIR with LLVM 15 and wrap it in a metallib that Metal loads directly. The fixed-function
+pipeline uses DXVK's ubershaders, precompiled into a metallib that `d3d9.dll` embeds.
+
+Three caches cut repeat compiles. The AIR cache is one sqlite file of compiled shaders, keyed
+by the bridge build, so a bridge change makes every player recompile once
+([ADR-0004](docs/adr/0004-batch-bridge-changes.md)). Metal 4 pipeline archives keep the
+pipelines of the last 8 sessions. The pipeline state cache records which pipelines a game used
+and rebuilds them in the background in later sessions, also after an update that invalidated
+the other two ([docs/state-cache.md](docs/state-cache.md),
+[ADR-0003](docs/adr/0003-pipeline-state-cache-in-d3d9.md)).
+
+The bridge in `bridge/` is DXMT's `winemetal` plus vertex-descriptor pipelines, per-slot
+samplers, vertex textures, the AIR compile calls and the Metal 4 command calls.
+[`bridge/UPSTREAM`](bridge/UPSTREAM) lists the changes.
+
+More depth:
+
+- [CONTEXT.md](CONTEXT.md) defines the terms used in code, issues and docs.
+- [docs/gpu-4k.md](docs/gpu-4k.md) analyses the GPU cost at 4K and the changes that cut it.
+- [docs/g1-early-commit.md](docs/g1-early-commit.md) describes how a mid-pass flush commits
+  earlier work without splitting the render pass.
+- [docs/state-cache.md](docs/state-cache.md) and
+  [docs/state-cache-journal.md](docs/state-cache-journal.md) cover the pipeline state cache.
+- [docs/pso-key-hash.md](docs/pso-key-hash.md) covers the pipeline key's hash.
+- [docs/adr/](docs/adr/index.md) holds the architecture decisions.
+- `docs/dev-notes/` has neo773's notes from v2's development. They are historical and not
+  maintained.
 
 ## Requirements
 
-- **Apple Silicon** Mac on **macOS 26 or later** (Metal 4). Only macOS 27
-  has been tested; see Known issues.
-- **Rosetta 2**: Wine's unix side, and with it `winemetal.so`, runs as
-  x86_64.
-- **A Wine engine with an x86_64 unix side and the winemac hooks DXMT's
-  bridge uses** (`macdrv_get_metal_layer`). Tested with the CrossOver 24.0.7
-  engine; engines of CrossOver-based wrappers should work. Vanilla upstream
-  Wine is untested. 32-bit games need 32-on-64 (wow64) support, as in
-  CrossOver.
-
-To build (see below): Homebrew `bash` (≥ 4.3), `mingw-w64` (i686 and
-x86_64), `cmake`, `ninja`, `python3`, Xcode Command Line Tools; optionally
-Xcode with the Metal Toolchain plus `glslang` and `spirv-cross` to regenerate
-the embedded metallibs.
+- An Apple silicon Mac on macOS 26 or later.
+- Rosetta 2, because Wine's unix side, and `winemetal.so` with it, runs as x86_64.
+- A Wine engine with an x86_64 unix side and the winemac hook DXMT's bridge uses,
+  `macdrv_get_metal_layer`. d9mt's testing uses the CrossOver 24.0.7 engine. Nobody has tested
+  upstream Wine. 32-bit games need 32-on-64 support, as CrossOver has.
 
 ## Build
 
-From the repo root. The scripts need bash ≥ 4.3 (`/bin/bash` 3.2 fails), so
-put Homebrew's first in `PATH`.
-
-LLVM and `winemetal.so` target macOS 26.0, whatever the SDK; set
-`MACOSX_DEPLOYMENT_TARGET` to change it. An LLVM built before this default
-(with the SDK's version) gives linker warnings: rebuild it. The embedded
-metallibs come in two builds: the SDK's newest Metal language (MSL 4.1 with
-Xcode 27) and a Compat build for that minimum. The driver loads the newest
-and falls back to Compat where Metal rejects it (MSL 4.1 on macOS 26).
+You need Homebrew `bash` 4.3 or newer, `mingw-w64` for i686 and x86_64, `cmake`, `ninja`,
+`python3` and the Xcode Command Line Tools. You need Xcode's Metal toolchain, `glslang` and
+`spirv-cross` only to regenerate the embedded metallibs. The build needs no DXVK or DXMT
+checkout and no Wine engine.
 
 ```bash
-export PATH="/opt/homebrew/bin:$PATH"
+export PATH="/opt/homebrew/bin:$PATH"   # the scripts fail under /bin/bash 3.2
 
-# 1. Fetch dxbc-spirv, pinned to c5c1a5b9, and apply patches/dxbc-spirv
-#    (-> third_party/dxbc-spirv). build-driver.sh refuses an unpatched copy.
-scripts/fetch-deps.sh
-
-# 2. Build LLVM 15.0.7 as static x86_64 libs (-> toolchains/llvm-x86_64).
-#    Once; a large clone and a long build.
-scripts/build-llvm-unixside.sh
-
-# 3. The bridge: winemetal.so (x86_64 Mach-O, includes the AIR compiler) and
-#    winemetal.dll for i386 and x86_64, marked as Wine builtins.
-scripts/build-bridge.sh
-
-# 4. The driver: build/driver-x64/d3d9.dll (64-bit games) and/or
-#    build/driver/d3d9.dll (32-bit games).
-ARCH=x64 scripts/build-driver.sh
-ARCH=x86 scripts/build-driver.sh
+scripts/fetch-deps.sh             # dxbc-spirv at c5c1a5b9 with patches/dxbc-spirv applied
+scripts/build-llvm-unixside.sh    # LLVM 15.0.7, static x86_64 libs; once, and slow
+scripts/build-bridge.sh           # winemetal.so with the AIR compiler, winemetal.dll i386 + x86_64
+ARCH=x64 scripts/build-driver.sh  # build/driver-x64/d3d9.dll for 64-bit games
+ARCH=x86 scripts/build-driver.sh  # build/driver/d3d9.dll for 32-bit games
 ```
 
-- No DXVK or DXMT checkout and no Wine engine are needed to build;
-  `driver/` and `bridge/` contain everything.
-- `build-driver.sh` regenerates `driver/d3d9/d3d9_ff_metallib.h` and
-  `driver/backend/mtl_blit_metallib.h` when their sources (or the script)
-  are newer and `xcrun metal`, `glslangValidator` and `spirv-cross` are
-  available; otherwise it keeps the committed headers. On Xcode 27 run
-  `xcodebuild -downloadComponent MetalToolchain` once. If `xcode-select`
-  points at the Command Line Tools, the script falls back to
-  `/Applications/Xcode.app`.
-- `D9MT_JOBS=<n>` (1–999) is the most compiles `build-driver.sh`,
-  `build-air-compiler.sh` and `build-d9mtair.sh` run at once (default 12, 10
-  and 10); `build-bridge.sh` passes it on to the `build-d9mtair.sh` it runs
-  (its own compiles run one at a time). `D9MT_JOBS=1`
-  compiles one file at a time and needs the least memory. The compiles and
-  the link order are the same for any value (`scripts/test-build-jobs.sh`).
-- `build-bridge.sh` ends with a smoke test that needs reference metallibs
-  from `scripts/build-air-compiler.sh` (Homebrew `llvm@15` and a SPIRV-Cross
-  checkout in `third_party/SPIRV-Cross`). Without them the test is skipped;
-  `SMOKE=0` skips it explicitly.
-- The driver and the bridge share an ABI: always rebuild and install them
-  together.
-- Two from-scratch builds of the same commit with the same toolchain give
-  byte-identical `d3d9.dll`, `winemetal.dll`, `d9mtair.dll`, `.a` and `.o`
-  files, wherever the checkout is: the PE links write no time stamp and use
-  fixed image bases, the archives carry no dates, and the import libraries
-  don't name the build directory. Check it with `shasum -a 256` over those
-  files of both builds (`build/driver-x64`, `build/driver`, `build/bridge`,
-  `build/airlib`).
-
-### Release binaries
-
-The checkout's path is mapped out of the binaries (`-ffile-prefix-map`; the
-debug info still names the toolchain's own build paths), but the driver is
-built with `-g` and is about 80 MB. Strip before installing or shipping:
-
-```bash
-x86_64-w64-mingw32-strip build/driver-x64/d3d9.dll
-i686-w64-mingw32-strip   build/driver/d3d9.dll
-strip -x build/bridge/winemetal.so
-```
-
-A binary release must carry the notices listed in
+The driver and the bridge share an ABI, so rebuild and install them together. Two builds of
+the same commit with the same toolchain give byte-identical binaries. The driver is about 80 MB
+with debug info, so strip it before shipping. A binary release must carry the notices in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-### Tests
+[docs/building.md](docs/building.md) covers the deployment target, the two metallib builds,
+`D9MT_JOBS`, the bridge's smoke test and the strip commands.
 
-Native unit tests (no Wine or GPU needed), from the repo root:
+## Install and run
 
-```bash
-scripts/run-native-tests.sh   # the 13 host clang++ tests in test/native/; never starts Wine
-scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
-```
+Use a copy of the Wine engine for d9mt. Its bridge replaces the engine's `winemetal`, and DXMT
+games stop working on that engine. Don't modify `/Applications/CrossOver.app` itself. It is
+code-signed, and updates overwrite it.
 
-`scripts/run-native-tests.sh` builds and runs every `test/native/*_test.cpp` that
-needs only the host's clang++ (each source's first lines give its own command), and
-names the runner of each of the other six: `state_cache_test`
-(`scripts/test-state-cache.sh`), `pso_key_hash_test` (`scripts/test-pso-key-hash.sh`),
-`upload_copy_test` (`scripts/test-upload-copy.sh`), and `lifetime_check_test`,
-`submission_retire_test` and `submission_tracker_test`, which are mingw programs run
-by hand under Wine (the build line is in each source). A test in neither list fails
-the run, and so does any failing or unbuildable test (exit status 1).
-
-`scripts/test-state-cache.sh` runs the pipeline state cache tests (file
-format, corruption, versions, cap, record → load → prewarm with a fake
-backend), plain and under ThreadSanitizer, plus the render-thread cost of
-recording; it needs DXVK's native headers like `test-compile-mt.sh`.
-`scripts/run-statecache-bench.sh` runs `test/code_statecache.c`, a synthetic
-SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
-directory.
-
-`scripts/test-air-versions.sh` (after `scripts/build-bridge.sh`; needs Xcode's
-metal toolchain) compiles the AIR corpus through d9mtair for macOS 26, for
-macOS 27 and for this Mac (`D9MT_AIR_MACOS`). For macOS 26 each runtime
-metallib's OS version and VERS tags must equal what Apple's `metallib` writes
-for the same bitcode (a newer VERS makes Metal reject every game shader); for
-macOS 27 they keep AIR 2.9, and nothing else differs.
-
-`scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
-patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
-`ENGINE=<engine with this build's bridge> [FRAMEWORKS=<dir>] [WORK=<scratch dir>]
-scripts/sm3_hazard_test.py build/driver-x64/d3d9.dll [<dir of .asm/.bin>...]`
-(corpora from `scripts/sm3_corpus.py gen`). `scripts/sm3_ref_test.py` (same
-environment) renders `crs`/`setp` with every write mask, modifier and
-predicate and packed I/O declarations on the GPU and compares the results
-with a scalar model of the D3D9 semantics; `--strict` uses
-`d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
-every corpus `crs` against a `mul`/`mul`/`add` expansion.
-
-`scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
-ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
-and `scripts/dump-verify.sh` drive the D3D9 test programs in `test/` under a
-CrossOver bottle (`CX` and `BOTTLE` must be set).
-
-`scripts/run-hang-test.sh` is the profiling/debug regression test: it runs
-`test/code_mtlock.c` (a render thread presenting frames while a second thread
-locks managed textures, on a device without `D3DCREATE_MULTITHREADED`, as
-SWTOR does) with `D9MT_PROFILE`, `D9MT_MEMSTATS`, `DXVK_LOG_LEVEL=info` and a
-`D9MT_DEBUG_FILE` flags file, in a throwaway prefix, and fails if a run doesn't
-finish within the timeout:
-
-```bash
-ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
-```
-
-The benchmarks are in `test/perf/` (bindbench, perdrawbench, churnbench,
-psobench, bench_draws, bench_upload, bench_getdata, bench_fps_cap) and
-`test/bench_4k.c`; `scripts/build-benches.sh` builds them, and
-[PERFORMANCE.md](PERFORMANCE.md) §3 describes each. The hash suite's runner is
-not on `main` yet (CONTRIBUTING, *Definition of Done*).
-
-### Performance
-
-Nothing measurably slower merges. [PERFORMANCE.md](PERFORMANCE.md) is the binding guide: how to
-measure (quiet window, uncapped, paired rounds, layout controls), the benchmarks, the `D9MT_PROFILE`
-diagnostics and the design rules for the hot path. How to contribute:
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Install & run
-
-> **Use a dedicated Wine engine copy.** d9mt's `winemetal` replaces the
-> engine's builtin `winemetal`, which DXMT (D3D10/11) also uses. **DXMT
-> games stop working on that engine.** Don't modify
-> `/Applications/CrossOver.app` itself: updates overwrite it and it is
-> code-signed.
-
-1. **Copy a Wine engine**, e.g. CrossOver's
-   `Contents/SharedSupport/CrossOver` or your wrapper's engine folder. Call
-   it `$ENGINE`.
-
-2. **Install the bridge into the engine** (originals are kept as
-   `*.cx-orig`; `--restore` puts them back):
+1. Copy a Wine engine, for example CrossOver's `Contents/SharedSupport/CrossOver`, and call the
+   copy `$ENGINE`.
+2. Install the bridge into it. The script keeps the originals as `*.cx-orig`, and `--restore`
+   puts them back.
 
    ```bash
    CX="$ENGINE" scripts/install-bridge-builtins.sh
    ```
 
-   which copies `build/bridge/winemetal.so` to `lib/wine/x86_64-unix/`,
-   `build/bridge/winemetal64.dll` to `lib/wine/x86_64-windows/winemetal.dll`
-   and `build/bridge/winemetal32.dll` to `lib/wine/i386-windows/winemetal.dll`.
-
-3. **Deploy the driver as `d3d9.dll`**: next to the game's `.exe`, or into
-   the prefix (`drive_c/windows/system32/` for a 64-bit game,
-   `drive_c/windows/syswow64/` for a 32-bit one).
+3. Put the driver next to the game's `.exe` as `d3d9.dll`. The prefix's
+   `drive_c/windows/system32/` works for a 64-bit game and `drive_c/windows/syswow64/` for a
+   32-bit one.
 
    ```bash
    cp build/driver-x64/d3d9.dll "$GAME_DIR/d3d9.dll"   # 64-bit game
    cp build/driver/d3d9.dll     "$GAME_DIR/d3d9.dll"   # 32-bit game
    ```
 
-4. **Launch** with `d3d9` overridden to the native (our) DLL, using the
-   engine from step 1:
+4. Launch with `d3d9` overridden to the native DLL, using the engine from step 1.
 
    ```bash
    WINEDLLOVERRIDES="d3d9=n,b" "$ENGINE/bin/wine" --bottle "My Game" \
      start /unix "$GAME_DIR/YourGame.exe"
    ```
 
-   `--bottle` is CrossOver's; with plain Wine set `WINEPREFIX` instead. The
-   override can also go in `winecfg` → Libraries or your wrapper's DLL
-   override setting.
+   `--bottle` is CrossOver's option. With plain Wine, set `WINEPREFIX` instead. The override
+   can also go in `winecfg` under Libraries, or in a wrapper's DLL override setting.
 
-To check that it's active, set `DXVK_LOG_PATH=<dir>` and look for
-`<game>_d3d9.log`, or enable the Metal HUD (`MTL_HUD_ENABLED=1`).
+To check that d9mt is active, set `DXVK_LOG_PATH=<dir>` and look for `<game>_d3d9.log`, or turn
+on the Metal HUD with `MTL_HUD_ENABLED=1`.
 
 ## Configuration
 
-d9mt reads DXVK-style configuration: `dxvk.conf` next to the game's `.exe`
-(or the file in `DXVK_CONFIG_FILE`), with environment variables taking
-priority where both exist. Under CrossOver, environment variables reach the
-game only through the bottle's `cxbottle.conf` (`[EnvironmentVariables]`),
-not through a shell `export`.
+d9mt reads DXVK's `dxvk.conf` next to the game's `.exe`, or the file `DXVK_CONFIG_FILE` names.
+Environment variables take priority where both exist. Under CrossOver, environment variables
+reach the game only through the bottle's `cxbottle.conf`, not through a shell `export`.
 
-### `dxvk.conf` options
+[docs/configuration.md](docs/configuration.md) lists every option and variable: memory
+profiles, the pipeline wait budget, the attachment load/store optimization, the caches, the
+frame cap, the GPU canary and the diagnostic switches such as `D9MT_PROFILE`.
 
-The D3D9 options of DXVK's front-end apply (`d3d9.*`, `dxvk.maxFrameRate`,
-...). Options added or worth knowing:
+## Tests
 
-| Option | Default | Effect |
-|---|---|---|
-| `d3d9.presentInterval` | `-1` (the game decides) | `1` forces vsync, e.g. for games that request immediate present in borderless mode and tear |
-| `d3d9.maxFrameRate` / `dxvk.maxFrameRate` | `0` (off) | frame-rate cap |
-| `d3d9.maxAvailableMemory` | `-1` (= the memory profile's value) | video memory (MB) reported to the game |
-| `d3d9.allowOutOfRangeVsDefs` | `False` | accept hardware vertex shaders whose only float constants ≥ 256 are `def` immediates (advanced) |
-| `d9mt.memoryProfile` | `auto` | `auto`, `low`, `medium`, `high`, `ultra` or `unlimited` (see below); env `D9MT_MEMORY_PROFILE` |
-| `d9mt.reportedVramMB` | per profile | video memory reported when `d3d9.maxAvailableMemory` is unset |
-| `d9mt.memoryBudgetMB` | per profile | soft Metal budget; currently only logged |
-| `d9mt.writeOnlyDirect` | `True` (`False` in `unlimited`) | map DEFAULT-pool WRITEONLY buffers directly, like upstream DXVK; env `D9MT_WRITEONLY_DIRECT` |
-| `d9mt.writeOnlyDemoteLocks` | `2` (`0` in `unlimited`) | a directly mapped buffer locked in place more often than this goes back to a staging copy; `0` = never; env `D9MT_WRITEONLY_DEMOTE` |
-| `d9mt.memoryStats` | `False` | log a `DIAG MEM` line every 256 frames; env `D9MT_MEMSTATS` (`1`, or a frame interval ≥ 16) |
-| `d9mt.resourceLabels` | `False` | label Metal resources for Xcode's GPU tools; env `D9MT_LABELS` |
-| `d9mt.pipelineWaitBudgetMs` | `-1` (off: wait as long as it takes) | most the render thread waits per frame for shaders/pipelines still compiling before it skips the draws that need them (see below); `0` = never wait (= `D9MT_ASYNC_SKIP=1`); max `10000`; env `D9MT_PSO_WAIT_MS` |
-| `d9mt.attachmentOpt` | `True` | attachment load/store optimization (see below); `D9MT_NO_ATTACHMENT_OPT=1` turns it off |
-| `d9mt.stateCache` | `True` | pipeline state cache: record the pipelines the game uses, rebuild them in the background in later sessions ([docs/state-cache.md](docs/state-cache.md)); `D9MT_STATE_CACHE=0` turns it off too |
+The hash suite is the correctness gate of every pull request. Each D3D9 test program in
+`test/code_*.c` renders five frames, and the frame hashes must equal the base commit's, also
+under the Metal API validation layer and `D9MT_LIFETIME_CHECK=1`. Its runner is on the branch
+`chore/test-runner` and not on `main` yet.
 
-**Memory profiles.** `auto` picks by installed RAM: up to 8 GB `low`, up
-to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
-`unlimited`. The tiers set the reported video memory (`low` 2 GB, `medium`
-3 GB, otherwise 4 GB) and how much the driver keeps pooled
-(staging blocks, staging bytes in flight, spare buffer backings, idle
-upload-ring chunks, command allocators). `unlimited` behaves like the driver
-before profiles existed and is meant for A/B comparisons.
+The native unit tests need no Wine and no GPU:
 
-**Pipeline wait budget.** When a draw needs a shader or pipeline that is
-still compiling on the worker threads, the render thread waits for it by
-default: no draw is ever missing, but a slow compile is a hitch.
-`D9MT_ASYNC_SKIP=1` never waits and skips such draws instead: no hitch, but
-objects pop in a few frames late. `d9mt.pipelineWaitBudgetMs = N` sits in
-between: the render thread waits for pending compiles, but at most N ms per
-frame in total (each wait gets what is left of the frame's N ms, so many
-pending pipelines can't stack up their waits). Draws whose compile isn't done
-when the budget runs out are skipped for that frame, as with
-`D9MT_ASYNC_SKIP`; the compile carries on and the draws come back once it is
-done. Most compiles finish within a few ms and are still waited for; only
-the rare slow one is skipped, so a budget of e.g. `30` caps compile hitches
-at about 30 ms in exchange for occasional brief pop-in. While a draw is
-skipped, occlusion queries that cover it count fewer samples. Clears and
-blits are never skipped (their pipelines are built on the spot). `D9MT_ASYNC_SKIP=1` takes
-precedence and acts as a budget of `0`; without compile workers
-(`D9MT_COMPILE_THREADS=0`) the budget is ignored. With `D9MT_PROFILE`, the
-`COMPILE` and `HITCH` lines count skipped draws (`skipped=`) and waits cut
-short by the budget (`budgetHit=`).
+```bash
+scripts/run-native-tests.sh   # the 13 host clang++ tests in test/native/
+scripts/test-upload-copy.sh   # UploadPerDrawData's clamp and copy under ASan/UBSan
+```
 
-**Attachment load/store optimization.** A Metal render pass loads each
-attachment from memory when it starts and stores it when it ends. d9mt
-creates a pass's encoder only when the pass ends, so it knows what the pass
-did, and it tracks for each single-subresource attachment image whether its
-contents are a known clear value:
+`scripts/run-native-tests.sh` names the runner of each test it skips, and a test it doesn't know
+fails the run. The state cache and compile-path tests also run under ThreadSanitizer.
+[docs/testing.md](docs/testing.md) describes every runner, including the SM3 shader tests, the
+AIR version test and the hang test under Wine.
 
-- An attachment that holds a known clear (from creation or a clear) is
-  Clear-loaded instead of read from memory.
-- If no draw of the pass writes it and nothing samples it during the pass,
-  its store is skipped. Its contents are still the clear value: the next pass
-  Clear-loads it, and any other reader (sampling, copies, blits, resolves,
-  readbacks, Present) gets it by a re-clear first (`restore` in `STATS`).
-  Sampling reads only the view's aspects: a depth-stencil texture sampled as a
-  shadow map or INTZ (depth) doesn't need its unstored stencil clear.
-- Once a reader has needed such a clear (a target cleared every frame and
-  sampled or copied later in the frame), the passes of the next 8 frames store
-  it as before instead of leaving it to a re-clear; the hint lapses when the
-  reads stop.
-- A pass without draws whose clears needn't be stored gets no encoder at all;
-  the clear moves into the next pass's load action.
-- An MSAA color resolve (StretchRect) right after the pass that rendered the
-  source becomes that pass's `StoreAndMultisampleResolve`, instead of a pass
-  of its own that loads every sample again.
-- With `D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL`, the pass still rendering into
-  the auto depth-stencil at Present doesn't store it, and the next pass
-  doesn't load it (wined3d discards it too).
+## Performance
 
-Everything else is loaded and stored as before. Written contents are never
-dropped: when a pass ends, nothing tells whether a later pass needs them
-(only `D9MT_DEFERRED`'s whole-frame rules can). In SWTOR this removes the
-load and store of the 2048² R32F color target that its shadow passes bind with
-color writes off, about 32 MB per shadow pass. Memoryless textures aren't
-used: D3D9 surfaces outlive the pass. `no_attach_opt` in the
-`D9MT_DEBUG_FILE` flags switches back to the previous actions live, for A/B
-tests; `att_trace` logs the decisions and the restores. With `D9MT_PROFILE`, a
-`RESTORE` line follows each second's `STATS` line when there were restores:
-the most frequent images (Metal format, size, aspects re-cleared), why (`sample`,
-`copy`, `blit`, `resolve`, `readback`, `partial-clear`, ...) and the D3D9 call
-they came from, e.g. `120x 2048x2048 Depth32Float_Stencil8 s sample@Draw`;
-`RESTORE-SUMMARY` has the session's totals when the device is destroyed. `D9MT_DEFERRED` turns it off (deferred
-passes have their own load/store rules).
+Correctness on every supported Mac comes first, and nothing measurably slower merges
+([ADR-0005](docs/adr/0005-correctness-first-speed-proven.md)). [PERFORMANCE.md](PERFORMANCE.md)
+is the method: paired ABBA rounds against a byte-identical control in a quiet window, a
+code-layout control, the benchmarks in `test/perf/` and the `D9MT_PROFILE` diagnostics.
 
-### Environment variables
+## Contributing
 
-| Variable | Default | Effect |
-|---|---|---|
-| `D9MT_AIR_CACHE` | on | persistent compiled-shader cache (`<user cache dir>/d9mt/air-cache.sqlite3`); `0` turns it off, a path relocates it |
-| `D9MT_PSO_ARCHIVE` / `D9MT_PSO_ARCHIVE_DIR` | on | Metal 4 pipeline archives in `<user cache dir>/d9mt/pso/` (last 8 sessions); `0` turns them off, `_DIR` relocates them |
-| `D9MT_STATE_CACHE` | `~/Library/Caches/d9mt/state/<exe>.d9mtstate` | pipeline state cache file; `0` turns the cache off, a Unix directory or `.d9mtstate` file path relocates it. Launchers should set it to `"$(getconf DARWIN_USER_CACHE_DIR)d9mt/state"`, next to the AIR cache and PSO archives. Without it, d9mt uses that dir if Wine passes `TMPDIR` (CrossOver's doesn't), else `~/Library/Caches/d9mt/state` (home from `WINEHOMEDIR`), else the cache stays off (logged) |
-| `D9MT_STATE_CACHE_MAX` | `1024` | most pipelines kept per game (least recently used dropped first), `64`–`16384`; every session's PSO archive holds every prewarmed pipeline, ≈ 45 KB each |
-| `D9MT_STATE_CACHE_THREADS` | `2` | background prewarm threads (lowest priority, the second one only for long queues), `0`–`4`; `0` records and loads but never prewarms |
-| `D9MT_COMPILE_THREADS` | `min(4, cores/2)` | shader/pipeline compile worker threads; `0` compiles on first use |
-| `D9MT_COMPILE_MAXCONC` | `0` | `1` asks Metal at device creation to maximize concurrent pipeline compilation (`MTLDevice.shouldMaximizeConcurrentCompilation`): more of Metal's own compiler threads, which can compete with the game on Macs with few performance cores. A scheduling request, not guaranteed parallelism; an A/B switch. Independent of `D9MT_COMPILE_THREADS` |
-| `D9MT_PS_PREFETCH` | `1` | compile pixel shaders at creation; `0` waits until a draw needs them |
-| `D9MT_ASYNC_SKIP` | off | `1` skips draws whose pipeline isn't ready yet: less stutter, brief pop-in; overrides `D9MT_PSO_WAIT_MS` |
-| `D9MT_PSO_WAIT_MS` | off | wait at most this many ms per frame for pending pipelines, then skip (see `d9mt.pipelineWaitBudgetMs`); `off` or `-1` overrides a `dxvk.conf` value |
-| `D9MT_GPU_CANARY` | on | `0` turns off the GPU canary: three cases mark a command buffer's slot: a present copy into the drawable marks it in its own encoder; a present that isn't a copy (a scaled blit, MetalFX) gets a marking encoder of its own every frame; a command buffer that doesn't present gets one on every 4th, and only if no canary ran for 250 ms (`driver/backend/mtl_canary_gate.h`). The mark goes into the command buffer's slot in a 16 KiB buffer; a command buffer that completed without its mark was discarded by the GPU (after a page fault: always the command buffers queued after it, the faulting one if the fault came before the mark); `D9MT-GPU-CANARY: on` once the first mark arrived (or `off` and why), so a log shows the canary worked and is a `D9MT-GPU-LOST` line in the log (the first 20, then a summary at most every 10 s, and the session's total). macOS itself only logs `IOGPUMetalError` in its unified log |
-| `D9MT_NO_ATTACHMENT_OPT` | off | `1` turns the attachment load/store optimization off (see `d9mt.attachmentOpt`) |
-| `D9MT_FLUSH_CAP` | `0` | `1` caps the heuristic flushes at strong hints, as upstream DXVK does on tiling GPUs: a full CS chunk and the other weak hints no longer submit a command buffer mid-frame. An A/B switch, read at device creation; `d3d9.reproducibleCommandStream` takes precedence ([`docs/g1-early-commit.md`](docs/g1-early-commit.md) §7) |
-| `D9MT_FPS_CAP` | off | frame rate cap with even frame times (`20`–`1000`), for heat and battery: with vsync and a cap that divides the refresh rate (30 at 60 Hz; 30, 40, 60 at 120 Hz) every frame stays on screen for the same number of refreshes (`presentAfterMinimumDuration`); otherwise (40, 45 at 60 Hz, or vsync off) an exact timer, frames then shown for uneven numbers of refreshes at 60 Hz; at or above the refresh rate with vsync, nothing (vsync caps already). Logs a `frame cap` line. Takes over from `d3d9.maxFrameRate` while it caps ([`driver/d3d9/d3d9_frame_cap.h`](driver/d3d9/d3d9_frame_cap.h)) |
-| `D9MT_FPS_CAP_ALIGN` / `D9MT_FPS_CAP_SPIN_US` | on / `200` | `0`: the cap's timer only, no vsync alignment; the least time the cap's and the background throttle's sleep spin before the deadline (more while the system's sleep oversleeps, at most 4 ms) |
-| `D9MT_BG_FPS` / `D9MT_BG_FPS_MINIMIZED` | `30` / `10` | the background throttle: the rate Present sleeps to while the window is hidden / minimized; `0` turns it off |
-| `D9MT_DRAWABLE_TIMEOUT_MS` | max(3 frames, 50 ms) | longest wait for a drawable before a present is skipped |
-| `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
-| `D9MT_METALFX` | off | MetalFX spatial upscaling at present. **Currently broken** (selector bug; fix pending) |
-| `D9MT_MEMORY_PROFILE`, `D9MT_WRITEONLY_DIRECT`, `D9MT_WRITEONLY_DEMOTE`, `D9MT_MEMSTATS`, `D9MT_LABELS` | | see the `dxvk.conf` table |
-| `DXVK_LOG_PATH`, `DXVK_LOG_LEVEL` | none, `info` | log directory and verbosity, as in DXVK |
-
-<details><summary>Developer and diagnostic switches</summary>
-
-| Variable | Effect |
-|---|---|
-| `D9MT_PROFILE` | per-frame timing lines (`PSOBUILD`, `AIRCOMPILE`, compile counters), `HITCH` lines that attribute frames longer than `D9MT_HITCH_MS` (default 50) to d9mt or to the game, and a `STATS` line every second: fps, Present-to-Present frame time (avg/p99/max, frames over 33 and 50 ms), per-frame render passes, skipped passes, command buffers, draws, attachment loads/stores and the estimated attachment traffic saved, the render thread's CPU time in the attachment optimization (`attMs`, ms per second) and clears folded into a pass or given one of their own, compiles and render-thread compile waits, Metal's allocated MiB (fields: `driver/d3d9/d3d9_stats.h`), plus a `RESTORE` line in seconds with attachment restores and `RESTORE-SUMMARY` at device destruction (`driver/mtl/mtl_restore_stats.h`), and a `PACE` line every second: the interval between the game's Present calls (min/avg/max, standard deviation) and the Present thread's time per frame inside d9mt (and how much of it is waiting, the cap's sleep included) and outside it, with its CPU time per second split into d9mt's and the game's own (`driver/d3d9/d3d9_pace.h`). No GPU time: MTL4 command buffers don't report it |
-| `D9MT_TRACE` | verbose trace lines |
-| `D9MT_LIFETIME_CHECK` | `1`: a texture d9mt releases before the GPU is past the last command buffer that uses it (sampled, attachment, copy) is a `D9MT-LIFETIME` line and an abort, on any Mac, without needing the GPU to fault; `log`: the lines only (the first 100, then every 1000th). A drawable's texture (Core Animation holds it too) is logged as `D9MT-LIFETIME drawable`, never aborts (`driver/backend/mtl_lifetime.h`) |
-| `D9MT_UNWRITTEN_NULL` | `0`: a DEFAULT 2D texture nothing has written yet is sampled as it is (undefined memory, losslessly compressed) instead of as the null texture (zero) until its first write; for A/B. The first 8 such binds are `D9MT-UNWRITTEN` lines |
-| `D9MT_GPU_CANARY_TEST_FAULT` | `<n>`: the n-th armed mark is written far outside the canary buffer, which Metal drops, so the mark stays unwritten: tests the `D9MT-GPU-LOST` detection (not a GPU fault). Tests only |
-| `D9MT_GPU_HUNG` | `continue`: a command buffer the GPU never finishes (a submitted serial not signalled for 10 s it spent submitted) only gives up the wait, and the game renders on, as before. By default that ends the game: the GPU stopped and its queue doesn't recover, so rendering on left the game frozen with its GPU context alive (and, once, the process running past a WindowServer crash and logout). A `D9MT-GPU-HUNG` line names the serial (on stderr even with `DXVK_LOG_LEVEL=none`), no further wait on an unfinished serial returns, and the process exits with code 0xD9D9 |
-| `D9MT_WSILOG` | window-system / presenter log (bridge, stderr) |
-| `D9MT_DEBUG_FILE=<Windows path>` | live debug flags file, polled once a second: `occ_visible`, `occ_trace`, `occ_sync`, `no_scissor`, `no_depthbias`, `cull_none`, `depth_clamp`, `no_ztest_blended`, `no_sameview_skip`, `no_clipplanes`, `bools_off`, `no_attach_opt` (previous attachment load/store actions), `att_trace` (log up to 400 render-pass load/store decisions and restores each time it's set), and `dump` to dump the next frame's draws. Off unless set |
-| `D9MT_SHADER_DUMP_PATH=<Windows dir>` | disassembly of vertex shaders rejected (or accepted via `d3d9.allowOutOfRangeVsDefs`) for using more than 256 float constants. Off unless set |
-| `D9MT_AIR_ERRLOG=<host path>` | append the AIR compiler's reason for rejecting a shader. Off unless set |
-| `D9MT_AIR_MACOS=<major>` | the macOS version the AIR compiler tags its metallibs for (below 27: the bitcode's AIR version; 27 and later: AIR 2.9), instead of this Mac's (a value that isn't a version gives the bitcode's AIR version). The choice is logged once (`d9mt: AIR metallibs tagged for macOS …`). Tests only |
-| `D9MT_DUMP_TRIGGER=1` | backbuffer dump for the test scripts (`C:/d9mt-test/DUMP` trigger) |
-| `D9MT_GPUCAPTURE=<n>\|trigger`, `D9MT_GPUCAPTURE_COMMITS` | Xcode GPU trace to `/tmp/d9mt.gputrace` |
-| `D9MT_PSO_FLUSH_EVERY` | pipelines between archive flushes (default 256) |
-| `D9MT_PSO_ASYNC_FLUSH` | `1`: the pipeline archive is flushed by its own thread at a quiet moment (`D9MT_PSO_FLUSH_EVERY` pipelines pending and no build for 2 s, anything pending and no build for 10 s, or between two builds once a flush is 60 s overdue: new builds then hold off until the flush has the lock), not by the build that made it due (#11), and not at exit; pipelines built in a session's last 10 s aren't saved. A build that arrives during a flush still waits for it. `0` (the default): the build that makes a flush due writes it, and once at exit |
-| `D9MT_PSO_FLUSH_FORCE_MS=<n>` | with `D9MT_PSO_ASYNC_FLUSH=1`: the deadline after which an overdue archive flush goes between two builds, in ms (default 60000). Tests only (`scripts/test-compile-mt.sh`) |
-| `D9MT_STATE_CACHE_TEST_NO_VALIDATE=1`, `D9MT_STATE_CACHE_TEST_FAIL_PREWARM=1` | test builds only (`STATE_CACHE_TESTING=1 scripts/build-driver.sh`): skip the state cache's content validation to test its crash-loop guard with a real Metal crash (`scripts/forge-statecache.py`); make prewarm builds fail after 150 ms |
-| `STATECACHE` log lines (info) | `load` (file, entries, how many can be prewarmed, `invalid=` entries dropped by content validation, a warning if the last session ended during prewarm builds (crash, kill, or exit without releasing the device): only the entries in flight then are dropped), `prewarm` (each time the background queue drains: built, already built by a draw, failed, time paused for the render thread), `use` (every 60 s and at the end: PSO misses served by a finished prewarm `hits`, by a still-building one `late`, not prewarmed `misses`, new records, the build time the hits saved, `boosts`: prewarm threads raised to normal priority for a late hit), `write` |
-| `D9MT_DEFERRED`, `D9MT_XFER_HOIST` | experimental: deferred render passes; hoisting vertex/index uploads into an earlier command buffer |
-| `D9MT_EARLY_COMMIT`, `D9MT_EARLY_COMMIT_MIN_MIB` | G1 ([docs/g1-early-commit.md](docs/g1-early-commit.md)): a heuristic flush inside a pass commits the work before it and keeps the pass open, while the GPU is on an earlier frame and the pass's attachments sum to at least `_MIN_MIB` (default `8`). On with the attachment optimization and without `D9MT_DEFERRED`. Exactly `0` turns it off; exactly `always` drops the backlog gate (hang tests and the hash suite of a submission-path change, CONTRIBUTING); any other value, empty included, leaves the default. `_MIN_MIB` set and not empty is read with `strtoull` base 10: leading whitespace and an optional sign are accepted, the decimal integer prefix is consumed (`8junk` and ` +8` are 8, `1.5` is 1, `-1` wraps to the largest unsigned value before the shift to bytes), and text with no number is `0`; unset or empty keeps `8`. Read when the device's context is created; the choice is logged |
-| `D9MT_PASS_BARRIER` | exactly `all`: every pass ends with the barrier before all stages, as before #18's narrowing; any other value leaves the narrow barrier (before Fragment\|Blit\|Dispatch, vertex fences for vertex textures). Without the attachment optimization the barrier is always before all stages. Read when the device's context is created; logged |
-| `D9MT_CLEAR_DISCARD` | exactly `0`: a clear that ends a pass keeps the pass's stores; any other value, empty included, leaves the store-skip on. Only with the attachment optimization. Read when the device's context is created; logged |
-| `D9MT_TEX_PFV` | a value starting with `1`: `PixelFormatView` on every texture, which turns lossless compression off (by default only block-compressed textures get it); anything else, `0` and empty included, leaves the default. Read once per process; logged |
-| `D9MT_NO_SAMEVIEW_SKIP`, `D9MT_NO_PSOMRU`, `D9MT_NOPSOCACHE`, `D9MT_NO_PASSMERGE`, `D9MT_NO_RULE_{B,C,E,F}`, `D9MT_NOCOLORCLEAR`, `D9MT_NO_AB`, `D9MT_RTSKIP`, `D9MT_STALL_PACE=0` | A/B escape hatches that turn individual optimizations off |
-| `PROFILE_INSTRUMENT=1` (build) + `D9MT_PROFILE_INSTRUMENT=1` | per-function CPU profiler build |
-
-</details>
-
-## Known issues
-
-- **Conflicts with DXMT on the same engine.** The bridge replaces the
-  engine's `winemetal`; DXMT's D3D10/11 entry points are stubbed out and
-  the render-pass struct has grown, so D3D10/11 games using DXMT break or
-  crash on that engine. Use a dedicated engine copy until the bridge gets
-  its own module name.
-- **Driver and bridge must come from the same build.** There is no version
-  handshake; mixing them can crash.
-- **MetalFX upscaling** (`D9MT_METALFX`) is broken (selector bug); a fix is
-  pending.
-- **First-time stutter** in new areas while shaders and pipelines compile.
-  Compiles run on worker threads and are cached on disk, so later visits are
-  smoother. `D9MT_ASYNC_SKIP=1` trades stutter for pop-in;
-  `d9mt.pipelineWaitBudgetMs` caps the stutter and only skips what takes
-  longer.
-- **The disk caches have no size cap**, except the state cache (1024
-  pipelines per game, ≈ 390 KB). The AIR cache is one sqlite file
-  shared by all games (entries from other driver builds are dropped); the
-  pipeline archives keep the last 8 sessions.
-- **macOS 26 is barely tested.** Before the Compat metallibs (see Build),
-  builds with Xcode 27 embedded only MSL 4.1 metallibs, which Metal on
-  macOS 26 rejects ("language version 4.1 … not supported"): a black
-  screen. Checked on 26.6.2 in a VM, whose paravirtual GPU has no Metal 4,
-  so d9mt itself can't run there. The AIR compiler's metallibs were tagged
-  AIR 2.9 (macOS 27's) until #109, so macOS 26 rejected every game shader
-  (black after the first loading screen, seen on a 26.6.2 M4). Before macOS
-  27 they now carry their bitcode's AIR 2.7; macOS 27 keeps 2.9, so its
-  shader caches stay valid.
-- **Gamma ramps** (`SetGammaRamp`, used by some brightness sliders) are
-  ignored.
-- **Not implemented or unverified**, from code review: instance divisors
-  > 1, indexed triangle fans, stride-0 vertex streams, and hardware vertex
-  shaders that address more than 256 float constants (rejected, as in
-  DXVK; see `d3d9.allowOutOfRangeVsDefs`).
-
-## How it works (deeper)
-
-- The D3D9 front-end in `driver/d3d9` is DXVK's, extracted and with Vulkan
-  removed (`driver/EXTRACTION-LOG.md`, `driver/UPSTREAM`). It tracks all
-  D3D9 state and records work through DXVK's command-stream thread into a
-  Metal seam (`driver/mtl`).
-- The backend (`driver/backend`) implements that seam on Metal 4: argument
-  tables, residency sets, MTL4 command buffers and allocators, render and
-  compute encoders, MTL4 pipeline compilation, the upload ring and
-  presentation to the window's `CAMetalLayer`.
-- Shaders: the game's DXSO bytecode is parsed by dxbc-spirv's `sm3`
-  front-end into dxbc-spirv's IR in `d3d9.dll`, serialized and passed
-  through the bridge. On Wine's unix side, `airlib`/`air` lower the IR to
-  AIR (LLVM 15 bitcode) and wrap it in a metallib, which Metal loads
-  directly. Results are cached in the AIR cache.
-- The bridge (`bridge/`) is DXMT's `winemetal` with additions
-  (`bridge/UPSTREAM`): vertex-descriptor pipelines, per-slot samplers and
-  vertex textures, the AIR compile calls and the full Metal 4 command
-  surface, plus persistent pipeline archives.
-- The pipeline state cache (`driver/mtl/mtl_state_cache*`) lives entirely in
-  `d3d9.dll`: it records D3D9-side shader identities plus the derived
-  pipeline key, and rebuilds through the same compile path as a draw
-  ([docs/state-cache.md](docs/state-cache.md)).
-- `docs/dev-notes/` has neo773's design notes and research from v2's
-  development (historical, not maintained).
+[CONTRIBUTING.md](CONTRIBUTING.md) has the issue and pull request format and the Definition of
+Done. Read [CONTEXT.md](CONTEXT.md) and the [ADRs](docs/adr/index.md) first.
 
 ## Credits
 
-- **[neo773](https://github.com/neo773)**: author of
-  [d9mt](https://github.com/neo773/d9mt) and
-  [d9mt-v2](https://github.com/neo773/d9mt-v2): the Metal 4 backend, the
-  AIR shader compiler, the bridge extensions and the DXVK extraction this
-  fork is built on.
-- **[DXVK](https://github.com/doitsujin/dxvk)** (Philip Rebohle, Joshua
-  Ashton and contributors): the D3D9 front-end and its fixed-function
-  shaders.
-- **[DXMT](https://github.com/3Shain/dxmt)** (Feifan He / CodeWeavers): the
-  `winemetal` bridge that carries Metal calls across Wine's PE/unix
-  boundary.
-- **[dxbc-spirv](https://github.com/doitsujin/dxbc-spirv)** (Philip
-  Rebohle): the shader bytecode parser and IR.
-- **[LLVM](https://llvm.org)**: bitcode writing for AIR.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** and
-  **[glslang](https://github.com/KhronosGroup/glslang)**: build-time
-  conversion of the fixed-function shaders.
-- **Wine** and **CodeWeavers**: the platform all of this runs on.
-- Fork maintenance, x64, memory and rendering work: Jan Drlý.
+- [neo773](https://github.com/neo773) wrote [d9mt](https://github.com/neo773/d9mt) and
+  [d9mt-v2](https://github.com/neo773/d9mt-v2): the Metal 4 backend, the AIR shader compiler,
+  the bridge extensions and the DXVK extraction this fork builds on.
+- [DXVK](https://github.com/doitsujin/dxvk), by Philip Rebohle, Joshua Ashton and contributors,
+  provides the D3D9 front-end and its fixed-function shaders.
+- [DXMT](https://github.com/3Shain/dxmt), by Feifan He for CodeWeavers, provides the
+  `winemetal` bridge that carries Metal calls across Wine's PE/unix boundary.
+- [dxbc-spirv](https://github.com/doitsujin/dxbc-spirv), by Philip Rebohle, parses the shader
+  bytecode into its IR.
+- [LLVM](https://llvm.org) writes the AIR bitcode.
+- [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) and
+  [glslang](https://github.com/KhronosGroup/glslang) convert the fixed-function shaders at build
+  time.
+- Wine and CodeWeavers make the platform all of this runs on.
+- Jan Drlý maintains the fork and did the x64, memory and rendering work.
 
 ## License
 
-See the licenses of the third-party components in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
-[`LICENSES/`](LICENSES/). d9mt's own code follows suit:
+d9mt's own code and the DXVK-derived driver are under the zlib/libpng license
+([LICENSE](LICENSE)), DXVK's license, with DXVK's copyright notice kept. `driver/` is an
+altered version of DXVK, not the original.
 
-- d9mt's own code and the DXVK-derived driver are under the **zlib/libpng
-  license** ([`LICENSE`](LICENSE)), DXVK's license, with DXVK's copyright
-  notice kept. `driver/` is an altered version of DXVK, not the original.
-- The **winemetal bridge** in `bridge/` follows DXMT and is under the **GNU
-  LGPL 2.1 or later** ([`bridge/LICENSE`](bridge/LICENSE),
-  [`bridge/COPYING.LIB`](bridge/COPYING.LIB)).
+The `winemetal` bridge in `bridge/` follows DXMT and is under the GNU LGPL 2.1 or later
+([bridge/LICENSE](bridge/LICENSE), [bridge/COPYING.LIB](bridge/COPYING.LIB)).
+
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [LICENSES/](LICENSES/) cover every
+third-party component and what a binary release must ship.

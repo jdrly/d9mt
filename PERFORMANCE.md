@@ -23,8 +23,8 @@ and what a release candidate is checked for. What isn't in this repository yet i
   preventing a bug, needs evidence that it renders identically on Mac generations other than the
   one it was measured on, a slower and a fanless Mac among them, not only a faster benchmark.
   Without that coverage it goes in only behind a switch that is **off by default**, in the
-  README's tables, and a later PR that brings the coverage turns it on (`D9MT_AIR_FASTMATH` has
-  this shape). The player on an untested Mac is the one who would need an off switch and the one
+  tables in [docs/configuration.md](docs/configuration.md), and a later PR that brings the
+  coverage turns it on (`D9MT_AIR_FASTMATH` has this shape). The player on an untested Mac is the one who would need an off switch and the one
   least likely to know it exists. Existing speed optimisations stay as they are; this applies to
   new speed-only changes (ADR-0005).
 - **+0.25 % is a flag, not a hard stop.** Every median slowdown over it is flagged and
@@ -438,7 +438,7 @@ for any change to lifetimes or submission.
 
 **Live flags and captures**: `D9MT_DEBUG_FILE` (flags polled once a second, for example
 `no_attach_opt` for a live A/B, `att_trace`, `dump`) and `D9MT_GPUCAPTURE` (an Xcode GPU trace);
-see the README's *Developer and diagnostic switches*.
+see *Developer and diagnostic switches* in [docs/configuration.md](docs/configuration.md#developer-and-diagnostic-switches).
 
 ## 5. Design rules for the hot path
 
@@ -464,8 +464,8 @@ doesn't apply.
    looks up or starts a build without waiting for it. The limits today: a PSO miss and the
    prewarm take the registry's mutex; `getSync` waits for its build without a limit; a draw
    waits for a pending compile as long as it takes unless `d9mt.pipelineWaitBudgetMs` is set
-   (off by default, ignored without compile workers) (`driver/backend/mtl_pso_cache.h`; README,
-   *Pipeline wait budget*). _Open:_ when a pipeline-archive flush holds the archive lock, a
+   (off by default, ignored without compile workers) (`driver/backend/mtl_pso_cache.h`;
+   `docs/configuration.md`, *Pipeline wait budget*). _Open:_ when a pipeline-archive flush holds the archive lock, a
    build on the bridge bundle (`bundle/bridge-s1-pso`) falls back to a compiler without the
    serializer instead of waiting; that is not on `main` yet.
 5. **Hash word by word, not byte by byte.** The PSO key hash went from a byte-wise FNV-1a over the

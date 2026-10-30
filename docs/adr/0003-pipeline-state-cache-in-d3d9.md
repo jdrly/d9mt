@@ -23,7 +23,7 @@ other state are still fixed at pipeline creation, which in D3D9 is only known at
 - d9mt records the pipelines a game uses (stable shader identities plus the derived
   `RenderPsoKey` bytes) and rebuilds them on low-priority prewarm threads in later sessions, as
   soon as the game has created their shaders, through the same compile path as a draw
-  (`docs/state-cache.md`; README).
+  (`docs/state-cache.md`; `docs/configuration.md`).
 - It lives entirely in `d3d9.dll`: `winemetal.so` stays byte-identical (`docs/state-cache.md` §8;
   ADR-0004).
 - The file is written atomically (temp file and rename), capped (1024 pipelines per game by
@@ -41,7 +41,7 @@ other state are still fixed at pipeline creation, which in D3D9 is only known at
 - A key signature bump resets every player's state cache, so bumps are called out and batched
   (CONTRIBUTING).
 - Every prewarmed pipeline is also captured into each session's PSO archive (about 45 KB each)
-  (README, `D9MT_STATE_CACHE_MAX`).
+  (`docs/configuration.md`, `D9MT_STATE_CACHE_MAX`).
 - A crash during prewarm must not repeat every session: the load drops the entries that were in
   flight (crash-loop guard, `docs/state-cache.md` §12).
 
