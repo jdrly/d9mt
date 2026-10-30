@@ -140,8 +140,9 @@ sequenceDiagram
   game->>game: D3D9DeviceEx records each call with EmitCs into a DxvkCsChunk
   game->>cs: FlushCsChunk hands the chunk to DxvkCsThread
   cs->>cs: MtlContextImpl encodes render passes into an MTL4 command buffer
-  cs->>gpu: submit() arms the canary and commits under the next serial
-  cs->>gpu: Present copies the frame into the drawable, MtlPresenter present()
+  cs->>cs: Present records the copy of the frame into the drawable
+  cs->>gpu: synchronizeWsi calls submit(), which arms the canary and commits under the next serial
+  cs->>gpu: then signalDrawable and MetalDrawable_present hand the drawable to the display
   gpu-->>ret: the serial is signalled on the MTLSharedEvent
   ret->>ret: SubmissionTracker retires what the serial used
   cs->>cs: checkCanaries() logs D9MT-GPU-LOST for a completed serial without its mark
