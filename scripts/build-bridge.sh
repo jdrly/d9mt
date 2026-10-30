@@ -97,7 +97,7 @@ clang++ -arch x86_64 -dynamiclib \
   -framework MetalFX \
   -lsqlite3 -lm -lpthread
 # The id the library carries is the digest of what it links.
-[ "$(strings -a "$OUT/winemetal.so" | sed -n 's/^D9MT-AIR-CODEGEN-ID //p')" = "$AIR_ID" ] \
+[ "$(strings -a "$OUT/winemetal.so" | sed -n 's/^D9MT-AIR-CODEGEN-ID \([0-9a-f]\{64\}\)$/\1/p')" = "$AIR_ID" ] \
   || { echo "FATAL: winemetal.so does not carry AIR codegen id $AIR_ID" >&2; exit 1; }
 if grep -q "\"$AIR_ID\"" "$BR/unix/air_cache_lineage.c"; then
   AIR_LINEAGE="lineage $(grep -A3 "\"$AIR_ID\"" "$BR/unix/air_cache_lineage.c" | sed -n 's/.*"\([^"]*\)" *},.*/\1/p' | head -1): players keep their AIR caches"
