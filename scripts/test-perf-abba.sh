@@ -23,7 +23,10 @@
 #  10. precedence, as before #96: --env changes the Wine defaults (WINEDEBUG, WINEMSYNC) but not the
 #      run's own settings (WINEDLLOVERRIDES, D9MT_STATE_CACHE), and only for its variant;
 #  11. the launch digest counts bytes: a D9MT_* value of "a" and of "é" give different digests
-#      under a UTF-8 locale.
+#      under a UTF-8 locale;
+#  12. visible= against the timed start (a fake engine prints the bridge's visibility lines and
+#      TIMED): no change is nolog; changes all before it that leave the window visible are pre:0>1;
+#      one at or after it keeps the plain sequence; vis_ms= gives each change's offset.
 # 08827cb's harness fails 1 (argv[0] is the variant's own program) and 2 (bin-<name> and
 # caches/<name>), and passes 3 and 4 (it runs each program in place, so 4 is a failed run there).
 # dbd9139's fails 5 and 6 (logs/<tag>-<pid>-<name>-<round>.err). 07d4a60's fails 7 and 8 (the
@@ -228,6 +231,34 @@ done
 d1=$(grep -ho 'launch=[^ ]*' "$T"/w11-1/results/*.txt 2>/dev/null | head -1); d2=$(grep -ho 'launch=[^ ]*' "$T"/w11-2/results/*.txt 2>/dev/null | head -1)
 if [ -n "$d1" ] && [ -n "$d2" ] && [ "$d1" != "$d2" ]; then ok "the launch digest counts bytes: D9MT_TEST_PAD=a and =é differ under a UTF-8 locale"
 else bad "the launch digest under a UTF-8 locale: '$d1' and '$d2'"; fi
+
+# 12. visible= against the timed start: a fake engine prints the bridge's visibility lines (stderr)
+# and the bench's TIMED (stdout) at fixed times; D9MT_TEST_VIS picks the changes' times (ms after
+# 12:00:00.000, the destination 2 = occluded, 3 = visible), the timed start is at .500
+mkdir -p "$T/engine12/bin"
+cat > "$T/engine12/bin/wine" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = wineboot ]; then mkdir -p "$WINEPREFIX" && : > "$WINEPREFIX/system.reg"; exit 0; fi
+echo "warn:  MtlPresenter: layer props (create)" >&2
+prev=3
+for c in $D9MT_TEST_VIS; do
+  printf 'D9MT-WSI 12:00:00.%03d visibility 0x%d -> 0x%d on test (window 0x1)\n' "${c%:*}" "$prev" "${c#*:}" >&2
+  prev=${c#*:}
+done
+echo "TIMED fake 12:00:00.500"
+echo "RESULT fake avg_ms=1.0"
+EOF
+cp "$T/engine/bin/wineserver" "$T/engine12/bin/"; chmod +x "$T/engine12/bin/wine"
+k=0
+for c in "|nolog" "100:2 105:3|pre:0>1 vis_ms=-400,-395" "100:2|0 vis_ms=-400" "100:2 900:3|0>1 vis_ms=-400,+400" \
+         "900:2|1>0 vis_ms=+400" "100:2 105:3 500:2|0>1>0 vis_ms=-400,-395,+0"; do
+  k=$((k + 1))
+  D9MT_TEST_VIS="${c%%|*}" ENGINE="$T/engine12" WORK="$T/w12-$k" BENCH_DIR="$T/bench" bash "$ABBA" --variant a="$T/d3d9-a.dll" \
+    --variant bbbb="$T/d3d9-bbbb.dll" --rounds 1 fake >/dev/null 2>&1
+  got=$(grep -h '^round=' "$T/w12-$k"/results/*.txt 2>/dev/null | sed -n 's/.* visible=\(.*\) RESULT.*/\1/p' | sort -u)
+  if [ "$got" = "${c#*|}" ]; then ok "visible= with changes at '${c%%|*}' (timed start 500): $got"
+  else bad "visible= with changes at '${c%%|*}': want '${c#*|}', got '$(echo $got)'"; fi
+done
 
 [ "$fail" = 0 ] && echo "test-perf-abba: all passed ($ABBA)" || echo "test-perf-abba: $fail FAILED ($ABBA)"
 [ "$fail" = 0 ]

@@ -39,12 +39,17 @@
 # starts watching) and the bench's `TIMED <bench> <HH:MM:SS.mmm>` line (the timed start, the
 # same wall clock):
 #   0         occluded from before the timed start on
-#   1>0, 0>1  the states in order when it changed (1> first: the first change came at or after
-#             the timed start, so it began visible)
+#   pre:0>1   every change came before the timed start and the last one left it visible: visible
+#             throughout the timed interval (the window's initial occlusion reading, flipped by
+#             the first occlusion notification a few ms later, is logged as 0>1 at creation)
+#   1>0, 0>1  the states in order when it changed at or after the timed start (1> first: the first
+#             change came at or after it, so it began visible)
 #   nolog     no change logged: visible throughout if the bench presented (a bench that never
 #             presents, like bench_draws flush, never has its visibility read)
 #   ?, ?>0    not established: lines may have been dropped (30 or more, or a suppression mark),
 #             the clocks disagree by more than 10 min, or (?> first) the bench printed no TIMED
+# With a change logged and the timed start known, vis_ms= follows: each change's time against the
+# timed start in ms (-: before it), in order.
 # An occluded window's presents are skipped, so perf-compare.py warns about runs that changed or
 # are unknown, and about occluded runs mixed with others.
 # A run is marked DIRTY (also left out) when a wineserver other than this run's own is running:
@@ -347,7 +352,7 @@ for r in $(seq "$ROUNDS"); do
         function ms(t, a) { split(t, a, ":"); return (a[1] * 3600 + a[2] * 60 + a[3]) * 1000 }
         /^D9MT-WSI .* visibility 0x[0-9a-f]+ -> 0x[0-9a-f]+ on / {
           n++; if (/earlier lines suppressed/) lost = 1
-          if (n == 1) first = ms($2)
+          at[n] = ms($2)
           for (i = 1; i < NF; i++) if ($i == "->") s = ($(i + 1) == "0x3") ? "1" : "0"
           if (seq == "") seq = s; else if (s != last) seq = seq ">" s
           last = s }
@@ -355,9 +360,12 @@ for r in $(seq "$ROUNDS"); do
           if (lost || n >= 30) { print "?"; exit }
           if (n == 0) { print "nolog"; exit }
           if (T == "") { print "?>" seq; exit }
-          d = first - ms(T)
+          t = ms(T); d = at[1] - t
           if (d > 600000 || d < -600000) { print "?"; exit }
-          print (d >= 0 ? "1>" : "") seq }' "$log")
+          for (k = 1; k <= n; k++) o = o (k > 1 ? "," : "") sprintf("%+d", at[k] - t)
+          # every change before the timed start, the last one to visible: settled before timing began
+          v = (at[n] < t && last == "1") ? "pre:" seq : (d >= 0 ? "1>" : "") seq
+          print v " vis_ms=" o }' "$log")
     fi
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.
     grep -q 'not submitted yet' "$log" 2>/dev/null && line="RESULT FAIL unsubmitted-wait"
