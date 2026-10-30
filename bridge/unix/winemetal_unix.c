@@ -6083,14 +6083,18 @@ _MTLDevice_newArgumentTable(void *obj) {
  *    goes to its own file (<unix-time>-<pid>-<seq>.mtl4archive);
  *  - flushing while another thread compiles through the same compiler
  *    crashes, so compiles hold g_pso_lock shared and flushes hold it
- *    exclusively. A flush of 256 PSOs takes 0.5-0.7 s, and on the thread of
- *    the build that made it due it stalled the render thread waiting for that
- *    PSO (#11). Flushes run on their own thread instead, at a quiet moment:
+ *    exclusively. By default flushes run on the compiling (render) thread
+ *    every D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if
+ *    uncontended). A flush of 256 PSOs takes 0.5-0.7 s, which stalls the
+ *    render thread waiting for that PSO (#11). With D9MT_PSO_ASYNC_FLUSH=1
+ *    flushes run on their own thread instead, at a quiet moment:
  *    D9MT_PSO_FLUSH_EVERY PSOs are pending and no build ran for 2 s, or
  *    anything is pending and no build ran for 10 s (the end of a session:
  *    there is no flush at exit, which crashed or hung there when exiting
  *    threads held Metal's or libc's locks). A flush due for 60 s without a
- *    quiet moment goes in between two builds;
+ *    quiet moment goes in between two builds. A build that arrives during
+ *    a flush still waits for it, and PSOs built in a session's last 10 s are
+ *    not saved;
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum (size + SHA-256) written
  *    after it and is only loaded when that matches; anything else is deleted.
@@ -6100,7 +6104,8 @@ _MTLDevice_newArgumentTable(void *obj) {
  * it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
  *   D9MT_PSO_ARCHIVE_DIR=<unix dir> base directory override (0 = disable)
- *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256) */
+ *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256)
+ *   D9MT_PSO_ASYNC_FLUSH=1          flush on the flush thread (default 0) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
 #define D9MT_PSO_FLUSH_DEFAULT 256u
@@ -6111,6 +6116,7 @@ static NSString                         *g_pso_dir;
 static NSString                         *g_pso_session;
 static unsigned                          g_pso_seq;
 static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
+static bool                              g_pso_async_flush;  /* the flush thread runs */
 static _Atomic unsigned                  g_pso_pending;
 static _Atomic uint64_t                  g_pso_last_build;   /* CLOCK_UPTIME_RAW ns */
 static pthread_mutex_t                   g_pso_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -6177,6 +6183,18 @@ pso_flush_locked(void) {
     pso_remove_archive(path);
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
   }
+}
+
+static void
+pso_flush_atexit(void) {
+  /* Another thread may still be compiling (or died holding the lock while
+   * the process tears down): never block exit on it. */
+  if (pthread_rwlock_trywrlock(&g_pso_lock))
+    return;
+  @autoreleasepool {
+    pso_flush_locked();
+  }
+  pthread_rwlock_unlock(&g_pso_lock);
 }
 
 static void *
@@ -6253,6 +6271,8 @@ pso_archive_init(id<MTLDevice> device) {
   const char *every = getenv("D9MT_PSO_FLUSH_EVERY");
   if (every && atoi(every) > 0)
     g_pso_flush_every = (unsigned)atoi(every);
+  const char *async = getenv("D9MT_PSO_ASYNC_FLUSH");
+  const bool want_async = async && !strcmp(async, "1");
 
   NSString *base;
   if (env) {
@@ -6341,10 +6361,15 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_dir = [dir retain];
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
     pthread_t thread;
-    if (!pthread_create(&thread, NULL, pso_flush_thread, NULL))
+    if (want_async && !pthread_create(&thread, NULL, pso_flush_thread, NULL)) {
       pthread_detach(thread);
-    else
-      fprintf(stderr, "d9mt: PSO archive flush thread not started: archives are not written\n");
+      g_pso_async_flush = true;
+      fprintf(stderr, "d9mt: PSO archives flushed by the flush thread (D9MT_PSO_ASYNC_FLUSH=1)\n");
+    } else {
+      if (want_async)
+        fprintf(stderr, "d9mt: PSO archive flush thread not started: flushing on the build thread\n");
+      atexit(pso_flush_atexit);
+    }
   }
   fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
           (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
@@ -6367,12 +6392,21 @@ pso_archive_setup(id<MTLDevice> device, MTL4CompilerDescriptor *desc) {
     desc.pipelineDataSetSerializer = g_pso_serializer;
 }
 
-/* After each build: counts it and wakes the flush thread when the first PSO
- * becomes pending (it then waits for an idle period) and when a flush is due. */
+/* After each build: counts it and flushes when a flush is due, or with the
+ * flush thread wakes it when the first PSO becomes pending (it then waits for
+ * an idle period) and when a flush is due. */
 static void
 pso_note_compiled(void) {
   if (!g_pso_serializer)
     return;
+  if (!g_pso_async_flush) {
+    if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
+      return;
+    pthread_rwlock_wrlock(&g_pso_lock);
+    pso_flush_locked();
+    pthread_rwlock_unlock(&g_pso_lock);
+    return;
+  }
   atomic_store(&g_pso_last_build, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
   const unsigned n = atomic_fetch_add(&g_pso_pending, 1u) + 1u;
   if (n == 1u || n == g_pso_flush_every) {

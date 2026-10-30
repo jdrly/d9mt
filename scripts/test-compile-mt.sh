@@ -2,7 +2,7 @@
 # Native (no Wine) concurrency tests: the driver's compile task / worker
 # pool under TSan (driver/mtl/tests/mtl_compile_test.cpp), then the bridge
 # compile path (bridge/tests/compile_mt_test.cpp). Runs the harness twice (cold, then warm
-# AIR cache + PSO archives) against build/bridge/winemetal.so, then again
+# AIR cache + PSO archives) against build/bridge/winemetal.so for each PSO flush mode, then again
 # against a ThreadSanitizer build of the unix side (TSAN=0 skips that).
 # Needs build-bridge.sh to have run (airlib objects, LLVM toolchain).
 # Heavy (GPU compiler service + LLVM on 6 threads): prefix with
@@ -22,13 +22,18 @@ DXBC_OBJS=("$AIRLIB_OBJ"/third_party_dxbc-spirv_*.o)
 # MT_BINS="a.bin b.bin" limits the shader set (all of air/tests/bin by default)
 if [ -n "${MT_BINS:-}" ]; then read -r -a BINS <<< "$MT_BINS"; else BINS=("$V2"/air/tests/bin/*.bin); fi
 
+# PSO_ASYNC="0 1" (the default) runs each pair with D9MT_PSO_ASYNC_FLUSH=0 (archives flushed by the
+# builds) and =1 (by the bridge's flush thread), each on its own workdir.
 run_pair() { # <harness> <winemetal.so> <workdir>
-  rm -rf "$3"; mkdir -p "$3"
-  echo "--- $(basename "$1"): cold"
-  "$1" "$2" "$3" "${BINS[@]}"
-  echo "--- $(basename "$1"): warm"
-  "$1" "$2" "$3" "${BINS[@]}"
-  ls "$3/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  local a
+  for a in ${PSO_ASYNC:-0 1}; do
+    rm -rf "$3-async$a"; mkdir -p "$3-async$a"
+    echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a: cold"
+    D9MT_PSO_ASYNC_FLUSH=$a "$1" "$2" "$3-async$a" "${BINS[@]}"
+    echo "--- $(basename "$1") D9MT_PSO_ASYNC_FLUSH=$a: warm"
+    D9MT_PSO_ASYNC_FLUSH=$a "$1" "$2" "$3-async$a" "${BINS[@]}"
+    ls "$3-async$a/pso"/*/ 2>/dev/null | grep -c 'mtl4archive$' | sed 's/^/    archives written: /'
+  done
 }
 
 # Needs DXVK's native Windows headers (include/native/{windows,directx} of a

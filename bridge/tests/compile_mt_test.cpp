@@ -2,7 +2,8 @@
 // driver's compile workers do through winemetal.so (no Wine): many threads
 // at once run the AIR thunk (sqlite cache), MTLDevice newLibrary and
 // MTL4Compiler render PSO builds (pipeline archive serializer attached,
-// flushed every few PSOs, by the bridge's flush thread once builds pause).
+// flushed every few PSOs while other threads compile, or with
+// D9MT_PSO_ASYNC_FLUSH=1 by the bridge's flush thread once builds pause).
 //
 //   compile_mt_test <winemetal.so> <workdir> <sm3 .bin>...
 //
@@ -355,8 +356,9 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
 
-  // The bridge flushes the archive on its own thread once builds pause (2 s);
-  // this process must still run then. Wait for this session's archive.
+  // With D9MT_PSO_ASYNC_FLUSH=1 the bridge flushes the archive on its own
+  // thread once builds pause (2 s); this process must still run then. Wait
+  // for this session's archive (without it, builds flushed it already).
   const auto tw = std::chrono::steady_clock::now();
   const std::string session = "-" + std::to_string(getpid()) + "-";
   bool flushed = false;
