@@ -90,7 +90,7 @@ body:
         The commit the `d3d9.dll` was built from, and the app's version if you use one. SWTOR on
         Mac names it in the first line of `wine.log` and in the session report; in your own
         build, `git rev-parse --short HEAD`.
-      placeholder: "2a1bc00 (SWTOR on Mac 0.1.3)"
+      placeholder: "f6cfa71 (SWTOR on Mac 0.1.5.1)"
     validations:
       required: true
 
@@ -160,6 +160,22 @@ body:
         with `D9MT_PROFILE=1`; for a hang or a GPU fault, also `D9MT_LIFETIME_CHECK=log` and the
         `IOGPUMetalError` lines of the unified log. When a test program shows it, an apitrace
         (`scripts/run-apitrace.sh`).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Was D9MT_PROFILE on when you saw it?
+      description: >-
+        `D9MT_PROFILE=1`, or Debug Logging in SWTOR on Mac (its development builds turn it on by
+        default). Profiling measures every frame, so frame rates and frame times with it on aren't
+        comparable with a run without it (PERFORMANCE.md §2.1). Either is fine for a report; we
+        only need to know which.
+      options:
+        - I don't know
+        - "Yes, D9MT_PROFILE (or Debug Logging) was on"
+        - "No, it was off"
     validations:
       required: true
 
