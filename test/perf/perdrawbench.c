@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
   IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
   LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f);
   MSG msg;
-  unsigned long long polls = 0;
+  unsigned long long polls = 0, scratch_polls = 0;
   LONGLONG wait_ticks = 0, scratch = 0;
   int waited = 0;
   if (flush && check && FAILED(IDirect3DDevice9_Present(dev, NULL, NULL, NULL, NULL))) { printf("RESULT FAIL check present\n"); return 1; }
@@ -156,6 +156,9 @@ int main(int argc, char **argv) {
   QueryPerformanceCounter(&t1);
   bench_timed_print("perdrawbench");
   if (flush) {
+    /* after the timed interval: the last frame's query (in order, so the last depth frames too)
+     * must also signal, or a GPU stall there would still print a result */
+    if (wait_query(ev[frames % depth], f.QuadPart, &scratch_polls, &scratch)) { printf("RESULT FAIL getdata drain\n"); return 1; }
     printf("RESULT perdrawbench mode=flush depth=%d frames=%d avg_ms=%.4f busy_ms=%.4f\n", depth, frames - 60,
            (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / (frames - 60),
            (double)(t1.QuadPart - t0.QuadPart - wait_ticks) * 1000.0 / f.QuadPart / (frames - 60));
