@@ -360,11 +360,16 @@ for r in $(seq "$ROUNDS"); do
           if (lost || n >= 30) { print "?"; exit }
           if (n == 0) { print "nolog"; exit }
           if (T == "") { print "?>" seq; exit }
-          t = ms(T); d = at[1] - t
-          if (d > 600000 || d < -600000) { print "?"; exit }
-          for (k = 1; k <= n; k++) o = o (k > 1 ? "," : "") sprintf("%+d", at[k] - t)
+          # each change against the timed start, across midnight; one more than 10 min away or out
+          # of order means the clocks are not comparable
+          t = ms(T)
+          for (k = 1; k <= n; k++) {
+            d[k] = at[k] - t
+            if (d[k] > 43200000) d[k] -= 86400000; else if (d[k] < -43200000) d[k] += 86400000
+            if (d[k] > 600000 || d[k] < -600000 || (k > 1 && d[k] < d[k - 1])) { print "?"; exit }
+            o = o (k > 1 ? "," : "") sprintf("%+d", d[k]) }
           # every change before the timed start, the last one to visible: settled before timing began
-          v = (at[n] < t && last == "1") ? "pre:" seq : (d >= 0 ? "1>" : "") seq
+          v = (d[n] < 0 && last == "1") ? "pre:" seq : (d[1] >= 0 ? "1>" : "") seq
           print v " vis_ms=" o }' "$log")
     fi
     # A wait on a serial still unsubmitted after a whole 2 s slice: a hang hazard, not a time.

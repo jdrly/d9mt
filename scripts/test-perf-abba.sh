@@ -26,7 +26,9 @@
 #      under a UTF-8 locale;
 #  12. visible= against the timed start (a fake engine prints the bridge's visibility lines and
 #      TIMED): no change is nolog; changes all before it that leave the window visible are pre:0>1;
-#      one at or after it keeps the plain sequence; vis_ms= gives each change's offset.
+#      one at or after it keeps the plain sequence; across midnight too; out-of-order or far-off
+#      clocks are ?; vis_ms= gives each change's offset; perf-compare.py warns exactly about changed
+#      and unknown runs.
 # 08827cb's harness fails 1 (argv[0] is the variant's own program) and 2 (bin-<name> and
 # caches/<name>), and passes 3 and 4 (it runs each program in place, so 4 is a failed run there).
 # dbd9139's fails 5 and 6 (logs/<tag>-<pid>-<name>-<round>.err). 07d4a60's fails 7 and 8 (the
@@ -233,31 +235,44 @@ if [ -n "$d1" ] && [ -n "$d2" ] && [ "$d1" != "$d2" ]; then ok "the launch diges
 else bad "the launch digest under a UTF-8 locale: '$d1' and '$d2'"; fi
 
 # 12. visible= against the timed start: a fake engine prints the bridge's visibility lines (stderr)
-# and the bench's TIMED (stdout) at fixed times; D9MT_TEST_VIS picks the changes' times (ms after
-# 12:00:00.000, the destination 2 = occluded, 3 = visible), the timed start is at .500
+# and the bench's TIMED (stdout); D9MT_TEST_TIMED is the timed start, D9MT_TEST_VIS the changes
+# (<HH:MM:SS.mmm>/<destination: 2 occluded, 3 visible>). perf-compare.py must warn about every
+# changed or unknown run and stay quiet about nolog and pre: runs that end visible.
 mkdir -p "$T/engine12/bin"
-cat > "$T/engine12/bin/wine" <<'EOF'
+cat > "$T/engine12/bin/wine" <<'EOF2'
 #!/usr/bin/env bash
 if [ "${1:-}" = wineboot ]; then mkdir -p "$WINEPREFIX" && : > "$WINEPREFIX/system.reg"; exit 0; fi
 echo "warn:  MtlPresenter: layer props (create)" >&2
 prev=3
 for c in $D9MT_TEST_VIS; do
-  printf 'D9MT-WSI 12:00:00.%03d visibility 0x%d -> 0x%d on test (window 0x1)\n' "${c%:*}" "$prev" "${c#*:}" >&2
-  prev=${c#*:}
+  echo "D9MT-WSI ${c%/*} visibility 0x$prev -> 0x${c#*/} on test (window 0x1)" >&2
+  prev=${c#*/}
 done
-echo "TIMED fake 12:00:00.500"
+echo "TIMED fake $D9MT_TEST_TIMED"
 echo "RESULT fake avg_ms=1.0"
-EOF
+EOF2
 cp "$T/engine/bin/wineserver" "$T/engine12/bin/"; chmod +x "$T/engine12/bin/wine"
 k=0
-for c in "|nolog" "100:2 105:3|pre:0>1 vis_ms=-400,-395" "100:2|0 vis_ms=-400" "100:2 900:3|0>1 vis_ms=-400,+400" \
-         "900:2|1>0 vis_ms=+400" "100:2 105:3 500:2|0>1>0 vis_ms=-400,-395,+0"; do
+N=12:00:00
+for c in "$N.500||nolog|quiet" \
+         "$N.500|$N.100/2 $N.105/3|pre:0>1 vis_ms=-400,-395|quiet" \
+         "$N.500|$N.100/2|0 vis_ms=-400|quiet" \
+         "$N.500|$N.100/2 $N.900/3|0>1 vis_ms=-400,+400|warn" \
+         "$N.500|$N.900/2|1>0 vis_ms=+400|warn" \
+         "$N.500|$N.100/2 $N.105/3 $N.500/2|0>1>0 vis_ms=-400,-395,+0|warn" \
+         "23:59:59.500|23:59:59.100/2 23:59:59.105/3 00:00:00.100/2 00:00:00.200/3|0>1>0>1 vis_ms=-400,-395,+600,+700|warn" \
+         "00:00:00.200|23:59:59.900/2 23:59:59.950/3|pre:0>1 vis_ms=-300,-250|quiet" \
+         "$N.500|$N.100/2 $N.050/3|?|warn" \
+         "$N.500|$N.100/2 12:20:00.000/3|?|warn"; do
+  IFS='|' read -r tm vis want cmp <<< "$c"
   k=$((k + 1))
-  D9MT_TEST_VIS="${c%%|*}" ENGINE="$T/engine12" WORK="$T/w12-$k" BENCH_DIR="$T/bench" bash "$ABBA" --variant a="$T/d3d9-a.dll" \
-    --variant bbbb="$T/d3d9-bbbb.dll" --rounds 1 fake >/dev/null 2>&1
+  D9MT_TEST_TIMED="$tm" D9MT_TEST_VIS="$vis" ENGINE="$T/engine12" WORK="$T/w12-$k" BENCH_DIR="$T/bench" bash "$ABBA" \
+    --variant a="$T/d3d9-a.dll" --variant bbbb="$T/d3d9-bbbb.dll" --rounds 1 fake >/dev/null 2>&1
   got=$(grep -h '^round=' "$T/w12-$k"/results/*.txt 2>/dev/null | sed -n 's/.* visible=\(.*\) RESULT.*/\1/p' | sort -u)
-  if [ "$got" = "${c#*|}" ]; then ok "visible= with changes at '${c%%|*}' (timed start 500): $got"
-  else bad "visible= with changes at '${c%%|*}': want '${c#*|}', got '$(echo $got)'"; fi
+  warned=quiet
+  python3 -I "$V2/scripts/perf-compare.py" "$T/w12-$k"/results/*.txt 2>/dev/null | grep -q '^WARNING: runs whose window changed' && warned=warn
+  if [ "$got" = "$want" ] && [ "$warned" = "$cmp" ]; then ok "visible= with changes '$vis', timed start $tm: $got (perf-compare: $warned)"
+  else bad "visible= with changes '$vis', timed start $tm: want '$want' ($cmp), got '$(echo $got)' ($warned)"; fi
 done
 
 [ "$fail" = 0 ] && echo "test-perf-abba: all passed ($ABBA)" || echo "test-perf-abba: $fail FAILED ($ABBA)"
