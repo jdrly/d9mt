@@ -39,6 +39,6 @@ moved here from an app's repository) stay as they are.
 | `area:frontend`   | DXVK's D3D9 front-end (`driver/d3d9`)                                     |
 | `area:backend`    | The seam and the Metal 4 backend, submission, presentation (`driver/mtl`, `driver/backend`) |
 | `area:shaders`    | The AIR compiler and dxbc-spirv (`air/`, `airlib/`, `patches/dxbc-spirv`) |
-| `area:bridge`     | `winemetal` (`bridge/`); changes the LC_UUID (ADR-0004)                   |
+| `area:bridge`     | `winemetal` (`bridge/`); the AIR cache's part changes the AIR codegen id (ADR-0006) |
 | `area:caches`     | AIR cache, PSO archives, pipeline state cache                             |
 | `area:build-test` | Build scripts, the hash suite, native tests, benchmarks (`scripts/`, `test/`) |

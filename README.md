@@ -183,8 +183,9 @@ to AIR with LLVM 15 and wrap it in a metallib that Metal loads directly. The fix
 pipeline uses DXVK's ubershaders, precompiled into a metallib that `d3d9.dll` embeds.
 
 Three caches cut repeat compiles. The AIR cache is one sqlite file of compiled shaders, keyed
-by the bridge build, so a bridge change makes every player recompile once
-([ADR-0004](docs/adr/0004-batch-bridge-changes.md)). Metal 4 pipeline archives keep the
+by the AIR codegen (the code that produces the metallibs), so only a change to that code makes
+every player recompile once; other bridge changes keep it
+([ADR-0006](docs/adr/0006-air-cache-keyed-on-codegen.md)). Metal 4 pipeline archives keep the
 pipelines of the last 8 sessions. The pipeline state cache records which pipelines a game used
 and rebuilds them in the background in later sessions, also after an update that invalidated
 the other two ([docs/state-cache.md](docs/state-cache.md),
