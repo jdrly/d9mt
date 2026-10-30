@@ -145,7 +145,6 @@ private:
   bool m_stop = false;
   bool m_drained = false;  // drainAndStopPump ran: the GPU is idle, retireAfter releases at once
 
-  const bool m_failFast;   // D9MT_GPU_HUNG unset (not "continue")
   std::atomic<bool> m_gpuHung = { false };
 
   dxvk::thread m_pump;
@@ -158,7 +157,9 @@ private:
 
   [[gnu::cold, gnu::noinline]] void parkHung();
 
-  [[gnu::cold, gnu::noinline]] void abandonUnsubmitted(uint64_t serial, uint32_t slices);
+  // waitFor after a slice the GPU didn't signal: 0 waits on; 1 returns (the wait was abandoned or
+  // parked, which returns only in a test); 2 gives the wait up (D9MT_GPU_HUNG=continue).
+  [[gnu::cold, gnu::noinline]] int stallEnds(uint64_t serial, uint32_t slices, uint32_t submittedSlices);
 
   void runDue(uint64_t completed);  // m_runMutex held
 
