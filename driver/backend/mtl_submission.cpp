@@ -14,8 +14,43 @@
 
 namespace dxvk::backend {
 
+// The GPU-hang paths' strings and the test seams go last in .rdata and .data: "$zz" sorts after
+// every other section of its kind, so they move no other data (#53 moved 1621 .rdata symbols).
+#define D9MT_HANG_RDATA __attribute__((section(".rdata$zz_d9mt_gpu_hang")))
+#define D9MT_HANG_DATA  __attribute__((section(".data$zz_d9mt_gpu_hang")))
+
+uint32_t SubmissionTracker::s_sliceMs D9MT_HANG_DATA = 2000u;
+void (*SubmissionTracker::s_terminate)(unsigned exitCode) D9MT_HANG_DATA = nullptr;
+void (*SubmissionTracker::s_park)() D9MT_HANG_DATA = nullptr;
+
+namespace {
+  const char kEnvGpuHung[] D9MT_HANG_RDATA = "D9MT_GPU_HUNG";
+  const char kContinue[] D9MT_HANG_RDATA = "continue";
+  const char kNotSubmitted0[] D9MT_HANG_RDATA = "SubmissionTracker: serial ";
+  const char kNotSubmitted1[] D9MT_HANG_RDATA = " still not submitted after ";
+  const char kNotSubmitted2[] D9MT_HANG_RDATA = " s (next ";
+  const char kNotSubmitted3[] D9MT_HANG_RDATA = ") — abandoning wait";
+  const char kHung0[] D9MT_HANG_RDATA = "D9MT-GPU-HUNG: serial ";
+  const char kHung1[] D9MT_HANG_RDATA = " not signalled after ";
+  const char kHung2[] D9MT_HANG_RDATA = " s on the GPU (completed ";
+  const char kHung3[] D9MT_HANG_RDATA = ", submitted ";
+  const char kHung4[] D9MT_HANG_RDATA = "): the GPU stopped and its queue won't recover; ending the game (exit code ";
+  const char kHung5[] D9MT_HANG_RDATA = "; D9MT_GPU_HUNG=continue keeps it running)";
+  const char kErrPrefix[] D9MT_HANG_RDATA = "err:   ";
+  const char kNewline[] D9MT_HANG_RDATA = "\n";
+  const char kKernel32[] D9MT_HANG_RDATA = "kernel32.dll";
+  const char kGetStdHandle[] D9MT_HANG_RDATA = "GetStdHandle";
+  const char kTerminateProcess[] D9MT_HANG_RDATA = "TerminateProcess";
+
+  // D9MT_GPU_HUNG unset (not "continue"); read once, by the tracker's constructor (#53's policy).
+  // Cold and out of line, so the environment lookup isn't inlined into the constructor.
+  [[gnu::cold, gnu::noinline]] bool gpuHungEndsGame() {
+    return env::getEnvVar(kEnvGpuHung) != kContinue;
+  }
+}
+
 SubmissionTracker::SubmissionTracker(obj_handle_t device)
-: m_failFast(env::getEnvVar("D9MT_GPU_HUNG") != "continue") {
+: m_failFast(gpuHungEndsGame()) {
   m_event = WmtSharedEvent::adopt(MTLDevice_newSharedEvent(device));
   m_pump = dxvk::thread([this] { pumpThread(); });
 }
@@ -212,11 +247,19 @@ void SubmissionTracker::pumpThread() {
   }
 }
 
+// D9MT_PROFILE's note of a wait on a serial nobody had submitted yet; out of line, so the wait
+// doesn't inline it at each of its returns.
+[[gnu::cold, gnu::noinline]] static void noteUnsubmitted(std::chrono::steady_clock::time_point t0, uint64_t serial) {
+  prof::noteUnsubmittedWait(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now() - t0).count()), serial);
+}
+
+// waitFor's code is as large as before #53, to the byte: its hang paths are in stallEnds (cold), so
+// no function after it moves (a layout cost, PERFORMANCE.md §1). Check a change here with the sizes
+// in the PR (#53's cost-free candidate) before it merges.
 void SubmissionTracker::waitFor(uint64_t serial) {
   if (isComplete(serial))
     return;
-  if (gpuHung())
-    return parkHung();
   // D9MT_PROFILE: a wait that starts on a serial nobody submitted yet, timed until it returns.
   struct UnsubmittedWait {
     std::chrono::steady_clock::time_point t0;
@@ -224,13 +267,13 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     bool on;
     ~UnsubmittedWait() {
       if (on)
-        prof::noteUnsubmittedWait(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - t0).count()), serial);
+        noteUnsubmitted(t0, serial);
     }
   } unsubmitted = { std::chrono::steady_clock::now(), serial, prof::g_profEnabled && serial >= nextSerial() };
   // Bounded blocking wait, not a spin. Only slices the serial spent submitted count towards a GPU
   // hang (5 of them: 10 s on the GPU); a serial still not submitted after 5 slices is a missing
-  // flush, not the GPU's fault, and the wait is given up as before.
+  // flush, not the GPU's fault, and the wait is given up as before. After a GPU hang, no wait on
+  // an incomplete serial returns: stallEnds parks it at the end of its first slice.
   uint32_t slices = 0u, submittedSlices = 0u;
   for (;;) {
     const bool submitted = serial < nextSerial();
@@ -241,8 +284,6 @@ void SubmissionTracker::waitFor(uint64_t serial) {
     completedSerial();
     if (isComplete(serial))
       return;
-    if (gpuHung())
-      return parkHung();
     slices++;
     if (submitted)
       submittedSlices++;
@@ -255,21 +296,38 @@ void SubmissionTracker::waitFor(uint64_t serial) {
         ", still not submitted yet after ", slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ")"));
     Logger::warn(str::format("SubmissionTracker: GPU stall waiting serial ",
       serial, " (completed ", completedSerial(), ") — slice ", slices));
-    // D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, submitted or not
-    if (m_failFast ? submittedSlices >= 5u : slices >= 5u)
+    if (const int end = stallEnds(serial, slices, submittedSlices)) {
+      if (end == 1)
+        return;
       break;
-    if (m_failFast && slices >= 5u && serial >= nextSerial()) {
-      Logger::err(str::format("SubmissionTracker: serial ", serial, " still not submitted after ",
-        slices * s_sliceMs / 1000u, " s (next ", nextSerial(), ") — abandoning wait"));
-      return;
     }
   }
-  if (!m_failFast) {
-    Logger::err(str::format("SubmissionTracker: GPU never signalled serial ",
-      serial, " (completed ", completedSerial(), ") — abandoning wait"));
-    return;
+  Logger::err(str::format("SubmissionTracker: GPU never signalled serial ",
+    serial, " (completed ", completedSerial(), ") — abandoning wait"));
+}
+
+// A slice the GPU didn't signal: does the wait end? After a GPU hang it parks. Both modes wait 5
+// slices at least. Unless D9MT_GPU_HUNG=continue, only slices the serial spent submitted count
+// towards a GPU hang, and a serial still not submitted after 5 slices is abandoned.
+// D9MT_GPU_HUNG=continue keeps the old budget: 5 slices in all, submitted or not.
+int SubmissionTracker::stallEnds(uint64_t serial, uint32_t slices, uint32_t submittedSlices) {
+  if (gpuHung()) {
+    parkHung();
+    return 1;
+  }
+  if (slices < 5u)
+    return 0;
+  if (!m_failFast)
+    return 2;
+  if (submittedSlices < 5u) {
+    if (serial < nextSerial())
+      return 0;
+    Logger::err(str::format(kNotSubmitted0, serial, kNotSubmitted1,
+      slices * s_sliceMs / 1000u, kNotSubmitted2, nextSerial(), kNotSubmitted3));
+    return 1;
   }
   hung(serial);
+  return 1;
 }
 
 // The GPU stopped: rendering on (as before) leaves the game frozen, its dead GPU context
@@ -284,18 +342,23 @@ void SubmissionTracker::hung(uint64_t serial) {
     return;
   if (m_gpuHung.exchange(true, std::memory_order_acq_rel))
     return parkHung();
-  const std::string line = str::format("D9MT-GPU-HUNG: serial ", serial, " not signalled after ",
-    5u * s_sliceMs / 1000u, " s on the GPU (completed ", completed, ", submitted ", lastSubmittedSerial(),
-    "): the GPU stopped and its queue won't recover; ending the game (exit code ", kGpuHungExitCode,
-    "; D9MT_GPU_HUNG=continue keeps it running)");
+  // Looked up here, not imported: a new import adds its thunk among the code linked after the
+  // driver's own and moves all of it.
+  const HMODULE kernel32 = GetModuleHandleA(kKernel32);
+  const auto getStdHandle = reinterpret_cast<HANDLE (WINAPI*)(DWORD)>(
+    reinterpret_cast<void*>(GetProcAddress(kernel32, kGetStdHandle)));
+  const auto terminateProcess = reinterpret_cast<BOOL (WINAPI*)(HANDLE, UINT)>(
+    reinterpret_cast<void*>(GetProcAddress(kernel32, kTerminateProcess)));
+  const std::string line = str::format(kHung0, serial, kHung1, 5u * s_sliceMs / 1000u, kHung2, completed,
+    kHung3, lastSubmittedSerial(), kHung4, kGpuHungExitCode, kHung5);
   // The line must be out whatever the log level is: through the logger if it writes errors
   // (__wine_dbg_output writes synchronously; only "none" drops them; the level it fixed at start),
   // else straight to stderr, flushed.
   if (Logger::logLevel() != LogLevel::None) {
     Logger::err(line);
   } else {
-    const std::string out = "err:   " + line + "\n";
-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    const std::string out = kErrPrefix + line + kNewline;
+    HANDLE h = getStdHandle ? getStdHandle(STD_ERROR_HANDLE) : nullptr;
     DWORD written = 0u;
     if (h && h != INVALID_HANDLE_VALUE) {
       WriteFile(h, out.data(), DWORD(out.size()), &written, nullptr);
@@ -304,8 +367,8 @@ void SubmissionTracker::hung(uint64_t serial) {
   }
   if (s_terminate)
     s_terminate(kGpuHungExitCode);
-  else
-    TerminateProcess(GetCurrentProcess(), kGpuHungExitCode);
+  else if (terminateProcess)
+    terminateProcess(GetCurrentProcess(), kGpuHungExitCode);
   parkHung();
 }
 
