@@ -1316,14 +1316,51 @@ namespace dxvk {
         region.dstOffset      = MtlOrigin{ blitInfo.dstOffsets[0].x, blitInfo.dstOffsets[0].y, blitInfo.dstOffsets[0].z };
         region.extent         = srcCopyExtent;
 
-        EmitCs([
-          cDstImage    = dstImage,
-          cSrcImage    = srcImage,
-          cRegion      = region
-        ] (MtlContext* ctx) {
-          ctx->resolveTexture(cDstImage, cSrcImage, cRegion, cSrcImage->info().format,
-            MtlResolveMode::Average, MtlResolveMode::SampleZero);
-        });
+        // Metal resolves a pass's whole render area into (0,0) of a resolve texture of its
+        // size: a colour sub-rect, an offset or a destination of another size resolves the
+        // whole source into its resolve image, and the rect is copied from there (as the
+        // stretching path below does). A depth-stencil copy is whole-surface (checked above).
+        const bool wholeResolve = srcIsDS
+          || (region.srcOffset.x == 0 && region.srcOffset.y == 0
+           && region.dstOffset.x == 0 && region.dstOffset.y == 0
+           && srcCopyExtent.width  == srcExtent.width  && srcCopyExtent.height == srcExtent.height
+           && dstExtent.width      == srcExtent.width  && dstExtent.height     == srcExtent.height);
+
+        if (wholeResolve) {
+          EmitCs([
+            cDstImage    = dstImage,
+            cSrcImage    = srcImage,
+            cRegion      = region
+          ] (MtlContext* ctx) {
+            ctx->resolveTexture(cDstImage, cSrcImage, cRegion, cSrcImage->info().format,
+              MtlResolveMode::Average, MtlResolveMode::SampleZero);
+          });
+        } else {
+          Rc<MtlTexture> resolved = srcTextureInfo->GetResolveImage();
+          if (resolved == nullptr)
+            return D3DERR_INVALIDCALL;
+          MtlResolveRegion whole;
+          whole.srcSubresource = blitInfo.srcSubresource;
+          whole.srcOffset      = MtlOrigin{ 0, 0, 0 };
+          whole.dstSubresource = blitInfo.srcSubresource;
+          whole.dstOffset      = MtlOrigin{ 0, 0, 0 };
+          whole.extent         = srcExtent;
+
+          EmitCs([
+            cDstImage  = dstImage,
+            cResolved  = std::move(resolved),
+            cSrcImage  = srcImage,
+            cWhole     = whole,
+            cRegion    = region
+          ] (MtlContext* ctx) {
+            ctx->resolveTexture(cResolved, cSrcImage, cWhole, cSrcImage->info().format,
+              MtlResolveMode::Average, MtlResolveMode::SampleZero);
+            ctx->copyTexture(
+              cDstImage, cRegion.dstSubresource, cRegion.dstOffset,
+              cResolved, cRegion.srcSubresource, cRegion.srcOffset,
+              cRegion.extent);
+          });
+        }
       } else {
         EmitCs([
           cDstImage  = dstImage,

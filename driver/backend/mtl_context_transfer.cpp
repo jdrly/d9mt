@@ -1075,6 +1075,19 @@ namespace dxvk::backend {
     }
 
     const MtlExtent3D srcExtent = src->mipLevelExtent(region.srcSubresource.mipLevel);
+    // The render area is the whole source: a smaller resolve texture is undefined in Metal
+    // (whatever the GPU then writes, or not). StretchRect resolves a sub-rect through the
+    // source's resolve image, so this is a caller's bug: nothing is resolved.
+    const MtlExtent3D dstExtent = dst->mipLevelExtent(region.dstSubresource.mipLevel);
+    if (unlikely(dstExtent.width < srcExtent.width || dstExtent.height < srcExtent.height)) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        Logger::warn(str::format("MtlContextImpl::resolveTexture: destination ", dstExtent.width, "x",
+          dstExtent.height, " smaller than the source ", srcExtent.width, "x", srcExtent.height, ", skipped"));
+      }
+      return;
+    }
     if (unlikely(region.srcOffset.x || region.srcOffset.y
               || region.dstOffset.x || region.dstOffset.y
               || region.extent.width  < srcExtent.width
@@ -1156,14 +1169,19 @@ namespace dxvk::backend {
     const bool hasDepth   = (fi->flags & MtlFormatFlagDepth) != 0u;
     const bool hasStencil = (fi->flags & MtlFormatFlagStencil) != 0u;
 
+    // (a resolve texture smaller than the render area, the whole source, is undefined in Metal)
+    const MtlExtent3D srcSize = src->mipLevelExtent(region.srcSubresource.mipLevel);
+    const MtlExtent3D dstSize = dst->mipLevelExtent(region.dstSubresource.mipLevel);
     if (unlikely(s->format != d->format || dst->info().sampleCount > 1u
-              || !(dst->info().usage & MtlTextureUsageRenderTarget))) {
+              || !(dst->info().usage & MtlTextureUsageRenderTarget)
+              || dstSize.width < srcSize.width || dstSize.height < srcSize.height)) {
       static bool warned = false;
       if (!warned) {
         warned = true;
         Logger::warn(str::format("MtlContextImpl::resolveDepthStencil: incompatible dst (srcFmt=",
           uint32_t(s->format), " dstFmt=", uint32_t(d->format), " dstSamples=",
-          dst->info().sampleCount, " dstUsage=", uint32_t(dst->info().usage), "), skipped"));
+          dst->info().sampleCount, " dstUsage=", uint32_t(dst->info().usage),
+          " dst ", dstSize.width, "x", dstSize.height, " src ", srcSize.width, "x", srcSize.height, "), skipped"));
       }
       return;
     }
