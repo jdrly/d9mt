@@ -48,6 +48,7 @@ skip submission_retire_test "hand under Wine (a mingw exe; build line in its sou
 skip submission_tracker_test "hand under Wine (a mingw exe; build line in its source)"
 skip state_cache_test "scripts/test-state-cache.sh (DXVK's native headers; plain and TSan)"
 skip pso_key_hash_test "scripts/test-pso-key-hash.sh (DXVK's native headers)"
+skip residency_pso_test "scripts/test-residency.sh (DXVK's native headers; plain, ASan/UBSan and TSan)"
 skip upload_copy_test "scripts/test-upload-copy.sh (extracts d3d9_device.cpp; ASan/UBSan)"
 
 for f in test/native/*_test.cpp; do

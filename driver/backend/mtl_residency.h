@@ -32,6 +32,15 @@ namespace dxvk::backend {
 
     void allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes = 0u);
 
+    // A pipeline state d9mt just built (#63; Apple: "Anytime you need a resource on the GPU, add
+    // it to a residency set. This includes pipelines", WWDC25 254). Added once, committed with
+    // the next submit like every add: a draw binds a pipeline only once its build is done, so
+    // the submit that first uses it commits it. The tracker keeps its own reference: d9mt
+    // never evicts a pipeline, so it stays in the set, and alive, until the tracker goes, which
+    // takes it out, commits and only then releases it. Called by the compile workers, once
+    // per build, never per draw.
+    void pipelineCreated(obj_handle_t pso);
+
     // Commits pending adds/removes: once per submit, and only if the set changed.
     void beforeSubmit();
 
@@ -56,6 +65,8 @@ namespace dxvk::backend {
     uint64_t totalRemoves()    const { return m_removes.load(); }
     uint64_t pendingRemovals() const { return m_pendingCount.load(); }
     uint64_t totalCommits()    const { return m_commits.load(); }
+    // Pipeline states in the set (pipelineCreated), not counted in netResident().
+    uint64_t residentPsos()    const { return m_psoCount.load(); }
     // Bytes added minus bytes removed / still waiting for removal (as passed by callers).
     uint64_t residentBytes()   const { return m_residentBytes.load(); }
     uint64_t pendingBytes()    const { return m_pendingBytes.load(); }
@@ -82,6 +93,7 @@ namespace dxvk::backend {
     std::vector<PendingRemoval> m_removed;    // out of the set, awaiting commit
     std::vector<PendingRemoval> m_committed;  // removal committed, awaiting release
     std::vector<obj_handle_t>   m_attachedLayerSets;
+    std::vector<obj_handle_t>   m_psos;       // in the set, retained by the tracker
 
     std::atomic<uint64_t> m_adds{0u};
     std::atomic<uint64_t> m_removes{0u};
@@ -89,6 +101,7 @@ namespace dxvk::backend {
     std::atomic<uint64_t> m_residentBytes{0u};
     std::atomic<uint64_t> m_pendingBytes{0u};
     std::atomic<uint64_t> m_commits{0u};
+    std::atomic<uint64_t> m_psoCount{0u};
 
   };
 

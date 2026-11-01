@@ -7,6 +7,7 @@
 
 #include "wmt_handle.h"
 #include "mtl_pso_key.h"
+#include "mtl_residency.h"
 
 #include "../mtl/mtl_device.h"
 #include "../mtl/mtl_compile.h"
@@ -42,6 +43,7 @@ namespace dxvk::backend {
       obj_handle_t  m_fsLibrary = 0u;
       const char*   m_vsEntry = nullptr;   // static strings
       const char*   m_fsEntry = nullptr;
+      MtlResidencyTracker* m_residency = nullptr;  // gets the built PSO (#63)
       bool          m_prewarmed = false;
       uint64_t      m_buildNs = 0u;
       WmtRenderPso  m_pso;
@@ -74,7 +76,8 @@ namespace dxvk::backend {
       std::unordered_map<RenderPsoKey, Rc<Entry>, KeyHash> m_map;
     };
 
-    RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry);
+    RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry,
+                   MtlResidencyTracker* residency);
 
     /// Looks up or starts building a PSO; never blocks. vsFn/fsFn: the
     /// functions behind the libraries, for the state cache (nullptr for
@@ -99,6 +102,7 @@ namespace dxvk::backend {
     /// A not yet built entry for the state cache prewarm.
     static Rc<Entry> createPrewarmEntry(
             obj_handle_t        compiler,
+            MtlResidencyTracker* residency,
             const RenderPsoKey& key,
             obj_handle_t        vsLibrary,
             obj_handle_t        fsLibrary,
@@ -120,6 +124,7 @@ namespace dxvk::backend {
     obj_handle_t m_compiler;
     MtlDevice*   m_device;
     Registry*    m_registry;
+    MtlResidencyTracker* m_residency;
 
     RenderPsoKey m_lastKey = { };
     Entry*       m_last = nullptr;
