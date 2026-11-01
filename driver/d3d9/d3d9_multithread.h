@@ -60,7 +60,10 @@ namespace dxvk {
 
     // D9MT_PROFILE only. Out of line (and cold) so the profile-off Unlock stays small enough to
     // inline into every API entry point.
-    [[gnu::noinline, gnu::cold]] void LeaveHitch();
+    [[gnu::noinline, gnu::cold]] void LeaveHitch() {
+      m_hitch->leave(m_hitchOuter, m_hitchT0, hitch::ticks());
+      m_hitch = nullptr;
+    }
 
   };
 
@@ -103,11 +106,6 @@ namespace dxvk {
     }
 
   };
-
-  inline void D3D9DeviceLock::LeaveHitch() {
-    m_hitch->leave(m_hitchOuter, m_hitchT0, hitch::ticks());
-    m_hitch = nullptr;
-  }
 
   inline void D3D9DeviceLock::Unlock() {
     if (unlikely(m_hitch != nullptr))
