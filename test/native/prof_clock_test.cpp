@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     std::printf("process calibration: tsc=%d nsPerTick=%.6f (%.1f MHz)\n",
       int(c.tsc), c.nsPerTick, 1e3 / c.nsPerTick);
 #if D9MT_CHEAP_CLOCK_TSC
-    CHECK(c.tsc);                                          // Rosetta/Intel: the TSC calibrates
+    CHECK(c.tsc);                                          // Rosetta/Intel with D9MT_PROFILE: the TSC calibrates
 #else
     CHECK(!c.tsc && c.nsPerTick == 1.0);                   // no TSC: steady_clock ns
 #endif

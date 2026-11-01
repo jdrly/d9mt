@@ -5,18 +5,21 @@
 // convert with process().
 //
 // On x86 a tick is the TSC (rdtsc: no unix call under Wine, where steady_clock goes through
-// __wine_unix_call -> clock_gettime). The tick length is measured once, on first use, against
-// steady_clock over kCalibrationNs, and never changes afterwards: every thread reads the same
-// immutable Calibration without a race. When there is no TSC (any other architecture) or the
-// measurement is implausible, ticks are steady_clock nanoseconds and nsPerTick is 1.
+// __wine_unix_call -> clock_gettime). The tick length is measured once, while the module's
+// statics initialize and only with D9MT_PROFILE set (the profilers' switch), against
+// steady_clock over kCalibrationNs. It never changes afterwards: every thread reads the same
+// immutable Calibration without a race or an initialization guard. When there is no TSC (any
+// other architecture), profiling is off, or the measurement is implausible, ticks are
+// steady_clock nanoseconds and nsPerTick is 1.
 //
-// Nothing here runs with D9MT_PROFILE unset: callers reach now() and process() only behind
-// their enabled flag, so the off path doesn't calibrate and doesn't change.
+// With D9MT_PROFILE unset nothing here runs but one getenv at load: callers reach now() and
+// process() only behind their enabled flag, and now() inlines to a load, a branch and rdtsc.
 //
 // Dependency-free so it builds natively (test/native/prof_clock_test.cpp).
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
@@ -90,20 +93,30 @@ namespace dxvk::cheap_clock {
     return fromSamples(t0, ns0, t1, ns1, spanNs);
   }
 
-  // The process's calibration: measured on first use (a thread-safe static), then immutable.
-  inline const Calibration& process() {
+  inline Calibration initialCalibration() {
 #if D9MT_CHEAP_CLOCK_TSC
-    static const Calibration s_calibration = measure(tsc, steadyNs);
-#else
-    static const Calibration s_calibration;
+    if (std::getenv("D9MT_PROFILE") != nullptr)
+      return measure(tsc, steadyNs);
 #endif
-    return s_calibration;
+    return Calibration();
+  }
+
+  // The process's calibration: set during static initialization, then immutable.
+  inline const Calibration g_calibration = initialCalibration();
+
+  inline const Calibration& process() {
+    return g_calibration;
+  }
+
+  // The fallback read, kept out of line so now() stays small where it inlines (the device lock).
+  [[gnu::noinline]] inline uint64_t steadyNsOutOfLine() {
+    return steadyNs();
   }
 
   // Now, in process()'s ticks.
   inline uint64_t now() {
 #if D9MT_CHEAP_CLOCK_TSC
-    return process().tsc ? tsc() : steadyNs();
+    return __builtin_expect(g_calibration.tsc, 1) ? tsc() : steadyNsOutOfLine();
 #else
     return steadyNs();
 #endif
