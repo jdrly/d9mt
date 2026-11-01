@@ -6,6 +6,41 @@
 
 namespace dxvk::backend {
 
+  bool (*MtlResidencyTracker::s_detaching)() = &this_thread::isInModuleDetachment;
+
+  namespace {
+
+    // The tracker's mutex, never waited for while the process detaches (#63). ExitProcess kills
+    // every other thread before DLL detach, and a compile worker or prewarm thread killed inside
+    // pipelineCreated (or the CS thread inside any other call) leaves the mutex held for good.
+    // So when the lock is taken during detach, the owner is dead: the caller skips its work and
+    // leaks what it would have released (the OS reclaims it at exit). Uncontended, this is one
+    // try_lock, as cheap as a lock; the detach check runs only on contention.
+    class DetachSafeLock {
+    public:
+      DetachSafeLock(std::mutex& mutex, bool (*detaching)())
+      : m_mutex(mutex) {
+        if (likely(m_mutex.try_lock()))
+          m_owns = true;
+        else if (!detaching()) {
+          m_mutex.lock();
+          m_owns = true;
+        }
+      }
+      ~DetachSafeLock() {
+        if (m_owns)
+          m_mutex.unlock();
+      }
+      DetachSafeLock(const DetachSafeLock&) = delete;
+      DetachSafeLock& operator = (const DetachSafeLock&) = delete;
+      explicit operator bool () const { return m_owns; }
+    private:
+      std::mutex& m_mutex;
+      bool        m_owns = false;
+    };
+
+  }
+
   MtlResidencyTracker::MtlResidencyTracker(obj_handle_t device, obj_handle_t queue, bool batchCommits)
   : m_queue(queue), m_batchCommits(batchCommits) {
     WMTResidencySetInfo info = {};
@@ -27,7 +62,7 @@ namespace dxvk::backend {
 
     // Pipelines: out of the set and committed (with the retired allocations) before they are released.
     std::vector<obj_handle_t> psos;
-    { std::lock_guard<std::mutex> lock(m_mutex);
+    if (DetachSafeLock lock(m_mutex, s_detaching); lock) {
       if (m_set) {
         for (obj_handle_t pso : m_psos)
           MTLResidencySet_removeAllocation(m_set.handle(), pso);
@@ -42,7 +77,9 @@ namespace dxvk::backend {
     for (obj_handle_t pso : psos)
       NSObject_release(pso);
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return;  // detaching, the owner is dead: the set and the layer sets are leaked
     if (m_set)
       MTL4CommandQueue_removeResidencySet(m_queue, m_set.handle());
     for (obj_handle_t set : m_attachedLayerSets) {
@@ -56,7 +93,9 @@ namespace dxvk::backend {
     if (!alloc || !m_set)
       return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return;
     MTLResidencySet_addAllocation(m_set.handle(), alloc);
     m_dirty = true;
     m_adds++;
@@ -67,8 +106,10 @@ namespace dxvk::backend {
     if (!pso || !m_set)
       return;
 
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return;
     NSObject_retain(pso);
-    std::lock_guard<std::mutex> lock(m_mutex);
     MTLResidencySet_addAllocation(m_set.handle(), pso);
     m_psos.push_back(pso);
     m_dirty = true;
@@ -82,7 +123,9 @@ namespace dxvk::backend {
       return;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return;  // detaching: alloc and hostMem are leaked
     m_pending.push_back({ alloc, hostMem, lastUseSerial, bytes });
     m_pendingCount = m_pending.size();
     m_pendingBytes += bytes;
@@ -92,16 +135,16 @@ namespace dxvk::backend {
     if (!m_set)
       return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_dirty)
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (lock && m_dirty)
       commitLocked();
   }
 
   void MtlResidencyTracker::releaseCommitted() {
     std::vector<PendingRemoval> released;
 
-    { std::lock_guard<std::mutex> lock(m_mutex);
-      if (m_committed.empty())
+    { DetachSafeLock lock(m_mutex, s_detaching);
+      if (!lock || m_committed.empty())
         return;
       released.swap(m_committed);
     }
@@ -124,8 +167,8 @@ namespace dxvk::backend {
     // submit that just ran): release them now, off the pre-commit path.
     releaseCommitted();
 
-    { std::lock_guard<std::mutex> lock(m_mutex);
-      if (!retireLocked(completedSerial) || m_batchCommits)
+    { DetachSafeLock lock(m_mutex, s_detaching);
+      if (!lock || !retireLocked(completedSerial) || m_batchCommits)
         return;
       // Legacy: commit the removals right away, as before batching.
       commitLocked();
@@ -178,7 +221,9 @@ namespace dxvk::backend {
     if (!set)
       return false;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return false;
     for (obj_handle_t s : m_attachedLayerSets) {
       if (s == set)
         return true;
@@ -198,7 +243,9 @@ namespace dxvk::backend {
     if (!set)
       return 0u;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    DetachSafeLock lock(m_mutex, s_detaching);
+    if (!lock)
+      return 0u;
     for (size_t i = 0u; i < m_attachedLayerSets.size(); i++) {
       if (m_attachedLayerSets[i] == set) {
         m_attachedLayerSets.erase(m_attachedLayerSets.begin() + i);

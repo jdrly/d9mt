@@ -71,6 +71,10 @@ namespace dxvk::backend {
     uint64_t residentBytes()   const { return m_residentBytes.load(); }
     uint64_t pendingBytes()    const { return m_pendingBytes.load(); }
 
+    // Whether the process is detaching (this_thread::isInModuleDetachment): asked only when the
+    // tracker's mutex is contended, see DetachSafeLock in mtl_residency.cpp. Native tests replace it.
+    static bool (*s_detaching)();
+
   private:
 
     struct PendingRemoval {

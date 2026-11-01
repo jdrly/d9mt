@@ -8,15 +8,25 @@
 //  - at teardown the pipelines leave the set, that removal is committed, and only then are they
 //    released, each exactly once (no leak, no early release);
 //  - pipelines added from several threads while another one commits are all counted and resident;
-//  - without a residency set (newResidencySet failed) nothing is retained.
+//  - without a residency set (newResidencySet failed) nothing is retained;
+//  - the tracker's lock: a live owner is waited for; while the process detaches, an owner that
+//    died holding it (ExitProcess kills the other threads first, e.g. a compile worker inside
+//    pipelineCreated) is not: every entry point and the destructor return, and skip (leak) their
+//    work. A watchdog fails the test if one blocks. (Not under TSan: it would report the dead
+//    owner's lock, which is the point.)
 // DXVK's native headers (log.h includes the COM ones), as scripts/test-pso-key-hash.sh:
 //   N=<DXVK or dxmt>/include/native; clang++ -std=c++17 -I driver/backend -I $N/windows \
 //     -I $N/directx -include test/native/stubs/virtual_free.h test/native/residency_pso_test.cpp \
 //     driver/backend/mtl_residency.cpp -o residency_pso_test && ./residency_pso_test
 #include "mtl_residency.h"
 
+#include <unistd.h>
+
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <new>
 #include <map>
 #include <mutex>
 #include <set>
@@ -53,9 +63,24 @@ extern "C" obj_handle_t MTLDevice_newResidencySet(obj_handle_t, const WMTResiden
 extern "C" void MTLResidencySet_requestResidency(obj_handle_t) { }
 extern "C" void MTL4CommandQueue_addResidencySet(obj_handle_t, obj_handle_t) { }
 extern "C" void MTL4CommandQueue_removeResidencySet(obj_handle_t, obj_handle_t) { }
-extern "C" obj_handle_t MetalLayer_residencySet(obj_handle_t) { return 0u; }
+static obj_handle_t g_layerSet = 0u;
+extern "C" obj_handle_t MetalLayer_residencySet(obj_handle_t) { return g_layerSet; }
+
+// An add of g_blockOn blocks (inside the tracker's lock) until g_unblock: an owner that is slow,
+// or, never unblocked, one that died there.
+static std::mutex g_blockMutex;
+static std::condition_variable g_blockCond;
+static obj_handle_t g_blockOn = 0u;
+static bool g_holding = false, g_unblock = false;
 
 extern "C" void MTLResidencySet_addAllocation(obj_handle_t set, obj_handle_t a) {
+  { std::unique_lock l(g_blockMutex);
+    if (a == g_blockOn && a) {
+      g_holding = true;
+      g_blockCond.notify_all();
+      g_blockCond.wait(l, [] { return g_unblock; });
+    }
+  }
   std::lock_guard l(g_model);
   CHECK(set == kSet);
   CHECK(g_refs[a] > 0);                      // never a released object
@@ -205,13 +230,110 @@ static void testNoSet() {
   NSObject_release(pso);
 }
 
+static void waitHolding() {
+  std::unique_lock l(g_blockMutex);
+  g_blockCond.wait(l, [] { return g_holding; });
+}
+
+static std::atomic<bool> g_detaching = { false };
+static bool testDetaching() { return g_detaching.load(); }
+
+// Not detaching: a thread that holds the lock is waited for, and the waiter's work is done.
+static void testLiveOwnerWaitedFor() {
+  const obj_handle_t pso = 0xd001u, buf = 0xd002u;
+  created(pso); created(buf);
+  {
+    MtlResidencyTracker tracker(0xde5u, 0x9u);
+    { std::lock_guard l(g_blockMutex); g_blockOn = pso; g_holding = g_unblock = false; }
+    std::thread owner([&] { tracker.pipelineCreated(pso); });
+    waitHolding();
+    std::atomic<bool> done = { false };
+    std::thread waiter([&] { tracker.allocCreated(buf, 16u); done = true; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(!done.load());                     // waits for the owner
+    { std::lock_guard l(g_blockMutex); g_unblock = true; g_blockOn = 0u; }
+    g_blockCond.notify_all();
+    owner.join();
+    waiter.join();
+    CHECK(done.load() && staged(pso) && staged(buf));
+    tracker.allocDestroyed(buf, nullptr, 0u, 16u);
+    tracker.serialRetired(1u);
+    tracker.beforeSubmit();
+    tracker.releaseCommitted();
+  }
+  NSObject_release(pso);
+}
+
+// Detaching, the owner died holding the lock: nothing blocks, nothing is done.
+[[maybe_unused]] static void testDeadOwnerAtDetach() {
+  static constexpr obj_handle_t dying = 0xe001u, pso = 0xe002u, buf = 0xe003u, buf2 = 0xe004u;
+  created(dying); created(pso); created(buf); created(buf2);
+  g_layerSet = 0xe0e0u;
+  created(g_layerSet);
+
+  // Its memory is never freed: the dead owner's frame still points into it.
+  alignas(MtlResidencyTracker) static unsigned char storage[sizeof(MtlResidencyTracker)];
+  MtlResidencyTracker* tracker = new (storage) MtlResidencyTracker(0xde5u, 0x9u);
+  tracker->allocCreated(buf2, 16u);
+  tracker->beforeSubmit();
+
+  { std::lock_guard l(g_blockMutex); g_blockOn = dying; g_holding = g_unblock = false; }
+  std::thread([tracker] { tracker->pipelineCreated(dying); }).detach();  // never returns
+  waitHolding();
+
+  g_detaching = true;
+  static std::atomic<const char*> step = { "start" };
+  static std::atomic<bool> finished = { false };
+  std::thread([tracker] {
+    step = "allocCreated";     tracker->allocCreated(buf, 16u);
+    step = "pipelineCreated";  tracker->pipelineCreated(pso);
+    step = "allocDestroyed";   tracker->allocDestroyed(buf2, nullptr, 0u, 16u);
+    step = "serialRetired";    tracker->serialRetired(~0ull);
+    step = "beforeSubmit";     tracker->beforeSubmit();
+    step = "releaseCommitted"; tracker->releaseCommitted();
+    step = "attachLayer";      CHECK(!tracker->attachLayer(0x1a7u));
+    step = "detachLayer";      CHECK(tracker->detachLayer(0x1a7u) == 0u);
+    step = "~MtlResidencyTracker"; tracker->~MtlResidencyTracker();
+    finished = true;
+  }).detach();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!finished.load() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!finished.load()) {
+    std::printf("FAIL detach: %s blocked on the dead owner's lock (5 s)\n", step.load());
+    std::fflush(stdout);
+    _exit(1);                                // the blocked thread can't be joined
+  }
+
+  // Skipped, so leaked: not added, not retained, not released, not removed.
+  CHECK(!staged(buf) && !staged(pso));
+  CHECK(refs(pso) == 1 && refs(buf2) == 1 && refs(g_layerSet) == 1);
+  CHECK(committed(buf2));
+  g_detaching = false;
+}
+
 int main() {
+  MtlResidencyTracker::s_detaching = &testDetaching;
+
   testAddCommitTeardown();
   testConcurrentAdds();
   testNoSet();
+  testLiveOwnerWaitedFor();
 
   for (const auto& r : g_refs)
     CHECK(r.second == 0);                    // nothing leaked or over-released
+
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define RESIDENCY_TEST_TSAN 1
+#  endif
+#endif
+#ifndef RESIDENCY_TEST_TSAN
+  testDeadOwnerAtDetach();
+#else
+  std::printf("dead-owner detach test: skipped under TSan\n");
+#endif
   std::printf("%s (%llu commits)\n", g_fail ? "FAIL" : "ok", (unsigned long long)g_commits);
   return g_fail ? 1 : 0;
 }
