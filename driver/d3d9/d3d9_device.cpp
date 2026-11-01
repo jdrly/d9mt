@@ -1320,11 +1320,16 @@ namespace dxvk {
         // size: a colour sub-rect, an offset or a destination of another size resolves the
         // whole source into its resolve image, and the rect is copied from there (as the
         // stretching path below does). A depth-stencil copy is whole-surface (checked above).
-        const bool wholeResolve = srcIsDS
+        // Where resolve images get no lossless compression (MtlPfvImages, by default on GPUs
+        // before Apple10) the destination, a game's image that keeps it, isn't written by the
+        // resolve either: every resolve goes through the resolve image and a copy.
+        const bool viaResolveImage = MtlPfvImages::resolveViaImage(
+          m_dxvkDevice->deviceInfo().pfvImages, srcIsDS);
+        const bool wholeResolve = !viaResolveImage && (srcIsDS
           || (region.srcOffset.x == 0 && region.srcOffset.y == 0
            && region.dstOffset.x == 0 && region.dstOffset.y == 0
            && srcCopyExtent.width  == srcExtent.width  && srcCopyExtent.height == srcExtent.height
-           && dstExtent.width      == srcExtent.width  && dstExtent.height     == srcExtent.height);
+           && dstExtent.width      == srcExtent.width  && dstExtent.height     == srcExtent.height));
 
         if (wholeResolve) {
           EmitCs([
@@ -8389,6 +8394,9 @@ namespace dxvk {
           cSrcImage, cSrcLayers, MtlOrigin { 0, 0, 0 },
           cDstImage->mipLevelExtent(cDstLayers.mipLevel));
       });
+    } else if (MtlPfvImages::resolveViaImage(m_dxvkDevice->deviceInfo().pfvImages, true)
+            && ResolveZViaImage(srcTextureInfo, dstTextureInfo, srcSubresourceLayers, dstSubresourceLayers)) {
+      // resolved into the source's resolve image (no lossless compression) and copied
     } else {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
@@ -8410,6 +8418,51 @@ namespace dxvk {
 
     dstTextureInfo->MarkAllNeedReadback();
     MarkTextureWritten(dstTextureInfo);
+  }
+
+
+  bool D3D9DeviceEx::ResolveZViaImage(
+          D3D9CommonTexture*       pSrc,
+          D3D9CommonTexture*       pDst,
+    const MtlSubresourceLayers&    SrcSubresource,
+    const MtlSubresourceLayers&    DstSubresource) {
+    // The direct resolve's rules (MtlContextImpl::resolveDepthStencil): the same format and a
+    // destination at least the source's size, the source's whole area into its (0,0).
+    const Rc<MtlTexture>& srcImage = pSrc->GetImage();
+    const Rc<MtlTexture>& dstImage = pDst->GetImage();
+    if (srcImage == nullptr || dstImage == nullptr || dstImage->info().sampleCount != 1u
+     || srcImage->info().format != dstImage->info().format)
+      return false;
+    const MtlExtent3D srcExtent = srcImage->mipLevelExtent(SrcSubresource.mipLevel);
+    const MtlExtent3D dstExtent = dstImage->mipLevelExtent(DstSubresource.mipLevel);
+    if (dstExtent.width < srcExtent.width || dstExtent.height < srcExtent.height)
+      return false;
+    Rc<MtlTexture> resolved = pSrc->GetResolveImage();
+    if (resolved == nullptr)
+      return false;
+
+    MtlResolveRegion whole;
+    whole.srcSubresource = SrcSubresource;
+    whole.srcOffset      = MtlOrigin { 0, 0, 0 };
+    whole.dstSubresource = SrcSubresource;
+    whole.dstOffset      = MtlOrigin { 0, 0, 0 };
+    whole.extent         = MtlSize { srcExtent.width, srcExtent.height, 1u };
+
+    EmitCs([
+      cDstImage  = dstImage,
+      cResolved  = std::move(resolved),
+      cSrcImage  = srcImage,
+      cDstSubres = DstSubresource,
+      cWhole     = whole
+    ] (MtlContext* ctx) {
+      ctx->resolveTexture(cResolved, cSrcImage, cWhole, cSrcImage->info().format,
+        MtlResolveMode::SampleZero, MtlResolveMode::SampleZero);
+      ctx->copyTexture(
+        cDstImage, cDstSubres, MtlOrigin { 0, 0, 0 },
+        cResolved, cWhole.srcSubresource, MtlOrigin { 0, 0, 0 },
+        cWhole.extent);
+    });
+    return true;
   }
 
 

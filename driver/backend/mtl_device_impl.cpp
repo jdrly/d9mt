@@ -59,16 +59,80 @@ namespace dxvk::backend {
       }
     }
 
-    // D9MT_TEX_PFV=1: PixelFormatView on every texture, as before (A/B).
-    bool pixelFormatViewOnAll() {
-      static const bool on = [] {
-        const char* v = std::getenv("D9MT_TEX_PFV");
-        return v != nullptr && v[0] == '1';
-      }();
-      return on;
+    // MTLGPUFamilyApple10 (M5); the bridge passes the value through.
+    constexpr WMTGPUFamily GpuFamilyApple10 = WMTGPUFamily(1010);
+
+    // D9MT_TEX_PFV: which images get PixelFormatView (MtlPfvImages). Read once.
+    //   unset or empty: the default for the GPU (pfvImages below)
+    //   a value starting with 1: every image, as before #18 (A/B)
+    //   0: none but block-compressed ones, on every GPU
+    //   msaa, resolve, ds, or a comma list of them: those sets, on every GPU
+    // Returns ~0u for the default.
+    uint32_t pfvSetting(std::string& name) {
+      const char* v = std::getenv("D9MT_TEX_PFV");
+      name = v != nullptr ? v : "";
+      if (name.empty())
+        return ~0u;
+      if (name[0] == '1')
+        return MtlPfvImages::Every;
+      if (name == "0")
+        return 0u;
+      uint32_t set = 0u;
+      for (size_t pos = 0u; pos <= name.size(); ) {
+        size_t end = name.find(',', pos);
+        if (end == std::string::npos)
+          end = name.size();
+        const std::string part = name.substr(pos, end - pos);
+        if (part == "msaa")
+          set |= MtlPfvImages::Msaa;
+        else if (part == "resolve")
+          set |= MtlPfvImages::Resolve;
+        else if (part == "ds")
+          set |= MtlPfvImages::Depth;
+        else {
+          Logger::warn(str::format("D9MT: D9MT_TEX_PFV=", name, " not understood (1, 0, msaa, resolve, ds): the default"));
+          return ~0u;
+        }
+        pos = end + 1u;
+      }
+      return set;
     }
 
-    uint32_t textureUsage(MtlUsage usage, MtlFormat format) {
+    // Lossless compression of 4x MSAA images and of the images MSAA resolves write
+    // drew flickering lines on an M4 (Apple9); D9MT_TEX_PFV=1 removed them. On GPUs
+    // before Apple10 (M1-M4) those images get PixelFormatView by default. The M5
+    // (Apple10) has new compression hardware, shows nothing, and keeps it.
+    uint32_t pfvImages(obj_handle_t device, std::string& line) {
+      std::string name;
+      const uint32_t setting = pfvSetting(name);
+      const bool beforeApple10 = !MTLDevice_supportsFamily(device, GpuFamilyApple10);
+      const uint32_t set = setting != ~0u ? setting
+                         : beforeApple10 ? MtlPfvImages::Msaa | MtlPfvImages::Resolve : 0u;
+      const std::string mode = setting != ~0u
+        ? str::format("D9MT_TEX_PFV=", name)
+        : str::format("default, ", beforeApple10 ? "GPU before Apple10" : "Apple10 GPU");
+      if (set & MtlPfvImages::Every) {
+        line = "D9MT: PixelFormatView on every texture (D9MT_TEX_PFV=1): no lossless compression";
+      } else if (!set) {
+        line = str::format("D9MT: PixelFormatView only on block-compressed textures (lossless compression on; ", mode, ")");
+      } else {
+        std::string what;
+        auto add = [&] (uint32_t bit, const char* text) {
+          if (set & bit)
+            what += str::format(what.empty() ? "" : ", ", text);
+        };
+        add(MtlPfvImages::MsaaColor,    "MSAA colour");
+        add(MtlPfvImages::MsaaDepth,    "MSAA depth-stencil");
+        add(MtlPfvImages::ResolveColor, "colour resolve");
+        add(MtlPfvImages::ResolveDepth, "depth-stencil resolve");
+        line = str::format("D9MT: PixelFormatView on block-compressed textures and ", what,
+          " images (", mode, "): no lossless compression on those");
+      }
+      return set;
+    }
+
+    uint32_t textureUsage(const MtlImageCreateInfo& info, uint32_t pfv) {
+      const MtlUsage usage = info.usage;
       uint32_t result = 0u;
 
       if (usage & MtlUsage::Sampled)
@@ -83,8 +147,17 @@ namespace dxvk::backend {
       // with or without a swizzle, none of which needs the option
       // (MTLTextureUsage.pixelFormatView). Block-compressed formats keep it:
       // they are never losslessly compressed anyway (ColorFill no longer
-      // views them, #14).
-      if (pixelFormatViewOnAll() || (lookupFormatInfo(format)->flags & MtlFormatFlagCompressed))
+      // views them, #14). MSAA images and resolve images get it per pfvImages.
+      const uint32_t flags = lookupFormatInfo(info.format)->flags;
+      bool view = (pfv & MtlPfvImages::Every) || (flags & MtlFormatFlagCompressed);
+      if (!view && (info.sampleCount > 1u || info.resolveTarget)) {
+        const bool depth = (flags & (MtlFormatFlagDepth | MtlFormatFlagStencil)) != 0u;
+        const uint32_t bit = info.sampleCount > 1u
+          ? (depth ? MtlPfvImages::MsaaDepth : MtlPfvImages::MsaaColor)
+          : (depth ? MtlPfvImages::ResolveDepth : MtlPfvImages::ResolveColor);
+        view = (pfv & bit) != 0u;
+      }
+      if (view)
         result |= WMTTextureUsagePixelFormatView;
       return result;
     }
@@ -173,9 +246,9 @@ namespace dxvk::backend {
       profile.legacy ? ", legacy pools" : "",
       profile.statsInterval ? str::format(", memstats every ", profile.statsInterval, " frames") : std::string(),
       profile.labels ? ", labels" : ""));
-    Logger::info(pixelFormatViewOnAll()
-      ? "D9MT: PixelFormatView on every texture (D9MT_TEX_PFV=1): no lossless compression"
-      : "D9MT: PixelFormatView only on block-compressed textures (lossless compression on)");
+    std::string pfvLine;
+    m_info.pfvImages = pfvImages(m_device.handle(), pfvLine);
+    Logger::info(pfvLine);
   }
 
   void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
@@ -400,7 +473,7 @@ namespace dxvk::backend {
     texInfo.array_length = arrayLength;
     texInfo.mipmap_level_count = info.mipLevels;
     texInfo.sample_count = info.sampleCount;
-    texInfo.usage = WMTTextureUsage(textureUsage(info.usage, info.format));
+    texInfo.usage = WMTTextureUsage(textureUsage(info, m_info.pfvImages));
     texInfo.options = storageOptions(MtlCpuAccess::None);
 
     obj_handle_t handle = MTLDevice_newTexture(m_device.handle(), &texInfo);
@@ -424,7 +497,7 @@ namespace dxvk::backend {
     texture->m_info.mipLevels   = info.mipLevels ? info.mipLevels : 1u;
     texture->m_info.numLayers   = info.arrayLayers ? info.arrayLayers : 1u;
     texture->m_info.sampleCount = info.sampleCount ? info.sampleCount : 1u;
-    texture->m_info.usage       = MtlTextureUsage(textureUsage(info.usage, info.format));
+    texture->m_info.usage       = MtlTextureUsage(texInfo.usage);
     texture->residencyDevice = this;
     texture->m_device = this;  // MtlTexture::createView (StretchRect, ColorFill)
     texture->bytes = textureBytes(info);

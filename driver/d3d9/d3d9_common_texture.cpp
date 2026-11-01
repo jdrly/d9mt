@@ -377,6 +377,8 @@ namespace dxvk {
     if (m_desc.ImageUsage & MtlTextureUsageShaderRead)
       imageInfo.usage = imageInfo.usage | MtlUsage::Sampled;
 
+    imageInfo.resolveTarget = m_desc.IsResolveTarget;
+
     imageInfo.category = isRT ? MtlMemCategory::TexRT
                        : isDS ? MtlMemCategory::TexDS
                        : IsManaged() ? MtlMemCategory::TexManaged
@@ -411,6 +413,7 @@ namespace dxvk {
     if (isRT) imageInfo.usage = imageInfo.usage | MtlUsage::RenderTarget;
     if (isDS) imageInfo.usage = imageInfo.usage | MtlUsage::DepthStencil;
     imageInfo.category = isDS ? MtlMemCategory::TexDS : MtlMemCategory::TexRT;
+    imageInfo.resolveTarget = true;
 
     return m_device->GetDXVKDevice()->createImage(imageInfo);
   }

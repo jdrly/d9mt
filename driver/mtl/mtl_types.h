@@ -592,6 +592,27 @@ namespace dxvk {
     uint32_t     deviceId         = 0x73df;
     uint32_t     maxSampleCount   = 8u;
     float        maxPointSize     = 256.0f;
+    // Which images get PixelFormatView, which turns lossless compression off
+    // (MtlPfvImages bits; D9MT_TEX_PFV, mtl_device_impl.cpp)
+    uint32_t     pfvImages        = 0u;
   };
+
+  // MtlDeviceInfo::pfvImages. Block-compressed images always get PixelFormatView.
+  namespace MtlPfvImages {
+    constexpr uint32_t MsaaColor    = 1u << 0;  // colour images with sampleCount > 1
+    constexpr uint32_t MsaaDepth    = 1u << 1;  // depth-stencil images with sampleCount > 1
+    constexpr uint32_t ResolveColor = 1u << 2;  // colour images that MSAA resolves write
+    constexpr uint32_t ResolveDepth = 1u << 3;  // depth-stencil images that MSAA resolves write
+    constexpr uint32_t Every        = 1u << 4;  // every image (D9MT_TEX_PFV=1)
+    constexpr uint32_t Msaa         = MsaaColor | MsaaDepth;
+    constexpr uint32_t Resolve      = ResolveColor | ResolveDepth;
+    constexpr uint32_t Depth        = MsaaDepth | ResolveDepth;
+
+    // Does an MSAA resolve that writes a game's image (which keeps lossless
+    // compression) go through the source's uncompressed resolve image instead?
+    inline bool resolveViaImage(uint32_t pfv, bool depth) {
+      return !(pfv & Every) && (pfv & (depth ? ResolveDepth : ResolveColor)) != 0u;
+    }
+  }
 
 }
