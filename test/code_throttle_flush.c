@@ -36,6 +36,24 @@ static DWORD WINAPI watchdog(LPVOID p) {
   }
 }
 
+/* DXVK_CONFIG declares d3d9.reproducibleCommandStream = True (the harness's variant sets it there). */
+static BOOL repro_declared(void) {
+  char cfg[1024];
+  DWORD n = GetEnvironmentVariableA("DXVK_CONFIG", cfg, sizeof(cfg));
+  if (n == 0 || n >= sizeof(cfg))
+    return FALSE;
+  const char *k = strstr(cfg, "reproducibleCommandStream");
+  if (!k)
+    return FALSE;
+  const char *eq = strchr(k, '=');
+  if (!eq)
+    return FALSE;
+  eq++;
+  while (*eq == ' ' || *eq == '\t')
+    eq++;
+  return _strnicmp(eq, "true", 4) == 0;
+}
+
 static DWORD color(int n) {
   return 0xff000000u | (DWORD)(n * 40) << 16 | 0x8000u | (DWORD)(255 - n * 30);
 }
@@ -54,17 +72,23 @@ static void frame(int n) {
   IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u, 1.0f, 0);
 
   X_CHECK(IDirect3DQuery9_Issue(query, D3DISSUE_END));
-  /* The flush before the lock is the test's precondition. A mode that submits only on explicit
-   * flushes (d3d9.reproducibleCommandStream) never completes this poll before a Present, so the
-   * test can't run there: it says so and ends, instead of hanging until the harness kills it. */
+  /* The flush before the lock is the test's precondition. d3d9.reproducibleCommandStream submits
+   * only on explicit flushes, so this poll never completes before a Present: with that option
+   * declared in DXVK_CONFIG the test can't run and exits 77 (SKIP, uncovered, not a pass). Without
+   * it, a query that doesn't signal is a failure of its own. */
   BOOL done = FALSE;
   const DWORD poll0 = GetTickCount();
   while (IDirect3DQuery9_GetData(query, &done, sizeof(done), D3DGETDATA_FLUSH) == S_FALSE) {
     if (GetTickCount() - poll0 > 5000) {
-      printf("SKIP code_throttle_flush: the event query hasn't signalled in 5 s with D3DGETDATA_FLUSH "
-             "(a mode that submits only on explicit flushes, e.g. d3d9.reproducibleCommandStream)\n");
+      if (repro_declared()) {
+        printf("SKIP code_throttle_flush: d3d9.reproducibleCommandStream (DXVK_CONFIG) submits only on explicit "
+               "flushes, so the event query can't signal before the lock; not covered in this mode\n");
+        fflush(stdout);
+        ExitProcess(77);
+      }
+      printf("FAIL code_throttle_flush: the event query hasn't signalled in 5 s with D3DGETDATA_FLUSH (before the lock)\n");
       fflush(stdout);
-      ExitProcess(0);
+      ExitProcess(4);
     }
     Sleep(0);
   }
