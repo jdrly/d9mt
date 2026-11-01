@@ -12,13 +12,25 @@
 static IDirect3DVertexBuffer9 *vb;
 static IDirect3DQuery9 *query;
 
+/* The watchdog times the DISCARD Lock itself: lock_start is the tick the Lock began (0 outside
+ * it). A Lock that hasn't returned after 20 s is the hang. It disarms after frame 5's checks, so a
+ * slow start or a long standalone run (x_loop presents up to frame 600) never trips it. */
+static volatile LONG lock_start;
+static volatile LONG disarmed;
+
 static DWORD WINAPI watchdog(LPVOID p) {
   (void)p;
-  Sleep(20000);
-  printf("FAIL code_throttle_flush: no progress in 20 s (hang in Lock)\n");
-  fflush(stdout);
-  ExitProcess(3);
-  return 0;
+  for (;;) {
+    Sleep(250);
+    if (disarmed)
+      return 0;
+    const LONG t = lock_start;
+    if (t && GetTickCount() - (DWORD)t > 20000) {
+      printf("FAIL code_throttle_flush: Lock hasn't returned in 20 s (hang in Lock)\n");
+      fflush(stdout);
+      ExitProcess(3);
+    }
+  }
 }
 
 static DWORD color(int n) {
@@ -44,7 +56,9 @@ static void frame(int n) {
     Sleep(0);
 
   float *v;
+  InterlockedExchange(&lock_start, (LONG)(GetTickCount() | 1u));
   X_CHECK(IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&v, D3DLOCK_DISCARD));
+  InterlockedExchange(&lock_start, 0);
   const float q[20] = {
       -0.5f, 0.5f, 0.5f, 0.0f, 0.0f, 0.5f, 0.5f, 0.5f, 1.0f, 0.0f,
       -0.5f, -0.5f, 0.5f, 0.0f, 1.0f, 0.5f, -0.5f, 0.5f, 1.0f, 1.0f};
@@ -66,8 +80,10 @@ static void frame(int n) {
   snprintf(what, sizeof(what), "frame %d outside", n);
   x_expect(what, &r, 40, 40, 0xff000000u, 0x00ffffffu);
   x_done(&r);
-  if (n == 5)
+  if (n == 5) {
     x_report("code_throttle_flush");
+    InterlockedExchange(&disarmed, 1);
+  }
 }
 
 int main(void) {
