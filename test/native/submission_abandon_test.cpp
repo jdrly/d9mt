@@ -1,18 +1,19 @@
 // Native unit test of SubmissionTracker::abandon (#63; driver/backend/mtl_submission.cpp, compiled
-// as is against stubbed bridge and Win32 calls). At process detach, after a residency commit that
-// couldn't be made, the tracker must neither wait nor release:
-//  - waitFor on a submitted serial the GPU never signals returns at once: no GPU-stall slices, no
-//    D9MT-GPU-HUNG termination;
-//  - no retirement runs or is destroyed, queued before or after abandon(), due or not (one could
-//    release a prefix command buffer the GPU still uses); a retirement batch isn't run either;
-//  - drainAndStopPump waits for nothing, runs nothing and leaves the shared event alive.
-// Before abandon(), the same tracker runs a due retirement (the control).
+// as is against stubbed bridge and Win32 calls). A submit dropped at process detach took no serial,
+// but a prefix of it may be on the GPU, uncovered by any signal. After abandon():
+//  - waits are unchanged: waitFor still blocks until a submitted serial is signalled (a caller
+//    takes its return as "the GPU is done"), and the drain still waits for every submitted serial;
+//  - what is retired after a serial past lastSubmittedSerial() is leaked, never run or destroyed:
+//    by retireAfter and retireBatch, before and after the drain, and by the drain itself;
+//  - what is retired at or below it still runs, in the drain and after it.
+// Before abandon(), the same tracker runs a due retirement (the control). No D9MT-GPU-HUNG.
 //   scripts/test-residency.sh (DXVK's native headers; plain and ASan/UBSan)
 #include "mtl_submission.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <new>
 #include <string>
@@ -76,67 +77,102 @@ struct Probe {
   ~Probe() { (*destroyed)++; }
 };
 
+struct Retired {
+  std::atomic<uint32_t> runs = { 0u }, destroyed = { 0u };
+  std::function<void()> closure() {
+    auto p = std::make_shared<Probe>(Probe { &destroyed });
+    return [p, this] { runs++; };
+  }
+  bool ran() const { return runs.load() == 1u; }
+  bool leaked() const { return runs.load() == 0u && destroyed.load() == 0u; }
+};
+
+// Signals `serial` after `ms`, as the GPU would.
+static std::thread signalLater(uint64_t serial, uint32_t ms) {
+  return std::thread([serial, ms] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    g_signaled = serial;
+  });
+}
+
+static long long msSince(std::chrono::steady_clock::time_point t0) {
+  return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static RetireBatch* batchWith(std::unique_ptr<RetireBatch>& b, obj_handle_t object) {
+  b = std::make_unique<RetireBatch>();
+  b->objects.push_back(object);
+  return b.get();
+}
+
 int main() {
-  SubmissionTracker::s_sliceMs = 50u;
+  SubmissionTracker::s_sliceMs = 200u;   // a GPU-hang verdict would take 1 s
   SubmissionTracker::s_terminate = [] (unsigned) { g_terminations++; };
 
-  // The tracker's memory is never freed: its pump may still run (at a real detach it's dead).
-  alignas(SubmissionTracker) static unsigned char storage[sizeof(SubmissionTracker)];
-  SubmissionTracker* t = new (storage) SubmissionTracker(0xde5u);
+  auto* t = new SubmissionTracker(0xde5u);
 
   // Control: before abandon(), a due retirement runs.
-  std::atomic<uint32_t> controlRuns = { 0u };
-  t->retireAfter(0u, [&] { controlRuns++; });
-  CHECK(controlRuns.load() == 1u);
+  Retired control;
+  t->retireAfter(0u, control.closure());
+  CHECK(control.ran());
 
-  // Serial 1 is submitted and the GPU never signals it.
-  const uint64_t serial = t->onSubmit(0x9u);
-  CHECK(serial == 1u);
+  // Serial 1 is submitted; a retirement and a batch wait for it.
+  const uint64_t s1 = t->onSubmit(0x9u);
+  Retired a;
+  t->retireAfter(s1, a.closure());
+  std::unique_ptr<RetireBatch> b;
+  batchWith(b, 0xb1u);
+  b = t->retireBatch(s1, std::move(b));
 
-  std::atomic<uint32_t> runs = { 0u }, destroyed = { 0u };
-  { auto p = std::make_shared<Probe>(Probe { &destroyed });
-    t->retireAfter(serial, [p, &runs] { runs++; }); }
-  auto batch = std::make_unique<RetireBatch>();
-  batch->objects.push_back(0xb0u);
-  batch = t->retireBatch(serial, std::move(batch));
-
+  // The open serial's submit is dropped: abandon. What is retired after it is leaked at once.
   t->abandon();
   CHECK(t->abandoned());
+  const uint64_t open = t->nextSerial();
+  Retired prefix;
+  t->retireAfter(open, prefix.closure());
+  batchWith(b, 0xb2u);
+  b = t->retireBatch(open, std::move(b));
+  CHECK(prefix.leaked());
 
-  // No wait: a GPU-hang wait would take 5 slices (250 ms) and terminate.
-  const auto t0 = std::chrono::steady_clock::now();
-  t->waitFor(serial);
-  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-  if (ms >= 40) { g_fail++; std::printf("FAIL waitFor after abandon waited %lld ms\n", (long long)ms); }
+  // waitFor still waits for a submitted serial.
+  { std::thread gpu = signalLater(s1, 150u);
+    const auto t0 = std::chrono::steady_clock::now();
+    t->waitFor(s1);
+    const long long ms = msSince(t0);
+    gpu.join();
+    if (ms < 100) { g_fail++; std::printf("FAIL waitFor after abandon returned after %lld ms, before the GPU signalled\n", ms); }
+    CHECK(t->isComplete(s1));
+  }
+
+  // Serial 2 is submitted too (an earlier, complete submit of the same frame, say).
+  const uint64_t s2 = t->onSubmit(0x9u);
+  Retired c;
+  t->retireAfter(s2, c.closure());
+
+  // The drain waits for serial 2, runs what is at or below it, leaks what is past it.
+  { std::thread gpu = signalLater(s2, 150u);
+    const auto t0 = std::chrono::steady_clock::now();
+    t->drainAndStopPump();
+    const long long ms = msSince(t0);
+    gpu.join();
+    if (ms < 100) { g_fail++; std::printf("FAIL the drain after abandon returned after %lld ms, before the GPU signalled\n", ms); }
+  }
+  CHECK(a.ran() && c.ran());
+  if (!prefix.leaked()) { g_fail++; std::printf("FAIL the drain ran or destroyed a retirement past the last submitted serial\n"); }
+  CHECK(g_batchRuns.load() == 1u);          // serial 1's batch ran, the open serial's didn't
+
+  // After the drain: past the last submitted serial, leaked; at or below it, released at once.
+  Retired late, done;
+  t->retireAfter(open, late.closure());
+  t->retireAfter(s2, done.closure());
+  if (!late.leaked()) { g_fail++; std::printf("FAIL retireAfter after the drain ran a retirement past the last submitted serial\n"); }
+  CHECK(done.ran());
+  batchWith(b, 0xb3u);
+  b = t->retireBatch(open, std::move(b));
+  CHECK(g_batchRuns.load() == 1u);
+
   CHECK(g_terminations.load() == 0u);
-
-  // Due now, but nothing runs: not by processRetirements, not by the pump.
-  g_signaled = serial;
-  t->processRetirements();
-  t->processRetirements(serial);
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  CHECK(runs.load() == 0u && destroyed.load() == 0u);
-  CHECK(g_batchRuns.load() == 0u);
-
-  // Queued after abandon(), complete already: leaked, not run.
-  { auto p = std::make_shared<Probe>(Probe { &destroyed });
-    t->retireAfter(0u, [p, &runs] { runs++; }); }
-  batch->objects.push_back(0xb1u);
-  batch = t->retireBatch(serial, std::move(batch));
-  CHECK(runs.load() == 0u && destroyed.load() == 0u);
-  CHECK(g_batchRuns.load() == 0u);
-
-  // The drain: no wait, no retirement, the event left alive.
-  g_signaled = 0u;
-  const auto t1 = std::chrono::steady_clock::now();
-  t->drainAndStopPump();
-  t->drainAndStopPump();
-  const auto ms1 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
-  if (ms1 >= 40) { g_fail++; std::printf("FAIL drainAndStopPump after abandon waited %lld ms\n", (long long)ms1); }
-  CHECK(runs.load() == 0u && destroyed.load() == 0u);
-  CHECK(g_batchRuns.load() == 0u);
-  CHECK(g_terminations.load() == 0u);
-  CHECK(g_eventReleases.load() == 0u);
+  delete t;
 
   std::printf("%s\n", g_fail ? "FAIL" : "ok");
   std::fflush(stdout);
