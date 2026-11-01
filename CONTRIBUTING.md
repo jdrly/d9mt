@@ -107,9 +107,11 @@ If two sources conflict, report the conflict instead of silently choosing one.
   | `Medium` | Significant duplication, overengineering or maintainability risk. |
   | `Low` | Local cleanup that can go with related work. |
 
-- In d9mt a finding is a `Blocker` by default when it can **change a frame against the base
-  commit unintentionally**, **release a Metal object before the GPU has retired it** (Metal 4
-  doesn't retain resources), or **make something measurably slower**.
+- In d9mt a finding is a Blocker by default when it can change a frame against
+  base unintentionally, release a Metal object before the GPU has retired it,
+  or leave a confirmed material representative regression without a resolution
+  or recorded maintainer decision under PERFORMANCE.md. A microbenchmark delta
+  alone is a diagnostic observation, not a performance Blocker.
 - A finding describes **one problem with one fix boundary**, not one affected file.
 - Findings stay in the pull request; never commit a review ledger. Decisions that should outlive
   the review go into the PR description.
@@ -128,36 +130,27 @@ A change is done only when all of these hold:
       `D9MT_NO_ATTACHMENT_OPT=1` and `d3d9.reproducibleCommandStream=True`, and, for a change to
       the submission path, with `D9MT_EARLY_COMMIT=always`. `D9MT_LIFETIME_CHECK=1` finds no
       violation.
-- [ ] **A regression test that fails without the fix.** A bug fix adds or extends a `test/`
-      program or a `test/native/` test, and the PR shows it failing on the base commit and
-      passing on the branch.
+- [ ] A bug fix adds or extends a regression test and shows it failing on base
+      and passing on the branch where safe and feasible. When the hardware fault
+      cannot reproduce locally or safely, state the violated contract, provide
+      the strongest safe production/API witness available, and document what it
+      proves and which hardware/runtime checks remain. Do not provoke a GPU fault
+      merely to obtain a negative control.
 - [ ] **Native tests.** `scripts/run-native-tests.sh` passes, and a change that a test it skips
       covers runs that test's own runner ([docs/testing.md](docs/testing.md)); a change to threading runs the
       affected tests under ThreadSanitizer (`scripts/test-state-cache.sh`,
       `scripts/test-compile-mt.sh`), a change to memory handling under ASan/UBSan.
-- [ ] **Nothing measurably slower.** Benchmarks run uncapped (`D9MT_BG_FPS=0
-      D9MT_STALL_PACE=0`), alone in a quiet window (never while a game runs), in paired rounds
-      against the base commit with the order alternated (ABBA), next to a control (a byte-
-      identical copy of base). The PR gives the paired difference and the number of slower
-      rounds. A rebuild alone moves a microbenchmark by up to ±3 % (code layout), so a single
-      commit's small delta is checked with the **a64 layout control**: base and branch both
-      built with `-falign-functions=64`; if the gap disappears, it is layout. When the change
-      alters the size of its translation unit's code, a64 can't separate it, and the control is
-      a placebo of identical size; a change of data layout needs the same change in the placebo.
-      One block isn't a pass, and the PR names the outcome: cost established, cost bounded, or
-      unresolved (PERFORMANCE.md §2.4). The release candidate's whole-build comparison at default
-      alignment is the binding check; a slowdown there gets a layout fix, not a revert. The full
-      method, the benchmarks and the diagnostics are in [PERFORMANCE.md](PERFORMANCE.md).
-      - **A fix** (a change that prevents a bug or a GPU fault) merges when no cost is
-        established at the measurable resolution, the one the calibrated method actually
-        reaches (about ±1 % on bindbench today). A flag below it goes to a council and doesn't
-        hold the fix; a larger one is re-verified, and a cost that is established goes to the
-        maintainer (PERFORMANCE.md §1, §2.4).
-      - **A speed-only change** (its purpose is speed, not preventing a bug) also shows that it
-        renders identically on Mac generations other than the one it was measured on, a slower
-        and a fanless Mac among them, and the PR names them. Without that coverage it goes in
-        only behind a switch that is off by default, in the tables of `docs/configuration.md`. This applies to
-        new speed-only changes; existing speed optimisations stay as they are (ADR-0005).
+- [ ] Performance evidence follows the change's kind in PERFORMANCE.md §1.
+      Name the kind and record a bounded review of added work, inspected paths,
+      architectures and omissions. Provide the accepted representative guard's
+      result when valid. During the explicit transition record timing as pending,
+      never passed, and preserve correctness, review and UAT requirements.
+      Record supported below-guard costs for the cumulative release decision.
+      Speed-only defaults need positive representative and game evidence plus
+      cross-generation rendering coverage; otherwise use a documented default-off
+      experiment. Shader codegen adds semantic, OS and cache checks. Diagnostics
+      separate default-path effects from enabled overhead. Report optional
+      microbenchmark observations in both directions with their limits.
 - [ ] **AIR codegen id.** A PR that changes the bridge or the AIR codegen states its AIR codegen
       id (`build/bridge/air-codegen-id.txt`) next to `main`'s. If it changes, every player's AIR
       cache recompiles once: the PR says so, or adds a lineage entry with the evidence that the
@@ -182,9 +175,9 @@ benchmarks (`test/perf/`, `test/bench_4k.c`, PERFORMANCE.md §3) are on `main`.
 
 - Push directly to `main`.
 - Merge a change that renders a frame differently from base without the issue asking for it.
-- Merge a change that is measurably slower, or measure while a game or anything else runs.
-- Merge a speed-only change that hasn't shown identical rendering on other Mac generations,
-  unless it is behind a switch that is off by default.
+- Bypass the performance decisions or required evidence in PERFORMANCE.md.
+- Measure while a game or unrelated workload runs.
+- Merge a speed-only change enabled by default without the evidence PERFORMANCE.md §1 requires.
 - Release a Metal object the GPU may still use (ADR-0001).
 - Change the AIR codegen in passing: it costs every player a shader recompile (ADR-0006).
 - Mix a driver and a bridge from different builds.

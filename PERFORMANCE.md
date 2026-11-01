@@ -2,52 +2,50 @@
 
 d9mt exists to make games faster. This guide is **binding**: the Definition of Done in
 [CONTRIBUTING.md](CONTRIBUTING.md) refers to it, and the decision behind it is
-[ADR-0005](docs/adr/0005-correctness-first-speed-proven.md), which supersedes
-[ADR-0002](docs/adr/0002-nothing-measurably-slower.md). It says what the rule is, how to measure
+[ADR-0007](docs/adr/0007-correctness-and-representative-performance.md), which supersedes
+ADR-0005. Instrument-dependent rules remain pending until a calibration record is accepted. It says what the rule is, how to measure
 against it, which benchmarks and diagnostics exist, which design rules keep the hot path fast,
 and what a release candidate is checked for. What isn't in this repository yet is marked _Open_.
 
 ## 1. The rule
 
-- **Correctness on every supported Mac comes first.** A change that renders correctly on one Mac
-  can still break on another generation, a slower or a fanless one. #18's lossless compression
-  for textures that aren't block-compressed is the suspected cause of magenta icons on a player's
-  MacBook Air M4, not confirmed yet (ADR-0005).
-- **A fix merges unless a cost is established at the measurable resolution.** A fix, a change
-  that prevents a bug or a GPU fault, merges when the calibrated method establishes no cost at
-  the resolution it actually reaches: about ±1 % on bindbench today (§2.4, *Per PR and at the
-  release check*). It doesn't need a bound below +0.25 %. A flag larger than that resolution is
-  re-verified before the fix merges; a cost the re-verification establishes still goes to the
-  maintainer (§2.4, steps 2 and 3).
-- **A speed-only change carries the burden of proof.** A change whose purpose is speed, not
-  preventing a bug, needs evidence that it renders identically on Mac generations other than the
-  one it was measured on, a slower and a fanless Mac among them, not only a faster benchmark.
-  Without that coverage it goes in only behind a switch that is **off by default**, in the
-  tables in [docs/configuration.md](docs/configuration.md), and a later PR that brings the
-  coverage turns it on (`D9MT_AIR_FASTMATH` has this shape). The player on an untested Mac is the one who would need an off switch and the one
-  least likely to know it exists. Existing speed optimisations stay as they are; this applies to
-  new speed-only changes (ADR-0005).
-- **+0.25 % is a flag, not a hard stop.** Every median slowdown over it is flagged and
-  re-verified (§2.4). A small flag at the edge of the measurable resolution goes to a council and
-  doesn't block a fix. Such flags can add up over a release; the smoothness guard (§6) is where
-  that is caught.
-- **Nothing measurably slower merges**, in any scenario. The per-draw and per-bind paths are the
-  most sensitive; a gain in one scenario doesn't offset a loss in another (ADR-0005).
-- **A cost that can't be removed waits until it can.** Measuring a regression is not enough; it
-  has to be solved (ADR-0005).
-- **A layout effect is not a cost of the change.** Under Rosetta, a rebuild alone moves a
-  microbenchmark by up to ±3 % because the linker moves hot code; every later merge moves it
-  again, and its sign is as likely to flip as to stay. A delta that disappears under the layout
-  controls, in more than one block (§2.4), isn't attributed to the commit. A delta the method
-  can't resolve isn't attributed to layout either: it is unresolved (§2.4, *Outcomes*).
-- **The binding check is the release candidate as shipped**: the whole build at default
-  alignment against the previous release (§6). A slowdown there that is layout gets a layout fix
-  (an alignment flag, function order), each measured on its own, **not a revert** of the commit
-  that happened to move it.
-- No author or reviewer grants an exception; only the maintainer can (§2.4, step 3). The PSO
-  MRU change (#40), for example, was no exception: it merged once the cause of its synthetic
-  worst case (psobench `topo`) was gone with #33, merged before it, and what remained flipped
-  sign with alignment, so it was layout (#40).
+Correctness on supported Macs comes first. Every change needs clean builds, appropriate
+correctness tests, explained image/hash differences, relevant Metal validation,
+independent review at its current head and the specified game UAT. A test that fails on
+base and passes on the fix is preferred. Where a safe reproduction is unavailable,
+document the violated contract and what is untested.
+
+Correctness and stability fixes use representative workloads as a guard against
+substantial regressions, not a demand to prove zero cost. Diagnostics and refactors use
+that guard when they affect executable runtime behavior. Diagnostics also report enabled
+overhead separately. Confirmed material losses require investigation regardless of
+static instruction growth. The maintainer may accept a necessary material cost, recorded
+with its benefit and the independent review's opinion. A supported cost below the
+accepted guard does not independently hold a correctness fix. Record it in the PR and
+performance ledger and list it for the maintainer in the release candidate record.
+Policy adoption delegates those per-PR decisions; the maintainer records acceptance of
+the cumulative tradeoff before release.
+
+Speed-only changes enabled by default must demonstrate a representative gain, a
+comparable before/after game session and identical rendering across other GPU
+generations, including slower and fanless Macs. Until then a reviewed experiment may
+merge behind a documented default-off switch. The enabled path still needs correctness
+checks. Exposing a driver switch in an app does not establish its benefit or authorize
+changing its default.
+Existing speed optimizations stay as they are; this applies to new speed-only changes.
+
+Shader codegen changes also need semantic and target-macOS checks and cache identity
+validation under ADR-0006. Separate cold compilation from warm rates, and disclose the
+planned one-time rebuild.
+
+Microbenchmarks are diagnostics. Their gains and losses are reported under the same
+rules; they do not independently block merge or release. An inconclusive measurement
+remains unresolved. Evidence from one GPU generation supports a claim about that
+generation, not every supported Mac.
+
+The maintainer accepts regression guards and deliberate performance tradeoffs. Routine
+merges follow CONTRIBUTING.md once their review, checks and UAT are complete. Public
+releases retain their separate authorization and candidate checks.
 
 ## 2. How to measure
 
@@ -96,16 +94,24 @@ and what a release candidate is checked for. What isn't in this repository yet i
   `build-driver.sh` tracks header dependencies since #36, but a measured variant must not depend
   on that. Record each variant's source commit next to its binary.
 
-### 2.2 Rounds and what to report
+### 2.2 Comparisons and reporting
 
-- Run **paired rounds**: each round runs every variant once, with the order rotated by one per
-  round (so each variant is in each position equally often; for two variants that is ABBA). Every
-  round pairs each variant with base.
-- Report per variant the **median** of its runs, the **paired difference** to base (per round,
-  then the median), and **how many rounds it was slower**, for example
-  `paired -0.3250 ms (-3.2%)  slower 0/10`.
-- A difference within the ±3 % a rebuild can cause counts only if it repeats across windows,
-  with a control next to it (§2.4).
+Declare the workload, metric, direction, source and artifact identities, cache state,
+independent unit, comparison order, uncertainty method and repeat budget before
+collecting results. Compare both sides in matched conditions across independent windows.
+More frames in one window do not replace independent windows. Record realized order and
+validate controls in each window.
+
+Report both builds' values and the signed absolute and relative differences,
+uncertainty, sample counts and invalid runs. Show speedups and slowdowns equally. For
+frame times and CPU cost, higher is worse; for rates, higher is better. Keep raw results
+even if a later comparison differs. A sign change, invalid control or broad interval
+does not prove equivalence.
+
+Microbenchmark reports name the synthetic workload and layout limitations. Game sessions
+record the scene, settings, cap, display, chip, OS and cache state. Instrumentation must
+match between arms. Profile-on measurements describe the instrumented regime and cannot
+establish normal profile-off game performance.
 
 ### 2.3 The harness
 
@@ -194,93 +200,65 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
   biases an A/A is measured by a quiet A/A and a reverse-order window with and without it; until
   then that observer is an unmeasured condition of runs made through it.
 
-### 2.4 Controls
+### 2.4 Calibration, regression guard and diagnostics
 
-- **basecopy (A/A)**: a byte-identical copy of base in its own directory, run as one more variant
-  (`--control basecopy`).
-  It shows the harness's bias and the window's noise floor. A delta smaller than the A/A spread
-  of that window can't be told from noise in that window. Inside one block a byte-identical
-  copy lands in base's mode (§2.5), so the A/A doesn't show how far two different binaries can
-  move between blocks.
-- The former automatic `FLAG >0.25%` and `~ noise` output has been removed.
-  The optional symmetric diagnostic band and observed control range are described in
-  §2.3. Neither independently triggers a merge hold, a council or re-verification.
-  The adopted representative policy supersedes the historical microbenchmark gate;
-  its ADR and full documentation follow separately. Calibration remains pending.
-- **a64 pair**: for a single commit's small delta, build base and the branch both with
-  `-falign-functions=64`. If the gap disappears there, that points at code layout, not the
-  change. It is a diagnosis for that block, and it counts only when it repeats across blocks.
-  Check that the flag alone doesn't move base (base-a64 against base).
-  a64 controls less than it seems to:
-  - It aligns where functions start. **It doesn't neutralise a change of data layout:** a member
-    added to or moved inside a struct shifts every later field's offset, and with it which hot
-    fields share a cache line, at any code alignment. #55's branch, for example, adds three
-    members in the middle of the device context, before its per-draw state, so every later
-    field moves by 0x18 bytes.
-  - It keeps each function's offset within a cache line, but not its address or its position
-    within a page.
-  - So a gap that survives a64 can still be layout, and a gap that disappears under a64 in one
-    block isn't a pass yet (*Outcomes*).
-- **Identical-size placebo**: a64 can't neutralise a change that alters the size of its
-  translation unit's code, because everything after it moves. Then build a placebo with exactly the
-  change's code size and no behaviour change, and compare the change against the placebo. If the
-  change reads like the placebo, it is layout. A change that alters data layout needs a placebo
-  with the same data-layout change too (the same members at the same offsets); otherwise the
-  comparison mixes layout with the change. Check both against the disassembly: the function
-  spans, and the field offsets the hot path uses.
-- **A near-identical pair is a control, not a verdict.** Two binaries that match in the
-  disassembly (an a64 pair, a change and its placebo) still place their code and data at
-  different addresses. Whether such a pair reads the same in every block is measured for that
-  pair, across blocks. It never passes on one block.
+The representative suite's calibration record specifies each workload and metric, the
+actual comparison procedure, independent windows, null variation, uncertainty and power
+to detect a player-relevant regression. It also records the repeat budget, validity
+checks, supported conditions and expiration triggers. The maintainer accepts the
+resulting per-metric regression guard. A large noise floor is a limitation to fix, not
+permission to hide arbitrarily large costs.
 
-#### Outcomes
+Open: the representative suite and accepted calibration record are not yet in this
+repository. There is no accepted numerical guard. No comparison may claim to have passed
+an uncalibrated guard. Pending calibration, correctness fixes, diagnostics and refactors
+may merge on current-head correctness evidence, bounded review of added work,
+independent review and specified UAT. Record timing as pending, never passed. Credible
+material losses go promptly to the maintainer. Speed-only changes remain off by default.
+No interim percentage threshold replaces the former gate.
 
-Every comparison of two different binaries ends in one of three outcomes, and the PR names it:
+An identical-copy A/A checks the harness under the tested conditions. It does not
+measure how different binaries respond to placement. Calibration must cover the actual
+comparison and relevant rebuild variation. Invalid controls invalidate that window;
+controls from different windows must not cancel one another.
 
-1. **Cost established**: the declared uncertainty, across blocks, supports a positive slowdown.
-   It doesn't merge (§1), whatever its size, and it takes steps 2 and 3 above. +0.25 % stays
-   the threshold for the flag, not for the cost.
-2. **Cost bounded below +0.25 %, under stated conditions**: a one-sided upper bound, declared
-   before the data, lies below +0.25 %, and the PR states the conditions it holds under (the
-   bench, the blocks, the layout control). This doesn't permit a smaller slowdown that is
-   measured reliably: that one is still measurably slower (§1). A fix doesn't need this outcome
-   (§1).
-3. **Unresolved**: everything else. A sign flip between blocks is unresolved, not "the flag
-   didn't hold". So is one block's narrow interval, whatever its sign, when the bench's mode can
-   change between blocks (§2.5). An unresolved comparison goes to a council (above); for a fix,
-   that doesn't hold the merge.
+An estimate crossing an accepted regression guard triggers the predefined confirmation
+operation: two admissions in distinct measurement windows, with later-night coverage
+when needed. The proposed 30-minute ceiling covers both admissions including setup,
+queue/lease/admission waiting, warm-up, measurement, analysis and cleanup. Report
+calendar gaps without active clients separately. If the complete operation cannot fit,
+record confirmation incomplete; do not omit controls or shorten blocks. A confirmed
+uncertainty interval wholly beyond the guard holds normal merge or release regardless of
+the static review result. Investigate the affected workload and causal path, and try a
+narrower implementation. If a necessary correctness fix retains a cost, the maintainer
+decides with the measured effect, uncertainty, safety benefit and independent review's
+assessment recorded.
 
-Every raw flag stays on record with its block, its interval, its slower n/N and its outcome, also
-after a later block reads otherwise.
+An interval crossing the guard is unresolved. At the end of the repeat budget, report
+that limit and refer any unresolved material risk to the maintainer; do not keep
+rerunning until a favorable result appears. Use "not confirmed" or "confirmation
+incomplete", preserving the original signal. Neither establishes noise or equivalence. A
+correctness fix may proceed with this qualification under the explicit transition or
+maintainer decision. A speed-only default needs positive proof. A supported cost below
+the accepted guard does not independently hold a correctness fix; record it in the PR,
+ledger and cumulative release record for the maintainer's release decision. A valid
+comparison with its upper uncertainty bound below the guard means only that no
+actionable regression was detected at the declared sensitivity; it does not establish
+zero cost or prove a speedup.
 
-#### Per PR and at the release check
+A static review records inspected functions, architectures and effects: calls, locks,
+allocation, data layout, execution frequency and GPU commands. "No added work was
+identified in the inspected paths" leaves timing and uninspected effects unverified.
+Instruction growth requires a rationale or investigation, not an invented time estimate.
+Unchanged instructions do not prove placement caused a measured loss. Existing tools or
+manual review suffice; a generic diff tool is optional and does not block a fix.
 
-The rule is there to stop code that costs: a design or a pipeline that makes the hot path slower
-when it could be written better and faster. Layout luck is a separate question, and it gets a
-separate check (the maintainer, 2026-10-27):
-
-- **Per PR**, the cost is judged on **layout-matched** evidence: a comparison whose two sides
-  share their code and data layout as far as the disassembly shows (the a64 pair or the
-  identical-size placebo above). On a bimodal bench the PR reports, side by side:
-  - the unfiltered paired contrast, over all rounds;
-  - each binary's **mode occupancy**, its runs in each mode;
-  - the **within-mode contrast**, the paired contrast over the rounds in which both runs share a
-    mode.
-
-  Declare the mode criterion before the data. The within-mode contrast is diagnosis, not the
-  change's cost: if a change moves which mode a run lands in, keeping only the rounds where both
-  runs share a mode removes part of its effect by construction.
-- **Mode and layout shifts**, a change that moves a binary into another mode or a cost that lives
-  only in the layout, are judged at the release candidate check (§6) with the calibrated method.
-- **The goal is a method that resolves 0.25 %.** A larger bound for one benchmark, or an
-  exception, comes only if calibration shows the method can't get there, and only the
-  maintainer grants either. Until then a fix is judged at the **measurable resolution**, the one
-  the calibrated method actually reaches (§1). _Open:_ on bindbench it doesn't resolve 0.25 %
-  yet. In the maintainer's runs one block of 30 to 40 rounds didn't bound even an A/A below
-  +0.25 % (the intervals' upper ends were +0.59 to +0.86 %), and the contrast of two different
-  binaries ranged from +5.3 % to −5.3 % over three blocks (§2.5). In the maintainer's runs of
-  2026-10-28 the A/A intervals spanned about ±1 %: that is bindbench's measurable resolution
-  today. The other benchmarks' resolution isn't calibrated yet.
+Alignment pairs, identical-size placebos and randomized layouts can help explain
+microbenchmark effects. They are optional investigations, not certification
+requirements. Alignment does not control data layout; one disappearing gap does not
+prove that a change is free. Within-mode filtering is diagnostic and must accompany the
+unfiltered result because it can remove part of the effect. The former +0.25% flag and
+approximately ±1% microbenchmark merge rules do not apply under this policy.
 
 ### 2.5 Bimodal benchmarks
 
@@ -300,7 +278,7 @@ known yet; the path and the environment (§2.1) are suspects, not proven causes.
   between blocks stays where it was. A small difference needs more blocks, not more rounds per
   block.
 - **One block's interval is conditional on that block.** A narrow interval with every round on one
-  side is still one block's reading, and it can flip sign in the next (§2.4, *Outcomes*).
+  side is still one block's reading, and it can flip sign in the next (§2.4).
 - **The A/A doesn't show it.** A byte-identical copy lands in base's mode, so the A/A can be tight
   in a block where two different binaries sit 5 % apart.
 - **`perf-compare.py`'s `bimodal?` doesn't see it either:** it looks for two clusters among one
@@ -311,7 +289,7 @@ known yet; the path and the environment (§2.1) are suspects, not proven causes.
 runs (bench_fps_cap, 15 s, uncapped with vsync off, no CPU work or game cap, presenting to a
 visible window on the virtual display), a run's fps followed its number of long frames (`long=`)
 almost exactly. Runs fell into a fast and a slow mode by time, not by variant, and variants with
-no behaviour difference still differed by more than the 0.25 % rule paired within one mode. That
+no behaviour difference still differed by more than the former 0.25 % rule paired within one mode. That
 is one configuration: CPU work, GPU load or the bench's own game cap can set the rate instead.
 In such a run:
 - Don't read a present-path cost from fps alone. Equal fps under a pacing limit (vsync, a cap,
@@ -324,7 +302,7 @@ In such a run:
 - State each value's printed resolution next to the A/A spread: `p50` in 0.01 ms, `cpuProc` and
   `cpuMain` in whole ms per second. A difference below either is unresolved, not zero.
 
-_The maintainer's measurements behind §2.4 and §2.5 are not public._
+_The maintainer's measurements behind §2.5 are not public._
 
 ### 2.6 The virtual display
 
@@ -372,6 +350,7 @@ parentheses.
 | `bench_fps_cap` | Frame pacing with vsync on or off, a set CPU time per frame and optional jitter; reports fps, percentiles, `sd` and `long` (frames over 1.5x the median), the CPU per second (`cpuProc`, `cpuMain`) and per frame (`cpuProcFrame`, `cpuMainFrame`), `p50_ms` (p50 to 4 decimals), the CPU clocks' smallest observed steps (`cpu_tick_ms`, `thread_tick_ms`: upper bounds on their granularity, 0 = unknown), `qpc_tick_ns`, and the measured interval (`measured_frames`, `measured_s`). The CPU values cover the whole interval; `n`, fps and the percentiles cover the first 200,000 stored frames. With a coarse clock, a CPU time can't resolve less than one tick over `measured_s` or `measured_frames`; printed rounding adds 0.01 ms (`p50`) or 0.0001 ms (`p50_ms`, `*Frame`) | Present-path and pacing changes (`--metric p99` or `sd`; the CPU per frame with `--metric cpuMainFrame`) | `test/perf/bench_fps_cap.c`: `[seconds (30)] [vsync 0/1 (1)] [cpu ms] [jitter ms] [quads] [game cap fps]` |
 | state cache record cost | The render thread's cost of recording a pipeline (`RESULT state_cache_bench rounds= median_ns= mean_ns=`) | Changes to recording | `test/native/state_cache_test.cpp`: `BENCH_ROUNDS=<n> scripts/test-state-cache.sh`; to compare trees, `perf-abba.sh --native` with one `state_cache_test` per tree |
 | state cache session | A synthetic SWTOR-like session with many pipelines (200 pixel shaders, 400 pipelines): world-phase frame times, compile waits, `STATECACHE` counters | Cold start, prewarm, the pipeline state cache | `test/code_statecache.c` via `scripts/run-statecache-bench.sh` |
+| Representative game workload | A validated game-shaped replay or equivalent supported workload, with separate CPU/GPU-sensitive, tail and cache metrics | Regression guard and speed-only evidence under §2.4; candidate checks under §6 | Open: workload implementation, measurement validity, calibration and accepted guards are pending. No numerical pass is available yet. |
 | `archfirst` | Native Metal 4, no Wine: `check` for correctness, `time` for the hit cost through an `MTL4Archive` vs a compiler with `lookupArchives`, and the miss cost with 1, 8 and 64 archives | Bridge PSO-archive changes | _Open:_ only on the branch `bundle/bridge-s1-pso` |
 
 The guards a change to the submission path runs are listed in
@@ -494,47 +473,42 @@ doesn't apply.
 
 ## 6. The release candidate's health pass
 
-Before a stable release of an app that ships d9mt, all changes since the last release are built
-into **one release candidate** at default alignment, and exactly that build is released. It is
-compared with the previous release (and a basecopy) in at least five paired rounds per benchmark,
-with no foreign Wine load:
+Check the combined candidate against the previous stable release on correctness,
+representative performance and game behavior. A tested development build may serve as
+the candidate. Keep an artifact manifest and record what was tested.
 
-- the hash suite;
-- `bench_4k`, `bindbench` (uncapped; its mode can change between blocks, so several blocks, not
-  only more rounds, §2.5), `churnbench`;
-- `psobench` `blend` and `topo`, and `bench_draws` `present`: the binding check for the commits
-  whose deltas were judged as layout;
-- `bench_fps_cap` with vsync on, about 20 rounds, with counters for the drawable wait (time,
-  timeouts); the present-path question behind it (#26: −2.0 % fps with vsync on, not shown to be
-  significant) is also checked in a game on a real display (§2.6).
+Run the hash/image suite, appropriate Metal validation and the representative CPU, GPU,
+upload, query and presentation cases supported by the accepted suite. Use the calibrated
+conditions and report each case separately. Microbenchmarks may help investigate a
+change; their deltas alone do not block the candidate. Keep the release architecture
+review and the maintainer's game session.
 
-A measured regression blocks the release. If it is layout, the release candidate gets a layout
-fix, each measured on its own; it is never fixed by reverting the commit that moved it.
+Presentation needs a real awake display. Synthetic virtual-display results cannot
+establish pacing at the player's display. Separate cold shader/pipeline compilation,
+prewarm and warm steady-state results when caches change. State coverage gaps on other
+GPU generations and macOS versions.
 
-_Open:_ the drawable-wait counters are on the branch `diag/drawable-wait-stats`, not on `main`
-yet.
+Ship the tested executable artifacts. Verify permitted version, notes and signing
+differences. Any functional change after the candidate checks receives review and the
+affected checks and UAT again. A confirmed representative regression is investigated
+before release, with any accepted tradeoff recorded by the maintainer. Missing
+calibration is explicitly unverified and requires a recorded release decision; it is not
+a performance pass.
 
 ### 6.1 The smoothness guard
 
-Per PR, a fix's flag below the measurable resolution doesn't hold it (§1), so small costs can add
-up over a release. The release check is where that is caught, on what the player feels rather
-than on average fps or ms alone: the release candidate is compared with **the last stable
-release** on the numbers below. **Any measurable regression in them goes to the maintainer
-before the release, with both builds' numbers** (ADR-0005).
+Report frame-time p99, the mean of the slowest 1% of frames, hitch counts or rates,
+present-interval spread and CPU cost alongside average performance. Include run duration
+and sample counts so hitch totals can be compared fairly. Use each metric's calibrated
+uncertainty and guard; a threshold for average frame time does not establish sensitivity
+for tail latency or hitch rates.
 
-| What the player feels | Where the number comes from |
-|---|---|
-| 1 % lows and frame-time p99 | `bench_fps_cap`'s `low1_ms`/`low1_fps` (the 1 % low: the mean of the slowest 1 % of frames, at least one) and `p99` (the frame interval 99 % of frames stay under, 0.01 ms); `bench_draws` `present`'s `frame_low1_ms`/`frame_low1_fps` and `frame_p99_ms`; in a game, `STATS`'s `ms=avg/p99/max` per second |
-| Hitches, frames over 33 and 50 ms | `bench_fps_cap`'s `slow33`/`slow50` (frames over 33.4 and 50 ms, as `STATS` counts them), and its worst frames: `HIST` in 1 ms bins up to 200 ms and `TAIL` every frame of 201 ms or more, so together every stored frame (the first 200 000 of the run; its `long` counts frames over 1.5x the median, not over 33 or 50 ms); `bench_draws` `present`'s `frame_max_ms`; in a game, `STATS`'s `slow33`/`slow50` and the `HITCH` lines (d9mt's share or the game's) |
-| The present interval's spread | `bench_fps_cap`'s `sd`; in a game, `PACE`'s `sd` (the interval between the game's Present calls) |
+Compare the candidate with the previous stable release in matched workloads and the
+maintainer's familiar scenes. Record caps, settings, display and cache state. At a frame
+cap, unchanged FPS does not prove unchanged CPU/GPU cost. Keep profile settings
+identical between arms and report their overhead regime.
 
-- The benchmark numbers come from the `bench_fps_cap` and `bench_draws` `present` runs above, as
-  paired rounds against the last stable (§2.2), with `--metric low1_ms`, `p99`, `slow33`,
-  `slow50`, `sd`, `frame_low1_ms` or `frame_p99_ms` (§2.3; `low1_fps` and `frame_low1_fps` are
-  read as higher-is-better), and compare `long` per round. perf-abba.sh keeps only the `RESULT`
-  line, so the `HIST` counts and the `TAIL` frames come from the bench's own output.
-- `STATS`, `PACE` and `HITCH` need `D9MT_PROFILE`, which changes the regime (§2.1): compare both
-  builds under the same setting, in the same scene on a real display (§2.6), and don't read their
-  frame rate as the player's.
-- _Open:_ there is no scripted game scene in this repository, so the in-game side of the
-  comparison isn't repeatable yet.
+A confirmed smoothness loss goes to the maintainer with both builds' numbers and the
+affected scenario before release. Gains in another scenario do not erase it. Preserve
+unresolved results and accepted small costs so cumulative release effects remain
+visible.

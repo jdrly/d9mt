@@ -58,8 +58,9 @@ on macOS 27.
   [#67](https://github.com/jdrly/d9mt/pull/67)
 
 Three switches merged on 2026-10-30 and stay off by default until testers' measurements back
-them. Under [ADR-0005](docs/adr/0005-correctness-first-speed-proven.md), a change made for speed
-stays behind a switch until it renders identically on other Mac generations, a slower and a
+them. Under [ADR-0007](docs/adr/0007-correctness-and-representative-performance.md), a change made for speed
+stays behind a switch until it shows a representative gain, a comparable before/after
+game session and identical rendering on other Mac generations, a slower and a
 fanless one among them.
 
 - `D9MT_FLUSH_CAP=1` stops weak flush hints from submitting a command buffer mid-frame, as
@@ -311,10 +312,12 @@ AIR version test and the hang test under Wine.
 
 ## Performance
 
-Correctness on every supported Mac comes first, and nothing measurably slower merges
-([ADR-0005](docs/adr/0005-correctness-first-speed-proven.md)). [PERFORMANCE.md](PERFORMANCE.md)
-is the method: paired ABBA rounds against a byte-identical control in a quiet window, a
-code-layout control, the benchmarks in `test/perf/` and the `D9MT_PROFILE` diagnostics.
+Correctness on every supported Mac comes first.
+[PERFORMANCE.md](PERFORMANCE.md) defines evidence by change type under
+[ADR-0007](docs/adr/0007-correctness-and-representative-performance.md). Representative
+calibration and numerical guards remain pending. Microbenchmarks are diagnostics;
+new speed-only defaults need positive representative and game evidence plus
+cross-generation rendering coverage.
 
 ## Contributing
 

@@ -1,10 +1,12 @@
 ---
-status: accepted
+status: superseded by ADR-0007
 date: 2026-10-28
 deciders: Jan Drlý
 ---
 
 # Correctness on every supported Mac comes first, and a speed-only change proves itself or waits behind a switch
+
+Superseded by [ADR-0007](0007-correctness-and-representative-performance.md) on 2026-11-01. The rules below are historical.
 
 ## Context
 

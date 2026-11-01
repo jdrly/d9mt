@@ -371,5 +371,5 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   Starvation and latency are reported, not only `cb`.
 - In game: STATS `cb`, `splitSubmit` and `splitMiB` with the switch off and on, in the same
   scene.
-- Results: pending. The default changes only with them and ADR-0005's cross-hardware evidence;
+- Results: pending. The default changes only with them and ADR-0007's cross-hardware evidence;
   the decision is the maintainer's.

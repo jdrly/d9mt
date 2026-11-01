@@ -35,8 +35,9 @@ This table is the status source of truth. Update both it and the ADR's frontmatt
 | [0002](0002-nothing-measurably-slower.md) | Nothing merges that is measurably slower | `superseded by ADR-0005` |
 | [0003](0003-pipeline-state-cache-in-d3d9.md) | A pipeline state cache in `d3d9.dll`, with a journal for the newest records | `accepted` |
 | [0004](0004-batch-bridge-changes.md) | Changes to `winemetal.so` are batched, because its LC_UUID keys every player's AIR cache | `superseded by ADR-0006` |
-| [0005](0005-correctness-first-speed-proven.md) | Correctness on every supported Mac comes first, and a speed-only change proves itself or waits behind a switch | `accepted` |
+| [0005](0005-correctness-first-speed-proven.md) | Correctness on every supported Mac comes first, and a speed-only change proves itself or waits behind a switch | `superseded by ADR-0007` |
 | [0006](0006-air-cache-keyed-on-codegen.md) | The AIR cache is keyed on the AIR codegen, not on `winemetal.so`, and keeps 0.1.5.1's metallibs | `accepted` |
+| [0007](0007-correctness-and-representative-performance.md) | Correctness fixes merge on correctness evidence with a representative performance guard | `accepted` |
 
 ## Candidates
 

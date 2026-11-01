@@ -219,16 +219,15 @@ _Open:_ its runner (`scripts/run-hash-tests.sh`) is on the branch `chore/test-ru
 
 **Base, basecopy**
 **Base** is the commit a change is measured and hashed against. **Basecopy** is a byte-identical
-copy of base, run next to the variants as a control for the harness (CONTRIBUTING).
+copy of base, run next to the variants as a control for the harness (PERFORMANCE.md §2.3, §2.4).
 
 **ABBA**
-Paired benchmark rounds in alternating order (base, branch, branch, base, …), so drift hits both
-sides equally (CONTRIBUTING; ADR-0005).
+Paired rounds with balanced order reduce order bias; they do not by themselves cancel all drift. Record the realized schedule and validate it.
 
 **a64**
-The layout control: base and branch both built with `-falign-functions=64`; a gap that
-disappears under a64 is code layout, not the change (CONTRIBUTING; ADR-0005). It doesn't
-control data layout, and one block under a64 isn't a pass (PERFORMANCE.md §2.4).
+A diagnostic comparison with both sources built with -falign-functions=64.
+It changes function alignment but does not control data layout, all addresses
+or page placement. Disappearance of a gap does not certify zero cost.
 
 **Block**
 One call of the benchmark harness: paired rounds of every variant under one admission, in one
@@ -242,37 +241,46 @@ contrast over the rounds in which both runs share a mode: diagnosis, not the cha
 (PERFORMANCE.md §2.4, §2.5).
 
 **Layout-matched**
-A comparison whose two sides share their code and data layout as far as the disassembly shows:
-the a64 pair, or a change and its identical-size placebo. Per PR, a cost is judged on it
-(PERFORMANCE.md §2.4).
+A diagnostic comparison designed to reduce particular code/data placement
+changes. State which placements remain uncontrolled. It is not a merge certificate.
 
 **Outcome**
-What a comparison of two binaries concludes: cost established, cost bounded below +0.25 % under
-stated conditions, or unresolved. A sign flip between blocks is unresolved. A fix needs no bound:
-only an established cost holds it (PERFORMANCE.md §2.4).
+The reported effect, uncertainty and decision under PERFORMANCE.md. Keep timing
+pending, not confirmed, confirmation incomplete and invalid distinct from an
+accepted guard result. Unresolved does not mean zero cost.
 
 **Council**
-Independent agent reviewers on different models who work on an unresolved flag alone, debate it
-and write one result for the maintainer (PERFORMANCE.md §2.4).
+Independent review and debate used when requested for a policy or unresolved
+technical decision. An unresolved microbenchmark flag does not automatically
+require a council under ADR-0007.
 
 **Fix, speed-only change**
-For the performance rule, a **fix** is a change that prevents a bug or a GPU fault; it merges
-when no cost is established at the measurable resolution. A **speed-only change** is one whose
-purpose is speed, not preventing a bug; it needs evidence of identical rendering on other Mac
-generations, a slower and a fanless Mac among them, or it goes in behind a switch that is off by
-default. That applies to new speed-only changes; existing speed optimisations stay as they are
-(PERFORMANCE.md §1; ADR-0005).
+A fix prevents wrong behavior, a hang, crash or GPU fault and is judged primarily
+on correctness, with the representative regression guard and specified UAT.
+A speed-only change needs positive representative and game evidence and other-
+generation rendering coverage for default-on. Otherwise a reviewed experiment
+uses a documented default-off switch. Existing optimizations stay as they are.
 
 **Measurable resolution**
-The smallest cost the calibrated method actually resolves between two binaries on a benchmark:
-about ±1 % on bindbench today. A fix is judged at it, not at the +0.25 % flag
-(PERFORMANCE.md §1, §2.4; ADR-0005).
+The sensitivity demonstrated for one metric, comparison schedule and condition.
+It is not an assumed universal percentage. Report uncertainty and detection power
+separately from the maintainer's accepted actionable regression guard.
 
 **Smoothness guard**
-The release candidate's comparison with the last stable release on what the player feels: 1 %
-lows, frames over 33 and 50 ms, frame-time p99 and the present interval's spread. A measurable
-regression goes to the maintainer before the release (PERFORMANCE.md §6.1; ADR-0005).
+The candidate's comparison with the last stable on tail frame times, hitch rates,
+pacing and cost using validated metric-specific conditions, plus the specified
+real-display and game checks. Material losses and cumulative known small costs
+reach the maintainer before release.
 
 **Quiet window**
 A time slot in which a benchmark runs alone on the Mac: no game, no other build or benchmark
-(ADR-0005).
+(PERFORMANCE.md §2.1).
+
+**Null variation**
+Measured variation with no intended treatment effect for a specified metric, schedule and condition. Identical-copy A/A does not establish cross-binary placement variation.
+
+**Detection power**
+The probability of detecting a specified effect under the calibrated comparison and its assumptions. Report it separately from uncertainty and the accepted guard.
+
+**Actionable regression guard**
+The maintainer-accepted loss for a metric and condition, supported by calibration of the actual schedule. No numerical guard is accepted yet.
