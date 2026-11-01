@@ -41,6 +41,10 @@ using FakeScope = prof::BasicScope<FakeClock>;
 int main(int argc, char** argv) {
   (void) argc;
   if (!prof::g_profEnabled) {
+    CHECK(!cheap_clock::process().tsc && cheap_clock::process().nsPerTick == 1.0);
+    { FakeScope scope(prof::Submit); FakeClock::t += 100u; }
+    CHECK(prof::g_ticks[prof::Submit] == 0u);
+    if (g_fail) return 1;
     setenv("D9MT_PROFILE", "1", 1);
     execv(argv[0], argv);
     std::printf("FAIL: could not re-run with D9MT_PROFILE=1\n");
@@ -72,10 +76,32 @@ int main(int argc, char** argv) {
   { // measure() with deterministic clocks: spans at least the calibration time.
     uint64_t ns = 0u, ticks = 0u, calls = 0u;
     cheap_clock::Calibration c = cheap_clock::measure(
-      [&] { ticks += 2500u; return ticks; },
+      [&] { ticks += 5000u; return ticks; },
       [&] { ns += 1000u; calls++; return ns; });
     CHECK(c.tsc && near(c.nsPerTick, 0.4, 1e-12));
     CHECK(ns >= cheap_clock::kCalibrationNs && calls < 2u * cheap_clock::kCalibrationNs / 1000u);
+
+    // Preemption on either endpoint retries the window, preserving the ratio.
+    for (uint64_t badCall : {2u, 202u}) {
+      uint64_t wall = 0u, calls = 0u;
+      auto c = cheap_clock::measure([&] { return wall * 2u; }, [&] {
+        wall += (++calls == badCall) ? 500000u : 1000u;
+        return wall;
+      });
+      CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12));
+      CHECK(calls > badCall);
+    }
+    // Persistent preemption and a backwards reference clock both fall back.
+    uint64_t wall = 0u;
+    CHECK(!cheap_clock::measure([&] { return wall; }, [&] { return wall += 500000u; }).tsc);
+    uint64_t backwards = 10000000u;
+    CHECK(!cheap_clock::measure([&] { return backwards; }, [&] { return --backwards; }).tsc);
+    // A backwards step between otherwise valid brackets retries, then falls back.
+    uint64_t reads = 0u;
+    CHECK(!cheap_clock::measure([] { return uint64_t(1); }, [&] {
+      const uint64_t n = reads++;
+      return (n % 4u < 2u ? uint64_t(10000u) : uint64_t(1000u)) + n % 2u;
+    }).tsc);
 
     // An ns clock that never advances: bounded, and the fallback.
     uint64_t spins = 0u;
@@ -178,7 +204,7 @@ int main(int argc, char** argv) {
     const double steadyMs = double(cheap_clock::steadyNs() - ns0) * 1e-6;
     const double scopeMs  = c.toMs(prof::g_ticks[prof::SynchronizeWsi]);
     std::printf("50 ms spin: scope %.4f ms, steady %.4f ms\n", scopeMs, steadyMs);
-    CHECK(scopeMs > 49.0 && scopeMs <= steadyMs * 1.01);
+    CHECK(near(scopeMs, steadyMs, 0.002));
 
     // Threads (and whatever cores they land on) agree: a tick read after another thread's read,
     // ordered by an atomic handoff, is never earlier.

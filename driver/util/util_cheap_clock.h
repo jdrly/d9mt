@@ -30,7 +30,7 @@
 
 namespace dxvk::cheap_clock {
 
-  // How long the one calibration spins: 2 ms, paid once per process with profiling on.
+  // Target span per calibration window: 2 ms, only at load with profiling on.
   constexpr uint64_t kCalibrationNs = 2000000u;
 
   // A plausible tick length: a 10 MHz to 100 GHz counter. Anything else falls back.
@@ -77,20 +77,35 @@ namespace dxvk::cheap_clock {
     return c;
   }
 
-  // Reads `ticks` and `ns` across at least spanNs of `ns` time. Templated on the two clocks so a
-  // test drives it with deterministic ones.
+  // Bracket each tick read with ns reads. Reject preempted endpoints and retry at
+  // most four windows; a coarse/stalled clock or persistent scheduling noise falls back.
+  constexpr uint64_t kMaxEndpointNs = 20000u;
+  constexpr uint32_t kCalibrationAttempts = 4u;
+
   template<typename TickFn, typename NsFn>
   Calibration measure(TickFn ticks, NsFn ns, uint64_t spanNs = kCalibrationNs) {
-    const uint64_t ns0 = ns();
-    const uint64_t t0  = ticks();
-    uint64_t t1 = t0, ns1 = ns0;
-    for (uint32_t i = 0u; i < kMaxCalibrationSpins; i++) {
-      t1  = ticks();
-      ns1 = ns();
-      if (ns1 < ns0 || ns1 - ns0 >= spanNs)
-        break;
+    auto sample = [&] (uint64_t& t, uint64_t& midpoint) {
+      const uint64_t a = ns();
+      t = ticks();
+      const uint64_t b = ns();
+      if (b < a || b - a > kMaxEndpointNs)
+        return false;
+      midpoint = a + (b - a) / 2u;
+      return true;
+    };
+    uint32_t spins = 0u;
+    for (uint32_t attempt = 0u; attempt < kCalibrationAttempts; attempt++) {
+      uint64_t t0, ns0;
+      if (!sample(t0, ns0)) continue;
+      while (spins++ < kMaxCalibrationSpins) {
+        uint64_t t1, ns1;
+        if (!sample(t1, ns1) || ns1 < ns0) break;
+        if (ns1 - ns0 >= spanNs)
+          return fromSamples(t0, ns0, t1, ns1, spanNs);
+      }
+      if (spins >= kMaxCalibrationSpins) break;
     }
-    return fromSamples(t0, ns0, t1, ns1, spanNs);
+    return Calibration();
   }
 
   inline Calibration initialCalibration() {
