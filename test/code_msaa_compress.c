@@ -14,11 +14,14 @@
  *    resolve folds into its store action) and into tDirect after that (a resolve pass of
  *    its own);
  *  - the depth-stencil into a 64x64 D24S8 surface (the render-pass depth-stencil resolve);
- *  - with that surface as the depth-stencil of a 64x64 render-target texture tVerify
- *    cleared to BG: a GREEN quad at depth 0.5 with ZFUNC LESS (passes where the resolved
- *    depth is 1: the right half) and a BLUE quad with STENCILFUNC EQUAL 5 and no depth test
- *    (passes where the resolved stencil is 5: the left half). Nothing writes it.
- * The three textures are drawn into the backbuffer, and frame 1 reads them back. */
+ *  - with that surface as the depth-stencil (nothing writes it):
+ *    - depth, into the 64x64 render-target texture tDepth cleared to BG, with ZFUNC LESS: a
+ *      YELLOW quad at depth 0.1 (passes where the resolved depth is above 0.1: everywhere),
+ *      then a GREEN quad at depth 0.5 (passes where it is above 0.5: the right half). Left
+ *      YELLOW and right GREEN means a left depth in (0.1, 0.5] and a right one above 0.5;
+ *    - stencil, into tStencil cleared to BG, no depth test: a BLUE quad with STENCILFUNC
+ *      EQUAL 5 (passes where the resolved stencil is 5: the left half only).
+ * The four textures are drawn into the backbuffer, and frame 1 reads them back. */
 #include "t_xfer.h"
 
 #define RED    0xffff0000u
@@ -28,7 +31,7 @@
 #define BG     0xff303030u
 
 static IDirect3DSurface9 *sMsaa, *sMsaaDs, *sDs;
-static IDirect3DTexture9 *tFolded, *tDirect, *tVerify;
+static IDirect3DTexture9 *tFolded, *tDirect, *tDepth, *tStencil;
 static IDirect3DTexture9 *cRed, *cGreen, *cBlue, *cYellow;
 static BOOL hasMsaa;
 
@@ -88,18 +91,27 @@ static void frame(int n) {
     IDirect3DSurface9_Release(d);
     X_CHECK(IDirect3DDevice9_StretchRect(x_dev, sMsaaDs, NULL, sDs, NULL, D3DTEXF_NONE));
 
-    IDirect3DDevice9_SetRenderTarget(x_dev, 0, d = x_level(tVerify, 0));
-    IDirect3DSurface9_Release(d);
     IDirect3DDevice9_SetDepthStencilSurface(x_dev, sDs);
+    IDirect3DDevice9_SetRenderTarget(x_dev, 0, d = x_level(tDepth, 0));
+    IDirect3DSurface9_Release(d);
     IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, BG, 1.0f, 0);
     IDirect3DDevice9_BeginScene(x_dev);
     rs(D3DRS_ZENABLE, D3DZB_TRUE);
     rs(D3DRS_ZWRITEENABLE, FALSE);
     rs(D3DRS_ZFUNC, D3DCMP_LESS);
+    rs(D3DRS_STENCILENABLE, FALSE);
+    quad(cYellow, -1.0f, -1.0f, 1.0f, 1.0f, 0.1f);
     quad(cGreen, -1.0f, -1.0f, 1.0f, 1.0f, 0.5f);
-    rs(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+    IDirect3DDevice9_EndScene(x_dev);
+
+    IDirect3DDevice9_SetRenderTarget(x_dev, 0, d = x_level(tStencil, 0));
+    IDirect3DSurface9_Release(d);
+    IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, BG, 1.0f, 0);
+    IDirect3DDevice9_BeginScene(x_dev);
+    rs(D3DRS_ZENABLE, D3DZB_FALSE);
     rs(D3DRS_STENCILENABLE, TRUE);
     rs(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+    rs(D3DRS_STENCILREF, 5);
     rs(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
     quad(cBlue, -1.0f, -1.0f, 1.0f, 1.0f, 0.5f);
     depthOff();
@@ -111,9 +123,10 @@ static void frame(int n) {
   IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, 0xff181828u, 1.0f, 0);
   if (hasMsaa) {
     IDirect3DDevice9_BeginScene(x_dev);
-    x_draw((IDirect3DBaseTexture9 *)tFolded, -0.9f, -0.4f, -0.4f, 0.4f);
-    x_draw((IDirect3DBaseTexture9 *)tDirect, -0.25f, -0.4f, 0.25f, 0.4f);
-    x_draw((IDirect3DBaseTexture9 *)tVerify,  0.4f, -0.4f, 0.9f, 0.4f);
+    x_draw((IDirect3DBaseTexture9 *)tFolded,  -0.95f, -0.4f, -0.55f, 0.4f);
+    x_draw((IDirect3DBaseTexture9 *)tDirect,  -0.45f, -0.4f, -0.05f, 0.4f);
+    x_draw((IDirect3DBaseTexture9 *)tDepth,    0.05f, -0.4f,  0.45f, 0.4f);
+    x_draw((IDirect3DBaseTexture9 *)tStencil,  0.55f, -0.4f,  0.95f, 0.4f);
     IDirect3DDevice9_EndScene(x_dev);
   }
 
@@ -133,11 +146,19 @@ static void frame(int n) {
       IDirect3DSurface9_Release(d);
     }
 
-    XReadback r = x_read(d = x_level(tVerify, 0));
-    x_expect("resolved stencil 5 (left)", &r, 4, 4, BLUE, 0xffffffffu);
-    x_expect("resolved stencil 5 (left)", &r, 28, 60, BLUE, 0xffffffffu);
+    XReadback r = x_read(d = x_level(tDepth, 0));
+    x_expect("resolved depth 0.25 (left)", &r, 4, 4, YELLOW, 0xffffffffu);
+    x_expect("resolved depth 0.25 (left)", &r, 28, 60, YELLOW, 0xffffffffu);
     x_expect("resolved depth 1 (right)", &r, 36, 4, GREEN, 0xffffffffu);
     x_expect("resolved depth 1 (right)", &r, 60, 60, GREEN, 0xffffffffu);
+    x_done(&r);
+    IDirect3DSurface9_Release(d);
+
+    r = x_read(d = x_level(tStencil, 0));
+    x_expect("resolved stencil 5 (left)", &r, 4, 4, BLUE, 0xffffffffu);
+    x_expect("resolved stencil 5 (left)", &r, 28, 60, BLUE, 0xffffffffu);
+    x_expect("resolved stencil 0 (right)", &r, 36, 4, BG, 0xffffffffu);
+    x_expect("resolved stencil 0 (right)", &r, 60, 60, BG, 0xffffffffu);
     x_done(&r);
     IDirect3DSurface9_Release(d);
   }
@@ -175,7 +196,8 @@ int main(void) {
     X_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(x_dev, 64, 64, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &sDs, NULL));
     tFolded = rt();
     tDirect = rt();
-    tVerify = rt();
+    tDepth = rt();
+    tStencil = rt();
     cRed = solid(RED);
     cGreen = solid(GREEN);
     cBlue = solid(BLUE);

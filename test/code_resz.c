@@ -15,11 +15,12 @@
  * exits with 1 if any frame failed. */
 #include "t_common.h"
 
-/* code_resz_msaa.c includes this file with a 4x multisampled depth surface (and render target):
- * RESZ then resolves the depth instead of copying it. */
+/* code_resz_msaa.c includes this file with a 4x multisampled depth surface (and render target) and
+ * a depth-stencil INTZ texture: RESZ then resolves the depth instead of copying it. */
 #ifndef RESZ_SAMPLES
 #define RESZ_SAMPLES D3DMULTISAMPLE_NONE
 #define RESZ_NAME "d9mt_resz"
+#define RESZ_INTZ_USAGE 0
 #endif
 
 #define FOURCC(a, b, c, d) ((D3DFORMAT)MAKEFOURCC(a, b, c, d))
@@ -124,7 +125,7 @@ int main(void) {
     T_CHECK(IDirect3DDevice9_CreateRenderTarget(t_dev, 256, 256, D3DFMT_A8R8G8B8, RESZ_SAMPLES, 0, FALSE,
                                                 &dummySurf, NULL));
   }
-  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, 0, FOURCC('I', 'N', 'T', 'Z'),
+  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, RESZ_INTZ_USAGE, FOURCC('I', 'N', 'T', 'Z'),
                                          D3DPOOL_DEFAULT, &intz, NULL));
   T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, 256, 256, D3DFMT_D24S8, RESZ_SAMPLES, 0,
                                                      FALSE, &ds, NULL));

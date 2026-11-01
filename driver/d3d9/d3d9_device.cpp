@@ -1323,9 +1323,12 @@ namespace dxvk {
         // stretching path below does). A depth-stencil copy is whole-surface (checked above).
         // Where resolve images get no lossless compression (MtlPfvImages, by default on GPUs
         // before Apple10) the destination, a game's image that keeps it, isn't written by the
-        // resolve either: every resolve goes through the resolve image and a copy.
+        // resolve either: every resolve goes through the resolve image and a copy. Only into a
+        // destination a resolve can write (render-target usage), so no mode writes a texture the
+        // direct resolve leaves alone.
         const bool viaResolveImage = MtlPfvImages::resolveViaImage(
-          m_dxvkDevice->deviceInfo().pfvImages, srcIsDS);
+            m_dxvkDevice->deviceInfo().pfvImages, srcIsDS)
+          && (dstImage->info().usage & MtlTextureUsageRenderTarget);
         const bool wholeResolve = !viaResolveImage && (srcIsDS
           || (region.srcOffset.x == 0 && region.srcOffset.y == 0
            && region.dstOffset.x == 0 && region.dstOffset.y == 0
@@ -8427,11 +8430,14 @@ namespace dxvk {
           D3D9CommonTexture*       pDst,
     const MtlSubresourceLayers&    SrcSubresource,
     const MtlSubresourceLayers&    DstSubresource) {
-    // The direct resolve's rules (MtlContextImpl::resolveDepthStencil): the same format and a
-    // destination at least the source's size, the source's whole area into its (0,0).
+    // Only what the direct resolve would write (MtlContextImpl::resolveDepthStencil): the same
+    // format, a single-sampled destination with render-target usage, at least the source's size;
+    // the source's whole area into its (0,0). Anything else goes to the direct resolve, which
+    // skips it as before, so no mode writes a texture another mode leaves alone.
     const Rc<MtlTexture>& srcImage = pSrc->GetImage();
     const Rc<MtlTexture>& dstImage = pDst->GetImage();
     if (srcImage == nullptr || dstImage == nullptr || dstImage->info().sampleCount != 1u
+     || !(dstImage->info().usage & MtlTextureUsageRenderTarget)
      || srcImage->info().format != dstImage->info().format)
       return false;
     const MtlExtent3D srcExtent = srcImage->mipLevelExtent(SrcSubresource.mipLevel);
