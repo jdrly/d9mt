@@ -36,22 +36,38 @@ static DWORD WINAPI watchdog(LPVOID p) {
   }
 }
 
-/* DXVK_CONFIG declares d3d9.reproducibleCommandStream = True (the harness's variant sets it there). */
+/* DXVK_CONFIG sets d3d9.reproducibleCommandStream to true, read as the driver reads it
+ * (util/config/config.cpp): ';'-separated "key = value" assignments with an exact key; the last
+ * one wins as a string, and only "true" (case-insensitive) reads as true (an invalid value falls
+ * back to the default, false). */
+static void trim(const char **b, const char **e) {
+  while (*b < *e && (**b == ' ' || **b == '\t')) (*b)++;
+  while (*e > *b && ((*e)[-1] == ' ' || (*e)[-1] == '\t')) (*e)--;
+}
+
 static BOOL repro_declared(void) {
+  static const char key[] = "d3d9.reproducibleCommandStream";
   char cfg[1024];
   DWORD n = GetEnvironmentVariableA("DXVK_CONFIG", cfg, sizeof(cfg));
   if (n == 0 || n >= sizeof(cfg))
     return FALSE;
-  const char *k = strstr(cfg, "reproducibleCommandStream");
-  if (!k)
-    return FALSE;
-  const char *eq = strchr(k, '=');
-  if (!eq)
-    return FALSE;
-  eq++;
-  while (*eq == ' ' || *eq == '\t')
-    eq++;
-  return _strnicmp(eq, "true", 4) == 0;
+  BOOL on = FALSE;
+  for (const char *p = cfg; *p; ) {
+    const char *end = strchr(p, ';');
+    if (!end)
+      end = p + strlen(p);
+    const char *eq = memchr(p, '=', (size_t)(end - p));
+    if (eq) {
+      const char *kb = p, *ke = eq, *vb = eq + 1, *ve = end;
+      trim(&kb, &ke);
+      trim(&vb, &ve);
+      if ((size_t)(ke - kb) == sizeof(key) - 1 && !memcmp(kb, key, sizeof(key) - 1)) {
+        on = ve - vb == 4 && !_strnicmp(vb, "true", 4);
+      }
+    }
+    p = *end ? end + 1 : end;
+  }
+  return on;
 }
 
 static DWORD color(int n) {
