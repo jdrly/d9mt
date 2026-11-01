@@ -78,8 +78,12 @@ namespace dxvk::backend {
       NSObject_release(pso);
 
     DetachSafeLock lock(m_mutex, s_detaching);
-    if (!lock)
-      return;  // detaching, the owner is dead: the set and the layer sets are leaked
+    if (!lock) {
+      // Detaching, the owner is dead: the set and the layer sets are leaked (not released by
+      // m_set's destructor either).
+      (void) m_set.detach();
+      return;
+    }
     if (m_set)
       MTL4CommandQueue_removeResidencySet(m_queue, m_set.handle());
     for (obj_handle_t set : m_attachedLayerSets) {

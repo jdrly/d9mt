@@ -311,6 +311,7 @@ static void testLiveOwnerWaitedFor() {
   // Skipped, so leaked: not added, not retained, not released, not removed.
   CHECK(!staged(buf) && !staged(pso));
   CHECK(refs(pso) == 1 && refs(buf2) == 1 && refs(g_layerSet) == 1);
+  CHECK(refs(kSet) == 1);                    // the tracker's set: leaked too, not released
   CHECK(committed(buf2));
   g_detaching = false;
 }
