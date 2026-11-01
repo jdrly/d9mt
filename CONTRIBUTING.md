@@ -177,8 +177,7 @@ benchmarks (`test/perf/`, `test/bench_4k.c`, PERFORMANCE.md §3) are on `main`.
 - Merge a change that renders a frame differently from base without the issue asking for it.
 - Bypass the performance decisions or required evidence in PERFORMANCE.md.
 - Measure while a game or unrelated workload runs.
-- Merge a speed-only change that hasn't shown identical rendering on other Mac generations,
-  unless it is behind a switch that is off by default.
+- Merge a speed-only change enabled by default without the evidence PERFORMANCE.md §1 requires.
 - Release a Metal object the GPU may still use (ADR-0001).
 - Change the AIR codegen in passing: it costs every player a shader recompile (ADR-0006).
 - Mix a driver and a bridge from different builds.

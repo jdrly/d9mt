@@ -59,7 +59,8 @@ on macOS 27.
 
 Three switches merged on 2026-10-30 and stay off by default until testers' measurements back
 them. Under [ADR-0007](docs/adr/0007-correctness-and-representative-performance.md), a change made for speed
-stays behind a switch until it renders identically on other Mac generations, a slower and a
+stays behind a switch until it shows a representative gain, a comparable before/after
+game session and identical rendering on other Mac generations, a slower and a
 fanless one among them.
 
 - `D9MT_FLUSH_CAP=1` stops weak flush hints from submitting a command buffer mid-frame, as

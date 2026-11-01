@@ -219,7 +219,7 @@ _Open:_ its runner (`scripts/run-hash-tests.sh`) is on the branch `chore/test-ru
 
 **Base, basecopy**
 **Base** is the commit a change is measured and hashed against. **Basecopy** is a byte-identical
-copy of base, run next to the variants as a control for the harness (CONTRIBUTING).
+copy of base, run next to the variants as a control for the harness (PERFORMANCE.md §2.3, §2.4).
 
 **ABBA**
 Paired rounds with balanced order reduce order bias; they do not by themselves cancel all drift. Record the realized schedule and validate it.
@@ -274,7 +274,7 @@ reach the maintainer before release.
 
 **Quiet window**
 A time slot in which a benchmark runs alone on the Mac: no game, no other build or benchmark
-(ADR-0007).
+(PERFORMANCE.md §2.1).
 
 **Null variation**
 Measured variation with no intended treatment effect for a specified metric, schedule and condition. Identical-copy A/A does not establish cross-binary placement variation.
