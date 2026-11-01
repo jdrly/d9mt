@@ -329,7 +329,10 @@ namespace dxvk::backend {
     if (unlikely(m_device->submissions().gpuHung()))
       return;
 
-    m_device->residency().beforeSubmit();
+    // The residency commit was skipped (process detach, a dead thread holds the tracker's lock):
+    // nothing whose allocations aren't committed to the set may reach the queue (#63).
+    if (unlikely(!m_device->residency().beforeSubmit()))
+      return;
 
     gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), cbs, cbCount);

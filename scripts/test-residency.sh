@@ -6,7 +6,10 @@
 #  - test/native/pso_residency_test.cpp: the PSO cache (driver/backend/mtl_pso_cache.cpp as is)
 #    with a stub compiler: every PSO built for a draw, an internal pipeline, the prewarm and a
 #    failed prewarm's replacement is in the set once done, and committed by the next submit. It
-#    watches bridge calls only, so it also builds against a tree without #63 (and fails there).
+#    watches bridge calls only, so it also builds against a tree without #63 (and fails there);
+#  - test/native/commit_guard_test.cpp: commitRecorded (cut out of mtl_context_record.cpp by
+#    test/native/commit_guard_extract.py) never commits to the queue after a skipped residency
+#    commit (process detach) or a hung GPU. Plain and ASan/UBSan (no threads).
 # Needs DXVK's native headers as scripts/test-state-cache.sh (DXVK_NATIVE=<dir>).
 #   scripts/test-residency.sh [<driver tree>]   (default: this checkout's driver/; another tree's
 #                                                driver/ with this checkout's tests, for witnesses)
@@ -48,4 +51,19 @@ for t in TRACKER CACHE; do
   run "${n}_asan" $t -fsanitize=address,undefined -fno-sanitize-recover=undefined
   run "${n}_tsan" $t -fsanitize=thread
 done
+# commit_guard_test: the driver's own commitRecorded
+n=commit_guard_test
+if ! python3 -I "$V2/test/native/commit_guard_extract.py" "$SRC/driver/backend/mtl_context_record.cpp" "$OUT/$n.src" > "$OUT/$n.extract.log" 2>&1; then
+  echo "$n: FAIL (extract, $OUT/$n.extract.log)"; fails=$((fails + 1))
+else
+  for v in plain asan; do
+    f=(); nn=$n; [ $v = asan ] && { f=(-fsanitize=address,undefined -fno-sanitize-recover=all); nn=${n}_asan; }
+    if ! clang++ -std=c++17 -O1 -g -Wall "${f[@]}" -I "$OUT/$n.src" -I "$V2/test/native" "$V2/test/native/commit_guard_test.cpp" -o "$OUT/$nn" > "$OUT/$nn.build.log" 2>&1; then
+      echo "$nn: FAIL (build, $OUT/$nn.build.log)"; fails=$((fails + 1)); continue
+    fi
+    if "$OUT/$nn" > "$OUT/$nn.log" 2>&1; then echo "$nn: ok"
+    else echo "$nn: FAIL ($OUT/$nn.log: $(grep -c '^FAIL' "$OUT/$nn.log") failed checks)"; fails=$((fails + 1)); fi
+    [ -n "${RESIDENCY_PLAIN_ONLY:-}" ] && break
+  done
+fi
 [ "$fails" -eq 0 ]

@@ -12,7 +12,8 @@
 //  - the tracker's lock: a live owner is waited for; while the process detaches, an owner that
 //    died holding it (ExitProcess kills the other threads first, e.g. a compile worker inside
 //    pipelineCreated) is not: every entry point and the destructor return, and skip (leak) their
-//    work. A watchdog fails the test if one blocks. (Not under TSan: it would report the dead
+//    work, and beforeSubmit reports that it committed nothing (false), so no queue commit may
+//    follow. A watchdog fails the test if one blocks. (Not under TSan: it would report the dead
 //    owner's lock, which is the point.)
 // DXVK's native headers (log.h includes the COM ones), as scripts/test-pso-key-hash.sh:
 //   N=<DXVK or dxmt>/include/native; clang++ -std=c++17 -I driver/backend -I $N/windows \
@@ -141,7 +142,7 @@ static void testAddCommitTeardown() {
     CHECK(tracker.residentPsos() == 1u);
     CHECK(tracker.netResident() == 0);       // pipelines aren't counted as allocations
 
-    tracker.beforeSubmit();
+    CHECK(tracker.beforeSubmit());
     CHECK(committed(psoA));
 
     tracker.pipelineCreated(0u);             // a failed build: nothing
@@ -224,6 +225,7 @@ static void testNoSet() {
     tracker.pipelineCreated(pso);
     CHECK(refs(pso) == 1);
     CHECK(tracker.residentPsos() == 0u);
+    CHECK(tracker.beforeSubmit());           // no set, nothing to commit: the queue commit goes ahead
   }
   g_setFails = false;
   CHECK(!g_errors.empty());                  // "newResidencySet failed" was logged
@@ -258,7 +260,7 @@ static void testLiveOwnerWaitedFor() {
     CHECK(done.load() && staged(pso) && staged(buf));
     tracker.allocDestroyed(buf, nullptr, 0u, 16u);
     tracker.serialRetired(1u);
-    tracker.beforeSubmit();
+    CHECK(tracker.beforeSubmit());
     tracker.releaseCommitted();
   }
   NSObject_release(pso);
@@ -275,7 +277,7 @@ static void testLiveOwnerWaitedFor() {
   alignas(MtlResidencyTracker) static unsigned char storage[sizeof(MtlResidencyTracker)];
   MtlResidencyTracker* tracker = new (storage) MtlResidencyTracker(0xde5u, 0x9u);
   tracker->allocCreated(buf2, 16u);
-  tracker->beforeSubmit();
+  CHECK(tracker->beforeSubmit());
 
   { std::lock_guard l(g_blockMutex); g_blockOn = dying; g_holding = g_unblock = false; }
   std::thread([tracker] { tracker->pipelineCreated(dying); }).detach();  // never returns
@@ -289,7 +291,7 @@ static void testLiveOwnerWaitedFor() {
     step = "pipelineCreated";  tracker->pipelineCreated(pso);
     step = "allocDestroyed";   tracker->allocDestroyed(buf2, nullptr, 0u, 16u);
     step = "serialRetired";    tracker->serialRetired(~0ull);
-    step = "beforeSubmit";     tracker->beforeSubmit();
+    step = "beforeSubmit";     CHECK(!tracker->beforeSubmit());   // nothing committed: no queue commit may follow
     step = "releaseCommitted"; tracker->releaseCommitted();
     step = "attachLayer";      CHECK(!tracker->attachLayer(0x1a7u));
     step = "detachLayer";      CHECK(tracker->detachLayer(0x1a7u) == 0u);
