@@ -25,18 +25,6 @@ SubmissionTracker::~SubmissionTracker() {
 }
 
 void SubmissionTracker::drainAndStopPump() {
-  if (unlikely(abandoned())) {
-    // No lock, no join, no wait, no retirement (see abandon()): everything is left to the OS.
-    if (!m_leaked) {
-      m_leaked = true;
-      if (m_pump.joinable())
-        m_pump.detach();
-      (void) new std::vector<Retirement>(std::move(m_retirements));
-      (void) new std::deque<std::pair<uint64_t, std::unique_ptr<RetireBatch>>>(std::move(m_batches));
-      (void) m_event.detach();
-    }
-    return;
-  }
   { std::lock_guard<std::mutex> lock(m_retireMutex);
     if (m_stop) {
       return;
@@ -56,11 +44,22 @@ void SubmissionTracker::drainAndStopPump() {
     batches = std::move(m_batches);
     m_drained = true;
   }
+  // Abandoned (see abandon()): what is past every submitted serial is leaked, not run.
+  const bool abandonedNow = abandoned();
+  const uint64_t last = lastSubmittedSerial();
   std::lock_guard<std::mutex> run(m_runMutex);
-  for (Retirement& r : remaining)
-    r.release();
-  for (auto& b : batches)
-    b.second->run();
+  for (Retirement& r : remaining) {
+    if (unlikely(abandonedNow && r.serial > last))
+      (void) new std::function<void()>(std::move(r.release));
+    else
+      r.release();
+  }
+  for (auto& b : batches) {
+    if (unlikely(abandonedNow && b.first > last))
+      (void) b.second.release();
+    else
+      b.second->run();
+  }
 }
 
 uint64_t SubmissionTracker::onSubmit(obj_handle_t queue) {
@@ -82,7 +81,7 @@ uint64_t SubmissionTracker::completedSerial() {
 }
 
 void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> release) {
-  if (unlikely(abandoned())) {
+  if (unlikely(abandoned()) && serial > lastSubmittedSerial()) {
     (void) new std::function<void()>(std::move(release));  // leaked with what it holds, see abandon()
     return;
   }
@@ -110,7 +109,7 @@ void SubmissionTracker::retireAfter(uint64_t serial, std::function<void()> relea
 }
 
 std::unique_ptr<RetireBatch> SubmissionTracker::retireBatch(uint64_t serial, std::unique_ptr<RetireBatch>&& batch) {
-  if (unlikely(abandoned())) {
+  if (unlikely(abandoned()) && serial > lastSubmittedSerial()) {
     (void) batch.release();  // leaked, see abandon()
     return std::make_unique<RetireBatch>();
   }
@@ -144,15 +143,11 @@ std::unique_ptr<RetireBatch> SubmissionTracker::retireBatch(uint64_t serial, std
 }
 
 void SubmissionTracker::processRetirements() {
-  if (unlikely(abandoned()))
-    return;
   std::lock_guard<std::mutex> run(m_runMutex);
   runDue(completedSerial());
 }
 
 void SubmissionTracker::processRetirements(uint64_t completed) {
-  if (unlikely(abandoned()))
-    return;
   std::unique_lock<std::mutex> run(m_runMutex, std::try_to_lock);
   if (run.owns_lock())
     runDue(completed);
@@ -218,7 +213,7 @@ void SubmissionTracker::pumpThread() {
       return m_stop || !m_retirements.empty() || !m_batches.empty();
     });
 
-    if (m_stop || abandoned())
+    if (m_stop)
       return;
 
     uint64_t target = m_batches.empty() ? ~0ull : m_batches.front().first;
@@ -237,8 +232,6 @@ void SubmissionTracker::pumpThread() {
 }
 
 void SubmissionTracker::waitFor(uint64_t serial) {
-  if (unlikely(abandoned()))
-    return;
   if (isComplete(serial))
     return;
   if (gpuHung())

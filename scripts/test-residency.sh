@@ -12,7 +12,8 @@
 #    commit that couldn't be made (process detach), no queue commit, serial, retirement, wait or
 #    canary check, for submit and commitPrefix. Plain and ASan/UBSan (no threads);
 #  - test/native/submission_abandon_test.cpp: SubmissionTracker::abandon (mtl_submission.cpp as
-#    is): no wait, no retirement run or destroyed, a drain that does neither. Plain and ASan/UBSan.
+#    is): waits unchanged (waitFor and the drain still wait for submitted serials); what is
+#    retired past the last submitted serial is leaked, the rest still runs. Plain and ASan/UBSan.
 # Needs DXVK's native headers as scripts/test-state-cache.sh (DXVK_NATIVE=<dir>).
 #   scripts/test-residency.sh [<driver tree>]   (default: this checkout's driver/; another tree's
 #                                                driver/ with this checkout's tests, for witnesses)

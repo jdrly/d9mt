@@ -111,12 +111,12 @@ public:
 
   void drainAndStopPump();
 
-  // Process detach after a residency commit that couldn't be made (#63; MtlResidencyTracker::
-  // beforeSubmit): from then on nothing is waited for and no retirement runs or is destroyed.
-  // Running one could release what the GPU may still use (a prefix command buffer already
-  // committed under the abandoned serial), and a wait could take the GPU-hang path for a
-  // command buffer that was never committed. What the tracker holds is leaked for the OS to
-  // reclaim. Lock-free: a thread ExitProcess ended may hold the tracker's mutexes. Set once.
+  // A submit was dropped at process detach (#63: its residency commit couldn't be made). It
+  // took no serial, but a G1 prefix of its command buffers may already be on the GPU, which no
+  // signal covers. So from then on what is retired after a serial past lastSubmittedSerial() is
+  // leaked, never run (running it could release what that prefix uses): by retireAfter and
+  // retireBatch, and by the drain, which still waits for every submitted serial first.
+  // Waits are unchanged. Set once.
   void abandon() { m_abandoned.store(true, std::memory_order_release); }
   bool abandoned() const { return m_abandoned.load(std::memory_order_acquire); }
 
@@ -156,7 +156,6 @@ private:
   const bool m_failFast;   // D9MT_GPU_HUNG unset (not "continue")
   std::atomic<bool> m_gpuHung = { false };
   std::atomic<bool> m_abandoned = { false };
-  bool m_leaked = false;   // abandoned and drained: the lists and the event are leaked
 
   dxvk::thread m_pump;
 
