@@ -7,6 +7,7 @@
 #            handler for every commit), with the GPU times, the commit count, the encoders that
 #            didn't complete (the test error's userInfo: #1 faulted 'test', #2 affected) and the
 #            other userInfo keys
+#   queue    D9MT_COMMIT_FEEDBACK_TEST=q5: MTL4CommandQueueErrorDomain's AccessRevoked, "queue " prefix
 #   limit    D9MT_COMMIT_FEEDBACK_TEST=2, 50 commits: 30 lines (the diagnostic limit per 10 s);
 #            one more commit 10.5 s later: its line says 20 earlier lines were suppressed
 #   off      D9MT_COMMIT_FEEDBACK=0 with the test error: no handler, no line
@@ -38,6 +39,10 @@ echo "[commit-feedback] each"
 run each D9MT_COMMIT_FEEDBACK_TEST=3 -- 5
 check "a line per commit" "$(lines each)" 5
 check "named PageFault (3), with its encoders" "$(grep -c "^D9MT-GPU-ERROR [0-9:.]* PageFault (3): (test) gpu=[0-9.]*-[0-9.]* now=[0-9.]* commits=[1-5] encoders=3 #1 faulted 'test' #2 affected userInfo.D9mtTestKey=1$" "$OUT/each.err")" 5
+
+echo "[commit-feedback] queue"
+run queue D9MT_COMMIT_FEEDBACK_TEST=q5 -- 2
+check "MTL4 queue domain named" "$(grep -c '^D9MT-GPU-ERROR [0-9:.]* queue AccessRevoked (5): (test) gpu=' "$OUT/queue.err")" 2
 
 echo "[commit-feedback] limit"
 run limit D9MT_COMMIT_FEEDBACK_TEST=2 -- 50 late

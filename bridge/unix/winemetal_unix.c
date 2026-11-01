@@ -6291,7 +6291,8 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
 
 /* A failed commit's own error as a "D9MT-GPU-ERROR" line in wine.log. macOS's unified log has it
  * only as "IOGPUMetalError: <private>", so a player's GPU fault couldn't be named (a page fault, a
- * timeout, an invalid resource). Metal 4 reports it through MTL4CommitFeedback; it has no
+ * timeout, an invalid resource). Metal 4 reports it through MTL4CommitFeedback, in
+ * MTLCommandBufferErrorDomain or MTL4CommandQueueErrorDomain (both named); it has no
  * MTLCommandBufferErrorOption, so the encoders' execution status is in the line only when Metal
  * puts MTLCommandBufferEncoderInfoErrorKey into the error's userInfo: each encoder that faulted or
  * was affected, by its index in recorded order (and label, if it has one). The other userInfo
@@ -6303,7 +6304,8 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
  * 10 s, then a count of the suppressed): a dead queue fails every later commit.
  *   D9MT_COMMIT_FEEDBACK=0       no handler: commit:count: as before
  *   D9MT_COMMIT_FEEDBACK_TEST=n  tests only: every commit's feedback reads as error n, with one
- *                                faulted and one affected encoder in its userInfo */
+ *                                faulted and one affected encoder in its userInfo; q<n>: error n of
+ *                                MTL4CommandQueueErrorDomain (named with a "queue " prefix) */
 static _Atomic unsigned long g_commits;
 static struct d9mt_log_limit g_gpu_error_log;
 
@@ -6319,6 +6321,19 @@ gpu_error_name(long code) {
   case MTLCommandBufferErrorInvalidResource: return "InvalidResource";
   case MTLCommandBufferErrorMemoryless: return "Memoryless";
   case MTLCommandBufferErrorStackOverflow: return "StackOverflow";
+  default: return "unknown";
+  }
+}
+
+static const char *
+queue_error_name(long code) {
+  switch (code) {
+  case MTL4CommandQueueErrorTimeout: return "Timeout";
+  case MTL4CommandQueueErrorNotPermitted: return "NotPermitted";
+  case MTL4CommandQueueErrorOutOfMemory: return "OutOfMemory";
+  case 4: return "DeviceRemoved";
+  case MTL4CommandQueueErrorAccessRevoked: return "AccessRevoked";
+  case MTL4CommandQueueErrorInternal: return "Internal";
   default: return "unknown";
   }
 }
@@ -6350,7 +6365,7 @@ encoder_state_name(MTLCommandEncoderErrorState state) {
 @end
 
 static NSError *
-commit_feedback_test_error(long code) {
+commit_feedback_test_error(long code, BOOL queue) {
   D9mtTestEncoderInfo *done = [[D9mtTestEncoderInfo new] autorelease];
   done.errorState = MTLCommandEncoderErrorStateCompleted;
   D9mtTestEncoderInfo *bad = [[D9mtTestEncoderInfo new] autorelease];
@@ -6358,7 +6373,7 @@ commit_feedback_test_error(long code) {
   bad.errorState = MTLCommandEncoderErrorStateFaulted;
   D9mtTestEncoderInfo *after = [[D9mtTestEncoderInfo new] autorelease];
   after.errorState = MTLCommandEncoderErrorStateAffected;
-  return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:code
+  return [NSError errorWithDomain:queue ? MTL4CommandQueueErrorDomain : MTLCommandBufferErrorDomain code:code
                          userInfo:@{ NSLocalizedDescriptionKey: @"(test)",
                                      MTLCommandBufferEncoderInfoErrorKey: @[ done, bad, after ],
                                      @"D9mtTestKey": @1 }];
@@ -6366,6 +6381,19 @@ commit_feedback_test_error(long code) {
 
 /* " encoders=3 #1 faulted 'label' #2 affected" (only the ones that didn't complete, at most 8),
  * then " userInfo=<other keys>" */
+/* appends to buf (size bytes, always terminated); a full buffer drops the rest */
+static void __attribute__((format(printf, 4, 5)))
+gpu_error_append(char *buf, size_t size, size_t *used, const char *fmt, ...) {
+  if (*used + 1 >= size)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf + *used, size - *used, fmt, ap);
+  va_end(ap);
+  if (n > 0)
+    *used = *used + (size_t)n < size ? *used + (size_t)n : size - 1;
+}
+
 static void
 gpu_error_details(NSError *err, char *buf, size_t size) {
   size_t used = 0;
@@ -6373,34 +6401,33 @@ gpu_error_details(NSError *err, char *buf, size_t size) {
   id infos = err.userInfo[MTLCommandBufferEncoderInfoErrorKey];
   if ([infos isKindOfClass:[NSArray class]]) {
     NSArray *list = infos;
-    used += snprintf(buf + used, size - used, " encoders=%lu", (unsigned long)list.count);
+    gpu_error_append(buf, size, &used, " encoders=%lu", (unsigned long)list.count);
     unsigned shown = 0;
-    for (NSUInteger i = 0; i < list.count && used < size; i++) {
+    for (NSUInteger i = 0; i < list.count; i++) {
       id<MTLCommandBufferEncoderInfo> e = list[i];
       if (![e conformsToProtocol:@protocol(MTLCommandBufferEncoderInfo)]
        || e.errorState == MTLCommandEncoderErrorStateCompleted)
         continue;
       if (++shown > 8) {
-        used += snprintf(buf + used, size - used, " ...");
+        gpu_error_append(buf, size, &used, " ...");
         break;
       }
-      used += snprintf(buf + used, size - used, " #%lu %s", (unsigned long)i, encoder_state_name(e.errorState));
-      if (e.label.length && used < size)
-        used += snprintf(buf + used, size - used, " '%.40s'", e.label.UTF8String);
+      gpu_error_append(buf, size, &used, " #%lu %s", (unsigned long)i, encoder_state_name(e.errorState));
+      if (e.label.length)
+        gpu_error_append(buf, size, &used, " '%.40s'", e.label.UTF8String);
     }
   }
-  for (NSString *key in err.userInfo) {
-    if (used >= size)
-      break;
-    if ([key isEqualToString:MTLCommandBufferEncoderInfoErrorKey]
+  for (id key in err.userInfo) {
+    if (![key isKindOfClass:[NSString class]]
+     || [key isEqualToString:MTLCommandBufferEncoderInfoErrorKey]
      || [key isEqualToString:NSLocalizedDescriptionKey])
       continue;
-    used += snprintf(buf + used, size - used, " userInfo.%.48s", key.UTF8String);
+    gpu_error_append(buf, size, &used, " userInfo.%.48s", ((NSString *)key).UTF8String);
     id v = err.userInfo[key];
-    if ([v isKindOfClass:[NSError class]] && used < size)
-      used += snprintf(buf + used, size - used, "=%.48s/%ld", ((NSError *)v).domain.UTF8String, (long)((NSError *)v).code);
-    else if ([v isKindOfClass:[NSNumber class]] && used < size)
-      used += snprintf(buf + used, size - used, "=%.24s", ((NSNumber *)v).stringValue.UTF8String);
+    if ([v isKindOfClass:[NSError class]])
+      gpu_error_append(buf, size, &used, "=%.48s/%ld", ((NSError *)v).domain.UTF8String, (long)((NSError *)v).code);
+    else if ([v isKindOfClass:[NSNumber class]])
+      gpu_error_append(buf, size, &used, "=%.24s", ((NSNumber *)v).stringValue.UTF8String);
   }
 }
 
@@ -6413,7 +6440,8 @@ commit_feedback_handler(void) {
     if (on && !strcmp(on, "0"))
       return;
     const char *test = getenv("D9MT_COMMIT_FEEDBACK_TEST");
-    const long fake = test ? strtol(test, NULL, 10) : 0;
+    const BOOL fake_queue = test && test[0] == 'q';
+    const long fake = test ? strtol(test + (fake_queue ? 1 : 0), NULL, 10) : 0;
     handler = Block_copy(^(id<MTL4CommitFeedback> fb) {
       NSError *err = fb.error;
       if (!err && !fake)
@@ -6423,17 +6451,20 @@ commit_feedback_handler(void) {
         return;
       @autoreleasepool {
         if (!err)
-          err = commit_feedback_test_error(fake);
+          err = commit_feedback_test_error(fake, fake_queue);
         const long code = (long)err.code;
-        const BOOL metal = [err.domain isEqualToString:MTLCommandBufferErrorDomain];
+        const BOOL cmdbuf = [err.domain isEqualToString:MTLCommandBufferErrorDomain];
+        const BOOL queue = [err.domain isEqualToString:MTL4CommandQueueErrorDomain];
+        const BOOL metal = cmdbuf || queue;
         char ts[16], more[48] = "", details[512];
         d9mt_wallstamp(ts);
         gpu_error_details(err, details, sizeof(details));
         if (dropped)
           snprintf(more, sizeof(more), " [%d earlier lines suppressed]", dropped);
         /* the whole record in one stdio call: another callback's or a WSI line can't land inside it */
-        fprintf(stderr, "D9MT-GPU-ERROR %s %s (%ld)%s%s: %.200s gpu=%.3f-%.3f now=%.3f commits=%lu%s%s\n",
-                ts, metal ? gpu_error_name(code) : "error", code, metal ? "" : " domain=",
+        fprintf(stderr, "D9MT-GPU-ERROR %s %s%s (%ld)%s%s: %.200s gpu=%.3f-%.3f now=%.3f commits=%lu%s%s\n",
+                ts, queue ? "queue " : "", cmdbuf ? gpu_error_name(code) : queue ? queue_error_name(code) : "error",
+                code, metal ? "" : " domain=",
                 metal ? "" : err.domain.UTF8String, err.localizedDescription.UTF8String,
                 fb.GPUStartTime, fb.GPUEndTime, CACurrentMediaTime(), atomic_load(&g_commits),
                 details, more);
