@@ -123,6 +123,7 @@ namespace dxvk::backend {
     fresh->m_fsLibrary = pso->m_fsLibrary;
     fresh->m_vsEntry   = pso->m_vsEntry;
     fresh->m_fsEntry   = pso->m_fsEntry;
+    fresh->m_residency = pso->m_residency;
 
     // The caller's MRU and last-encoded references keep pso alive.
     it->second = fresh;
@@ -135,13 +136,16 @@ namespace dxvk::backend {
     return fresh.ptr();
   }
 
-  RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry)
-  : m_compiler(compiler), m_device(device), m_registry(registry) { }
+  RenderPsoCache::RenderPsoCache(obj_handle_t compiler, MtlDevice* device, Registry* registry,
+                                 MtlResidencyTracker* residency)
+  : m_compiler(compiler), m_device(device), m_registry(registry), m_residency(residency) { }
 
   RenderPsoCache::Entry* RenderPsoCache::get(
     const RenderPsoKey& key, obj_handle_t vsLibrary, obj_handle_t fsLibrary,
     const char* vsEntry, const char* fsEntry,
     const MtlShaderFunction* vsFn, const MtlShaderFunction* fsFn) {
+    // Debug switch: entries are dropped, but the residency tracker still holds every PSO built
+    // (#63), so a session under it grows by one PSO per rebuild.
     static const bool s_noPsoCache = std::getenv("D9MT_NOPSOCACHE") != nullptr;
     if (s_noPsoCache) {
       m_last = nullptr;
@@ -162,6 +166,7 @@ namespace dxvk::backend {
       e->m_fsLibrary = fsLibrary;
       e->m_vsEntry   = vsEntry;
       e->m_fsEntry   = fsEntry;
+      e->m_residency = m_residency;
 
       // State cache: a prewarmed entry for this key replaces ours; either
       // way the miss is recorded (once per key: m_cache keeps it).
@@ -203,7 +208,7 @@ namespace dxvk::backend {
   }
 
   Rc<RenderPsoCache::Entry> RenderPsoCache::createPrewarmEntry(
-    obj_handle_t compiler, const RenderPsoKey& key,
+    obj_handle_t compiler, MtlResidencyTracker* residency, const RenderPsoKey& key,
     obj_handle_t vsLibrary, obj_handle_t fsLibrary,
     const char* vsEntry, const char* fsEntry) {
     Rc<Entry> e = new Entry();
@@ -213,6 +218,7 @@ namespace dxvk::backend {
     e->m_fsLibrary = fsLibrary;
     e->m_vsEntry   = vsEntry;
     e->m_fsEntry   = fsEntry;
+    e->m_residency = residency;
     e->m_prewarmed = true;
     return e;
   }
@@ -235,6 +241,10 @@ namespace dxvk::backend {
     m_pso = WmtRenderPso::adopt(build(m_compiler, m_key,
       m_vsLibrary, m_fsLibrary, m_vsEntry, m_fsEntry, m_prewarmed));
     m_buildNs = compile_stats::nowNs() - t0;
+
+    // Into the residency set before isDone() publishes it: no draw can bind it uncommitted (#63).
+    if (m_pso && m_residency)
+      m_residency->pipelineCreated(m_pso.handle());
 
     // Prewarm builds run in the background: counted by the state cache
     // (STATECACHE lines), not as the render path's PSO builds.

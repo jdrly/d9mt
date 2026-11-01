@@ -262,7 +262,7 @@ namespace dxvk::backend {
     const char* vsEntry = pVs->entryName ? pVs->entryName : "main";
     const char* fsEntry = (pFs != nullptr && pFs->entryName) ? pFs->entryName : "main";
 
-    Rc<RenderPsoCache::Entry> e = RenderPsoCache::createPrewarmEntry(m_compiler.handle(), key,
+    Rc<RenderPsoCache::Entry> e = RenderPsoCache::createPrewarmEntry(m_compiler.handle(), m_residency.get(), key,
       pVs->library, pFs != nullptr ? obj_handle_t(pFs->library) : 0u, vsEntry, fsEntry);
 
     if (!m_psoRegistry.insertIfAbsent(e))

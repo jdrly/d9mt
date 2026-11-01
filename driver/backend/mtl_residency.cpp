@@ -24,8 +24,23 @@ namespace dxvk::backend {
 
   MtlResidencyTracker::~MtlResidencyTracker() {
     serialRetired(~0ull);
+
+    // Pipelines: out of the set and committed (with the retired allocations) before they are released.
+    std::vector<obj_handle_t> psos;
+    { std::lock_guard<std::mutex> lock(m_mutex);
+      if (m_set) {
+        for (obj_handle_t pso : m_psos)
+          MTLResidencySet_removeAllocation(m_set.handle(), pso);
+      }
+      if (!m_psos.empty())
+        m_dirty = true;
+      psos.swap(m_psos);
+      m_psoCount = 0u;
+    }
     beforeSubmit();
     releaseCommitted();
+    for (obj_handle_t pso : psos)
+      NSObject_release(pso);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_set)
@@ -46,6 +61,18 @@ namespace dxvk::backend {
     m_dirty = true;
     m_adds++;
     m_residentBytes += bytes;
+  }
+
+  void MtlResidencyTracker::pipelineCreated(obj_handle_t pso) {
+    if (!pso || !m_set)
+      return;
+
+    NSObject_retain(pso);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    MTLResidencySet_addAllocation(m_set.handle(), pso);
+    m_psos.push_back(pso);
+    m_dirty = true;
+    m_psoCount++;
   }
 
   void MtlResidencyTracker::allocDestroyed(obj_handle_t alloc, void* hostMem, uint64_t lastUseSerial, uint64_t bytes) {
