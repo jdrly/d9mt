@@ -131,13 +131,16 @@ namespace dxvk::backend {
     m_pendingBytes += bytes;
   }
 
-  void MtlResidencyTracker::beforeSubmit() {
+  bool MtlResidencyTracker::beforeSubmit() {
     if (!m_set)
-      return;
+      return true;
 
     DetachSafeLock lock(m_mutex, s_detaching);
-    if (lock && m_dirty)
+    if (!lock)
+      return false;
+    if (m_dirty)
       commitLocked();
+    return true;
   }
 
   void MtlResidencyTracker::releaseCommitted() {

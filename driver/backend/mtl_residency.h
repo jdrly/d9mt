@@ -41,8 +41,10 @@ namespace dxvk::backend {
     // per build, never per draw.
     void pipelineCreated(obj_handle_t pso);
 
-    // Commits pending adds/removes: once per submit, and only if the set changed.
-    void beforeSubmit();
+    // Commits pending adds/removes: once per submit, and only if the set changed. False only
+    // while the process detaches and a dead thread holds the tracker's lock (DetachSafeLock):
+    // then nothing is committed, and the caller must not commit to the queue either (#63).
+    bool beforeSubmit();
 
     // Removes allocations whose last use has retired from the set. They are
     // released (object, then host memory) by the first serialRetired() or
