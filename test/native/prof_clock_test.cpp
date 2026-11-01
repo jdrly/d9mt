@@ -113,6 +113,42 @@ int main(int argc, char** argv) {
       [&] { return wall += 2000u; }, cheap_clock::kCalibrationNs, noDeadline);
     CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12) && wall >= 3004001u);
 
+    // Worst positions in 1 us reference buckets, in both directions. Only
+    // the first candidate in each group is valid, so its midpoint is known.
+    for (bool startLate : {false, true}) {
+      uint64_t real = 0u, count = 0u, opening = 0u, first = 0u, last = 0u;
+      bool afterTick = false;
+      c = cheap_clock::measure([&] {
+        const bool late = count < 3u ? startLate : !startLate;
+        const uint64_t width = count % 3u == 0u ? 2000u : 3000u;
+        if (count == 0u) first = opening + 1000u;
+        else if (count % 3u == 0u) last = opening + 1000u;
+        if (late) real += width;
+        count++;
+        afterTick = true;
+        return real * 2u; // true nsPerTick = 0.5
+      }, [&] {
+        if (afterTick) {
+          const uint64_t k = count - 1u;
+          const bool late = k < 3u ? startLate : !startLate;
+          if (!late) real += k % 3u == 0u ? 2000u : 3000u;
+          afterTick = false;
+        } else {
+          const bool late = count < 3u ? startLate : !startLate;
+          real = (real / 1000u + 1u) * 1000u + (late ? 999u : 0u);
+          opening = real / 1000u * 1000u;
+        }
+        return real / 1000u * 1000u;
+      }, cheap_clock::kCalibrationNs, noDeadline);
+      // Independent of production constants: 2 us bracket + 1 us quantum + rounding.
+      const uint64_t error = 2000u + 1000u + 1u;
+      const double relative = std::fabs(c.nsPerTick / 0.5 - 1.0);
+      CHECK(c.tsc && last - first >= error * 1001u);
+      CHECK(relative <= 1e-3 && relative > 8e-4);
+      std::printf("quantized fake: lateStart=%d span=%llu error=%llu relative=%.8f\n",
+        int(startLate), (unsigned long long)(last - first), (unsigned long long)error, relative);
+    }
+
     wall = 0u;
     CHECK(!cheap_clock::measure([&] { return wall; }, [&] { return wall += 500000u; },
       cheap_clock::kCalibrationNs, noDeadline).tsc); // no clean candidate
