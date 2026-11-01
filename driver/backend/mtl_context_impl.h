@@ -613,6 +613,7 @@ namespace dxvk::backend {
     // a subsequent encoder observes them. Metal waits for `afterStages` of
     // this encoder and of every earlier one on the queue (also in earlier
     // command buffers), and holds `beforeStages` of every later encoder.
+    // An `afterStages` with Fragment also waits on Vertex (#64).
     void         emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages,
                                      uint64_t beforeStages = uint64_t(WMTStageAll));
 
