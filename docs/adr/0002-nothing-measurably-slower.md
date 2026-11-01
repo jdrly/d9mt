@@ -10,6 +10,8 @@ Superseded by [ADR-0005](0005-correctness-first-speed-proven.md) on 2026-10-28: 
 every supported Mac comes first, a speed-only change proves itself or waits behind a switch, and
 the release candidate gets a smoothness guard. The method below carries over.
 
+The current successor is [ADR-0007](0007-correctness-and-representative-performance.md). The rules below are historical.
+
 The comparison tool output below is historical. See PERFORMANCE.md §2.3 for its current
 fields, diagnostic bands and exit codes.
 
