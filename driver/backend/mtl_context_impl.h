@@ -182,6 +182,7 @@ namespace dxvk::backend {
       uint64_t abGpuAddress = 0u;
       std::vector<uint64_t> abShadowWords;
       uint64_t abFnId = 0u;
+      uint64_t tableFnId = 0u;   // the shader whose texture kinds the unbound table slots hold
       uint8_t abActive = 0u;
     };
 
@@ -553,7 +554,17 @@ namespace dxvk::backend {
     __attribute__((noinline, cold)) void internPsoGens();
     ArgTablePair createArgumentTablePair() const;
     void initNullBindings(ArgTablePair& pair) const;
-    uint64_t nullTextureId(uint32_t stage, uint32_t slot) const {
+    /* The null texture for an unbound table slot: of the kind the shader declares there (#62),
+     * else the fixed-function shader's (2D, and cube for fragment slots 8-15). */
+    uint64_t nullTextureId(uint32_t stage, uint32_t slot, const MtlShaderFunction* fn = nullptr) const {
+      const uint8_t dim = fn != nullptr && slot < fn->textureDim.size()
+        ? fn->textureDim[slot] : MtlShaderFunction::NoTextureDim;
+      if (dim == 2u)
+        return m_null3DId;
+      if (dim == 1u)
+        return m_nullCubeId;
+      if (dim == 0u)
+        return m_null2DId;
       return stage == 1u && slot >= kNullCubeFirstSlot ? m_nullCubeId : m_null2DId;
     }
     void selectArgumentTablesForPass();

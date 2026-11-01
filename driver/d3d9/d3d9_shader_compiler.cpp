@@ -1253,6 +1253,14 @@ namespace dxvk {
           continue;
         }
 
+        if (e.kind == D9MT_AIR_BIND_TEXTURE_2D || e.kind == D9MT_AIR_BIND_TEXTURE_CUBE
+         || e.kind == D9MT_AIR_BIND_TEXTURE_3D) {
+          if (e.index < map.textureDim.size())
+            map.textureDim[e.index] = e.kind == D9MT_AIR_BIND_TEXTURE_CUBE ? 1u
+              : e.kind == D9MT_AIR_BIND_TEXTURE_3D ? 2u : 0u;
+          continue;
+        }
+
         if (e.kind != D9MT_AIR_BIND_BUFFER)
           continue;
 
