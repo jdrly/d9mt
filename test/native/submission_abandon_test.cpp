@@ -10,6 +10,8 @@
 //   scripts/test-residency.sh (DXVK's native headers; plain and ASan/UBSan)
 #include "mtl_submission.h"
 
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -35,8 +37,11 @@ static std::atomic<uint32_t> g_eventReleases = { 0u }, g_terminations = { 0u }, 
 
 extern "C" obj_handle_t MTLDevice_newSharedEvent(obj_handle_t) { return kEvent; }
 extern "C" uint64_t MTLSharedEvent_signaledValue(obj_handle_t) { return g_signaled.load(); }
+// As Metal's: returns once the value is signalled, or after the whole timeout.
 extern "C" bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t, uint64_t value, uint64_t timeoutMs) {
-  std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs < 10u ? timeoutMs : 10u));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (g_signaled.load() < value && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   return g_signaled.load() >= value;
 }
 extern "C" void MTL4CommandQueue_signalEvent(obj_handle_t, obj_handle_t, uint64_t) { }
@@ -106,8 +111,10 @@ static RetireBatch* batchWith(std::unique_ptr<RetireBatch>& b, obj_handle_t obje
 }
 
 int main() {
+  alarm(60u);                            // never outlive a runner deadline, whatever blocks
   SubmissionTracker::s_sliceMs = 200u;   // a GPU-hang verdict would take 1 s
   SubmissionTracker::s_terminate = [] (unsigned) { g_terminations++; };
+  SubmissionTracker::s_park = [] { };    // a hang verdict is counted above and the wait returns
 
   auto* t = new SubmissionTracker(0xde5u);
 
