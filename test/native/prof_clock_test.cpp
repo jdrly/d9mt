@@ -148,6 +148,13 @@ int main(int argc, char** argv) {
           return ++budgetCalls > 3u ? cheap_clock::kCalibrationBudgetNs : uint64_t(0u);
         }).tsc);
     }
+    // A backwards budget step must expire even while still above the start.
+    budgetCalls = 0u; wall = 0u;
+    CHECK(!cheap_clock::measure([&] { return wall * 2u; }, [&] { return wall += 1000u; },
+      cheap_clock::kCalibrationNs, [&] {
+        const uint64_t n = budgetCalls++;
+        return n == 0u ? uint64_t(0u) : n == 1u ? uint64_t(1000000u) : uint64_t(500000u);
+      }).tsc);
     CHECK(cheap_clock::elapsed(10u, 25u) == 15u);
     CHECK(cheap_clock::elapsed(25u, 10u) == 0u);
   }

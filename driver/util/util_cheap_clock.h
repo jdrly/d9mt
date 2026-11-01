@@ -94,12 +94,15 @@ namespace dxvk::cheap_clock {
   Calibration measure(TickFn ticks, NsFn ns, uint64_t spanNs = kCalibrationNs,
                       BudgetFn budget = systemNs) {
     const uint64_t budgetStart = budget();
+    uint64_t previousBudget = budgetStart;
     uint32_t reads = 0u;
     uint64_t previousNs = 0u;
     bool stopped = false;
     auto withinBudget = [&] {
       const uint64_t t = budget();
-      return t >= budgetStart && t - budgetStart < kCalibrationBudgetNs;
+      const bool valid = t >= previousBudget && t - budgetStart < kCalibrationBudgetNs;
+      previousBudget = t;
+      return valid;
     };
     // The deadline is checked every 64 reads and before success. The read cap
     // also terminates frozen clocks. OS pauses/blocked reads cannot be preempted here.
