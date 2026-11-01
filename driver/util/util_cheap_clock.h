@@ -78,8 +78,9 @@ namespace dxvk::cheap_clock {
   }
 
   // Bracket each tick read with ns reads. Reject preempted endpoints and retry at
-  // most four windows; a coarse/stalled clock or persistent scheduling noise falls back.
-  constexpr uint64_t kMaxEndpointNs = 20000u;
+  // most four windows; a stalled clock or persistent scheduling noise falls back.
+  // The ns clock must resolve <= 1 us. Endpoint uncertainty is <= 0.1% of 2 ms.
+  constexpr uint64_t kMaxEndpointNs = 2000u;
   constexpr uint32_t kCalibrationAttempts = 4u;
 
   template<typename TickFn, typename NsFn>
