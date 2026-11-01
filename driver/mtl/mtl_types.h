@@ -592,6 +592,9 @@ namespace dxvk {
     uint32_t     deviceId         = 0x73df;
     uint32_t     maxSampleCount   = 8u;
     float        maxPointSize     = 256.0f;
+    // Which images get PixelFormatView, which turns lossless compression off
+    // (MtlPfvImages bits, mtl_pfv.h; D9MT_TEX_PFV)
+    uint32_t     pfvImages        = 0u;
   };
 
 }

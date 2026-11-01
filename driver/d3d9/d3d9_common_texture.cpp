@@ -411,6 +411,7 @@ namespace dxvk {
     if (isRT) imageInfo.usage = imageInfo.usage | MtlUsage::RenderTarget;
     if (isDS) imageInfo.usage = imageInfo.usage | MtlUsage::DepthStencil;
     imageInfo.category = isDS ? MtlMemCategory::TexDS : MtlMemCategory::TexRT;
+    imageInfo.resolveTarget = true;
 
     return m_device->GetDXVKDevice()->createImage(imageInfo);
   }

@@ -15,6 +15,14 @@
  * exits with 1 if any frame failed. */
 #include "t_common.h"
 
+/* code_resz_msaa.c includes this file with a 4x multisampled depth surface (and render target) and
+ * a depth-stencil INTZ texture: RESZ then resolves the depth instead of copying it. */
+#ifndef RESZ_SAMPLES
+#define RESZ_SAMPLES D3DMULTISAMPLE_NONE
+#define RESZ_NAME "d9mt_resz"
+#define RESZ_INTZ_USAGE 0
+#endif
+
 #define FOURCC(a, b, c, d) ((D3DFORMAT)MAKEFOURCC(a, b, c, d))
 #define RESZ_CODE 0x7fa05000u
 #define BG 0x00181828u
@@ -101,7 +109,7 @@ int main(void) {
   strcpy(conf + len, len ? ";d3d9.customVendorId=1002" : "d3d9.customVendorId=1002");
   SetEnvironmentVariableA("DXVK_CONFIG", conf);
 
-  t_init("d9mt_resz", 640, 480);
+  t_init(RESZ_NAME, 640, 480);
   IDirect3D9 *d3d = NULL;
   IDirect3DDevice9_GetDirect3D(t_dev, &d3d);
   D3DADAPTER_IDENTIFIER9 id;
@@ -109,15 +117,20 @@ int main(void) {
   printf("vendor %04lx\n", (unsigned long)id.VendorId);
   T_CHECK(IDirect3D9_CheckDeviceFormat(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
                                        D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE, FOURCC('R', 'E', 'S', 'Z')));
-  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
-                                         D3DPOOL_DEFAULT, &dummy, NULL));
-  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, 0, FOURCC('I', 'N', 'T', 'Z'),
+  if (RESZ_SAMPLES == D3DMULTISAMPLE_NONE) {
+    T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                           D3DPOOL_DEFAULT, &dummy, NULL));
+    dummySurf = t_level0(dummy);
+  } else {
+    T_CHECK(IDirect3DDevice9_CreateRenderTarget(t_dev, 256, 256, D3DFMT_A8R8G8B8, RESZ_SAMPLES, 0, FALSE,
+                                                &dummySurf, NULL));
+  }
+  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 256, 256, 1, RESZ_INTZ_USAGE, FOURCC('I', 'N', 'T', 'Z'),
                                          D3DPOOL_DEFAULT, &intz, NULL));
-  T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, 256, 256, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0,
+  T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, 256, 256, D3DFMT_D24S8, RESZ_SAMPLES, 0,
                                                      FALSE, &ds, NULL));
   T_CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(t_dev, 640, 480, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM,
                                                        &sys, NULL));
-  dummySurf = t_level0(dummy);
   T_CHECK(IDirect3DDevice9_GetRenderTarget(t_dev, 0, &backBuffer));
   T_CHECK(IDirect3DDevice9_GetDepthStencilSurface(t_dev, &autoDs));
   t_loop(frame);
