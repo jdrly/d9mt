@@ -11,13 +11,18 @@
 //  - a carried prefix (commitPrefix) that can't commit: abandoned the same way, no retireAfter;
 //    the destructor's completing submit(true) that follows does nothing either, logs nothing more;
 //  - a normal prefix: committed, its command buffer retired after the serial;
-//  - the GPU hung: no queue commit, the rest of submit as before #63.
+//  - the GPU hung: no queue commit, the rest of submit as before #63;
+//  - the destructor (also extracted): its allocators, whose command memory a committed prefix may
+//    still run from, are released with the context normally, and leaked once the submissions were
+//    abandoned (by its own completing submit(true), or before it).
 // It builds against a tree without #63 too (commit_path_sig.h), where the detach cases fail.
 //   scripts/test-residency.sh (builds it with the extraction; also against another tree's driver/)
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,7 +38,7 @@ static int g_fail = 0;
 struct Counts {
   uint32_t queueCommits = 0u, residencyCommits = 0u, onSubmit = 0u, retireBatch = 0u, retireAfter = 0u;
   uint32_t waits = 0u, processed = 0u, serialRetired = 0u, canaryChecks = 0u, canaryArms = 0u;
-  uint32_t abandons = 0u, logs = 0u, cmdbufReleases = 0u, newCmdbufs = 0u, ringSubmits = 0u;
+  uint32_t abandons = 0u, logs = 0u, cmdbufReleases = 0u, newCmdbufs = 0u, ringSubmits = 0u, allocReleases = 0u;
 };
 static Counts g;
 
@@ -47,7 +52,9 @@ extern "C" void NSObject_release(obj_handle_t) { }
 extern "C" void MTL4CommandQueue_commit(obj_handle_t, const obj_handle_t*, uint64_t) { g.queueCommits++; }
 
 namespace dxvk {
+  namespace str { template<typename... T> std::string format(const T&...) { return std::string(); } }
   struct Logger {
+    static void err(const std::string&) { }
     static void warn(const std::string& m) {
       g.logs++;
       if (m.find("detach: skipped submit") == std::string::npos) {
@@ -68,7 +75,10 @@ namespace dxvk::backend {
     static bool g_profEnabled = false;
   }
   namespace rstats { enum { CmdBufs = 0 }; }
-  namespace lifetime { static inline void checkSubmitSerial(uint64_t, uint64_t) { } }
+  namespace lifetime {
+    static inline void checkSubmitSerial(uint64_t, uint64_t) { }
+    static inline void beginTeardown() { }
+  }
 
   static void gpuCaptureBeforeCommit(obj_handle_t) { }
   static void gpuCaptureAfterCommit() { }
@@ -91,6 +101,28 @@ namespace dxvk::backend {
     obj_handle_t m_h = 0u;
   };
 
+  // WmtRef<Mtl4AllocatorTag>: what the context owns; counts releases of a live handle.
+  class WmtAllocator {
+  public:
+    WmtAllocator() = default;
+    static WmtAllocator adopt(obj_handle_t h) { WmtAllocator r; r.m_h = h; return r; }
+    WmtAllocator(WmtAllocator&& o) noexcept : m_h(std::exchange(o.m_h, 0u)) { }
+    WmtAllocator& operator = (WmtAllocator&& o) noexcept { reset(); m_h = std::exchange(o.m_h, 0u); return *this; }
+    ~WmtAllocator() { reset(); }
+    void reset() { if (m_h) { g.allocReleases++; m_h = 0u; } }
+    obj_handle_t detach() { return std::exchange(m_h, 0u); }
+    obj_handle_t handle() const { return m_h; }
+    explicit operator bool () const { return m_h != 0u; }
+  private:
+    obj_handle_t m_h = 0u;
+  };
+
+  struct WmtBuffer {
+    obj_handle_t h = 0u;
+    obj_handle_t detach() { return std::exchange(h, 0u); }
+    explicit operator bool () const { return h != 0u; }
+  };
+
   struct FakeResource {
     uint64_t serial = 0u;
     void setTrackingSerial(uint64_t s) { serial = s; }
@@ -99,6 +131,7 @@ namespace dxvk::backend {
   struct RetireBatch {
     WmtCommandBuffer initCmdbuf, cmdbuf;
     std::vector<std::shared_ptr<FakeResource>> keepAlive;
+    bool empty() const { return !initCmdbuf && !cmdbuf && keepAlive.empty(); }
   };
 
   struct FakeSubmissions {
@@ -109,6 +142,7 @@ namespace dxvk::backend {
     bool abandoned() const { return isAbandoned; }
     void abandon() { g.abandons++; isAbandoned = true; }
     uint64_t onSubmit(obj_handle_t) { g.onSubmit++; return next++; }
+    uint64_t nextSerial() const { return next; }
     std::unique_ptr<RetireBatch> retireBatch(uint64_t, std::unique_ptr<RetireBatch>&&) { g.retireBatch++; return std::make_unique<RetireBatch>(); }
     void retireAfter(uint64_t, std::function<void()> f) { g.retireAfter++; retirements.push_back(std::move(f)); }
     void waitFor(uint64_t) { g.waits++; }
@@ -120,6 +154,7 @@ namespace dxvk::backend {
     // Before #63 its caller discards the result.
     bool beforeSubmit() { g.residencyCommits++; return commits; }
     void serialRetired(uint64_t) { g.serialRetired++; }
+    void allocDestroyed(obj_handle_t, void*, uint64_t, uint64_t) { }
   };
   struct FakeRing {
     void onSubmit(uint64_t) { g.ringSubmits++; }
@@ -157,6 +192,21 @@ namespace dxvk::backend {
     std::vector<std::shared_ptr<FakeResource>> m_keepAlive;
     std::unique_ptr<RetireBatch> m_retire = std::make_unique<RetireBatch>();
 
+    // What the destructor reaches.
+    std::vector<WmtAllocator> m_allocators, m_initAllocators;
+    struct FxScaler { obj_handle_t scaler = 0u; };
+    std::map<int, FxScaler> m_fxScalers;
+    static constexpr uint32_t kVisSlots = 4u, kCanarySlots = 4u;
+    WmtBuffer m_visBuffer, m_canaryBuffer;
+    void*     m_visCpu = nullptr;
+    uint64_t* m_canaryCpu = nullptr;
+    std::shared_ptr<int> m_nullBuffer, m_nullImage2D, m_nullImageCube, m_nullView2D, m_nullViewCube, m_nullSampler;
+    uint64_t  m_canaryLost = 0u;
+    enum class CanaryState : uint8_t { Unused, Armed, On, Failed };
+    CanaryState m_canaryState = CanaryState::On;
+
+    ~MtlContextImpl();
+
     RetireBatch& retireBatch() { return *m_retire; }
     void emitProducerBarrier(obj_handle_t, uint64_t, uint64_t = 0u) { }
     void closePass() { }
@@ -173,6 +223,7 @@ namespace dxvk::backend {
   };
 
 #include "commit_path.inc"
+#include "context_dtor.inc"
 
 }
 
@@ -254,6 +305,32 @@ int main() {
       s.ctx.submit(true);
       EXPECT(what, queueCommits, 0u); EXPECT(what, residencyCommits, 0u); EXPECT(what, onSubmit, 1u);
       EXPECT(what, waits, 1u); EXPECT(what, abandons, 0u); EXPECT(what, logs, 0u);
+    }
+  }
+
+  // The destructor and the allocators it owns: released normally, leaked once abandoned.
+  struct DtorCase { const char* what; bool residencyCommits, prefixPending, abandonedBefore; uint32_t wantReleases; };
+  for (const DtorCase& d : { DtorCase { "context teardown", true, true, false, 3u },
+                             DtorCase { "context teardown, nothing pending", true, false, false, 3u },
+                             DtorCase { "detach teardown (its completing submit dropped)", false, true, false, 0u },
+                             DtorCase { "detach teardown (abandoned before)", true, false, true, 0u } }) {
+    g = Counts();
+    { FakeDevice dev;
+      dev.res.commits = d.residencyCommits;
+      dev.subs.isAbandoned = d.abandonedBefore;
+      auto ctx = std::make_unique<MtlContextImpl>();
+      ctx->m_device = &dev;
+      ctx->m_cmdbuf = WmtCommandBuffer::adopt(0xc001u);
+      ctx->m_serialPrefixCommitted = d.prefixPending;
+      ctx->m_allocators.push_back(WmtAllocator::adopt(0xa1u));
+      ctx->m_allocators.push_back(WmtAllocator::adopt(0xa2u));
+      ctx->m_initAllocators.push_back(WmtAllocator::adopt(0xa3u));
+      ctx->m_initAllocators.emplace_back();
+      ctx.reset();                           // the production destructor, then member teardown
+    }
+    if (g.allocReleases != d.wantReleases) {
+      g_fail++;
+      std::printf("FAIL %s: %u allocator releases (want %u)\n", d.what, g.allocReleases, d.wantReleases);
     }
   }
 

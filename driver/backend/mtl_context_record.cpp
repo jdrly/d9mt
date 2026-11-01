@@ -158,6 +158,15 @@ namespace dxvk::backend {
     // tracker's drain (which waits for submitted serials only) waits for it too.
     if (m_serialPrefixCommitted || m_completePending)
       submit(true);
+    // A dropped submit (process detach, #63): nothing waited for the GPU above, and a committed
+    // G1 prefix may still run, covered by no signal. Its command memory, and that of any other
+    // slot's submitted work, belongs to these allocators: leaked, not released with the context.
+    if (unlikely(m_device->submissions().abandoned())) {
+      for (WmtAllocator& a : m_allocators)
+        (void) a.detach();
+      for (WmtAllocator& a : m_initAllocators)
+        (void) a.detach();
+    }
     // after G1's completing submit: what is left is a command buffer that is never submitted
     lifetime::beginTeardown();
     if (m_pass.active)
