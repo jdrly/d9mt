@@ -73,44 +73,81 @@ int main(int argc, char** argv) {
     CHECK(!isFallback(cheap_clock::fromSamples(0u, 0u, 72000u, 3000000u)));        // 24 MHz: plausible
   }
 
-  { // measure() with deterministic clocks: spans at least the calibration time.
-    uint64_t ns = 0u, ticks = 0u, calls = 0u;
-    cheap_clock::Calibration c = cheap_clock::measure(
-      [&] { ticks += 5000u; return ticks; },
-      [&] { ns += 1000u; calls++; return ns; });
+  { // Coherent simulated clocks: a tick is 0.4 ns, independent of read count.
+    uint64_t wall = 0u, calls = 0u;
+    auto noDeadline = [] { return uint64_t(0u); };
+    auto c = cheap_clock::measure([&] { return wall * 5u / 2u; },
+      [&] { calls++; return wall += 1000u; }, cheap_clock::kCalibrationNs, noDeadline);
     CHECK(c.tsc && near(c.nsPerTick, 0.4, 1e-12));
-    CHECK(ns >= cheap_clock::kCalibrationNs && calls < 2u * cheap_clock::kCalibrationNs / 1000u);
+    CHECK(wall >= cheap_clock::kCalibrationNs && calls < 4000u);
 
-    // Preemption on either endpoint retries the window, preserving the ratio.
-    for (uint64_t badCall : {2u, 202u}) {
-      uint64_t wall = 0u, calls = 0u;
-      auto c = cheap_clock::measure([&] { return wall * 2u; }, [&] {
-        wall += (++calls == badCall) ? 500000u : 1000u;
-        return wall;
-      });
-      CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12));
-      CHECK(calls > badCall);
-    }
-    // Persistent preemption and a backwards reference clock both fall back.
-    uint64_t wall = 0u;
-    CHECK(!cheap_clock::measure([&] { return wall; }, [&] { return wall += 500000u; }).tsc);
+    // Every third endpoint candidate is preempted by 500 us. Clean candidates
+    // still calibrate; the old whole-window rejection exhausts its retries.
+    wall = 0u;
+    uint64_t candidates = 0u;
+    bool closing = false;
+    c = cheap_clock::measure([&] { closing = true; return wall * 2u; }, [&] {
+      uint64_t step = 1000u;
+      if (closing) { closing = false; if ((candidates++ % 3u) == 0u) step = 500000u; }
+      return wall += step;
+    }, cheap_clock::kCalibrationNs, noDeadline);
+    CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12) && candidates >= 6u);
+
+    // The narrowest candidate changes position between start and end. Picking
+    // the first candidate would bias the ratio by the asymmetric bracket widths.
+    wall = 0u; candidates = 0u; closing = false;
+    c = cheap_clock::measure([&] { closing = true; return wall * 2u; }, [&] {
+      uint64_t step = 1000u;
+      if (closing) {
+        closing = false;
+        const uint64_t k = candidates++ % 6u;
+        step = (k == 1u || k == 3u) ? 0u : 2000u;
+      }
+      return wall += step;
+    }, cheap_clock::kCalibrationNs, noDeadline);
+    CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12));
+
+    // Accepted 2 us brackets need >3 ms once 1 us quantization is included.
+    wall = 0u;
+    c = cheap_clock::measure([&] { return wall * 2u; },
+      [&] { return wall += 2000u; }, cheap_clock::kCalibrationNs, noDeadline);
+    CHECK(c.tsc && near(c.nsPerTick, 0.5, 1e-12) && wall >= 3004001u);
+
+    wall = 0u;
+    CHECK(!cheap_clock::measure([&] { return wall; }, [&] { return wall += 500000u; },
+      cheap_clock::kCalibrationNs, noDeadline).tsc); // no clean candidate
     uint64_t backwards = 10000000u;
-    CHECK(!cheap_clock::measure([&] { return backwards; }, [&] { return --backwards; }).tsc);
-    // A backwards step between otherwise valid brackets retries, then falls back.
-    uint64_t reads = 0u;
-    CHECK(!cheap_clock::measure([] { return uint64_t(1); }, [&] {
-      const uint64_t n = reads++;
+    CHECK(!cheap_clock::measure([&] { return backwards; }, [&] { return --backwards; },
+      cheap_clock::kCalibrationNs, noDeadline).tsc);
+    calls = 0u;
+    CHECK(!cheap_clock::measure([] { return uint64_t(1u); }, [&] {
+      const uint64_t n = calls++;
       return (n % 4u < 2u ? uint64_t(10000u) : uint64_t(1000u)) + n % 2u;
-    }).tsc);
+    }, cheap_clock::kCalibrationNs, noDeadline).tsc); // backwards between brackets
 
-    // An ns clock that never advances: bounded, and the fallback.
-    uint64_t spins = 0u;
-    cheap_clock::Calibration s = cheap_clock::measure(
-      [&] { return ++spins; }, [] { return uint64_t(42u); });
-    CHECK(!s.tsc && s.nsPerTick == 1.0);
-    CHECK(spins <= uint64_t(cheap_clock::kMaxCalibrationSpins) + 1u);
+    // Both clocks frozen: exactly the finite reference-read allowance is used.
+    calls = 0u;
+    CHECK(!cheap_clock::measure([] { return uint64_t(42u); }, [&] {
+      calls++; return uint64_t(42u);
+    }, cheap_clock::kCalibrationNs, noDeadline).tsc);
+    CHECK(calls == cheap_clock::kMaxCalibrationReads);
 
-    // elapsed() never wraps a backwards step into a huge value.
+    // Independent deadline expires even if the reference clock is frozen.
+    uint64_t budgetCalls = 0u;
+    calls = 0u;
+    CHECK(!cheap_clock::measure([] { return uint64_t(42u); }, [&] {
+      calls++; return uint64_t(42u);
+    }, cheap_clock::kCalibrationNs, [&] { return budgetCalls++ * 5000000u; }).tsc);
+    CHECK(calls < cheap_clock::kMaxCalibrationReads);
+    // Forward and backwards budget-clock steps terminate without a long spin.
+    for (bool back : {false, true}) {
+      budgetCalls = 0u; wall = 0u;
+      CHECK(!cheap_clock::measure([&] { return wall * 2u; }, [&] { return wall += 1000u; },
+        cheap_clock::kCalibrationNs, [&] {
+          if (back) return budgetCalls++ ? uint64_t(999u) : uint64_t(1000u);
+          return ++budgetCalls > 3u ? cheap_clock::kCalibrationBudgetNs : uint64_t(0u);
+        }).tsc);
+    }
     CHECK(cheap_clock::elapsed(10u, 25u) == 15u);
     CHECK(cheap_clock::elapsed(25u, 10u) == 0u);
   }

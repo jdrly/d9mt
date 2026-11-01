@@ -37,8 +37,14 @@ namespace dxvk::cheap_clock {
   constexpr double kMinNsPerTick = 0.01;
   constexpr double kMaxNsPerTick = 100.0;
 
-  // Upper bound on calibration loop turns, so a clock that never advances can't hang the caller.
-  constexpr uint32_t kMaxCalibrationSpins = 1u << 22;
+  constexpr uint32_t kMaxCalibrationReads = 1u << 18;
+  constexpr uint64_t kCalibrationBudgetNs = 25000000u;
+
+  // Independent deadline source; a backwards step expires calibration too.
+  inline uint64_t systemNs() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+  }
 
   inline uint64_t steadyNs() {
     return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -77,34 +83,73 @@ namespace dxvk::cheap_clock {
     return c;
   }
 
-  // Bracket each tick read with ns reads. Reject preempted endpoints and retry at
-  // most four windows; a stalled clock or persistent scheduling noise falls back.
-  // The ns clock must resolve <= 1 us. Endpoint uncertainty is <= 0.1% of 2 ms.
+  // Wine samples have 1 us quantization and rare 3-43 us outliers. Choose
+  // endpoints, not a whole uninterrupted window. These limits apply only at load.
   constexpr uint64_t kMaxEndpointNs = 2000u;
+  constexpr uint64_t kReferenceQuantumNs = 1000u;
   constexpr uint32_t kCalibrationAttempts = 4u;
+  constexpr uint32_t kEndpointSamples = 3u;
 
-  template<typename TickFn, typename NsFn>
-  Calibration measure(TickFn ticks, NsFn ns, uint64_t spanNs = kCalibrationNs) {
-    auto sample = [&] (uint64_t& t, uint64_t& midpoint) {
-      const uint64_t a = ns();
-      t = ticks();
-      const uint64_t b = ns();
-      if (b < a || b - a > kMaxEndpointNs)
+  template<typename TickFn, typename NsFn, typename BudgetFn = decltype(&systemNs)>
+  Calibration measure(TickFn ticks, NsFn ns, uint64_t spanNs = kCalibrationNs,
+                      BudgetFn budget = systemNs) {
+    const uint64_t budgetStart = budget();
+    uint32_t reads = 0u;
+    uint64_t previousNs = 0u;
+    bool stopped = false;
+    auto withinBudget = [&] {
+      const uint64_t t = budget();
+      return t >= budgetStart && t - budgetStart < kCalibrationBudgetNs;
+    };
+    // The deadline is checked every 64 reads and before success. The read cap
+    // also terminates frozen clocks. OS pauses/blocked reads cannot be preempted here.
+    auto readNs = [&] (uint64_t& value) {
+      if (reads == kMaxCalibrationReads || (!(reads % 64u) && !withinBudget())) {
+        stopped = true;
         return false;
-      midpoint = a + (b - a) / 2u;
+      }
+      value = ns();
+      if (reads++ && value < previousNs) {
+        stopped = true;
+        return false;
+      }
+      previousNs = value;
       return true;
     };
-    uint32_t spins = 0u;
-    for (uint32_t attempt = 0u; attempt < kCalibrationAttempts; attempt++) {
-      uint64_t t0, ns0;
-      if (!sample(t0, ns0)) continue;
-      while (spins++ < kMaxCalibrationSpins) {
-        uint64_t t1, ns1;
-        if (!sample(t1, ns1) || ns1 < ns0) break;
-        if (ns1 - ns0 >= spanNs)
-          return fromSamples(t0, ns0, t1, ns1, spanNs);
+    struct Endpoint { uint64_t ticks, ns, width; };
+    auto sample = [&] (Endpoint& best) {
+      bool found = false;
+      for (uint32_t i = 0u; i < kEndpointSamples; i++) {
+        uint64_t a, b;
+        if (!readNs(a)) return false;
+        const uint64_t t = ticks();
+        if (!readNs(b)) return false;
+        const uint64_t width = b - a;
+        if (width <= kMaxEndpointNs && (!found || width < best.width)) {
+          best = { t, a + width / 2u, width };
+          found = true;
+        }
       }
-      if (spins >= kMaxCalibrationSpins) break;
+      return found;
+    };
+    for (uint32_t attempt = 0u; attempt < kCalibrationAttempts && !stopped; attempt++) {
+      Endpoint start = {};
+      if (!sample(start)) continue;
+      uint64_t progress;
+      while (readNs(progress)) {
+        if (progress - start.ns < spanNs) continue;
+        Endpoint end = {};
+        if (!sample(end)) {
+          if (stopped) break;
+          continue;
+        }
+        // Quantization and midpoint rounding count too. span >= 1001*error
+        // bounds relative conversion error by error/(span-error) <= 0.1%.
+        const uint64_t error = (start.width + end.width + 1u) / 2u + kReferenceQuantumNs + 1u;
+        if (end.ns - start.ns < error * 1001u) continue;
+        if (!withinBudget()) return Calibration();
+        return fromSamples(start.ticks, start.ns, end.ticks, end.ns, spanNs);
+      }
     }
     return Calibration();
   }
