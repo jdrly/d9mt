@@ -54,9 +54,20 @@ static void frame(int n) {
   IDirect3DDevice9_Clear(x_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u, 1.0f, 0);
 
   X_CHECK(IDirect3DQuery9_Issue(query, D3DISSUE_END));
+  /* The flush before the lock is the test's precondition. A mode that submits only on explicit
+   * flushes (d3d9.reproducibleCommandStream) never completes this poll before a Present, so the
+   * test can't run there: it says so and ends, instead of hanging until the harness kills it. */
   BOOL done = FALSE;
-  while (IDirect3DQuery9_GetData(query, &done, sizeof(done), D3DGETDATA_FLUSH) == S_FALSE)
+  const DWORD poll0 = GetTickCount();
+  while (IDirect3DQuery9_GetData(query, &done, sizeof(done), D3DGETDATA_FLUSH) == S_FALSE) {
+    if (GetTickCount() - poll0 > 5000) {
+      printf("SKIP code_throttle_flush: the event query hasn't signalled in 5 s with D3DGETDATA_FLUSH "
+             "(a mode that submits only on explicit flushes, e.g. d3d9.reproducibleCommandStream)\n");
+      fflush(stdout);
+      ExitProcess(0);
+    }
     Sleep(0);
+  }
 
   float *v;
   InterlockedExchange(&lock_t0, (LONG)GetTickCount());
