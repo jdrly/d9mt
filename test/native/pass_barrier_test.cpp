@@ -8,8 +8,9 @@
 //  - visibility is Device; a null encoder encodes nothing;
 //  - the vertex epoch advances once, only for an encoder whose caller's afterStages has Fragment
 //    and whose beforeStages has Vertex (the full pass end and the vertex fences).
-// This checks the commands d9mt encodes, not GPU ordering: no Apple GPU finishes a pass's
-// fragment work before its vertex work, so the hazard itself can't be observed (#64).
+// This checks the commands d9mt encodes, not GPU ordering. The hazard itself hasn't been observed:
+// by Apple's description its GPUs run a pass's vertex work before its fragment work, and it was
+// tested on one M5 Max only (#64).
 //   scripts/test-pass-barrier.sh   (scripts/test-pass-barrier.sh --witness <base file>: also the
 //                                   base and the mutants, which must fail)
 #include <cstdint>
