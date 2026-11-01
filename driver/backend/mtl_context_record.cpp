@@ -104,6 +104,11 @@ namespace dxvk::backend {
       ii.arrayLayers = 6u;
       ii.cube        = true;
       m_nullImageCube = m_device->createImage(ii);
+      // (an argument buffer's 3D slot left unbound: its null texture)
+      ii.arrayLayers = 1u;
+      ii.cube        = false;
+      ii.type        = MtlImageType::e3D;
+      m_nullImage3D = m_device->createImage(ii);
       MtlImageViewKey vk;
       vk.format = MtlFormat::RGBA8Unorm;
       if (m_nullImage2D != nullptr)
@@ -112,10 +117,16 @@ namespace dxvk::backend {
       vk.viewType   = MtlTextureViewType::eCube;
       if (m_nullImageCube != nullptr)
         m_nullViewCube = m_device->createImageView(m_nullImageCube, vk);
+      vk.layerCount = 1u;
+      vk.viewType   = MtlTextureViewType::e3D;
+      if (m_nullImage3D != nullptr)
+        m_nullView3D = m_device->createImageView(m_nullImage3D, vk);
       if (m_nullView2D != nullptr)
         m_null2DId = static_cast<MtlTextureViewImpl*>(m_nullView2D.ptr())->gpuResourceId;
       if (m_nullViewCube != nullptr)
         m_nullCubeId = static_cast<MtlTextureViewImpl*>(m_nullViewCube.ptr())->gpuResourceId;
+      if (m_nullView3D != nullptr)
+        m_null3DId = static_cast<MtlTextureViewImpl*>(m_nullView3D.ptr())->gpuResourceId;
       m_nullSampler = m_device->createSampler(MtlSamplerKey());
       if (m_nullSampler != nullptr)
         m_nullSamplerId = static_cast<MtlSamplerStateImpl*>(m_nullSampler.ptr())->gpuResourceId; }
@@ -141,12 +152,12 @@ namespace dxvk::backend {
      * its slot. Private storage starts undefined (and may be compressed with garbage
      * metadata): zero them from the null buffer once, as slot 0 read before. */
     if (m_nullBuffer != nullptr) {
-      for (uint32_t layer = 0u; layer < 7u; layer++) {
-        const Rc<MtlTexture>& img = layer == 0u ? m_nullImage2D : m_nullImageCube;
+      for (uint32_t layer = 0u; layer < 8u; layer++) {
+        const Rc<MtlTexture>& img = layer == 0u ? m_nullImage2D : layer == 7u ? m_nullImage3D : m_nullImageCube;
         if (img == nullptr)
           continue;
         MtlSubresourceLayers sub;
-        sub.baseLayer = layer == 0u ? 0u : layer - 1u;
+        sub.baseLayer = layer == 0u || layer == 7u ? 0u : layer - 1u;
         copyBufferToTexture(img, sub, MtlOrigin { 0, 0, 0 }, MtlSize { 1u, 1u, 1u },
           m_nullBuffer, 0u, 0u, 0u, MtlFormat::RGBA8Unorm);
       }
@@ -179,7 +190,8 @@ namespace dxvk::backend {
      * past everything this context submitted, whatever the device's teardown order. */
     m_device->submissions().retireAfter(m_device->submissions().nextSerial(),
       [buf = std::move(m_nullBuffer), i2 = std::move(m_nullImage2D), ic = std::move(m_nullImageCube),
-       v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube), smp = std::move(m_nullSampler)]() { });
+       i3 = std::move(m_nullImage3D), v2 = std::move(m_nullView2D), vc = std::move(m_nullViewCube),
+       v3 = std::move(m_nullView3D), smp = std::move(m_nullSampler)]() { });
     if (m_canaryLost)
       Logger::err(str::format("D9MT-GPU-LOST: ", m_canaryLost, " command buffers of this session did not run to their end",
         m_canaryState == CanaryState::On ? "" : " (no mark of the canary ever arrived: either it doesn't work on this Mac, or the GPU discarded"

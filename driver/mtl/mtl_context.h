@@ -30,6 +30,7 @@ namespace dxvk {
     struct AbWord {
       AbWordKind kind;
       uint8_t    reg;
+      uint8_t    dim = 0u;   // a texture's: 0 2D, 1 cube, 2 3D (the null texture of an unbound one)
     };
     uint8_t             abTableIndex = 21u;
     std::vector<AbWord> abWords;

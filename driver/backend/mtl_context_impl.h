@@ -271,10 +271,10 @@ namespace dxvk::backend {
      * 1x1 cube texture, a default sampler. Written into every argument table once at
      * creation and wherever a slot is unbound, so the table never holds 0. */
     Rc<MtlBuffer>       m_nullBuffer;
-    Rc<MtlTexture>      m_nullImage2D, m_nullImageCube;
-    Rc<MtlTextureView>  m_nullView2D, m_nullViewCube;
+    Rc<MtlTexture>      m_nullImage2D, m_nullImageCube, m_nullImage3D;
+    Rc<MtlTextureView>  m_nullView2D, m_nullViewCube, m_nullView3D;
     Rc<MtlSamplerState> m_nullSampler;
-    uint64_t            m_nullAddress = 0u, m_null2DId = 0u, m_nullCubeId = 0u, m_nullSamplerId = 0u;
+    uint64_t            m_nullAddress = 0u, m_null2DId = 0u, m_nullCubeId = 0u, m_null3DId = 0u, m_nullSamplerId = 0u;
     Rc<MtlPresenter>   m_presenter;
 
     WmtCommandBuffer   m_cmdbuf;

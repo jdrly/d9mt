@@ -38,6 +38,7 @@ namespace dxvk {
     struct AbWord {
       uint8_t kind;
       uint8_t reg;
+      uint8_t dim = 0u;   // a texture's: 0 2D, 1 cube, 2 3D
     };
     bool                 abUsed = false;
     uint8_t              abTableIndex = 21u;
