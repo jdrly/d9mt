@@ -135,11 +135,18 @@ int main() {
   batchWith(b, 0xb1u);
   b = t->retireBatch(s1, std::move(b));
 
-  // The open serial's submit is dropped: abandon (nothing is submitted after that). What is
-  // retired after it is leaked at once.
+  // A G1 prefix of the open serial was committed: its command buffer is retired after the open
+  // serial (commitPrefix), queued before the drop.
+  const uint64_t open = t->nextSerial();
+  Retired committedPrefix;
+  t->retireAfter(open, committedPrefix.closure());
+  batchWith(b, 0xb4u);
+  b = t->retireBatch(open, std::move(b));
+
+  // The open serial's completing submit is dropped: abandon (nothing is submitted after that).
+  // What is retired after it from now on is leaked at once.
   t->abandon();
   CHECK(t->abandoned());
-  const uint64_t open = t->nextSerial();
   Retired prefix;
   t->retireAfter(open, prefix.closure());
   batchWith(b, 0xb2u);
@@ -165,7 +172,9 @@ int main() {
     if (ms < 100) { g_fail++; std::printf("FAIL the drain after abandon returned after %lld ms, before the GPU signalled\n", ms); }
   }
   CHECK(a.ran() && c.ran());
-  if (!prefix.leaked()) { g_fail++; std::printf("FAIL the drain ran or destroyed a retirement past the last submitted serial\n"); }
+  if (!prefix.leaked() || !committedPrefix.leaked()) {
+    g_fail++; std::printf("FAIL the drain ran or destroyed a retirement past the last submitted serial\n");
+  }
   CHECK(g_batchRuns.load() == 1u);          // serial 1's batch ran, the open serial's didn't
 
   // After the drain: past the last submitted serial, leaked; at or below it, released at once.
