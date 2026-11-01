@@ -1,68 +1,66 @@
 #!/usr/bin/env python3
-"""perf-compare.py — compares the variants of rotated-round bench results (scripts/perf-abba.sh).
+"""Compare rotated-round results descriptively, with symmetric effects and direction counts.
 
-  scripts/perf-compare.py [--ref NAME] [--control NAME] [--metric KEY] results.txt [...]
+Optional --diagnostic-band is a percentage magnitude, never a merge threshold.
+No accepted metric/schedule calibration is wired here: guard status is always pending.
+Paired median intervals assume independent exchangeable pairs and describe only the
+sampled regime. Correlated rounds in one window do not establish between-window power.
+Control ranges and bimodality are diagnostics, not proof of equivalence.
 
-Input lines: `round=<r> v=<variant> ... <metric>=<value>` (or block=/pair=); lines starting with DIRTY (another
-engine's Wine was running) or holding `RESULT FAIL` are skipped and counted. The metric is the
-first of avg_ms, ms/frame, frame_median_ms, median_ns present (lower is better), or --metric
-(fps, low1_fps and frame_low1_fps: higher is better; "slower" and the flag follow the metric's
-direction).
-
-Per variant: runs, median, min..max, the median against the reference's, the median of the
-per-round paired differences (same round, so drift between rounds cancels), and "slower n/N":
-in how many paired rounds the variant was slower than the reference.
-
-`FLAG >0.25%`: a variant whose median or paired median is more than 0.25 % slower than the
-reference's (ms up, fps down), even inside the control's range (`~ noise`). A fix re-verifies
-it before the merge only if it is larger than the measurable resolution; a smaller one goes to a
-council and doesn't hold the fix. Any other change, a speed-only one included, re-verifies it
-before a merge (PERFORMANCE.md §1, §2.4, ADR-0005). The flag doesn't change the exit code.
-
---control: a variant expected to equal the reference (a byte copy of its DLL, or the same build
-from another path). Its paired differences are the noise floor: a variant whose paired median
-lies within the control's range is marked `~ noise`. A variant whose runs fall into two clusters
-is marked `bimodal?`: read its per-run values before the median (some benches switch between two
-modes per process).
-
-Run metadata, never a metric: client=<W>x<H> (the bench's window client area, perf-abba.sh) is
-listed per variant (unknown for runs without it), with a warning when it isn't the back buffer's
-size (client=<W>x<H>!=<back buffer>: a visible window's presents need the presenter's scaling
-blit) or when a paired round compares different client areas. visible= (0: occluded from before
-the timed start; nolog: no change logged, visible throughout if the bench presented; pre:0>1
-etc.: every change before the timed start, visible from it on; 1>0, 0>1 etc.: changed at or after
-the timed start; ? or ?>...: not established) is counted per variant, with a warning about runs that changed or are
-unknown, and when occluded runs are mixed with others (an occluded window's presents are
-skipped, so the two measure different things).
+Exit codes: 0 complete descriptive report, never a guard pass; 1 failed runs or tool/I/O
+errors; 2 invalid CLI usage; 3 incomplete/invalid comparison, including DIRTY, missing,
+nonfinite, malformed or unpaired results. Failed runs take precedence over code 3.
 """
-import argparse, re, statistics, sys
+import argparse, math, re, statistics, sys
+from pathlib import Path
 
 METRICS = ("avg_ms", "ms/frame", "frame_median_ms", "median_ns")
 HIGHER_IS_BETTER = ("fps", "low1_fps", "frame_low1_fps")
-FLAG = 0.0025   # a median slowdown over 0.25 % is flagged; when it is re-verified: ADR-0005
 
 
-def over_flag(slowdown):
-    """More than 0.25 % slower. Exactly 0.25 % isn't: the 1e-12 absorbs float rounding at the
-    boundary (0.30075 / 0.3 - 1 is 0.0025000000000001), far below any measurable difference."""
-    return slowdown is not None and slowdown > FLAG + 1e-12
+def over_band(effect, band):
+    return band is not None and effect is not None and abs(effect) > band / 100 + 1e-12
+
+
+def median_interval(xs):
+    """Conservative distribution-free 95% median interval via binomial order statistics."""
+    xs = sorted(xs)
+    n = len(xs)
+    k = 0
+    while k < n // 2 and sum(math.comb(n, j) for j in range(k + 1)) / 2**n <= 0.025:
+        k += 1
+    return (xs[k - 1], xs[n - k]) if k else (None, None)
+
+
 META = ("client", "visible")
-NUM = r"=([0-9.]+)(?=\s|$)"   # the whole value token is a number (not 320x240)
+NUM = r"=([^\s]+)(?=\s|$)"   # validate the whole token, including malformed/nonfinite values
+
+
+def invalid(message, failed=False):
+    print(message, file=sys.stderr)
+    sys.exit(1 if failed else 3)
+
+
+def counts(skipped):
+    return (f"{skipped['dirty']} DIRTY, {skipped['fail']} FAIL, "
+            f"{skipped['missing']} missing, {skipped['invalid']} invalid")
 
 
 def load(paths, metric):
-    vals, skipped, seen, keys_seen, clients, visible = {}, {"dirty": 0, "fail": 0}, set(), set(), {}, {}
+    vals, skipped, seen, keys_seen, clients, visible = {}, {"dirty": 0, "fail": 0, "missing": 0, "invalid": 0}, set(), set(), {}, {}
     for path in paths:
+        file_samples = 0
         for n, line in enumerate(open(path), 1):
             m = re.match(r"(DIRTY )?(?:round|pair|block)=(\d+) v=(\S+)", line)
             if not m:
                 continue
+            file_samples += 1
             # One sample per (file, round, variant): a second one means two runs were mixed into
             # one file (perf-abba.sh writes a fresh file per call), and pairing would be wrong.
             ident = (path, int(m.group(2)), m.group(3))
             if ident in seen:
-                sys.exit(f"{path}:{n}: a second sample for round {ident[1]}, variant {ident[2]}: "
-                         "results of different runs mixed in one file")
+                invalid(f"{path}:{n}: a second sample for round {ident[1]}, variant {ident[2]}: "
+                         "results of different runs mixed in one file", skipped["fail"])
             seen.add(ident)
             if m.group(1):
                 skipped["dirty"] += 1
@@ -80,15 +78,26 @@ def load(paths, metric):
             for k in ([metric] if metric else METRICS):
                 mv = re.search(r"(?:^|\s)" + re.escape(k) + NUM, line)
                 if mv:
-                    vals.setdefault(m.group(3), {})[ident[:2]] = float(mv.group(1))
+                    try:
+                        value = float(mv.group(1))
+                    except ValueError:
+                        value = math.nan
+                    if not math.isfinite(value) or value < 0:
+                        skipped["invalid"] += 1
+                    else:
+                        vals.setdefault(m.group(3), {})[ident[:2]] = value
                     metric = metric or k
                     break
+            else:
+                skipped["missing"] += 1
+        if not file_samples:
+            skipped["missing"] += 1
     return vals, skipped, metric, keys_seen, clients, visible
 
 
 def pct(x, width=0):
     """A signed percentage, or n/a (the reference's median is 0: e.g. sd=0)."""
-    s = "n/a" if x is None else f"{x * 100:+.1f}%"
+    s = "n/a" if x is None else f"{x * 100:+.3f}%"
     return f"{s:>{width}}" if width else s
 
 
@@ -110,15 +119,26 @@ def main():
     ap.add_argument("--ref")
     ap.add_argument("--control")
     ap.add_argument("--metric")
+    ap.add_argument("--diagnostic-band", type=float, metavar="PERCENT",
+                    help="optional symmetric effect magnitude, never an accepted guard")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
+    if a.diagnostic_band is not None and (not math.isfinite(a.diagnostic_band) or a.diagnostic_band < 0):
+        ap.error("--diagnostic-band must be finite and nonnegative")
     if a.metric in META:
-        sys.exit(f"--metric {a.metric}: that's run metadata, not a measurement")
+        ap.error(f"--metric {a.metric}: that's run metadata, not a measurement")
+    a.files = [str(Path(p).resolve()) for p in a.files]
+    if len(set(a.files)) != len(a.files):
+        ap.error("duplicate result file")
     vals, skipped, metric, keys_seen, clients, visible = load(a.files, a.metric)
+    def print_no_results(message):
+        print(message, file=sys.stderr)
+        sys.exit(1 if skipped["fail"] else 3)
+
     if not vals:
         avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load") + META))
-        sys.exit(f"no results for metric {a.metric or ' / '.join(METRICS)}"
-                 f" (skipped {skipped['dirty']} DIRTY, {skipped['fail']} FAIL)"
+        print_no_results(f"no results for metric {a.metric or ' / '.join(METRICS)}"
+                 f" (skipped: {counts(skipped)})"
                  + (f"; keys present: {avail} (--metric)" if avail else ""))
     # The metadata of the runs in the table only (a run without the metric isn't in it).
     clients, visible = ({v: {k: x for k, x in d.items() if k in vals.get(v, {})} for v, d in md.items()}
@@ -127,7 +147,9 @@ def main():
     visible = {v: d for v, d in visible.items() if d}
     ref = a.ref or next(iter(vals))
     if ref not in vals:
-        sys.exit(f"no results for the reference {ref}")
+        invalid(f"no results for the reference {ref}", skipped["fail"])
+    if len(vals) < 2:
+        invalid("no comparison: need results for at least two variants", skipped["fail"])
     base = vals[ref]
     bmed = statistics.median(base.values())
 
@@ -136,57 +158,63 @@ def main():
 
     noise = None
     if a.control:
+        if a.control == ref:
+            ap.error("control must differ from reference")
         if a.control not in vals:
-            sys.exit(f"no results for the control {a.control}")
+            invalid(f"no results for the control {a.control}", skipped["fail"])
         c = paired(a.control)
-        noise = (min(c), max(c)) if c else None
+        if not c:
+            invalid("control has no paired results", skipped["fail"])
+        noise = (min(c), max(c))
 
     sign = -1 if metric in HIGHER_IS_BETTER else 1   # +: a larger value is slower
     print(f"metric {metric} ({'higher' if sign < 0 else 'lower'} is better), reference {ref}"
           + (f", control {a.control}" if a.control else "")
-          + (f"; skipped: {skipped['dirty']} DIRTY, {skipped['fail']} FAIL" if any(skipped.values()) else ""))
-    print(f"{'variant':22} {'n':>3} {'median':>10} {'min':>10} {'max':>10} {'vs ref':>8} "
-          f"{'paired median':>22} {'slower':>8}")
-    flagged = []
+          + (f"; skipped: {counts(skipped)}" if any(skipped.values()) else ""))
+    print("calibration: none")
+    print("guard: pending; no accepted metric/schedule/condition calibration is wired")
+    print("uncertainty: conditional 95% median interval, independent exchangeable pairs assumed; "
+          "no between-window calibration or detection-power claim")
+    print(f"{'variant':22} {'n':>3} {'median':>10} {'min':>10} {'max':>10} {'vs ref':>10}")
+    incomplete = any(skipped.values())
     for v, d in vals.items():
         xs = list(d.values())
         med = statistics.median(xs)
         flag = " bimodal?" if bimodal(xs) else ""
+        print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} "
+              f"{('[ref]' if v == ref else pct(med / bmed - 1 if bmed else None)):>10}{flag}")
         if v == ref:
-            print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {'[ref]':>8} {'':>22} {'':>8}{flag}")
             continue
-        # The median against the reference flags a variant even without paired rounds.
-        med_slow = sign * (med / bmed - 1) if bmed else None
         diffs = paired(v)
         if not diffs:
-            tag = ""
-            if over_flag(med_slow):
-                tag = " FLAG >0.25%"
-                if v != a.control:
-                    flagged.append(v)
-            print(f"{v:22} {len(xs):3} {med:10.4f}  (no rounds paired with the reference){tag}")
+            print("  no rounds paired with the reference; invalid comparison")
+            incomplete = True
             continue
+        if set(d) != set(base):
+            print("  incomplete pairing; descriptive results only")
+            incomplete = True
         pd = statistics.median(diffs)
-        slower = sum(1 for x in diffs if sign * x > 0)
-        tag = ""
-        if v == a.control:
-            tag = " [control]"
-        elif noise and noise[0] <= pd <= noise[1]:
-            tag = " ~ noise"
-        if over_flag(med_slow) or (bmed and over_flag(sign * pd / bmed)):
-            tag += " FLAG >0.25%"
-            if v != a.control:
-                flagged.append(v)
-        print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} {pct(med / bmed - 1 if bmed else None):>8} "
-              f"{pd:+11.4f} ({pct(pd / bmed if bmed else None, 5)}) {slower:>4}/{len(diffs):<3}{tag}{flag}")
+        rel = pd / bmed if bmed else None
+        slower = sum(sign * x > 0 for x in diffs)
+        faster = sum(sign * x < 0 for x in diffs)
+        equal = len(diffs) - slower - faster
+        lo, hi = median_interval(diffs)
+        interval = "unbounded" if lo is None else f"{lo:+.4f} .. {hi:+.4f}"
+        relative_interval = "unbounded" if lo is None or not bmed else f"{pct(lo / bmed)} .. {pct(hi / bmed)}"
+        print(f"  paired {pd:+.4f} ({pct(rel)}); magnitude {abs(pd):.4f} "
+              f"({f'{abs(rel) * 100:.3f}%' if rel is not None else 'n/a'}); "
+              f"faster {faster}/{len(diffs)}, slower {slower}/{len(diffs)}, equal {equal}/{len(diffs)}")
+        print(f"  conditional median interval: {interval}; relative {relative_interval}")
+        tag = " [control]" if v == a.control else ""
+        if noise and noise[0] <= pd <= noise[1] and v != a.control:
+            tag += " inside observed control range; equivalence unverified"
+        if over_band(rel, a.diagnostic_band):
+            direction = 'slower' if sign * pd > 0 else 'faster'
+            tag += f" DIAGNOSTIC {direction} >{a.diagnostic_band:g}%"
+        if tag:
+            print(" " + tag)
     if noise:
-        rel = f" ({pct(noise[0] / bmed)} .. {pct(noise[1] / bmed)})" if bmed else ""
-        print(f"control's paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}{rel}")
-    if flagged:
-        print(f"FLAG: {', '.join(flagged)}: median slower than the reference by more than 0.25 %, "
-              "even within the control's range. A fix: re-verify before the merge only if larger than "
-              "the measurable resolution, else a council, not a hold. Any other change, speed-only "
-              "included: re-verify before a merge (PERFORMANCE.md §1, §2.4, ADR-0005)")
+        print(f"control's observed paired range: {noise[0]:+.4f} .. {noise[1]:+.4f}; diagnostic only")
     if clients:
         def sizes(v):
             c = clients.get(v, {})
@@ -225,6 +253,12 @@ def main():
             print("WARNING: occluded runs are mixed with others: an occluded window's presents are skipped,"
                   " so compare them separately")
 
+    return 1 if skipped["fail"] else 3 if incomplete else 0
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except OSError as error:
+        print(f"perf-compare: {error}", file=sys.stderr)
+        sys.exit(1)

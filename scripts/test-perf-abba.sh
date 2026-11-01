@@ -37,7 +37,7 @@
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 ABBA="$(cd "$(dirname "${1:-$V2/scripts/perf-abba.sh}")" && pwd)/$(basename "${1:-perf-abba.sh}")"
-T="$(mktemp -d /tmp/d9mt-abba-test.XXXXXX)"
+T="$(mktemp -d "${TMPDIR:-/tmp}/d9mt-abba-test.XXXXXX")"
 trap 'chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"' EXIT
 fail=0
 ok()  { echo "ok   $1"; }
@@ -274,6 +274,35 @@ for c in "$N.500||nolog|quiet" \
   if [ "$got" = "$want" ] && [ "$warned" = "$cmp" ]; then ok "visible= with changes '$vis', timed start $tm: $got (perf-compare: $warned)"
   else bad "visible= with changes '$vis', timed start $tm: want '$want' ($cmp), got '$(echo $got)' ($warned)"; fi
 done
+
+# Reporting stays descriptive; the optional band reaches the analyzer.
+D9MT_TEST_SEEN="$T/report-seen" WORK="$T/report" DIRTY_CHECK=0 bash "$ABBA" --native \
+  --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 \
+  --diagnostic-band 0.25 fake >"$T/report.out" 2>&1
+if [ "$?" = 0 ] && grep -q 'guard: pending;' "$T/report.out" && \
+   grep -q 'faster 0/1, slower 0/1, equal 1/1' "$T/report.out"; then
+  ok "symmetric reporting and pending guard through wrapper"
+else bad "symmetric reporting through wrapper"; fi
+D9MT_TEST_SEEN="$T/missing-seen" WORK="$T/missing-report" DIRTY_CHECK=0 bash "$ABBA" --native \
+  --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 \
+  --metric absent fake >"$T/missing-report.out" 2>&1
+if [ "$?" = 3 ] && grep -q '2 missing' "$T/missing-report.out"; then
+  ok "wrapper preserves incomplete comparison status 3 and reason"
+else bad "wrapper incomplete comparison status"; fi
+cat >"$T/fail-program" <<'EOF'
+#!/usr/bin/env bash
+echo 'RESULT FAIL fixture'
+exit 1
+EOF
+chmod +x "$T/fail-program"
+WORK="$T/failed-report" DIRTY_CHECK=0 bash "$ABBA" --native \
+  --variant a="$T/fail-program" --variant bbbb="$T/fail-program" --rounds 1 \
+  fake >"$T/failed-report.out" 2>&1
+if [ "$?" = 1 ] && grep -q '2 failed run(s)' "$T/failed-report.out"; then
+  ok "wrapper preserves failed-run status 1"
+else bad "wrapper failed-run status"; fi
+if python3 "$V2/scripts/test-perf-compare.py"; then ok "synthetic comparison cases"
+else bad "synthetic comparison cases"; fi
 
 [ "$fail" = 0 ] && echo "test-perf-abba: all passed ($ABBA)" || echo "test-perf-abba: $fail FAILED ($ABBA)"
 [ "$fail" = 0 ]

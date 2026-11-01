@@ -3,8 +3,8 @@
 # round runs each variant once, and the order shifts by one per round, so each variant takes
 # each position equally often (ABBA). One line per run into a fresh results file per call,
 # $WORK/results/<tag>-<date>-<pid>.txt, then the comparison (scripts/perf-compare.py): per
-# variant the median, the per-round paired difference to the reference, "slower n/N", and the
-# control's difference as the noise floor. PERFORMANCE.md has the method and its pitfalls.
+# variant the median, the per-round paired difference to the reference, faster/slower counts, conditional uncertainty, and the
+# control's observed range as a diagnostic. Guard calibration remains pending. PERFORMANCE.md has the method and its pitfalls.
 #
 #   ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh [options] <bench> [bench args]
 #     --variant <name>=<d3d9.dll>   repeat, 2 or more, unique names; the first is the reference
@@ -18,11 +18,12 @@
 #     --timeout <s>                 (300) per run
 #     --tag <tag>                   (the bench name) the results file's name
 #     --ref <name>                  the reference (default: the first variant)
-#     --control <name>              a variant whose difference to the reference is noise only,
+#     --control <name>              a control variant for descriptive harness diagnostics,
 #                                   e.g. a byte copy of the reference DLL
 #     --metric <key>                the RESULT field to compare (default: perf-compare.py's
 #                                   first of avg_ms, ms/frame, frame_median_ms, median_ns);
 #                                   e.g. p99 or sd for bench_fps_cap's pacing
+#     --diagnostic-band <percent>   optional symmetric diagnostic band, never a merge guard
 #   <bench>: an exe in BENCH_DIR (default build/bench/x64, scripts/build-benches.sh) or a path.
 #   RUN_WRAPPER="<cmd> [args]"      optional prefix for each run (e.g. CPU pinning).
 #   To run the benches' windows on a virtual display, wrap the whole call, e.g.
@@ -31,6 +32,10 @@
 #
 # A run counts only if the program exits 0 with a RESULT/BENCH line that isn't "RESULT FAIL";
 # otherwise its line is RESULT FAIL, it's left out of the comparison, and the script exits 1.
+# Exit codes: 0 complete descriptive report, never a guard pass; 1 failed runs or tool/I/O
+# errors; 2 invalid usage/setup; 3 incomplete/invalid comparison (DIRTY, missing/invalid metrics,
+# or unpaired results). Comparison status is passed through; failed runs take precedence.
+# DIRTY now returns nonzero even when the remaining paired samples can be described.
 # A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
 # run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
 # then a visible window's presents need the presenter's scaling blit (perf-compare.py warns).
@@ -87,18 +92,18 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 die() { echo "perf-abba: $*" >&2; exit 2; }
 : "${WORK:?set WORK to a scratch dir}"
 
-NAMES=() DLLS=() ENVS=() ROUNDS=10 TIMEOUT=300 TAG="" REF="" CONTROL="" METRIC="" NATIVE=0
+NAMES=() DLLS=() ENVS=() ROUNDS=10 TIMEOUT=300 TAG="" REF="" CONTROL="" METRIC="" BAND="" NATIVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --variant) [ $# -ge 2 ] && [ "${2#*=}" != "$2" ] || die "--variant needs <name>=<file>"
                NAMES+=("${2%%=*}"); DLLS+=("${2#*=}"); shift 2 ;;
     --env) [ $# -ge 2 ] || die "--env needs <name>:<VAR>=<value>"; ENVS+=("$2"); shift 2 ;;
     --native) NATIVE=1; shift ;;
-    --rounds|--timeout|--tag|--ref|--control|--metric)
+    --rounds|--timeout|--tag|--ref|--control|--metric|--diagnostic-band)
       [ $# -ge 2 ] || die "$1 needs a value"
       case "$1" in
         --rounds) ROUNDS="$2" ;; --timeout) TIMEOUT="$2" ;; --tag) TAG="$2" ;;
-        --ref) REF="$2" ;; --control) CONTROL="$2" ;; --metric) METRIC="$2" ;;
+        --ref) REF="$2" ;; --control) CONTROL="$2" ;; --metric) METRIC="$2" ;; --diagnostic-band) [ -n "$2" ] || die "--diagnostic-band needs a percentage"; BAND="$2" ;;
       esac
       shift 2 ;;
     --) shift; break ;;
@@ -108,6 +113,9 @@ while [ $# -gt 0 ]; do
 done
 
 # Validate everything before anything is created.
+if [ -n "$BAND" ]; then
+  python3 -c 'import math, sys; x = float(sys.argv[1]); sys.exit(not math.isfinite(x) or x < 0)' "$BAND" 2>/dev/null || die "--diagnostic-band must be finite and nonnegative"
+fi
 [ ${#NAMES[@]} -ge 2 ] || die "need at least two --variant"
 case "$ROUNDS" in ''|*[!0-9]*|0) die "--rounds must be a positive integer" ;; esac
 case "$TIMEOUT" in ''|*[!0-9]*|0) die "--timeout must be a positive integer" ;; esac
@@ -381,7 +389,7 @@ for r in $(seq "$ROUNDS"); do
 done
 trap - INT TERM
 
-python3 "$V2/scripts/perf-compare.py" --ref "$REF" ${CONTROL:+--control "$CONTROL"} ${METRIC:+--metric "$METRIC"} "$OUT"
+python3 "$V2/scripts/perf-compare.py" --ref "$REF" ${CONTROL:+--control "$CONTROL"} ${METRIC:+--metric "$METRIC"} ${BAND:+--diagnostic-band "$BAND"} "$OUT"
 cmp=$?
 [ "$fails" -eq 0 ] || { echo "perf-abba: $fails failed run(s), see $OUT and $A/logs" >&2; exit 1; }
 exit "$cmp"
