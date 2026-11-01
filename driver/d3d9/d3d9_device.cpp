@@ -17,6 +17,7 @@
 #include "d3d9_format_helpers.h"
 
 #include "../mtl/mtl_device.h"
+#include "../mtl/mtl_pfv.h"
 
 #include "../util/util_bit.h"
 #include "../util/util_math.h"

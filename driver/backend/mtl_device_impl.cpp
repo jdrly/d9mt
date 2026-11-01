@@ -9,6 +9,7 @@
 
 #include "mtl_context_impl.h"
 #include "../mtl/mtl_context.h"
+#include "../mtl/mtl_pfv.h"
 #include "../util/log/log.h"
 #include "../util/util_env.h"
 #include "../util/util_string.h"
@@ -62,53 +63,17 @@ namespace dxvk::backend {
     // MTLGPUFamilyApple10 (M5); the bridge passes the value through.
     constexpr WMTGPUFamily GpuFamilyApple10 = WMTGPUFamily(1010);
 
-    // D9MT_TEX_PFV: which images get PixelFormatView (MtlPfvImages). Read once.
-    //   unset or empty: the default for the GPU (pfvImages below)
-    //   a value starting with 1: every image, as before #18 (A/B)
-    //   0: none but block-compressed ones, on every GPU
-    //   msaa, resolve, ds, or a comma list of them: those sets, on every GPU
-    // Returns ~0u for the default.
-    uint32_t pfvSetting(std::string& name) {
-      const char* v = std::getenv("D9MT_TEX_PFV");
-      name = v != nullptr ? v : "";
-      if (name.empty())
-        return ~0u;
-      if (name[0] == '1')
-        return MtlPfvImages::Every;
-      if (name == "0")
-        return 0u;
-      uint32_t set = 0u;
-      for (size_t pos = 0u; pos <= name.size(); ) {
-        size_t end = name.find(',', pos);
-        if (end == std::string::npos)
-          end = name.size();
-        const std::string part = name.substr(pos, end - pos);
-        if (part == "msaa")
-          set |= MtlPfvImages::Msaa;
-        else if (part == "resolve")
-          set |= MtlPfvImages::Resolve;
-        else if (part == "ds")
-          set |= MtlPfvImages::Depth;
-        else {
-          Logger::warn(str::format("D9MT: D9MT_TEX_PFV=", name, " not understood (1, 0, msaa, resolve, ds): the default"));
-          return ~0u;
-        }
-        pos = end + 1u;
-      }
-      return set;
-    }
-
-    // Lossless compression of 4x MSAA images and of the images MSAA resolves write
-    // drew flickering lines on an M4 (Apple9); D9MT_TEX_PFV=1 removed them. On GPUs
-    // before Apple10 (M1-M4) those images get PixelFormatView by default. The M5
-    // (Apple10) has new compression hardware, shows nothing, and keeps it.
+    // D9MT_TEX_PFV (mtl_pfv.h): read once per device, with the GPU-path line.
     uint32_t pfvImages(obj_handle_t device, std::string& line) {
-      std::string name;
-      const uint32_t setting = pfvSetting(name);
+      const char* env = std::getenv("D9MT_TEX_PFV");
+      const std::string name = env != nullptr ? env : "";
+      bool understood = true;
+      const uint32_t setting = MtlPfvImages::parse(name, understood);
+      if (!understood)
+        Logger::warn(str::format("D9MT: D9MT_TEX_PFV=", name, " not understood (1, 0, msaa, resolve, ds or a comma list): the default"));
       const bool beforeApple10 = !MTLDevice_supportsFamily(device, GpuFamilyApple10);
-      const uint32_t set = setting != ~0u ? setting
-                         : beforeApple10 ? MtlPfvImages::Msaa | MtlPfvImages::Resolve : 0u;
-      const std::string mode = setting != ~0u
+      const uint32_t set = MtlPfvImages::effective(setting, beforeApple10);
+      const std::string mode = setting != MtlPfvImages::Default
         ? str::format("D9MT_TEX_PFV=", name)
         : str::format("default, ", beforeApple10 ? "GPU before Apple10" : "Apple10 GPU");
       if (set & MtlPfvImages::Every) {
@@ -149,14 +114,8 @@ namespace dxvk::backend {
       // they are never losslessly compressed anyway (ColorFill no longer
       // views them, #14). MSAA images and resolve images get it per pfvImages.
       const uint32_t flags = lookupFormatInfo(info.format)->flags;
-      bool view = (pfv & MtlPfvImages::Every) || (flags & MtlFormatFlagCompressed);
-      if (!view && (info.sampleCount > 1u || info.resolveTarget)) {
-        const bool depth = (flags & (MtlFormatFlagDepth | MtlFormatFlagStencil)) != 0u;
-        const uint32_t bit = info.sampleCount > 1u
-          ? (depth ? MtlPfvImages::MsaaDepth : MtlPfvImages::MsaaColor)
-          : (depth ? MtlPfvImages::ResolveDepth : MtlPfvImages::ResolveColor);
-        view = (pfv & bit) != 0u;
-      }
+      const bool view = MtlPfvImages::wants(pfv, (flags & MtlFormatFlagCompressed) != 0u,
+        (flags & (MtlFormatFlagDepth | MtlFormatFlagStencil)) != 0u, info.sampleCount, info.resolveTarget);
       if (view)
         result |= WMTTextureUsagePixelFormatView;
       return result;

@@ -35,7 +35,6 @@ namespace dxvk {
     bool                IsBackBuffer;
     bool                IsAttachmentOnly;
     bool                IsLockable;
-    bool                IsResolveTarget = false;  // only MSAA resolves write it (the swap chain's resolve buffer)
 
     MtlTextureUsage     ImageUsage = 0;
   };

@@ -377,8 +377,6 @@ namespace dxvk {
     if (m_desc.ImageUsage & MtlTextureUsageShaderRead)
       imageInfo.usage = imageInfo.usage | MtlUsage::Sampled;
 
-    imageInfo.resolveTarget = m_desc.IsResolveTarget;
-
     imageInfo.category = isRT ? MtlMemCategory::TexRT
                        : isDS ? MtlMemCategory::TexDS
                        : IsManaged() ? MtlMemCategory::TexManaged

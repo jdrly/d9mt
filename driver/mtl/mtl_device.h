@@ -55,8 +55,8 @@ namespace dxvk {
     MtlUsage      usage       = MtlUsage::None;
     bool          cube        = false;
     MtlMemCategory category   = MtlMemCategory::Other;
-    // Written only by MSAA resolves (a source's resolve image, the swap chain's):
-    // D9MT_TEX_PFV's resolve set (MtlPfvImages::Resolve*)
+    // Written only by MSAA resolves (a source's resolve image): D9MT_TEX_PFV's
+    // resolve set (MtlPfvImages::Resolve*)
     bool          resolveTarget = false;
   };
 

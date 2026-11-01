@@ -1046,7 +1046,6 @@ namespace dxvk {
       D3D9_COMMON_TEXTURE_DESC resolveDesc = desc;
       resolveDesc.MultiSample        = D3DMULTISAMPLE_NONE;
       resolveDesc.MultisampleQuality = 0;
-      resolveDesc.IsResolveTarget    = true;
       try {
         m_resolveBuffer = new D3D9Surface(m_parent, &resolveDesc, m_parent->IsExtended(), this, nullptr);
         m_parent->IncrementLosableCounter();
