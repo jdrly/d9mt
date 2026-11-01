@@ -38,6 +38,10 @@ on macOS 27.
 
 ### Recent fixes
 
+- With 4x MSAA, an M4 drew flickering lines and specks, and turning lossless texture compression
+  off removed them. On M1 to M4 GPUs, d9mt now turns it off for multisampled textures and for
+  the textures their resolves write; the M5 keeps it. `D9MT_TEX_PFV` narrows it down for a
+  tester. [#140](https://github.com/jdrly/d9mt/pull/140)
 - On macOS 26, Metal rejected every game shader, which left the screen black after the first
   loading screen. The AIR compiler had tagged its metallibs with macOS 27's AIR version, 2.9.
   It now writes the AIR 2.7 its bitcode declares on macOS 26 and keeps 2.9 on macOS 27, so
