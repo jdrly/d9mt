@@ -6289,18 +6289,185 @@ _MTL4CommandBuffer_useResidencySet(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* A failed commit's own error as a "D9MT-GPU-ERROR" line in wine.log. macOS's unified log has it
+ * only as "IOGPUMetalError: <private>", so a player's GPU fault couldn't be named (a page fault, a
+ * timeout, an invalid resource). Metal 4 reports it through MTL4CommitFeedback; it has no
+ * MTLCommandBufferErrorOption, so the encoders' execution status is in the line only when Metal
+ * puts MTLCommandBufferEncoderInfoErrorKey into the error's userInfo: each encoder that faulted or
+ * was affected, by its index in recorded order (and label, if it has one). The other userInfo
+ * keys are named, so whatever Metal adds shows up. The handler block is built once; the options
+ * object is made per commit: Metal runs a reused MTL4CommitOptions' handlers for its first commit
+ * only (measured 2026-10-24: 10 commits with one shared options object, 1 call; with one each,
+ * 10). The feedback names no commit, so the line gives the GPU times, the host time now (the same
+ * clock) and the commits so far. One line per failed commit, through the diagnostic limit (30 per
+ * 10 s, then a count of the suppressed): a dead queue fails every later commit.
+ *   D9MT_COMMIT_FEEDBACK=0       no handler: commit:count: as before
+ *   D9MT_COMMIT_FEEDBACK_TEST=n  tests only: every commit's feedback reads as error n, with one
+ *                                faulted and one affected encoder in its userInfo */
+static _Atomic unsigned long g_commits;
+static struct d9mt_log_limit g_gpu_error_log;
+
+static const char *
+gpu_error_name(long code) {
+  switch (code) {
+  case MTLCommandBufferErrorInternal: return "Internal";
+  case MTLCommandBufferErrorTimeout: return "Timeout";
+  case MTLCommandBufferErrorPageFault: return "PageFault";
+  case MTLCommandBufferErrorAccessRevoked: return "AccessRevoked";
+  case MTLCommandBufferErrorNotPermitted: return "NotPermitted";
+  case MTLCommandBufferErrorOutOfMemory: return "OutOfMemory";
+  case MTLCommandBufferErrorInvalidResource: return "InvalidResource";
+  case MTLCommandBufferErrorMemoryless: return "Memoryless";
+  case MTLCommandBufferErrorStackOverflow: return "StackOverflow";
+  default: return "unknown";
+  }
+}
+
+static const char *
+encoder_state_name(MTLCommandEncoderErrorState state) {
+  switch (state) {
+  case MTLCommandEncoderErrorStateCompleted: return "completed";
+  case MTLCommandEncoderErrorStateAffected: return "affected";
+  case MTLCommandEncoderErrorStatePending: return "pending";
+  case MTLCommandEncoderErrorStateFaulted: return "faulted";
+  default: return "unknown";
+  }
+}
+
+/* D9MT_COMMIT_FEEDBACK_TEST's encoders (never in a real error) */
+@interface D9mtTestEncoderInfo : NSObject <MTLCommandBufferEncoderInfo>
+@property (readwrite, nonatomic, retain) NSString *label;
+@property (readwrite, nonatomic, retain) NSArray<NSString *> *debugSignposts;
+@property (readwrite, nonatomic) MTLCommandEncoderErrorState errorState;
+@end
+@implementation D9mtTestEncoderInfo
+@synthesize label, debugSignposts, errorState;
+- (void)dealloc {
+  [label release];
+  [debugSignposts release];
+  [super dealloc];
+}
+@end
+
+static NSError *
+commit_feedback_test_error(long code) {
+  D9mtTestEncoderInfo *done = [[D9mtTestEncoderInfo new] autorelease];
+  done.errorState = MTLCommandEncoderErrorStateCompleted;
+  D9mtTestEncoderInfo *bad = [[D9mtTestEncoderInfo new] autorelease];
+  bad.label = @"test";
+  bad.errorState = MTLCommandEncoderErrorStateFaulted;
+  D9mtTestEncoderInfo *after = [[D9mtTestEncoderInfo new] autorelease];
+  after.errorState = MTLCommandEncoderErrorStateAffected;
+  return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:code
+                         userInfo:@{ NSLocalizedDescriptionKey: @"(test)",
+                                     MTLCommandBufferEncoderInfoErrorKey: @[ done, bad, after ],
+                                     @"D9mtTestKey": @1 }];
+}
+
+/* " encoders=3 #1 faulted 'label' #2 affected" (only the ones that didn't complete, at most 8),
+ * then " userInfo=<other keys>" */
+static void
+gpu_error_details(NSError *err, char *buf, size_t size) {
+  size_t used = 0;
+  buf[0] = '\0';
+  id infos = err.userInfo[MTLCommandBufferEncoderInfoErrorKey];
+  if ([infos isKindOfClass:[NSArray class]]) {
+    NSArray *list = infos;
+    used += snprintf(buf + used, size - used, " encoders=%lu", (unsigned long)list.count);
+    unsigned shown = 0;
+    for (NSUInteger i = 0; i < list.count && used < size; i++) {
+      id<MTLCommandBufferEncoderInfo> e = list[i];
+      if (![e conformsToProtocol:@protocol(MTLCommandBufferEncoderInfo)]
+       || e.errorState == MTLCommandEncoderErrorStateCompleted)
+        continue;
+      if (++shown > 8) {
+        used += snprintf(buf + used, size - used, " ...");
+        break;
+      }
+      used += snprintf(buf + used, size - used, " #%lu %s", (unsigned long)i, encoder_state_name(e.errorState));
+      if (e.label.length && used < size)
+        used += snprintf(buf + used, size - used, " '%.40s'", e.label.UTF8String);
+    }
+  }
+  for (NSString *key in err.userInfo) {
+    if (used >= size)
+      break;
+    if ([key isEqualToString:MTLCommandBufferEncoderInfoErrorKey]
+     || [key isEqualToString:NSLocalizedDescriptionKey])
+      continue;
+    used += snprintf(buf + used, size - used, " userInfo.%.48s", key.UTF8String);
+    id v = err.userInfo[key];
+    if ([v isKindOfClass:[NSError class]] && used < size)
+      used += snprintf(buf + used, size - used, "=%.48s/%ld", ((NSError *)v).domain.UTF8String, (long)((NSError *)v).code);
+    else if ([v isKindOfClass:[NSNumber class]] && used < size)
+      used += snprintf(buf + used, size - used, "=%.24s", ((NSNumber *)v).stringValue.UTF8String);
+  }
+}
+
+static MTL4CommitFeedbackHandler
+commit_feedback_handler(void) {
+  static dispatch_once_t once;
+  static MTL4CommitFeedbackHandler handler;
+  dispatch_once(&once, ^{
+    const char *on = getenv("D9MT_COMMIT_FEEDBACK");
+    if (on && !strcmp(on, "0"))
+      return;
+    const char *test = getenv("D9MT_COMMIT_FEEDBACK_TEST");
+    const long fake = test ? strtol(test, NULL, 10) : 0;
+    handler = Block_copy(^(id<MTL4CommitFeedback> fb) {
+      NSError *err = fb.error;
+      if (!err && !fake)
+        return;
+      const int dropped = d9mt_log_allow(&g_gpu_error_log);
+      if (dropped < 0)
+        return;
+      @autoreleasepool {
+        if (!err)
+          err = commit_feedback_test_error(fake);
+        const long code = (long)err.code;
+        const BOOL metal = [err.domain isEqualToString:MTLCommandBufferErrorDomain];
+        char ts[16], more[48] = "", details[512];
+        d9mt_wallstamp(ts);
+        gpu_error_details(err, details, sizeof(details));
+        if (dropped)
+          snprintf(more, sizeof(more), " [%d earlier lines suppressed]", dropped);
+        /* the whole record in one stdio call: another callback's or a WSI line can't land inside it */
+        fprintf(stderr, "D9MT-GPU-ERROR %s %s (%ld)%s%s: %.200s gpu=%.3f-%.3f now=%.3f commits=%lu%s%s\n",
+                ts, metal ? gpu_error_name(code) : "error", code, metal ? "" : " domain=",
+                metal ? "" : err.domain.UTF8String, err.localizedDescription.UTF8String,
+                fb.GPUStartTime, fb.GPUEndTime, CACurrentMediaTime(), atomic_load(&g_commits),
+                details, more);
+      }
+    });
+  });
+  return handler;
+}
+
 static NTSTATUS
 _MTL4CommandQueue_commit(void *obj) {
   struct unixcall_mtl4_queue_commit *params = obj;
   const obj_handle_t *handles = params->cmdbufs.ptr;
   NSUInteger count = (NSUInteger)params->count;
+  atomic_fetch_add_explicit(&g_commits, 1, memory_order_relaxed);
   if (getenv("D9MT_WSILOG")) {
     static _Atomic unsigned n_commit;
     unsigned k = n_commit++;
     if (k < 24 || (k % 100) == 0)
       fprintf(stderr, "D9MT-WSI[unix] queue_commit #%u count=%lu\n", k, (unsigned long)count);
   }
-  [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
+  MTL4CommitFeedbackHandler handler = commit_feedback_handler();
+  if (handler) {
+    /* One options object per commit, on purpose: a reused MTL4CommitOptions runs its handlers
+     * for its first commit only (measured, not in the SDK), so a shared one would report the
+     * session's first commit and stay silent on every later fault. Don't hoist this. */
+    MTL4CommitOptions *options = [[MTL4CommitOptions alloc] init];
+    [options addFeedbackHandler:handler];
+    [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count
+                                        options:options];
+    [options release];
+  } else {
+    [(id<MTL4CommandQueue>)params->queue commit:(const id<MTL4CommandBuffer> _Nonnull *)handles count:count];
+  }
   return STATUS_SUCCESS;
 }
 

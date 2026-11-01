@@ -97,6 +97,13 @@ timeout cuts it off with everything queued behind it, and the queue doesn't reco
 page fault (see GPU canary), nothing completes afterwards. A wait that sees it for 10 s logs
 `D9MT-GPU-HUNG` and ends the game (`D9MT_GPU_HUNG`; `driver/backend/mtl_submission.cpp`).
 
+**GPU error line**
+A commit the GPU failed is a `D9MT-GPU-ERROR` line from the bridge's commit feedback: the
+error's name and code, and the encoders that faulted when Metal lists them (`D9MT_COMMIT_FEEDBACK`).
+It covers both cases above: after a page fault the canary also logs `D9MT-GPU-LOST`, but only for
+command buffers that still complete; when nothing completes again, `D9MT-GPU-ERROR` and
+`D9MT-GPU-HUNG` are the only lines.
+
 **Pass split**
 A submit in the middle of a render pass: the pass ends, so its attachments are stored and loaded
 again (`docs/gpu-4k.md`, `docs/g1-early-commit.md`).
