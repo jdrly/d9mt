@@ -45,7 +45,10 @@ static std::vector<std::string> g_errors;
 static void created(obj_handle_t h) { std::lock_guard l(g_model); g_refs[h] = 1; }
 
 extern "C" obj_handle_t MTLDevice_newResidencySet(obj_handle_t, const WMTResidencySetInfo*) {
-  return g_setFails ? 0u : kSet;
+  if (g_setFails)
+    return 0u;
+  created(kSet);                             // the tracker owns it (WmtResidencySet::adopt)
+  return kSet;
 }
 extern "C" void MTLResidencySet_requestResidency(obj_handle_t) { }
 extern "C" void MTL4CommandQueue_addResidencySet(obj_handle_t, obj_handle_t) { }
