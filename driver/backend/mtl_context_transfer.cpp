@@ -188,13 +188,21 @@ namespace dxvk::backend {
       const MtlVertexLayout& src = m_vertexLayouts[i];
       PsoVertexLayout& l = key.layouts[i];
       /* A 0 stride here makes Metal assert "buffer at index N has no
-       * stride"; prefer the live per-stream stride when present. */
-      uint32_t strideVal = src.stride;
-      if (src.binding < m_vertexStreams.size()
-       && m_vertexStreams[src.binding].stride != 0u)
-        strideVal = m_vertexStreams[src.binding].stride;
-      l.stride       = uint16_t(strideVal);
-      l.stepFunction = src.perInstance ? 2u : 1u;
+       * stride"; prefer the live per-stream stride when present. A live
+       * stride of 0 (D3D9 stride 0, an unbound stream, the null stream)
+       * steps as a constant, so the declaration's stride is never walked. */
+      const uint32_t boundStride = src.binding < m_vertexStreams.size()
+        ? m_vertexStreams[src.binding].stride : 0u;
+      l.stride       = uint16_t(boundStride ? boundStride : src.stride);
+      l.stepFunction = psoStepFunction(boundStride, src.perInstance, src.divisor);
+      if (unlikely(src.perInstance && src.divisor > kPsoMaxStepRate && boundStride)) {
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          Logger::warn(str::format("MtlContextImpl: instance divisor ", src.divisor,
+            " above ", kPsoMaxStepRate, ", stream ", src.binding, " read as a constant"));
+        }
+      }
       l.pad          = uint8_t(kVertexBufferBaseIndex + src.binding);
     }
     key.layoutCount = uint8_t(nLayout);

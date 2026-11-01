@@ -303,11 +303,13 @@ namespace dxvk::backend {
       if (idx >= 31u)
         continue;
       WMTVertexBufferLayoutInfo& l = vinfo.layouts[idx];
+      // psoStepFunction(): 0 constant, 1 per vertex, 2..255 per instance at the value - 1
       l.stride        = k.stride;
-      l.step_function = k.stepFunction == 2u
-        ? WMTVertexStepFunctionPerInstance
-        : WMTVertexStepFunctionPerVertex;
-      l.step_rate     = 1u;
+      l.step_function = k.stepFunction == kPsoStepConstant ? WMTVertexStepFunctionConstant
+        : k.stepFunction == kPsoStepPerVertex ? WMTVertexStepFunctionPerVertex
+        : WMTVertexStepFunctionPerInstance;
+      l.step_rate     = k.stepFunction == kPsoStepConstant ? 0u
+        : k.stepFunction == kPsoStepPerVertex ? 1u : k.stepFunction - 1u;
       numLayouts = std::max(numLayouts, idx + 1u);
     }
     vinfo.num_layouts = numLayouts;
