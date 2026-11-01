@@ -306,6 +306,16 @@ namespace dxvk::backend {
       m_tracker->drainAndStopPump();
       lifetime::detach(m_tracker.get());
     }
+
+    /* A context dropped a submit at process detach (#63): a committed prefix of it may still
+     * run, covered by no signal the drain could wait for. The samplers and depth-stencil states
+     * it may reference are leaked with their caches, not released with the device's members.
+     * (Shader libraries are never released; pipelines stay with the residency tracker, which
+     * can't take its lock then.) */
+    if (m_tracker && unlikely(m_tracker->abandoned())) {
+      (void) new decltype(m_samplerCache)(std::move(m_samplerCache));
+      (void) new decltype(m_dssoCache)(std::move(m_dssoCache));
+    }
   }
 
   void* MtlDeviceImpl::hostAlloc(uint64_t size) {

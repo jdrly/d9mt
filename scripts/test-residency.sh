@@ -13,7 +13,10 @@
 #    canary check, for submit and commitPrefix. Plain and ASan/UBSan (no threads);
 #  - test/native/submission_abandon_test.cpp: SubmissionTracker::abandon (mtl_submission.cpp as
 #    is): waits unchanged (waitFor and the drain still wait for submitted serials); what is
-#    retired past the last submitted serial is leaked, the rest still runs. Plain and ASan/UBSan.
+#    retired past the last submitted serial is leaked, the rest still runs. Plain and ASan/UBSan;
+#  - test/native/device_teardown_test.cpp: MtlDeviceImpl's destructor (cut out of mtl_device_impl.cpp
+#    by test/native/device_teardown_extract.py) releases the sampler and depth-stencil caches
+#    normally and leaks them after a dropped submit. Plain and ASan/UBSan.
 # Needs DXVK's native headers as scripts/test-state-cache.sh (DXVK_NATIVE=<dir>).
 #   scripts/test-residency.sh [<driver tree>]   (default: this checkout's driver/; another tree's
 #                                                driver/ with this checkout's tests, for witnesses)
@@ -65,6 +68,22 @@ else
     if ! clang++ -std=c++17 -O1 -g -Wall "${f[@]}" -I"$SRC/driver/backend" -I"$SRC/driver" -I"$NATIVE/windows" -I"$NATIVE/directx" \
          -include "$V2/test/native/stubs/win_submission.h" "$V2/test/native/submission_abandon_test.cpp" \
          "$SRC/driver/backend/mtl_submission.cpp" -o "$OUT/$nn" > "$OUT/$nn.build.log" 2>&1; then
+      echo "$nn: FAIL (build, $OUT/$nn.build.log)"; fails=$((fails + 1)); continue
+    fi
+    if "$OUT/$nn" > "$OUT/$nn.log" 2>&1; then echo "$nn: ok"
+    else echo "$nn: FAIL ($OUT/$nn.log: $(grep -c '^FAIL' "$OUT/$nn.log") failed checks)"; fails=$((fails + 1)); fi
+    [ -n "${RESIDENCY_PLAIN_ONLY:-}" ] && break
+  done
+fi
+
+# device_teardown_test: the driver's own device destructor
+n=device_teardown_test
+if ! python3 -I "$V2/test/native/device_teardown_extract.py" "$SRC/driver/backend/mtl_device_impl.cpp" "$OUT/$n.src" > "$OUT/$n.extract.log" 2>&1; then
+  echo "$n: FAIL (extract, $OUT/$n.extract.log)"; fails=$((fails + 1))
+else
+  for v in plain asan; do
+    f=(); nn=$n; [ $v = asan ] && { f=(-fsanitize=address,undefined -fno-sanitize-recover=all); nn=${n}_asan; }
+    if ! clang++ -std=c++17 -O1 -g -Wall "${f[@]}" -I "$OUT/$n.src" "$V2/test/native/device_teardown_test.cpp" -o "$OUT/$nn" > "$OUT/$nn.build.log" 2>&1; then
       echo "$nn: FAIL (build, $OUT/$nn.build.log)"; fails=$((fails + 1)); continue
     fi
     if "$OUT/$nn" > "$OUT/$nn.log" 2>&1; then echo "$nn: ok"
