@@ -7,9 +7,12 @@
 #    with a stub compiler: every PSO built for a draw, an internal pipeline, the prewarm and a
 #    failed prewarm's replacement is in the set once done, and committed by the next submit. It
 #    watches bridge calls only, so it also builds against a tree without #63 (and fails there);
-#  - test/native/commit_guard_test.cpp: commitRecorded (cut out of mtl_context_record.cpp by
-#    test/native/commit_guard_extract.py) never commits to the queue after a skipped residency
-#    commit (process detach) or a hung GPU. Plain and ASan/UBSan (no threads).
+#  - test/native/commit_guard_test.cpp: the context's commit path (commitRecorded to submit, cut
+#    out of mtl_context_record.cpp by test/native/commit_guard_extract.py): after a residency
+#    commit that couldn't be made (process detach), no queue commit, serial, retirement, wait or
+#    canary check, for submit and commitPrefix. Plain and ASan/UBSan (no threads);
+#  - test/native/submission_abandon_test.cpp: SubmissionTracker::abandon (mtl_submission.cpp as
+#    is): no wait, no retirement run or destroyed, a drain that does neither. Plain and ASan/UBSan.
 # Needs DXVK's native headers as scripts/test-state-cache.sh (DXVK_NATIVE=<dir>).
 #   scripts/test-residency.sh [<driver tree>]   (default: this checkout's driver/; another tree's
 #                                                driver/ with this checkout's tests, for witnesses)
@@ -51,7 +54,25 @@ for t in TRACKER CACHE; do
   run "${n}_asan" $t -fsanitize=address,undefined -fno-sanitize-recover=undefined
   run "${n}_tsan" $t -fsanitize=thread
 done
-# commit_guard_test: the driver's own commitRecorded
+# submission_abandon_test: the tracker's abandonment (it calls #63's API: not on a tree without it)
+n=submission_abandon_test
+if ! grep -q 'void abandon()' "$SRC/driver/backend/mtl_submission.h"; then
+  echo "$n: skipped ($SRC has no SubmissionTracker::abandon)"
+else
+  for v in plain asan; do
+    f=(); nn=$n; [ $v = asan ] && { f=(-fsanitize=address,undefined -fno-sanitize-recover=all); nn=${n}_asan; }
+    if ! clang++ -std=c++17 -O1 -g -Wall "${f[@]}" -I"$SRC/driver/backend" -I"$SRC/driver" -I"$NATIVE/windows" -I"$NATIVE/directx" \
+         -include "$V2/test/native/stubs/win_submission.h" "$V2/test/native/submission_abandon_test.cpp" \
+         "$SRC/driver/backend/mtl_submission.cpp" -o "$OUT/$nn" > "$OUT/$nn.build.log" 2>&1; then
+      echo "$nn: FAIL (build, $OUT/$nn.build.log)"; fails=$((fails + 1)); continue
+    fi
+    if "$OUT/$nn" > "$OUT/$nn.log" 2>&1; then echo "$nn: ok"
+    else echo "$nn: FAIL ($OUT/$nn.log: $(grep -c '^FAIL' "$OUT/$nn.log") failed checks)"; fails=$((fails + 1)); fi
+    [ -n "${RESIDENCY_PLAIN_ONLY:-}" ] && break
+  done
+fi
+
+# commit_guard_test: the driver's own commit path
 n=commit_guard_test
 if ! python3 -I "$V2/test/native/commit_guard_extract.py" "$SRC/driver/backend/mtl_context_record.cpp" "$OUT/$n.src" > "$OUT/$n.extract.log" 2>&1; then
   echo "$n: FAIL (extract, $OUT/$n.extract.log)"; fails=$((fails + 1))
