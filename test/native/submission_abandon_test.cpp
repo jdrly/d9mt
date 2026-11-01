@@ -78,14 +78,16 @@ namespace dxvk::backend {
 // A retirement's captured state: counts runs, and destructions (a destroyed closure releases
 // what it captured, as WmtCommandBuffer's does).
 struct Probe {
-  std::atomic<uint32_t>* destroyed;
+  explicit Probe(std::atomic<uint32_t>* d) : destroyed(d) { }
+  Probe(const Probe&) = delete;
   ~Probe() { (*destroyed)++; }
+  std::atomic<uint32_t>* destroyed;
 };
 
 struct Retired {
   std::atomic<uint32_t> runs = { 0u }, destroyed = { 0u };
   std::function<void()> closure() {
-    auto p = std::make_shared<Probe>(Probe { &destroyed });
+    auto p = std::make_shared<Probe>(&destroyed);
     return [p, this] { runs++; };
   }
   bool ran() const { return runs.load() == 1u; }
@@ -123,15 +125,18 @@ int main() {
   t->retireAfter(0u, control.closure());
   CHECK(control.ran());
 
-  // Serial 1 is submitted; a retirement and a batch wait for it.
+  // Serials 1 and 2 are submitted (the GPU signals neither yet); retirements and a batch wait.
   const uint64_t s1 = t->onSubmit(0x9u);
-  Retired a;
+  const uint64_t s2 = t->onSubmit(0x9u);
+  Retired a, c;
   t->retireAfter(s1, a.closure());
+  t->retireAfter(s2, c.closure());
   std::unique_ptr<RetireBatch> b;
   batchWith(b, 0xb1u);
   b = t->retireBatch(s1, std::move(b));
 
-  // The open serial's submit is dropped: abandon. What is retired after it is leaked at once.
+  // The open serial's submit is dropped: abandon (nothing is submitted after that). What is
+  // retired after it is leaked at once.
   t->abandon();
   CHECK(t->abandoned());
   const uint64_t open = t->nextSerial();
@@ -150,11 +155,6 @@ int main() {
     if (ms < 100) { g_fail++; std::printf("FAIL waitFor after abandon returned after %lld ms, before the GPU signalled\n", ms); }
     CHECK(t->isComplete(s1));
   }
-
-  // Serial 2 is submitted too (an earlier, complete submit of the same frame, say).
-  const uint64_t s2 = t->onSubmit(0x9u);
-  Retired c;
-  t->retireAfter(s2, c.closure());
 
   // The drain waits for serial 2, runs what is at or below it, leaks what is past it.
   { std::thread gpu = signalLater(s2, 150u);
