@@ -6,6 +6,10 @@ No accepted metric/schedule calibration is wired here: guard status is always pe
 Paired median intervals assume independent exchangeable pairs and describe only the
 sampled regime. Correlated rounds in one window do not establish between-window power.
 Control ranges and bimodality are diagnostics, not proof of equivalence.
+
+Exit codes: 0 complete descriptive report, never a guard pass; 1 failed runs or tool/I/O
+errors; 2 invalid CLI usage; 3 incomplete/invalid comparison, including DIRTY, missing,
+nonfinite, malformed or unpaired results. Failed runs take precedence over code 3.
 """
 import argparse, math, re, statistics, sys
 from pathlib import Path
@@ -32,6 +36,16 @@ META = ("client", "visible")
 NUM = r"=([^\s]+)(?=\s|$)"   # validate the whole token, including malformed/nonfinite values
 
 
+def invalid(message, failed=False):
+    print(message, file=sys.stderr)
+    sys.exit(1 if failed else 3)
+
+
+def counts(skipped):
+    return (f"{skipped['dirty']} DIRTY, {skipped['fail']} FAIL, "
+            f"{skipped['missing']} missing, {skipped['invalid']} invalid")
+
+
 def load(paths, metric):
     vals, skipped, seen, keys_seen, clients, visible = {}, {"dirty": 0, "fail": 0, "missing": 0, "invalid": 0}, set(), set(), {}, {}
     for path in paths:
@@ -45,8 +59,8 @@ def load(paths, metric):
             # one file (perf-abba.sh writes a fresh file per call), and pairing would be wrong.
             ident = (path, int(m.group(2)), m.group(3))
             if ident in seen:
-                sys.exit(f"{path}:{n}: a second sample for round {ident[1]}, variant {ident[2]}: "
-                         "results of different runs mixed in one file")
+                invalid(f"{path}:{n}: a second sample for round {ident[1]}, variant {ident[2]}: "
+                         "results of different runs mixed in one file", skipped["fail"])
             seen.add(ident)
             if m.group(1):
                 skipped["dirty"] += 1
@@ -112,15 +126,19 @@ def main():
     if a.diagnostic_band is not None and (not math.isfinite(a.diagnostic_band) or a.diagnostic_band < 0):
         ap.error("--diagnostic-band must be finite and nonnegative")
     if a.metric in META:
-        sys.exit(f"--metric {a.metric}: that's run metadata, not a measurement")
+        ap.error(f"--metric {a.metric}: that's run metadata, not a measurement")
     a.files = [str(Path(p).resolve()) for p in a.files]
     if len(set(a.files)) != len(a.files):
         ap.error("duplicate result file")
     vals, skipped, metric, keys_seen, clients, visible = load(a.files, a.metric)
+    def print_no_results(message):
+        print(message, file=sys.stderr)
+        sys.exit(1 if skipped["fail"] else 3)
+
     if not vals:
         avail = " ".join(sorted(k for k in keys_seen if k not in ("round", "pair", "block", "load") + META))
-        sys.exit(f"no results for metric {a.metric or ' / '.join(METRICS)}"
-                 f" (skipped {skipped['dirty']} DIRTY, {skipped['fail']} FAIL)"
+        print_no_results(f"no results for metric {a.metric or ' / '.join(METRICS)}"
+                 f" (skipped: {counts(skipped)})"
                  + (f"; keys present: {avail} (--metric)" if avail else ""))
     # The metadata of the runs in the table only (a run without the metric isn't in it).
     clients, visible = ({v: {k: x for k, x in d.items() if k in vals.get(v, {})} for v, d in md.items()}
@@ -129,9 +147,9 @@ def main():
     visible = {v: d for v, d in visible.items() if d}
     ref = a.ref or next(iter(vals))
     if ref not in vals:
-        sys.exit(f"no results for the reference {ref}")
+        invalid(f"no results for the reference {ref}", skipped["fail"])
     if len(vals) < 2:
-        sys.exit("no comparison: need results for at least two variants")
+        invalid("no comparison: need results for at least two variants", skipped["fail"])
     base = vals[ref]
     bmed = statistics.median(base.values())
 
@@ -141,29 +159,30 @@ def main():
     noise = None
     if a.control:
         if a.control == ref:
-            sys.exit("control must differ from reference")
+            ap.error("control must differ from reference")
         if a.control not in vals:
-            sys.exit(f"no results for the control {a.control}")
+            invalid(f"no results for the control {a.control}", skipped["fail"])
         c = paired(a.control)
         if not c:
-            sys.exit("control has no paired results")
+            invalid("control has no paired results", skipped["fail"])
         noise = (min(c), max(c))
 
     sign = -1 if metric in HIGHER_IS_BETTER else 1   # +: a larger value is slower
     print(f"metric {metric} ({'higher' if sign < 0 else 'lower'} is better), reference {ref}"
           + (f", control {a.control}" if a.control else "")
-          + (f"; skipped: {skipped}" if any(skipped.values()) else ""))
+          + (f"; skipped: {counts(skipped)}" if any(skipped.values()) else ""))
+    print("calibration: none")
     print("guard: pending; no accepted metric/schedule/condition calibration is wired")
     print("uncertainty: conditional 95% median interval, independent exchangeable pairs assumed; "
           "no between-window calibration or detection-power claim")
-    print("variant                 n     median        min        max   vs ref")
+    print(f"{'variant':22} {'n':>3} {'median':>10} {'min':>10} {'max':>10} {'vs ref':>10}")
     incomplete = any(skipped.values())
     for v, d in vals.items():
         xs = list(d.values())
         med = statistics.median(xs)
         flag = " bimodal?" if bimodal(xs) else ""
         print(f"{v:22} {len(xs):3} {med:10.4f} {min(xs):10.4f} {max(xs):10.4f} "
-              f"{('[ref]' if v == ref else pct(med / bmed - 1 if bmed else None)):>8}{flag}")
+              f"{('[ref]' if v == ref else pct(med / bmed - 1 if bmed else None)):>10}{flag}")
         if v == ref:
             continue
         diffs = paired(v)
@@ -183,7 +202,7 @@ def main():
         interval = "unbounded" if lo is None else f"{lo:+.4f} .. {hi:+.4f}"
         relative_interval = "unbounded" if lo is None or not bmed else f"{pct(lo / bmed)} .. {pct(hi / bmed)}"
         print(f"  paired {pd:+.4f} ({pct(rel)}); magnitude {abs(pd):.4f} "
-              f"({pct(abs(rel)) if rel is not None else 'n/a'}); "
+              f"({f'{abs(rel) * 100:.3f}%' if rel is not None else 'n/a'}); "
               f"faster {faster}/{len(diffs)}, slower {slower}/{len(diffs)}, equal {equal}/{len(diffs)}")
         print(f"  conditional median interval: {interval}; relative {relative_interval}")
         tag = " [control]" if v == a.control else ""
@@ -234,8 +253,12 @@ def main():
             print("WARNING: occluded runs are mixed with others: an occluded window's presents are skipped,"
                   " so compare them separately")
 
-    return 1 if incomplete else 0
+    return 1 if skipped["fail"] else 3 if incomplete else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as error:
+        print(f"perf-compare: {error}", file=sys.stderr)
+        sys.exit(1)

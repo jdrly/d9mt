@@ -10,6 +10,9 @@ Superseded by [ADR-0005](0005-correctness-first-speed-proven.md) on 2026-10-28: 
 every supported Mac comes first, a speed-only change proves itself or waits behind a switch, and
 the release candidate gets a smoothness guard. The method below carries over.
 
+The comparison tool output below is historical. See PERFORMANCE.md §2.3 for its current
+fields, diagnostic bands and exit codes.
+
 ## Context
 
 d9mt's users run it to make games faster; a correctness fix or a feature that costs frame time on

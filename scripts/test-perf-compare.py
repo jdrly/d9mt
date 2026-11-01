@@ -69,19 +69,46 @@ class Reports(unittest.TestCase):
         self.assertIn('guard: pending;', r.stdout)
 
     def test_invalid_missing_and_unpaired(self):
-        for line in ('DIRTY round=8 v=change RESULT avg_ms=110',
-                     'round=8 v=change RESULT FAIL timeout',
-                     'round=8 v=change RESULT fps=20',
-                     *(f'round=8 v=change RESULT avg_ms={v}' for v in ('nan', 'inf', '-1', '1.2.3'))):
+        cases = [('DIRTY round=8 v=change RESULT avg_ms=110', '1 DIRTY', 3),
+                 ('round=8 v=change RESULT FAIL timeout', '1 FAIL', 1),
+                 ('round=8 v=change RESULT fps=20', '1 missing', 3)]
+        cases += [(f'round=8 v=change RESULT avg_ms={v}', '1 invalid', 3)
+                  for v in ('nan', 'inf', '-1', '1.2.3')]
+        for line, reason, code in cases:
             with self.subTest(line=line):
                 r = self.run_report(self.pairs() + line + '\n')
-                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(r.returncode, code, r.stderr)
+                self.assertIn(reason, r.stdout)
                 self.assertIn('guard: pending;', r.stdout)
+        r = self.run_report(self.pairs() + 'round=8 v=base avg_ms=100\n')
+        self.assertEqual(r.returncode, 3)
+        self.assertIn('incomplete pairing', r.stdout)
         r = self.run_report('round=1 v=base avg_ms=1\nround=2 v=change avg_ms=2\n')
-        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 3)
         self.assertIn('invalid comparison', r.stdout)
-        for text in ('', 'round=1 v=base avg_ms=nan\n', 'round=1 v=base avg_ms=1\n', self.pairs() + self.pairs()):
-            self.assertNotEqual(self.run_report(text).returncode, 0)
+        for text, reason in (('', '1 missing'),
+                             ('round=1 v=base avg_ms=nan\n', '1 invalid'),
+                             ('round=1 v=base avg_ms=1\n', 'need results for at least two variants'),
+                             (self.pairs() + self.pairs(), 'a second sample')):
+            r = self.run_report(text)
+            self.assertEqual(r.returncode, 3)
+            self.assertIn(reason, r.stderr)
+        r = self.run_report('round=1 v=base RESULT FAIL timeout\n')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('1 FAIL', r.stderr)
+        r = self.run_report('round=1 v=base RESULT FAIL timeout\nround=1 v=change avg_ms=1\n', '--ref', 'base')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('no results for the reference base', r.stderr)
+
+    def test_paired_band_and_relative_interval(self):
+        # The two marginal medians are equal, but the paired median is +1.
+        text = ''.join(f'round={i} v=base avg_ms={b}\nround={i} v=change avg_ms={v}\n'
+                       for i, (b, v) in enumerate([(1, 2), (2, 3), (3, 1)] * 3))
+        r = self.run_report(text, '--diagnostic-band', '25')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('DIAGNOSTIC slower >25%', r.stdout)
+        self.assertIn('relative -100.000% .. +50.000%', r.stdout)
+        self.assertIn('magnitude 1.0000 (50.000%)', r.stdout)
 
     def test_controls_cannot_supply_calibration(self):
         text = self.pairs(value=100) + ''.join(f'round={i} v=copy avg_ms=100\n' for i in range(8))
@@ -92,7 +119,12 @@ class Reports(unittest.TestCase):
         self.assertNotIn('~ noise', r.stdout)
         for control in ('base', 'absent'):
             self.assertNotEqual(self.run_report(text, '--control', control).returncode, 0)
-        self.assertNotEqual(self.run_report(text, '--calibration', 'invented.json').returncode, 0)
+        self.assertIn('calibration: none', r.stdout)
+        self.assertIn('[control]', r.stdout)
+        self.assertNotIn('inside observed control range', r.stdout.split('[control]')[1])
+        r = self.run_report(self.pairs() + 'round=99 v=copy avg_ms=100\n', '--control', 'copy')
+        self.assertEqual(r.returncode, 3)
+        self.assertIn('control has no paired results', r.stderr)
 
 
 if __name__ == '__main__':

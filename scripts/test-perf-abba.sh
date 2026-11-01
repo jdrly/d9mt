@@ -283,6 +283,24 @@ if [ "$?" = 0 ] && grep -q 'guard: pending;' "$T/report.out" && \
    grep -q 'faster 0/1, slower 0/1, equal 1/1' "$T/report.out"; then
   ok "symmetric reporting and pending guard through wrapper"
 else bad "symmetric reporting through wrapper"; fi
+D9MT_TEST_SEEN="$T/missing-seen" WORK="$T/missing-report" DIRTY_CHECK=0 bash "$ABBA" --native \
+  --variant a="$T/prog-a" --variant bbbb="$T/prog-bbbb" --rounds 1 \
+  --metric absent fake >"$T/missing-report.out" 2>&1
+if [ "$?" = 3 ] && grep -q '2 missing' "$T/missing-report.out"; then
+  ok "wrapper preserves incomplete comparison status 3 and reason"
+else bad "wrapper incomplete comparison status"; fi
+cat >"$T/fail-program" <<'EOF'
+#!/usr/bin/env bash
+echo 'RESULT FAIL fixture'
+exit 1
+EOF
+chmod +x "$T/fail-program"
+WORK="$T/failed-report" DIRTY_CHECK=0 bash "$ABBA" --native \
+  --variant a="$T/fail-program" --variant bbbb="$T/fail-program" --rounds 1 \
+  fake >"$T/failed-report.out" 2>&1
+if [ "$?" = 1 ] && grep -q '2 failed run(s)' "$T/failed-report.out"; then
+  ok "wrapper preserves failed-run status 1"
+else bad "wrapper failed-run status"; fi
 if python3 "$V2/scripts/test-perf-compare.py"; then ok "synthetic comparison cases"
 else bad "synthetic comparison cases"; fi
 

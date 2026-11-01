@@ -136,12 +136,23 @@ D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh
   exit 0 with a result line (a bench given bad arguments prints `RESULT FAIL usage` and exits 2);
   both are left out of the comparison, and the script exits 1 if a run failed. `DIRTY_CHECK=0`
   turns the Wine server check off, for functional smoke runs only, never for measurements.
-- `scripts/perf-compare.py results.txt …` prints per variant the runs, the median, min..max, the
-  paired median against the reference and **slower n/N**. With `--control`, a variant whose paired
-  median lies within the control's range is marked **`~ noise`**; a variant whose runs fall into
-  two clusters (at least six runs, a gap wider than 2.5 % of the median, and at least 20 % of
-  the runs on each side) is marked **`bimodal?`** (§2.5). `--metric` picks another result field (for example
-  `p99` or `sd` for pacing).
+- `scripts/perf-compare.py results.txt …` prints per variant the runs, median, min..max and
+  difference against the reference. Paired lines report signed and magnitude effects,
+  relative effects, a conditional 95% median interval and faster/slower/equal counts.
+  Intervals assume independent exchangeable pairs and describe the sampled regime only;
+  they do not establish between-window detection power. `--metric` selects another field.
+  `calibration: none` and `guard: pending` explicitly report the missing accepted calibration.
+  With `--control`, the observed paired range is diagnostic, never proof of noise or
+  equivalence. `--diagnostic-band <percent>` optionally marks paired effects in either
+  direction strictly beyond that magnitude; it is not a merge threshold. `bimodal?` marks
+  two clusters with at least six runs, a gap wider than 2.5% of the median and at least 20%
+  of the runs on each side (§2.5).
+- Report exit codes are 0 for a complete descriptive report, 1 for failed runs or tool/I/O
+  errors, 2 for invalid CLI usage and 3 for an incomplete or invalid comparison, including
+  DIRTY, missing/invalid metrics or unpaired results. Failed runs take precedence over 3.
+  `perf-abba.sh` passes the comparison status through. Exit 0 is never a guard pass.
+  Unlike the older script, a DIRTY sample now makes the comparison nonzero even when the
+  remaining samples can be described. Callers must explicitly adopt this status contract.
 - For a virtual display, build the benches with `BENCH_INCLUDE=<header>` and wrap the whole
   `perf-abba.sh` call in the display tool (`scripts/build-benches.sh`, `scripts/perf-abba.sh`).
   A virtual display can vanish when the physical display is forced to sleep during a run (#43).
@@ -191,23 +202,11 @@ D9MT=<this checkout> ENGINE=<Wine engine root> WORK=<scratch dir> \
   of that window can't be told from noise in that window. Inside one block a byte-identical
   copy lands in base's mode (§2.5), so the A/A doesn't show how far two different binaries can
   move between blocks.
-- **A median slowdown over 0.25 % is flagged anyway** (ms up, fps down; the median or the paired
-  median against base), even inside the A/A spread, and re-verified before a merge:
-  `scripts/perf-compare.py` marks it `FLAG >0.25%` and names it in a closing line (ADR-0005).
-  For a fix, only a flag larger than the measurable resolution is re-verified before the merge; a
-  smaller one goes to a council (below) and doesn't hold the fix (§1).
-  A flag is first the author's to clear, in this order:
-  1. **Re-verify** in another block (on bindbench more rounds in the same block don't help,
-     §2.5), with the layout controls below and, on a bimodal bench, the mode report
-     (*Per PR and at the release check*). The re-verification ends in one of the three
-     outcomes below.
-  2. **If the cost is established, find a solution that costs nothing.**
-  3. **Only if there is none**, it goes to the maintainer, with a solid explanation of the cost
-     and a second opinion from the independent agent review (GPT-6.1-Sol).
-
-  An **unresolved** flag goes to a council: independent agent reviewers on different models
-  (GPT-6.1-Sol among them) work on it alone, debate it and write one result for the maintainer.
-  It isn't held without a word, and it isn't read as free (the maintainer, 2026-10-27).
+- The former automatic `FLAG >0.25%` and `~ noise` output has been removed.
+  The optional symmetric diagnostic band and observed control range are described in
+  §2.3. Neither independently triggers a merge hold, a council or re-verification.
+  The adopted representative policy supersedes the historical microbenchmark gate;
+  its ADR and full documentation follow separately. Calibration remains pending.
 - **a64 pair**: for a single commit's small delta, build base and the branch both with
   `-falign-functions=64`. If the gap disappears there, that points at code layout, not the
   change. It is a diagnosis for that block, and it counts only when it repeats across blocks.

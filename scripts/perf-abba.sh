@@ -32,6 +32,10 @@
 #
 # A run counts only if the program exits 0 with a RESULT/BENCH line that isn't "RESULT FAIL";
 # otherwise its line is RESULT FAIL, it's left out of the comparison, and the script exits 1.
+# Exit codes: 0 complete descriptive report, never a guard pass; 1 failed runs or tool/I/O
+# errors; 2 invalid usage/setup; 3 incomplete/invalid comparison (DIRTY, missing/invalid metrics,
+# or unpaired results). Comparison status is passed through; failed runs take precedence.
+# DIRTY now returns nonzero even when the remaining paired samples can be described.
 # A bench's `CLIENT <bench> <W>x<H>` line (test/perf/bench_window.h) becomes client=<W>x<H> on the
 # run's line, client=<W>x<H>!=<back buffer> when the client area isn't the back buffer's size:
 # then a visible window's presents need the presenter's scaling blit (perf-compare.py warns).
