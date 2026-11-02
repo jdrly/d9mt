@@ -69,9 +69,9 @@ int main(int argc, char** argv) {
     uint64_t frame = 0u;
     hitch::FrameStats s;
 
-    CHECK(!p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 50.0, frame, s));  // first frame
-    spinMs(25.0);                     // calibration window (>= 20 ms)
-    CHECK(!p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 50.0, frame, s));  // short frame
+    CHECK(!p.endFrame(hitch::nowNs(), compile, 0u, 50.0, frame, s));  // first frame
+    spinMs(25.0);
+    CHECK(!p.endFrame(hitch::nowNs(), compile, 0u, 50.0, frame, s));  // short frame
 
     { hitch::Scope outer(p, hitch::Present, true);           // entry
       { hitch::Scope inner(p, hitch::TexCreate, true);       // nested entry: not outer
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     compile.waits = 2u; compile.waitsNs = 3000000u;
     compile.skipped = 5u; compile.budgetHits = 1u;
 
-    CHECK(p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 4u, 50.0, frame, s));
+    CHECK(p.endFrame(hitch::nowNs(), compile, 4u, 50.0, frame, s));
     std::printf("%s\n", hitch::formatHitch(frame, s).c_str());
     CHECK(frame == 3u);
     CHECK(s.dtMs >= 66.0);
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
     // Counters were consumed: an idle long frame shows nothing inside d9mt,
     // and compile deltas are per frame.
     spinMs(55.0);
-    CHECK(p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 50.0, frame, s));
+    CHECK(p.endFrame(hitch::nowNs(), compile, 0u, 50.0, frame, s));
     CHECK(s.inMs == 0.0 && s.cat[hitch::Present].n == 0u && s.renderWaits == 0u);
     CHECK(s.skipped == 0u && s.budgetHits == 0u);
   }
@@ -126,12 +126,12 @@ int main(int argc, char** argv) {
     hitch::Profiler::CompileTotals compile;
     uint64_t frame = 0u;
     hitch::FrameStats s;
-    p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 1e9, frame, s);
+    p.endFrame(hitch::nowNs(), compile, 0u, 1e9, frame, s);
     { hitch::Scope e(p, hitch::Query, true);     // must be outer again
       spinMs(1.0);
     }
     spinMs(25.0);
-    CHECK(p.endFrame(hitch::ticks(), hitch::nowNs(), compile, 0u, 0.001, frame, s));
+    CHECK(p.endFrame(hitch::nowNs(), compile, 0u, 0.001, frame, s));
     CHECK(s.cat[hitch::Query].n == 1u);
     CHECK(s.inMs >= 0.9);
   }

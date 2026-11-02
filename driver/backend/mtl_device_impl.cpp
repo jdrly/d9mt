@@ -13,6 +13,7 @@
 #include "../util/log/log.h"
 #include "../util/util_env.h"
 #include "../util/util_string.h"
+#include "../util/util_cheap_clock.h"
 
 namespace dxvk::backend {
 
@@ -153,6 +154,15 @@ namespace dxvk::backend {
   MtlDeviceImpl::MtlDeviceImpl(const MtlMemoryProfile& profile)
   : m_compileWorkers(std::make_unique<MtlCompileWorkers>(compileThreadCount())) {
     m_memProfile = profile;
+    if (std::getenv("D9MT_PROFILE") != nullptr) {
+      static const bool logged = [] {
+        const auto& cal = cheap_clock::process();
+        Logger::info(str::format("D9MT: profiler clock: tsc=", cal.tsc ? 1 : 0,
+          " nsPerTick=", cal.nsPerTick));
+        return true;
+      }();
+      (void) logged;
+    }
 
     obj_handle_t devices = WMTCopyAllDevices();
     // objectAtIndex: is +0 and the array holds the device: retain it before the array goes
