@@ -1583,6 +1583,41 @@ d9mt_log_allow(struct d9mt_log_limit *l) {
     } \
   } while (0)
 
+/* D9MT_FORCE_COMPOSITED=1 (diagnostic, d9mt #153; off by default): keeps the layer off the
+ * direct-to-display path by giving it overlapping content of its own: a 1x1-point opaque black
+ * sublayer at the layer's bottom-left corner. Apple: "When you are composited, there may be some
+ * additional buffering and display latency due to system UI elements or your own additional
+ * layers overlapping" (Metal HUD tech talk 110339). The layer itself stays opaque, so no part of
+ * the game turns see-through (layer.opaque = NO would blend the drawable's alpha). Main thread. */
+static int
+d9mt_force_composited(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("D9MT_FORCE_COMPOSITED");
+    on = v && v[0] == '1' && v[1] == 0;
+  }
+  return on;
+}
+
+static void
+d9mt_apply_force_composited(CAMetalLayer *layer) {
+  static NSString *const name = @"d9mt-force-composited";
+  if (!d9mt_force_composited())
+    return;
+  for (CALayer *sub in layer.sublayers)
+    if ([sub.name isEqualToString:name])
+      return;
+  CALayer *dot = [CALayer layer]; /* autoreleased; the layer retains it */
+  dot.name = name;
+  dot.frame = CGRectMake(0, 0, 1, 1);
+  dot.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+  dot.opaque = YES;
+  [layer addSublayer:dot];
+  static struct d9mt_log_limit fc_log;
+  D9MT_DIAG(&fc_log, "layer %p: D9MT_FORCE_COMPOSITED=1, a 1x1-point sublayer keeps it composited",
+            (void *)layer);
+}
+
 /* Main-thread responsiveness probe. Core Animation commits and the AppKit
  * notifications that feed MetalView_visibility only run when wine's main
  * thread spins its run loop in a common mode; winemac blocks it in a private
@@ -3885,6 +3920,7 @@ _MetalLayer_setProps(void *obj) {
       strlcat(changed, " opaque", sizeof(changed));
     }
     dxmt_set_layer_background_black(layer);
+    d9mt_apply_force_composited(layer);
     if (layer.framebufferOnly != (BOOL)props.framebuffer_only) {
       layer.framebufferOnly = props.framebuffer_only;
       strlcat(changed, " framebufferOnly", sizeof(changed));

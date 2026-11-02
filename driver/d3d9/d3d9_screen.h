@@ -37,7 +37,7 @@
 // changes:
 //
 //   SCREEN-INFO displaySync=1 drawables=3 interval=1 cap=off hz=60.0 screenMaxFps=120
-//     refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1
+//     refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1 forceComposited=0
 //
 //   displaySync, drawables   the CAMetalLayer's displaySyncEnabled and maximumDrawableCount
 //   interval   the game's swap interval (vsyncs per frame; 0 = immediate)
@@ -47,6 +47,8 @@
 //              minimumRefreshInterval-maximumRefreshInterval in ms (a range: adaptive sync)
 //   nsFullscreen  the window is in macOS fullscreen (its own Space); "?" until AppKit answered
 //   d3dWindowed   the game's D3DPRESENT_PARAMETERS.Windowed
+//   forceComposited  D9MT_FORCE_COMPOSITED=1: the bridge keeps the layer off the direct-to-display
+//              path (a 1x1-point sublayer; for a direct-vs-composited A/B)
 //
 // Each presenter has its own stream (the bridge's ring, present_ring.h); the window restarts
 // (bindStream) when the swapchain's presenter changes, so a recreated device or a second device
@@ -83,6 +85,7 @@ namespace dxvk::screen {
     double   minIntervalMs = 0.0;
     double   maxIntervalMs = 0.0;
     bool     d3dWindowed   = true;
+    bool     forceComposited = false;
   };
 
   inline std::string formatInfo(const Info& i) {
@@ -95,14 +98,14 @@ namespace dxvk::screen {
     if (i.screenValid)
       std::snprintf(buf, sizeof(buf),
         "SCREEN-INFO displaySync=%d drawables=%u interval=%u cap=%s hz=%.1f screenMaxFps=%.0f"
-        " refreshInterval=%.1f-%.1f nsFullscreen=%d d3dWindowed=%d",
+        " refreshInterval=%.1f-%.1f nsFullscreen=%d d3dWindowed=%d forceComposited=%d",
         int(i.displaySync), i.drawables, i.interval, cap, i.hz, i.screenMaxFps,
-        i.minIntervalMs, i.maxIntervalMs, int(i.nsFullscreen), int(i.d3dWindowed));
+        i.minIntervalMs, i.maxIntervalMs, int(i.nsFullscreen), int(i.d3dWindowed), int(i.forceComposited));
     else
       std::snprintf(buf, sizeof(buf),
         "SCREEN-INFO displaySync=%d drawables=%u interval=%u cap=%s hz=%.1f screenMaxFps=?"
-        " refreshInterval=? nsFullscreen=? d3dWindowed=%d",
-        int(i.displaySync), i.drawables, i.interval, cap, i.hz, int(i.d3dWindowed));
+        " refreshInterval=? nsFullscreen=? d3dWindowed=%d forceComposited=%d",
+        int(i.displaySync), i.drawables, i.interval, cap, i.hz, int(i.d3dWindowed), int(i.forceComposited));
     return buf;
   }
 
