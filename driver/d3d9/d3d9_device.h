@@ -1059,6 +1059,14 @@ namespace dxvk {
 
     void ResolveZ();
 
+    // RESZ of an MSAA depth through the source's resolve image and a copy (MtlPfvImages);
+    // false: not possible, resolve directly
+    bool ResolveZViaImage(
+            D3D9CommonTexture*       pSrc,
+            D3D9CommonTexture*       pDst,
+      const MtlSubresourceLayers&    SrcSubresource,
+      const MtlSubresourceLayers&    DstSubresource);
+
     void TransformImage(
             D3D9CommonTexture*       pResource,
       const MtlSubresourceRange*     pSubresources);
