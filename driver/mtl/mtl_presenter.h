@@ -86,6 +86,10 @@ namespace dxvk {
     // display rate meanwhile, since nothing else does.
     virtual bool isDrawableStalled() const { return false; }
 
+    // The window visibility (WMT_VISIBILITY_*) the last isVisible() saw, without checking again
+    // (~0: not checked yet). For log lines (HITCH).
+    virtual uint64_t lastVisibility() const { return ~0ull; }
+
     // D9MT_PROFILE only: copies up to `max` presented records out of this presenter's stream (the
     // render thread presents with a presented handler while profiling), strictly in present
     // order; `pending`: the stream's presents not yet retired, `lostNew`: presents this call
