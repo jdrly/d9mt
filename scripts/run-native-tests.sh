@@ -50,6 +50,11 @@ skip submission_retire_test "hand under Wine (a mingw exe; build line in its sou
 skip submission_tracker_test "hand under Wine (a mingw exe; build line in its source)"
 skip state_cache_test "scripts/test-state-cache.sh (DXVK's native headers; plain and TSan)"
 skip pso_key_hash_test "scripts/test-pso-key-hash.sh (DXVK's native headers)"
+skip residency_pso_test "scripts/test-residency.sh (DXVK's native headers; plain, ASan/UBSan and TSan)"
+skip pso_residency_test "scripts/test-residency.sh (DXVK's native headers; plain, ASan/UBSan and TSan)"
+skip commit_guard_test "scripts/test-residency.sh (extracts the commit path from mtl_context_record.cpp; plain and ASan/UBSan)"
+skip submission_abandon_test "scripts/test-residency.sh (DXVK's native headers; plain and ASan/UBSan)"
+skip device_teardown_test "scripts/test-residency.sh (extracts the device destructor from mtl_device_impl.cpp; plain and ASan/UBSan)"
 skip upload_copy_test "scripts/test-upload-copy.sh (extracts d3d9_device.cpp; ASan/UBSan)"
 skip null_kind_test "scripts/test-null-kind.sh (extracts mtl_context_impl.h and mtl_context_transfer.cpp; ASan/UBSan)"
 

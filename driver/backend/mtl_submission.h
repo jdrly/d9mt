@@ -111,6 +111,15 @@ public:
 
   void drainAndStopPump();
 
+  // A submit was dropped at process detach (#63: its residency commit couldn't be made). It
+  // took no serial, but a G1 prefix of its command buffers may already be on the GPU, which no
+  // signal covers. So from then on what is retired after a serial past lastSubmittedSerial() is
+  // leaked, never run (running it could release what that prefix uses): by retireAfter and
+  // retireBatch, and by the drain, which still waits for every submitted serial first.
+  // Waits are unchanged. Set once.
+  void abandon() { m_abandoned.store(true, std::memory_order_release); }
+  bool abandoned() const { return m_abandoned.load(std::memory_order_acquire); }
+
   // The process's exit code after D9MT-GPU-HUNG.
   static constexpr unsigned kGpuHungExitCode = 0xD9D9u;
 
@@ -146,6 +155,7 @@ private:
 
   const bool m_failFast;   // D9MT_GPU_HUNG unset (not "continue")
   std::atomic<bool> m_gpuHung = { false };
+  std::atomic<bool> m_abandoned = { false };
 
   dxvk::thread m_pump;
 

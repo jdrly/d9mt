@@ -34,7 +34,7 @@ namespace dxvk::backend {
 
   MtlContextImpl::MtlContextImpl(Rc<MtlDeviceImpl> device)
   : MtlContext(device), m_device(std::move(device)),
-    m_psoCache(m_device->wmtCompiler(), m_device.ptr(), &m_device->m_psoRegistry) {
+    m_psoCache(m_device->wmtCompiler(), m_device.ptr(), &m_device->m_psoRegistry, &m_device->residency()) {
     // D9MT_ASYNC_SKIP=1 wins and is the same as a wait budget of 0.
     const int32_t budgetMs = m_device->memoryProfile().pipelineWaitBudgetMs;
     const bool workers = m_device->m_compileWorkers->maxThreads() != 0u;
@@ -169,6 +169,15 @@ namespace dxvk::backend {
     // tracker's drain (which waits for submitted serials only) waits for it too.
     if (m_serialPrefixCommitted || m_completePending)
       submit(true);
+    // A dropped submit (process detach, #63): nothing waited for the GPU above, and a committed
+    // G1 prefix may still run, covered by no signal. Its command memory, and that of any other
+    // slot's submitted work, belongs to these allocators: leaked, not released with the context.
+    if (unlikely(m_device->submissions().abandoned())) {
+      for (WmtAllocator& a : m_allocators)
+        (void) a.detach();
+      for (WmtAllocator& a : m_initAllocators)
+        (void) a.detach();
+    }
     // after G1's completing submit: what is left is a command buffer that is never submitted
     lifetime::beginTeardown();
     if (m_pass.active)
@@ -320,7 +329,7 @@ namespace dxvk::backend {
     }
   }
 
-  void MtlContextImpl::commitRecorded() {
+  bool MtlContextImpl::commitRecorded() {
     MTL4CommandBuffer_endCommandBuffer(m_cmdbuf.handle());
 
     obj_handle_t cbs[2] = { };
@@ -339,32 +348,56 @@ namespace dxvk::backend {
 
     // The GPU stopped (D9MT-GPU-HUNG): the process is ending, nothing more goes to the dead queue
     if (unlikely(m_device->submissions().gpuHung()))
-      return;
+      return true;
 
-    m_device->residency().beforeSubmit();
+    // Process detach, and a thread ExitProcess ended holds the residency tracker's lock: the
+    // set couldn't be committed, so nothing whose allocations it may lack goes to the queue, now
+    // or later, and nothing that was submitted is waited for or released (#63).
+    if (unlikely(m_device->submissions().abandoned()))
+      return false;
+    if (unlikely(!m_device->residency().beforeSubmit())) {
+      m_device->submissions().abandon();
+      Logger::warn("D9MT: detach: skipped submit: the residency set couldn't be committed (a thread"
+        " the process exit ended holds its lock); nothing more goes to the GPU, and what it used"
+        " is left to the OS");
+      return false;
+    }
 
     gpuCaptureBeforeCommit(m_device->wmtDevice());
     MTL4CommandQueue_commit(m_device->wmtQueue(), cbs, cbCount);
     gpuCaptureAfterCommit();
     if (unlikely(prof::g_profEnabled))
       m_rs[rstats::CmdBufs] += cbCount;
+    return true;
+  }
+
+  void MtlContextImpl::abandonRecording() {
+    // Process detach, nothing committed (commitRecorded): the command buffers and what they
+    // keep alive are leaked, for the OS to reclaim; releasing them could free what an earlier,
+    // committed prefix of the serial still uses on the GPU.
+    (void) m_initCmdbuf.detach();
+    (void) m_cmdbuf.detach();
+    if (!m_keepAlive.empty())
+      (void) new decltype(m_keepAlive)(std::move(m_keepAlive));
   }
 
   void MtlContextImpl::commitPrefix() {
     prof::Scope profScope(prof::Submit);
-    commitRecorded();
-
-    /* Metal 4 command buffers don't keep themselves alive while they run: both stay until
-     * the open serial completes, which the next submit() signals after the continuation. */
-    if (m_initCmdbuf) {
-      auto doneInit = std::make_shared<WmtCommandBuffer>(std::move(m_initCmdbuf));
-      m_initCmdbuf.reset();
+    if (unlikely(!commitRecorded())) {
+      abandonRecording();
+    } else {
+      /* Metal 4 command buffers don't keep themselves alive while they run: both stay until
+       * the open serial completes, which the next submit() signals after the continuation. */
+      if (m_initCmdbuf) {
+        auto doneInit = std::make_shared<WmtCommandBuffer>(std::move(m_initCmdbuf));
+        m_initCmdbuf.reset();
+        m_device->submissions().retireAfter(m_currentSerial,
+          [doneInit]() mutable { doneInit->reset(); });
+      }
+      auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
       m_device->submissions().retireAfter(m_currentSerial,
-        [doneInit]() mutable { doneInit->reset(); });
+        [doneCmd]() mutable { doneCmd->reset(); });
     }
-    auto doneCmd = std::make_shared<WmtCommandBuffer>(std::move(m_cmdbuf));
-    m_device->submissions().retireAfter(m_currentSerial,
-      [doneCmd]() mutable { doneCmd->reset(); });
 
     // Same allocator slot, same serial: the slot is reset only once the serial completed.
     m_cmdbuf = WmtCommandBuffer::adopt(
@@ -391,7 +424,10 @@ namespace dxvk::backend {
     // (the serial's last command buffer; a G1 prefix commit under it has no canary of its own:
     // its fault discards this one too)
     armCanary();
-    commitRecorded();
+    if (unlikely(!commitRecorded())) {
+      abandonRecording();  // no serial, retirement, wait or canary check (#63)
+      return;
+    }
 
     uint64_t serial = m_device->submissions().onSubmit(m_device->wmtQueue());
     m_allocatorSerial[m_allocatorSlot] = serial;
@@ -651,6 +687,7 @@ namespace dxvk::backend {
         " adds=", m_device->residency().totalAdds(),
         " removes=", m_device->residency().totalRemoves(),
         " pending=", m_device->residency().pendingRemovals(),
+        " residentPsos=", m_device->residency().residentPsos(),
         " argTables=", m_argTables.size(),
         " retirements=", m_device->submissions().retirementCount(),
         " serial=", m_device->submissions().lastSubmittedSerial(),
