@@ -1731,11 +1731,43 @@ image_map_flush(void) {
   pthread_mutex_unlock(&image_map_lock);
 }
 
+/* d9mt device info: once per process, after the first device enumeration, one "d9mt: device …"
+ * line per Metal device with the limits and families a Metal routine could divide by or branch
+ * on, so a fault in Metal's own code (a player's M1 Pro on macOS 26.1: an integer divide by zero
+ * in Metal.framework during the first render pipeline build) can be held against them: a 0
+ * among them is a divisor candidate. Logged with the image map (D9MT_IMAGE_MAP=0 turns both off). */
+static void
+device_info_log(NSArray *devices) {
+  static _Atomic int logged = 0;
+  if (atomic_load_explicit(&image_map_state, memory_order_relaxed) < 0 || atomic_exchange(&logged, 1))
+    return;
+  for (id<MTLDevice> d in devices) {
+    MTLSize tg = d.maxThreadsPerThreadgroup;
+    fprintf(stderr,
+            "d9mt: device \"%s\" arch %s registryID 0x%llx: maxThreadsPerThreadgroup %lux%lux%lu, "
+            "maxThreadgroupMemoryLength %lu, maxBufferLength %lu, recommendedMaxWorkingSetSize %llu, "
+            "maxArgumentBufferSamplerCount %lu, sparseTileSizeInBytes %lu, maximumConcurrentCompilationTaskCount %lu, "
+            "shouldMaximizeConcurrentCompilation %d, argumentBuffersSupport %lu, readWriteTextureSupport %lu, "
+            "unifiedMemory %d, families Apple7 %d Apple8 %d Apple9 %d Apple10 %d Metal3 %d Metal4 %d\n",
+            d.name.UTF8String ?: "?", d.architecture.name.UTF8String ?: "?", (unsigned long long)d.registryID,
+            (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth,
+            (unsigned long)d.maxThreadgroupMemoryLength, (unsigned long)d.maxBufferLength,
+            (unsigned long long)d.recommendedMaxWorkingSetSize, (unsigned long)d.maxArgumentBufferSamplerCount,
+            (unsigned long)d.sparseTileSizeInBytes, (unsigned long)d.maximumConcurrentCompilationTaskCount,
+            (int)d.shouldMaximizeConcurrentCompilation, (unsigned long)d.argumentBuffersSupport,
+            (unsigned long)d.readWriteTextureSupport, (int)d.hasUnifiedMemory,
+            (int)[d supportsFamily:(MTLGPUFamily)1007], (int)[d supportsFamily:(MTLGPUFamily)1008],
+            (int)[d supportsFamily:(MTLGPUFamily)1009], (int)[d supportsFamily:(MTLGPUFamily)1010],
+            (int)[d supportsFamily:(MTLGPUFamily)5001], (int)[d supportsFamily:(MTLGPUFamily)5002]);
+  }
+}
+
 static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
   params->ret = (obj_handle_t)MTLCopyAllDevices();
   image_map_flush();
+  device_info_log((NSArray *)params->ret);
   return STATUS_SUCCESS;
 }
 
