@@ -16,6 +16,7 @@
 #include "mtl_canary_gate.h"
 #include "mtl_cmd_chunk.h"
 #include "mtl_device_impl.h"
+#include "mtl_draw_bounds.h"
 #include "mtl_pso_cache.h"
 #include "mtl_pso_gen.h"
 
@@ -355,6 +356,10 @@ namespace dxvk::backend {
     std::array<StageBindings, 2> m_bindings;
     std::array<VertexStream, 16> m_vertexStreams;
     uint32_t                     m_dirtyVertexStreams = ~0u;
+    // #61: how far draws may fetch from the bound streams; recomputed when a stream or the
+    // layout changes (updateDrawLimits), applied by draw() and drawIndexed().
+    drawbounds::Limits           m_drawLimits;
+    bool                         m_drawLimitsDirty = true;
     MtlBufferSlice m_indexBuffer;
     MtlIndexType   m_indexType = { };
 
@@ -551,6 +556,7 @@ namespace dxvk::backend {
     PsoGenRing<std::array<uint32_t, 16>, 8>    m_strideGens;
     // Out of line and cold: resolvePso's MRU-hit path stays as it was.
     __attribute__((noinline, cold)) void internPsoGens();
+    __attribute__((noinline)) void updateDrawLimits();
     ArgTablePair createArgumentTablePair() const;
     void initNullBindings(ArgTablePair& pair) const;
     uint64_t nullTextureId(uint32_t stage, uint32_t slot) const {
