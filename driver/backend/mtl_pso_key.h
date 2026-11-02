@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -326,6 +327,53 @@ namespace dxvk::backend {
       return fail("depth/stencil format");
 
     return true;
+  }
+
+
+  /// One Metal vertex buffer layout of a render pipeline (RenderPsoCache::build).
+  struct PsoBufferLayout {
+    bool     set          = false;  ///< false: Metal's default, the descriptor leaves it alone
+    uint32_t stride       = 0u;
+    uint32_t stepFunction = kPsoStepPerVertex;  ///< kPsoStepConstant, kPsoStepPerVertex, or 2 (per instance)
+    uint32_t stepRate     = 1u;
+  };
+
+  constexpr uint32_t kPsoMaxBufferLayouts = 31u;
+
+  /**
+   * \brief The vertex buffer layouts of a key, by Metal buffer index
+   *
+   * Only the layouts the key gives are \c set; every other index stays Metal's default
+   * (stride 0, per vertex, step rate 1), which the bridge leaves out of the descriptor.
+   * Before this, the gaps below the highest index were zeroed structs, i.e. stride 0 and
+   * *constant* step, which the bridge passed to Metal as explicit layouts: for SWTOR's first
+   * fixed-function draw (stream 0 at buffer 3, the null stream at 19) that was buffers 0-2
+   * and 4-18, 0-2 being the FF shader's own constant buffers. On an M1 (G13) under macOS
+   * 26.1 that pipeline build ends in an x86 integer divide by zero inside Metal (Rosetta
+   * traps it; a player's D9MT-FATAL line, 2026-11-02).
+   *
+   * \returns the number of layouts up to the highest set index + 1
+   */
+  inline uint32_t psoBufferLayouts(const RenderPsoKey& key, PsoBufferLayout (&out)[kPsoMaxBufferLayouts]) {
+    for (PsoBufferLayout& l : out)
+      l = PsoBufferLayout();
+    uint32_t count = 0u;
+    for (uint32_t i = 0u; i < key.layoutCount && i < std::size(key.layouts); i++) {
+      const PsoVertexLayout& k = key.layouts[i];
+      const uint32_t idx = k.pad;
+      if (idx >= kPsoMaxBufferLayouts)
+        continue;
+      PsoBufferLayout& l = out[idx];
+      l.set = true;
+      l.stride = k.stride;
+      // psoStepFunction(): 0 constant, 1 per vertex, 2..255 per instance at the value - 1
+      l.stepFunction = k.stepFunction == kPsoStepConstant ? kPsoStepConstant
+        : k.stepFunction == kPsoStepPerVertex ? kPsoStepPerVertex : 2u;
+      l.stepRate = k.stepFunction == kPsoStepConstant ? 0u
+        : k.stepFunction == kPsoStepPerVertex ? 1u : k.stepFunction - 1u;
+      count = std::max(count, idx + 1u);
+    }
+    return count;
   }
 
 }
