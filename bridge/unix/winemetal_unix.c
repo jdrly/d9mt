@@ -11,6 +11,8 @@
 
 #include <stdatomic.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -1691,9 +1693,57 @@ _NSArray_count(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* d9mt image map: one "d9mt: image <name> <start>-<end>" line per loaded system image a Metal
+ * fault can come from (AGX*, *Metal*, *MTL*, *GPU*, *LLVM*, IOAccel*: the leaf name), its
+ * __TEXT range, logged once when it is loaded (dyld calls back for the images loaded already
+ * at registration, then for each one loaded later). A D9MT-FATAL line's address outside the
+ * PE modules (d3d9.dll's fatal-exception log) then maps to an image and an offset offline,
+ * symbolized with atos on a Mac of the same macOS build. Registered at the first device
+ * enumeration; nothing of it runs in an exception handler. D9MT_IMAGE_MAP=0 turns it off. */
+static void
+image_map_add(const struct mach_header *mh, intptr_t slide) {
+  static const char *const keys[] = { "AGX", "Metal", "MTL", "GPU", "LLVM", "IOAccel" };
+  Dl_info info;
+  const char *leaf;
+  int match = 0;
+  uint64_t size = 0;
+  (void)slide;
+  if (!mh || !dladdr(mh, &info) || !info.dli_fname)
+    return;
+  leaf = strrchr(info.dli_fname, '/');
+  leaf = leaf ? leaf + 1 : info.dli_fname;
+  for (size_t i = 0; i < sizeof(keys) / sizeof(*keys) && !match; i++)
+    match = strstr(leaf, keys[i]) != NULL;
+  if (!match)
+    return;
+  if (mh->magic == MH_MAGIC_64) {
+    const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
+    const struct load_command *lc = (const struct load_command *)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+      if (lc->cmd == LC_SEGMENT_64 && !strncmp(((const struct segment_command_64 *)lc)->segname, "__TEXT", 16)) {
+        size = ((const struct segment_command_64 *)lc)->vmsize;
+        break;
+      }
+      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+    }
+  }
+  fprintf(stderr, "d9mt: image %s 0x%016llx-0x%016llx\n", leaf, (unsigned long long)(uintptr_t)mh,
+          (unsigned long long)((uintptr_t)mh + size));
+}
+
+static void
+image_map_register(void) {
+  const char *off = getenv("D9MT_IMAGE_MAP");
+  if (off && !strcmp(off, "0"))
+    return;
+  _dyld_register_func_for_add_image(image_map_add);
+}
+
 static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
+  static pthread_once_t image_map_once = PTHREAD_ONCE_INIT;
+  pthread_once(&image_map_once, image_map_register);
   params->ret = (obj_handle_t)MTLCopyAllDevices();
   return STATUS_SUCCESS;
 }
