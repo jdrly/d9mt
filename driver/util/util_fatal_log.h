@@ -4,17 +4,29 @@
 
 // The fatal-exception log: a vectored exception handler that writes one `D9MT-FATAL` line per
 // fatal exception (an NTSTATUS of the 0xC0000000 class: access violation, integer divide by zero,
-// illegal instruction, stack overflow, …) to the log, before the program's own handlers see it.
+// illegal instruction, …) to the log, before the program's frame-based handlers and its top-level
+// filter see it.
 //
 // Why: a game that catches its own crash ends with the exception code as its exit code and
 // nothing in the log (a player's M1 Pro: "exit code 148", the low byte of 0xC0000094). The line
-// names the code, the address as module+RVA, the thread and the last d9mt step, so the next
-// such report says where it happened.
+// names the code, the address as module+RVA (or the image's base+RVA, or "not in a PE module"),
+// the thread's id and the last d9mt step, so the next such report says where it happened.
 //
-// It never changes what happens: the handler always returns EXCEPTION_CONTINUE_SEARCH. It runs
-// only when an exception is dispatched; the path without exceptions has no cost beyond the
-// breadcrumbs below (one relaxed pointer store at a few cold places, none per draw).
-// On by default; D9MT_FATAL_LOG=0 turns it off (docs/configuration.md).
+// It never changes what happens: the handler always returns EXCEPTION_CONTINUE_SEARCH and never
+// touches the record or the context. It runs only when an exception is dispatched; the path
+// without exceptions has no cost beyond the breadcrumbs below (one relaxed pointer store at a few
+// places, none per draw). On by default; D9MT_FATAL_LOG=0 turns it off (docs/configuration.md).
+//
+// Its limits, by design:
+//   - it is appended to the vectored list when installed (Direct3DCreate9): a vectored handler
+//     registered before it that resolves an exception hides it from the log;
+//   - a stack overflow (0xC00000FD) is never logged;
+//   - only the first 8 fatal exceptions of the process are logged (deliberate probes count too),
+//     then one line says more were left out;
+//   - installing it pins the module that holds it (d3d9.dll) for the life of the process: the
+//     handler is never removed, so the module can't be unloaded under it;
+//   - no pin (GetModuleHandleEx fails) means no handler;
+//   - at most 64 threads at once inside it; a 65th fault at the same time isn't logged.
 
 namespace dxvk::fatal {
 

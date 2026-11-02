@@ -6,31 +6,64 @@
 #include <cstring>
 
 // The handler runs while the program may be crashing: the heap may be corrupt, another thread may
-// hold the loader lock, the stack may be nearly gone. So it allocates nothing, takes no lock (no
-// Logger, no GetModuleHandleEx, no snprintf), formats into a fixed buffer on its stack and writes
-// the line in one call. Everything it looks up is looked up by install().
+// hold the loader lock, an image may be going away. So it allocates nothing, takes no lock, reads
+// no memory it didn't write itself at install (no PE headers, no thread names, no Logger, no
+// snprintf), formats into a fixed buffer on its stack and writes the line with one call.
+// Everything it needs is looked up by install(), outside any exception.
+//
+// Its only system calls: GetLastError/SetLastError and GetCurrentThreadId (TEB fields),
+// VirtualQuery (one NtQueryVirtualMemory) and the write.
+//
+// The recursion guard is a fixed table of the thread ids inside the handler, not a TLS slot: in
+// Wine 11 / CrossOver 26.3, TlsSetValue on an index past the first 64 allocates the thread's
+// expansion slots from the process heap on first use (dlls/kernelbase/thread.c), and a game
+// that uses many slots would give d3d9.dll such an index.
+//
+// The write: Wine's __wine_dbg_write, one Unix write(2) of the whole line to the process's stderr,
+// which is the game's log. Not __wine_dbg_output: in Wine 11 / CrossOver 26.3 that appends to a
+// per-thread line buffer in the TEB and raises STATUS_BUFFER_OVERFLOW when the buffer can't take
+// the text (dlls/ntdll/thread.c append_output), so a fault in the middle of a long debug line
+// would get a second exception from the logger. __wine_dbg_write has no buffer and no state
+// (dlls/ntdll/unix/debug.c unixcall_wine_dbg_write: `write( 2, str, len )`). Outside Wine,
+// WriteFile to the stderr handle read at install.
 
 namespace dxvk::fatal {
 
   namespace {
 
-    using PFN_wineDbgOutput        = int (__cdecl *)(const char*);
-    using PFN_getThreadDescription = HRESULT (WINAPI *)(HANDLE, PWSTR*);
+    using PFN_wineDbgWrite = int (WINAPI *)(const char*, unsigned int);
 
     /** Lines per process; then one line that says more were left out. */
     constexpr uint32_t MaxLines = 8u;
 
-    PFN_wineDbgOutput        s_wineOutput           = nullptr;
-    PFN_getThreadDescription s_getThreadDescription = nullptr;
-    std::atomic<void (*)(const char*)> s_sink       = { nullptr };
-    DWORD                    s_tls                  = TLS_OUT_OF_INDEXES;
-    uintptr_t                s_exeBase              = 0u;
-    char                     s_exeName[64]          = { };
-    std::atomic<uint32_t>    s_seen                 = { 0u };
+    constexpr DWORD StatusStackOverflow = 0xc00000fdu;
+
+    /** A module named in the lines: its base and file name, taken at install. */
+    struct Module {
+      uintptr_t base;
+      char      name[40];
+    };
+
+    /** The modules a fault in the game usually comes from; any other image is `base 0x…`. */
+    constexpr const char* SnapshotNames[] = {
+      "d3d9.dll", "winemetal.dll", "ntdll.dll", "kernelbase.dll", "kernel32.dll", "user32.dll",
+      "win32u.dll", "gdi32.dll", "ucrtbase.dll", "msvcrt.dll", "msvcp140.dll", "vcruntime140.dll",
+      "vcruntime140_1.dll", "dxgi.dll", "dinput8.dll", "xinput1_3.dll",
+    };
+
+    constexpr size_t MaxModules = 2u + sizeof(SnapshotNames) / sizeof(SnapshotNames[0]);
+
+    PFN_wineDbgWrite                   s_wineWrite = nullptr;
+    HANDLE                             s_stderr    = nullptr;
+    std::atomic<void (*)(const char*)> s_sink      = { nullptr };
+    std::atomic<DWORD>                 s_active[64] = { };
+    Module                             s_modules[MaxModules] = { };
+    size_t                             s_moduleCount = 0u;
+    std::atomic<uint32_t>              s_seen      = { 0u };
 
 
     struct Line {
-      char   buf[512] = { };
+      char   buf[384] = { };
       size_t len      = 0u;
 
       void str(const char* s) {
@@ -87,7 +120,6 @@ namespace dxvk::fatal {
         case 0xc0000094u: return "integer divide by zero";
         case 0xc0000095u: return "integer overflow";
         case 0xc0000096u: return "privileged instruction";
-        case 0xc00000fdu: return "stack overflow";
         case 0xc0000374u: return "heap corruption";
         case 0xc0000409u: return "stack buffer overrun";
         default:          return "fatal exception";
@@ -95,103 +127,24 @@ namespace dxvk::fatal {
     }
 
 
-    /** Bytes readable from \p p in its region, 0 if none (uncommitted, no access, guard). */
-    size_t readableBytes(const void* p) {
-      MEMORY_BASIC_INFORMATION mbi;
-      if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT
-       || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || mbi.Protect == 0u)
-        return 0u;
-      return uintptr_t(mbi.BaseAddress) + mbi.RegionSize - uintptr_t(p);
-    }
-
-
-    /**
-     * The PE image that holds \p addr: its base (0 if none) and its name, from the export
-     * directory, or the exe's file name. VirtualQuery and the image headers instead of
-     * GetModuleHandleEx, which takes the loader lock.
-     */
-    uintptr_t imageOf(const void* addr, char* name, size_t nameSize) {
-      std::strcpy(name, "?");
-
-      MEMORY_BASIC_INFORMATION mbi;
-      if (!VirtualQuery(addr, &mbi, sizeof(mbi)) || mbi.Type != MEM_IMAGE || mbi.AllocationBase == nullptr)
-        return 0u;
-
-      const auto* base = static_cast<const uint8_t*>(mbi.AllocationBase);
-
-      if (uintptr_t(base) == s_exeBase && s_exeName[0] != '\0') {
-        std::strncpy(name, s_exeName, nameSize - 1u);
-        name[nameSize - 1u] = '\0';
-        return uintptr_t(base);
+    /** The snapshot's name for the image at \p base, or nullptr. */
+    const char* moduleName(uintptr_t base) {
+      for (size_t i = 0u; i < s_moduleCount; i++) {
+        if (s_modules[i].base == base)
+          return s_modules[i].name;
       }
-
-      const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-      if (readableBytes(dos) < sizeof(*dos) || dos->e_magic != IMAGE_DOS_SIGNATURE
-       || dos->e_lfanew <= 0 || dos->e_lfanew > 4096)
-        return uintptr_t(base);
-
-      const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-      if (readableBytes(nt) < sizeof(*nt) || nt->Signature != IMAGE_NT_SIGNATURE)
-        return uintptr_t(base);
-
-      const uint32_t imageSize = nt->OptionalHeader.SizeOfImage;
-      if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT)
-        return uintptr_t(base);
-
-      const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-      if (dir.VirtualAddress == 0u || dir.VirtualAddress >= imageSize || dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY))
-        return uintptr_t(base);
-
-      const auto* exp = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
-      if (readableBytes(exp) < sizeof(*exp) || exp->Name == 0u || exp->Name >= imageSize)
-        return uintptr_t(base);
-
-      const char* s = reinterpret_cast<const char*>(base + exp->Name);
-      size_t avail = readableBytes(s);
-      size_t i = 0u;
-      while (i + 1u < nameSize && i < avail && s[i] != '\0') {
-        name[i] = s[i];
-        i++;
-      }
-      name[i] = '\0';
-      if (i == 0u)
-        std::strcpy(name, "?");
-      return uintptr_t(base);
-    }
-
-
-    /** The thread's name (SetThreadDescription), ASCII only, or "(unnamed)". */
-    void threadName(Line& line) {
-      PWSTR w = nullptr;
-      if (s_getThreadDescription == nullptr
-       || FAILED(s_getThreadDescription(GetCurrentThread(), &w)) || w == nullptr) {
-        line.str("(unnamed)");
-        return;
-      }
-      char name[48];
-      size_t n = 0u;
-      for (; w[n] != L'\0' && n + 1u < sizeof(name); n++)
-        name[n] = (w[n] >= 0x20 && w[n] < 0x7f && w[n] != L'"') ? char(w[n]) : '?';
-      name[n] = '\0';
-      LocalFree(w);
-      if (n == 0u) {
-        line.str("(unnamed)");
-        return;
-      }
-      line.str("\"");
-      line.str(name);
-      line.str("\"");
+      return nullptr;
     }
 
 
     void emit(const Line& line) {
       if (auto sink = s_sink.load(std::memory_order_acquire)) {
         sink(line.buf);
-      } else if (s_wineOutput != nullptr) {
-        s_wineOutput(line.buf);
-      } else {
+      } else if (s_wineWrite != nullptr) {
+        s_wineWrite(line.buf, unsigned(line.len));
+      } else if (s_stderr != nullptr && s_stderr != INVALID_HANDLE_VALUE) {
         DWORD written = 0u;
-        WriteFile(GetStdHandle(STD_ERROR_HANDLE), line.buf, DWORD(line.len), &written, nullptr);
+        WriteFile(s_stderr, line.buf, DWORD(line.len), &written, nullptr);
       }
     }
 
@@ -211,17 +164,27 @@ namespace dxvk::fatal {
         line.str(")");
       }
 
-      const void* addr = rec->ExceptionAddress;
+      const uintptr_t addr = uintptr_t(rec->ExceptionAddress);
       line.str(" at ");
-      line.ptr(uint64_t(uintptr_t(addr)));
+      line.ptr(uint64_t(addr));
 
-      char module[64];
-      const uintptr_t base = imageOf(addr, module, sizeof(module));
-      if (base != 0u) {
+      // The image's base from the kernel's region record, not from the image: nothing of the
+      // image is read, so an image unmapped or reprotected meanwhile can't fault here
+      MEMORY_BASIC_INFORMATION mbi;
+      if (VirtualQuery(rec->ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi)
+       && mbi.Type == MEM_IMAGE && mbi.AllocationBase != nullptr
+       && uintptr_t(mbi.AllocationBase) <= addr) {
+        const uintptr_t base = uintptr_t(mbi.AllocationBase);
         line.str(" (");
-        line.str(module);
-        line.str("+0x");
-        line.hex(uint64_t(uintptr_t(addr) - base), 1u);
+        if (const char* name = moduleName(base)) {
+          line.str(name);
+          line.str("+0x");
+        } else {
+          line.str("base ");
+          line.ptr(uint64_t(base));
+          line.str("+0x");
+        }
+        line.hex(uint64_t(addr - base), 1u);
         line.str(")");
       } else {
         line.str(" (not in a PE module)");
@@ -229,12 +192,6 @@ namespace dxvk::fatal {
 
       line.str(", thread 0x");
       line.hex(GetCurrentThreadId(), 4u);
-      line.str(" ");
-      // Not for a stack overflow (little stack left) or a corrupt heap (the name is allocated)
-      if (code == 0xc00000fdu || code == 0xc0000374u)
-        line.str("(name not read)");
-      else
-        threadName(line);
 
       line.str(", last d9mt step: ");
       const char* step = g_breadcrumb.load(std::memory_order_relaxed);
@@ -253,6 +210,36 @@ namespace dxvk::fatal {
     }
 
 
+    /** Claims a line: its number (1-based), or 0 once the cap line went out. Never wraps. */
+    uint32_t claimLine() {
+      uint32_t n = s_seen.load(std::memory_order_relaxed);
+      do {
+        if (n > MaxLines)
+          return 0u;
+      } while (!s_seen.compare_exchange_weak(n, n + 1u, std::memory_order_relaxed));
+      return n + 1u;
+    }
+
+
+    /**
+     * Marks thread \p tid as inside the handler: its slot, or nullptr if the thread is in it
+     * already (a nested fault) or 64 threads are (then this one isn't logged). Only the thread
+     * itself writes its id, so the check for it can't race.
+     */
+    std::atomic<DWORD>* enter(DWORD tid) {
+      for (auto& a : s_active) {
+        if (a.load(std::memory_order_acquire) == tid)
+          return nullptr;
+      }
+      for (auto& a : s_active) {
+        DWORD expected = 0u;
+        if (a.compare_exchange_strong(expected, tid, std::memory_order_acq_rel))
+          return &a;
+      }
+      return nullptr;
+    }
+
+
     LONG CALLBACK handler(EXCEPTION_POINTERS* info) {
       const EXCEPTION_RECORD* rec = info != nullptr ? info->ExceptionRecord : nullptr;
 
@@ -261,26 +248,25 @@ namespace dxvk::fatal {
       if (rec == nullptr || (rec->ExceptionCode & 0xf0000000u) != 0xc0000000u)
         return EXCEPTION_CONTINUE_SEARCH;
 
+      // A stack overflow is never logged: the thread is running on its last guard page, and
+      // nothing here is proven to fit (the line alone is a few hundred bytes of stack)
+      if (rec->ExceptionCode == StatusStackOverflow)
+        return EXCEPTION_CONTINUE_SEARCH;
+
       // The program's handler may read the thread's last error: keep it
       const DWORD lastError = GetLastError();
 
-      // Not again on this thread while a line is being written (a fault in the handler itself)
-      if (s_tls != TLS_OUT_OF_INDEXES) {
-        if (TlsGetValue(s_tls) != nullptr) {
-          SetLastError(lastError);
-          return EXCEPTION_CONTINUE_SEARCH;
-        }
-        TlsSetValue(s_tls, reinterpret_cast<void*>(1));
+      // Not again on this thread while a line is being written (a fault in the handler itself:
+      // that one goes on to the program's handlers unlogged, and this line still goes out)
+      std::atomic<DWORD>* slot = enter(GetCurrentThreadId());
+      if (slot != nullptr) {
+        const uint32_t n = claimLine();
+        if (n != 0u && n <= MaxLines)
+          writeLine(rec);
+        else if (n == MaxLines + 1u)
+          writeCapLine();
+        slot->store(0u, std::memory_order_release);
       }
-
-      const uint32_t n = s_seen.fetch_add(1u, std::memory_order_relaxed) + 1u;
-      if (n <= MaxLines)
-        writeLine(rec);
-      else if (n == MaxLines + 1u)
-        writeCapLine();
-
-      if (s_tls != TLS_OUT_OF_INDEXES)
-        TlsSetValue(s_tls, nullptr);
 
       SetLastError(lastError);
       return EXCEPTION_CONTINUE_SEARCH;
@@ -295,32 +281,55 @@ namespace dxvk::fatal {
     }
 
 
+    /** Adds \p module to the snapshot under its file name, once. */
+    void snapshotModule(HMODULE module) {
+      if (module == nullptr || s_moduleCount >= MaxModules || moduleName(uintptr_t(module)) != nullptr)
+        return;
+
+      char path[MAX_PATH] = { };
+      const DWORD len = GetModuleFileNameA(module, path, sizeof(path));
+      if (len == 0u || len >= sizeof(path))
+        return;
+
+      const char* leaf = path;
+      for (const char* p = path; *p != '\0'; p++) {
+        if (*p == '\\' || *p == '/')
+          leaf = p + 1;
+      }
+
+      Module& m = s_modules[s_moduleCount];
+      m.base = uintptr_t(module);
+      std::strncpy(m.name, leaf, sizeof(m.name) - 1u);
+      m.name[sizeof(m.name) - 1u] = '\0';
+      s_moduleCount++;
+    }
+
+
     bool doInstall() {
       char value[8] = { };
       const DWORD n = GetEnvironmentVariableA("D9MT_FATAL_LOG", value, sizeof(value));
       if (n > 0u && n < sizeof(value) && std::strcmp(value, "0") == 0)
         return false;
 
-      s_wineOutput = procAddress<PFN_wineDbgOutput>(GetModuleHandleA("ntdll.dll"), "__wine_dbg_output");
-      s_getThreadDescription = procAddress<PFN_getThreadDescription>(GetModuleHandleA("kernelbase.dll"), "GetThreadDescription");
-      if (s_getThreadDescription == nullptr)
-        s_getThreadDescription = procAddress<PFN_getThreadDescription>(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+      // The module that holds the handler stays mapped for the life of the process: the
+      // handler can't be removed safely while another thread may be inside it, and the
+      // breadcrumbs it reads are literals in this module. So never unloaded, never removed.
+      HMODULE self = nullptr;
+      if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                              reinterpret_cast<LPCWSTR>(&handler), &self))
+        return false;
 
-      s_exeBase = uintptr_t(GetModuleHandleW(nullptr));
-      char path[MAX_PATH] = { };
-      const DWORD len = GetModuleFileNameA(nullptr, path, sizeof(path));
-      if (len > 0u && len < sizeof(path)) {
-        const char* leaf = path;
-        for (const char* p = path; *p != '\0'; p++) {
-          if (*p == '\\' || *p == '/')
-            leaf = p + 1;
-        }
-        std::strncpy(s_exeName, leaf, sizeof(s_exeName) - 1u);
-      }
+      s_wineWrite = procAddress<PFN_wineDbgWrite>(GetModuleHandleA("ntdll.dll"), "__wine_dbg_write");
+      s_stderr    = GetStdHandle(STD_ERROR_HANDLE);
 
-      s_tls = TlsAlloc();
-      // Last in the vectored list: another vectored handler that resolves an exception
-      // (EXCEPTION_CONTINUE_EXECUTION) runs first, so what it resolves isn't logged.
+      snapshotModule(GetModuleHandleW(nullptr));
+      snapshotModule(self);
+      for (const char* name : SnapshotNames)
+        snapshotModule(GetModuleHandleA(name));
+
+      // Last in the vectored list at install: another vectored handler already registered that
+      // resolves an exception (EXCEPTION_CONTINUE_EXECUTION) runs first, so what it resolves isn't
+      // logged. Vectored handlers run before the frame-based ones and the top-level filter.
       return AddVectoredExceptionHandler(0u, handler) != nullptr;
     }
 
