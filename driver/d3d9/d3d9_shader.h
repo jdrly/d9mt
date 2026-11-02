@@ -43,7 +43,10 @@ namespace dxvk {
     bool                 abUsed = false;
     uint8_t              abTableIndex = 21u;
     std::vector<AbWord>  abWords;
-    D3D9CbvSlotMap() { slot.fill(int8_t(-1)); }
+    // The kind of each argument-table texture slot the shader declares (as AbWord::dim);
+    // 0xFF: none declared (#62)
+    std::array<uint8_t, 16> textureDim;
+    D3D9CbvSlotMap() { slot.fill(int8_t(-1)); textureDim.fill(0xFFu); }
   };
 
   class ID3D9MetalShaderBackend : public RcObject {

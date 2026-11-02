@@ -547,7 +547,12 @@ namespace dxvk::backend {
 
       const uint32_t cbvMask = (psoChanged ? ~0u : b.dirtyCbvs)
         & ((1u << b.cbvs.size()) - 1u);
-      const uint32_t texMask = b.dirtyTextures
+      // A new shader may declare other kinds at its unbound slots: rewrite those (the shadow
+      // skips every ID that stays the same).
+      const uint64_t fnId = fn != nullptr ? uint64_t(fn->library) : 0u;
+      const bool kindsChanged = b.tableFnId != fnId;
+      b.tableFnId = fnId;
+      const uint32_t texMask = (kindsChanged ? ~0u : b.dirtyTextures)
         & ((1u << b.textures.size()) - 1u);
       const uint32_t smpMask = b.dirtySamplers
         & ((1u << b.samplers.size()) - 1u);
@@ -574,7 +579,7 @@ namespace dxvk::backend {
       for (uint32_t slot : bit::BitMask(texMask)) {
         const Rc<MtlTextureView>& view = b.textures[slot];
         if (view == nullptr) {
-          appendTableTexture(shadow, table, nullTextureId(st, slot), slot);
+          appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
