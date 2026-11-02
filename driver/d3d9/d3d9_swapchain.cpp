@@ -872,6 +872,8 @@ namespace dxvk {
     info.minIntervalMs = st.minIntervalS * 1e3;
     info.maxIntervalMs = st.maxIntervalS * 1e3;
     info.d3dWindowed   = m_presentParams.Windowed != FALSE;
+    static const bool s_forceComposited = env::getEnvVar("D9MT_FORCE_COMPOSITED") == "1";
+    info.forceComposited = s_forceComposited;
     std::string infoLine = screen::formatInfo(info);
     if (infoLine != m_screenInfo) {
       Logger::warn(infoLine);

@@ -180,13 +180,14 @@ int main() {
     std::string a = screen::formatInfo(i);
     std::printf("%s\n", a.c_str());
     CHECK(a == "SCREEN-INFO displaySync=1 drawables=3 interval=1 cap=off hz=60.0 screenMaxFps=?"
-               " refreshInterval=? nsFullscreen=? d3dWindowed=1");
+               " refreshInterval=? nsFullscreen=? d3dWindowed=1 forceComposited=0");
     i.screenValid = true; i.nsFullscreen = true; i.screenMaxFps = 120.0; i.interval = 2u;
     i.minIntervalMs = 1000.0 / 120.0; i.maxIntervalMs = 1000.0 / 24.0; i.capMs = 33.3;
+    i.forceComposited = true;
     std::string b = screen::formatInfo(i);
     std::printf("%s\n", b.c_str());
     CHECK(b == "SCREEN-INFO displaySync=1 drawables=3 interval=2 cap=33.3 hz=60.0 screenMaxFps=120"
-               " refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1");
+               " refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1 forceComposited=1");
   }
 
   std::printf("%s (%d failures)\n", g_fail ? "FAILED" : "ok", g_fail);
