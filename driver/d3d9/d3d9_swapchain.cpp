@@ -425,6 +425,8 @@ namespace dxvk {
         m_wctx->presenter->setRefreshRate(hz);
       }
       UpdateTargetFrameRate(presentInterval);
+      if (unlikely(hitch::g_enabled))
+        m_screenCapMs = capped ? m_capPlan.minDurationS * 1e3 : 0.0;
       PresentImage(presentInterval, capped ? m_capPlan.minDurationS : 0.0);
       if (capped)
         m_capUntilNs = m_capCadence.next(clockNs(), m_capPlan.intervalNs);
@@ -831,6 +833,43 @@ namespace dxvk {
 
     if (env::getEnvVar("DXVK_FORCE_WINDOWED") == "1")
       pPresentParams->Windowed         = TRUE;
+  }
+
+
+  void D3D9SwapChainEx::LogScreen(double t) {
+    if (m_wctx == nullptr || m_wctx->presenter == nullptr)
+      return;
+    const Rc<MtlPresenter>& presenter = m_wctx->presenter;
+
+    // The bridge's ring holds 1024 records: a few drains a second at most
+    MtlPresentedRecord recs[256];
+    uint64_t issued = 0u, lost = 0u;
+    for (uint32_t round = 0u; round < 8u; round++) {
+      const uint32_t n = presenter->drainPresented(recs, 256u, &issued, &lost);
+      for (uint32_t i = 0u; i < n; i++)
+        m_screenWindow.add({ recs[i].seq, recs[i].submitS, recs[i].presentedS });
+      if (n < 256u)
+        break;
+    }
+
+    const MtlScreenState st = presenter->screenState();
+    screen::Info info;
+    info.displaySync   = st.displaySync;
+    info.drawables     = st.drawables;
+    info.capMs         = m_screenCapMs;
+    info.hz            = m_displayRefreshRate;
+    info.screenValid   = st.windowValid;
+    info.nsFullscreen  = st.fullscreen;
+    info.screenMaxFps  = st.screenMaxFps;
+    info.minIntervalMs = st.minIntervalS * 1e3;
+    info.maxIntervalMs = st.maxIntervalS * 1e3;
+    info.d3dWindowed   = m_presentParams.Windowed != FALSE;
+    std::string infoLine = screen::formatInfo(info);
+    if (infoLine != m_screenInfo) {
+      Logger::warn(infoLine);
+      m_screenInfo = std::move(infoLine);
+    }
+    Logger::warn(m_screenWindow.take(t, m_displayRefreshRate, issued, lost));
   }
 
 

@@ -5835,7 +5835,11 @@ namespace dxvk {
         auto ft = [] (const FILETIME& f) { return (uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
         cpuNs = (ft(kernel) + ft(user)) * 100u;
       }
+      const double paceT = m_paceWindow.seconds(nowNs);
       Logger::warn(m_paceWindow.take(nowNs, cpuNs));
+      // SCREEN: when this second's frames reached the screen (d3d9_screen.h)
+      if (m_mostRecentlyUsedSwapchain != nullptr)
+        m_mostRecentlyUsedSwapchain->LogScreen(paceT);
     }
 
     if (m_statsWindow.addFrame(nowNs)) {

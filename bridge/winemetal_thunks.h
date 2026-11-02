@@ -232,6 +232,15 @@ struct unixcall_generic_obj_obj_double_noret {
   double arg1;
 };
 
+struct unixcall_present_drain {
+  struct WMTMemoryPointer out;
+  uint32_t max;
+  uint32_t ret;
+  uint64_t issued;
+  uint64_t lost;
+  double now_s;
+};
+
 struct unixcall_mtlcapturemanager_startcapture {
   obj_handle_t capture_manager;
   struct WMTMemoryPointer info;

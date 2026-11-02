@@ -2239,6 +2239,33 @@ WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable);
 
 WINEMETAL_API void MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after);
 
+/* D9MT_PROFILE only (d9mt #153): when tracked drawables reached the screen. */
+struct WMTPresentRecord {
+  uint64_t seq;       /* the tracked present's number, from 1 */
+  double submit_s;    /* host time (s, CACurrentMediaTime) when present was called */
+  double presented_s; /* MTLDrawable.presentedTime; 0 = never shown (dropped) */
+};
+
+struct WMTViewPresentInfo {
+  uint32_t valid;               /* 0 until the main thread has answered once */
+  uint32_t fullscreen;          /* the window has NSWindowStyleMaskFullScreen */
+  double screen_max_fps;        /* NSScreen.maximumFramesPerSecond */
+  double screen_min_interval_s; /* NSScreen.minimumRefreshInterval */
+  double screen_max_interval_s; /* NSScreen.maximumRefreshInterval (> min: adaptive sync) */
+};
+
+/* present (after > 0: presentAfterMinimumDuration) with a presented handler that records the
+ * drawable's presentedTime into the bridge's ring */
+WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, double after);
+
+/* copies up to max records out of the ring; *issued = tracked presents so far, *lost = records
+ * overwritten before they were read, *now_s = host time now */
+WINEMETAL_API uint32_t MetalPresent_drainRecords(
+    struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost, double *now_s);
+
+/* the last values the main thread published (asks it for fresh ones; never blocks) */
+WINEMETAL_API void MetalView_presentInfo(obj_handle_t view, struct WMTViewPresentInfo *info);
+
 #define WMT_VISIBILITY_VISIBLE         0x1u
 #define WMT_VISIBILITY_ON_ACTIVE_SPACE 0x2u
 #define WMT_VISIBILITY_MINIATURIZED    0x4u

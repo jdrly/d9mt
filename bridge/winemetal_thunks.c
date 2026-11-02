@@ -1797,6 +1797,43 @@ MetalView_visibility(obj_handle_t view) {
 }
 
 WINEMETAL_API void
+MetalDrawable_presentTracked(obj_handle_t drawable, double after) {
+  struct unixcall_generic_obj_obj_double_noret params;
+  params.handle = drawable;
+  params.arg0 = 0;
+  params.arg1 = after;
+  UNIX_CALL(213, &params);
+}
+
+WINEMETAL_API uint32_t
+MetalPresent_drainRecords(struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost,
+                          double *now_s) {
+  struct unixcall_present_drain params;
+  WMT_MEMPTR_SET(params.out, out);
+  params.max = max;
+  params.ret = 0;
+  params.issued = 0;
+  params.lost = 0;
+  params.now_s = 0.0;
+  UNIX_CALL(214, &params);
+  if (issued)
+    *issued = params.issued;
+  if (lost)
+    *lost = params.lost;
+  if (now_s)
+    *now_s = params.now_s;
+  return params.ret;
+}
+
+WINEMETAL_API void
+MetalView_presentInfo(obj_handle_t view, struct WMTViewPresentInfo *info) {
+  struct unixcall_generic_obj_ptr_noret params;
+  params.handle = view;
+  WMT_MEMPTR_SET(params.arg, info);
+  UNIX_CALL(215, &params);
+}
+
+WINEMETAL_API void
 MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after) {
   struct unixcall_generic_obj_obj_double_noret params;
   params.handle = drawable;

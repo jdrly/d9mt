@@ -21,6 +21,23 @@ namespace dxvk {
     bool            valid   = false;
   };
 
+  // D9MT_PROFILE (SCREEN line, d9mt #153): when a tracked drawable reached the screen.
+  struct MtlPresentedRecord {
+    uint64_t seq        = 0u;
+    double   submitS    = 0.0; // host time, s, when present was called
+    double   presentedS = 0.0; // MTLDrawable.presentedTime; 0 = never shown
+  };
+
+  struct MtlScreenState {
+    bool     displaySync   = true;
+    uint32_t drawables     = 0u;  // CAMetalLayer.maximumDrawableCount
+    bool     windowValid   = false;
+    bool     fullscreen    = false;
+    double   screenMaxFps  = 0.0;
+    double   minIntervalS  = 0.0;
+    double   maxIntervalS  = 0.0;
+  };
+
   struct MtlPresenterDesc {
     MtlExtent2D imageExtent  = { };
     MtlFormat   imageFormat  = MtlFormat::BGRA8Unorm;
@@ -68,6 +85,16 @@ namespace dxvk {
     // time (WindowServer not latching). The app thread paces Present to the
     // display rate meanwhile, since nothing else does.
     virtual bool isDrawableStalled() const { return false; }
+
+    // D9MT_PROFILE only: copies up to `max` presented records out of the bridge (the render
+    // thread presents with a presented handler while profiling); `issued` and `lost` are totals.
+    virtual uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
+                                    uint64_t* issued, uint64_t* lost) {
+      (void)out; (void)max; *issued = 0u; *lost = 0u; return 0u;
+    }
+
+    // D9MT_PROFILE only: the layer's and its window's present-relevant state (never blocks).
+    virtual MtlScreenState screenState() { return MtlScreenState(); }
   };
 
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc);
