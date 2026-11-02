@@ -7,10 +7,11 @@
 // interval, no late); a handler unresolved past the hold bound (lost, the interval chain breaks);
 // a writer delayed while owning its slot during a wrap; an overwrite while the reader copies; a
 // reader more than a ring behind; pending accounting; break markers; streams A -> B -> A; a
-// stream released with handlers pending, and a recreated one. Stress: writer threads (each
-// present handled by another thread than the one that issued it, in any order) against a
+// stream released with handlers pending, and a recreated one; a writer paused mid-write across
+// timed drains (review 3). Stress: writer threads against a
 // draining reader: every accepted record whole, seqs strictly increasing, accepted + lost ==
-// issued.
+// issued. Each thread runs its own presents' handlers late and newest first, so handlers finish
+// out of global seq order; there is no separate handoff queue.
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -266,8 +267,40 @@ int main() {
     CHECK(d9mt_present_ring_unref(c) == 1);
   }
 
-  // 10. stress: 4 issuing threads hand each present to a random one of 4 handler threads (so
-  //     handlers run late and out of order), against a draining reader; afterwards every issued
+  // 10. review 3: a writer paused mid-write (it owns its slot: busy) across timed drains, with
+  //     fewer than a ring of presents. The busy position waits under the same hold bound as an
+  //     unwritten one: held at the first drain, lost at the next (a second later), so the later
+  //     presents don't stay pending. The writer keeps its slot and publishes later; that record
+  //     is never read, nothing is counted twice, and no interval spans the lost position.
+  {
+    d9mt_present_ring* r = d9mt_present_ring_create();
+    dxvk::screen::Window w;
+    const double T = 500.0;
+    const uint64_t s0 = d9mt_present_ring_issue(r), s1 = d9mt_present_ring_issue(r), s2 = d9mt_present_ring_issue(r);
+    d9mt_present_ring_record(r, s0, T - 0.02, T);
+    d9mt_present_slot* slot1 = nullptr;
+    CHECK(d9mt_present_ring_own(r, s1, &slot1) == 1);              // busy(1): paused mid-write
+    d9mt_present_ring_record(r, s2, T + 2 * R - 0.02, T + 2 * R);
+    std::string a = second(r, w, 10.0, 1.0);                        // held at the busy position
+    std::printf("%s\n", a.c_str());
+    CHECK(has(a, "shown=1 dropped=0 pend=2 lost=0"));
+    std::string b = second(r, w, 11.0, 2.0);                        // past the bound: lost
+    std::printf("%s\n", b.c_str());
+    CHECK(has(b, "shown=1 dropped=0 pend=0 lost=1 onscreen=n/a refreshes=0/0/0 late=0"));
+    d9mt_present_ring_fill(slot1, s1, T + R - 0.02, T + R);        // the writer resumes
+    d9mt_present_ring_publish(slot1, s1);
+    d9mt_present_ring_finish(r);
+    const uint64_t s3 = d9mt_present_ring_issue(r);
+    d9mt_present_ring_record(r, s3, T + 3 * R - 0.02, T + 3 * R);
+    std::string c = second(r, w, 12.0, 3.0);
+    std::printf("%s\n", c.c_str());
+    CHECK(has(c, "shown=1 dropped=0 pend=0 lost=0 onscreen=16.7/0.00/16.7 refreshes=1/0/0 late=0"));
+    CHECK(d9mt_present_ring_unref(r) == 1);
+  }
+
+  // 11. stress: 4 threads each issue presents and run their handlers late, in batches of 1-5,
+  //     newest first, so handlers complete out of global seq order (within a thread and across
+  //     threads; no separate handoff queue), against a draining reader; afterwards every issued
   //     present is accepted or lost exactly once, accepted records are whole and in seq order
   {
     d9mt_present_ring* r = d9mt_present_ring_create();

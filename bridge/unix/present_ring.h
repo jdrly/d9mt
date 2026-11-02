@@ -21,9 +21,9 @@
  *
  * Retirement and loss. Only the reader counts losses, once per position, as its cursor moves:
  *   - pub(r): copied, and kept unless the slot was taken during the copy (then lost);
- *   - busy(r): writer r is mid-write: stop until the next drain;
- *   - a newer position's tag: r was overwritten or its writer gave up: lost;
- *   - an older position's tag (or 0): r's handler hasn't written yet. If no handler is running
+ *   - a newer position's tag (published or busy): r was overwritten or its writer gave up: lost;
+ *   - busy(r) (writer r mid-write), or an older position's tag (or 0: r's handler hasn't
+ *     written yet): unresolved. If no handler is running
  *     at all (finished == issued), it never will: lost. Otherwise the cursor holds at r; once r
  *     has held for D9MT_PRESENT_HOLD_S (in practice: unresolved at the next drain, a second
  *     later, far beyond a handler's normal delay of a few refreshes), r is lost and the cursor
@@ -83,7 +83,8 @@ struct d9mt_present_rec {
 #define D9MT_TAG_BUSY 1ull
 static inline uint64_t d9mt_tag_pub(uint64_t i) { return (i + 1) << 1; }
 static inline uint64_t d9mt_tag_busy(uint64_t i) { return ((i + 1) << 1) | D9MT_TAG_BUSY; }
-/* the position a tag is for (tag 0, never used, is handled before this is called) */
+/* the position a tag is for, busy or published (tag 0, never used, is handled before this is
+ * called) */
 static inline uint64_t d9mt_tag_index(uint64_t t) { return (t >> 1) - 1; }
 
 static inline struct d9mt_present_ring *d9mt_present_ring_create(void) {
@@ -208,13 +209,15 @@ static inline uint32_t d9mt_present_ring_drain(struct d9mt_present_ring *r,
       }
       continue;
     }
-    if (t == d9mt_tag_busy(r->read))
-      break; /* writer r is mid-write */
     if (t != 0 && d9mt_tag_index(t) > r->read) {
-      d9mt_present_ring_lose(r); /* overwritten, or its writer gave up on a newer position */
+      d9mt_present_ring_lose(r); /* overwritten (or being written) by a newer position, or its
+                                    writer gave up on one */
       continue;
     }
-    /* an older position's tag (or none): r's handler hasn't written yet */
+    /* unresolved: writer r is mid-write (busy(r)), or hasn't taken its slot yet (an older
+     * position's tag, or none). Both wait under the same hold bound. A writer still mid-write
+     * when r is retired as lost keeps its slot and publishes into it later; the reader, past r,
+     * never reads that record, and the next accepted seq leaves a gap that breaks the chain. */
     if (quiet) {
       d9mt_present_ring_lose(r); /* no handler pending: it never will */
       continue;
