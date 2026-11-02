@@ -301,7 +301,7 @@ or differ from run to run. The suite's runner is on the branch `chore/test-runne
 The native unit tests need no Wine and no GPU:
 
 ```bash
-scripts/run-native-tests.sh   # the 13 host clang++ tests in test/native/
+scripts/run-native-tests.sh   # the 15 host clang++ tests in test/native/
 scripts/test-upload-copy.sh   # UploadPerDrawData's clamp and copy under ASan/UBSan
 ```
 
