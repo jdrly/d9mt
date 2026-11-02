@@ -355,6 +355,7 @@ xcrun xctrace record --template ~/Desktop/d9mt-counters.tracetemplate --attach "
   - If that encoder already exists (4 MiB of commands, or a feedback barrier), the pass is split for the fence.
 - `emitGraphicsBarrier` (feedback loops inside a pass) emits its barrier directly and does **not** start a new epoch. Metal orders only later encoders after it, not the same pass's later draws (verifier finding D1, `code_vtf_fb`).
 - The compute encoders' `Blit|Dispatch → All` barriers stay as they are.
+- Since #64, every barrier after Fragment (each render encoder's end and the fence) waits on `Vertex|Fragment`. A later copy that overwrites a buffer an earlier pass's vertex stage read is then ordered by the barrier itself. Before, only the GPU running a pass's vertex work ahead of its fragment work ordered it. The epoch rule above still keys on the Fragment bit.
 
 **What the fence relies on (D2).** Apple documents a producer barrier as waiting for its after-stages "in the pass and all previous passes". The fence encoder runs no work of its own, so it depends on that "all previous passes" part to wait for earlier fragment work. Apple's header is less explicit than the article.
 - On the M5 Max the negative controls show it working: `code_vtf_rt` and `code_vtf_alias` fail without the fence and pass with it.

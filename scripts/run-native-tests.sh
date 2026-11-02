@@ -57,6 +57,7 @@ skip submission_abandon_test "scripts/test-residency.sh (DXVK's native headers; 
 skip device_teardown_test "scripts/test-residency.sh (extracts the device destructor from mtl_device_impl.cpp; plain and ASan/UBSan)"
 skip upload_copy_test "scripts/test-upload-copy.sh (extracts d3d9_device.cpp; ASan/UBSan)"
 skip null_kind_test "scripts/test-null-kind.sh (extracts mtl_context_impl.h and mtl_context_transfer.cpp; ASan/UBSan)"
+skip pass_barrier_test "scripts/test-pass-barrier.sh (extracts emitProducerBarrier from mtl_context_transfer.cpp; ASan/UBSan)"
 
 for f in test/native/*_test.cpp; do
   n=$(basename "$f" .cpp)

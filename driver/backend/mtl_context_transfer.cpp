@@ -733,7 +733,13 @@ namespace dxvk::backend {
   void MtlContextImpl::emitProducerBarrier(obj_handle_t encoder, uint64_t afterStages, uint64_t beforeStages) {
     if (!encoder)
       return;
-    MTL4CommandEncoder_barrier(encoder, afterStages, beforeStages,
+    // A barrier waits only on the stages it lists (WWDC25 254). Every barrier after Fragment
+    // ends a render encoder or is the vertex fence: it also waits on Vertex, so a later copy that
+    // overwrites a buffer or texture an earlier pass's vertex stage read (write-after-read) is
+    // ordered by the barrier, not by the GPU running a pass's vertex work before its fragment work.
+    const uint64_t waitStages = (afterStages & uint64_t(WMTStageFragment))
+      ? afterStages | uint64_t(WMTStageVertex) : afterStages;
+    MTL4CommandEncoder_barrier(encoder, waitStages, beforeStages,
                                uint64_t(WMTVisibilityOptionDevice));
     // At the end of an encoder (every caller): everything rendered so far is
     // ordered before the vertex stages of later encoders.
