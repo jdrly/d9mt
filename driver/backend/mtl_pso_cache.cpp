@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "../util/log/log.h"
+#include "../util/util_fatal_log.h"
 #include "../util/util_string.h"
 
 #include "../mtl/mtl_state_cache.h"
@@ -323,6 +324,13 @@ namespace dxvk::backend {
 
     // D3D9 sm3 VS always declares point-size output; Metal rejects that against an explicit topology class.
     info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
+
+    {
+      const bool ff = vsEntry && vsEntry[0] == 'f' && vsEntry[1] == 'f';
+      const bool msaa = info.raster_sample_count > 1u;
+      fatal::breadcrumb(ff ? (msaa ? "FF render PSO build, MSAA" : "FF render PSO build")
+                           : (msaa ? "render PSO build, MSAA" : "render PSO build"));
+    }
 
     obj_handle_t err = 0u;
     obj_handle_t pso = MTL4Compiler_newRenderPipelineState(compiler, &info, &err);

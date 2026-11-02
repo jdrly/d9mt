@@ -3,6 +3,7 @@
 #include "d3d9_device.h"
 
 #include "../util/util_env.h"
+#include "../util/util_fatal_log.h"
 
 namespace dxvk {
 
@@ -110,6 +111,7 @@ namespace dxvk {
       const uint64_t t0 = compile_stats::g_enabled ? compile_stats::nowNs() : 0u;
 
       D3D9CbvSlotMap cbvMap;
+      fatal::breadcrumb("AIR shader compile");
       std::vector<uint8_t> metallib = backend->compileMetallib(ir, &cbvMap);
 
       Rc<MtlShaderFunction> lib;

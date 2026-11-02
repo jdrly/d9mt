@@ -15,6 +15,7 @@
 #include "../util/util_env.h"
 #include "../util/util_string.h"
 #include "../util/util_cheap_clock.h"
+#include "../util/util_fatal_log.h"
 
 namespace dxvk::backend {
 
@@ -456,6 +457,7 @@ namespace dxvk::backend {
     texInfo.usage = WMTTextureUsage(textureUsage(info, m_info.pfvImages));
     texInfo.options = storageOptions(MtlCpuAccess::None);
 
+    fatal::breadcrumb(info.sampleCount > 1u ? "MSAA texture creation" : "texture creation");
     obj_handle_t handle = MTLDevice_newTexture(m_device.handle(), &texInfo);
 
     if (!handle) {
@@ -644,6 +646,7 @@ namespace dxvk::backend {
     if (!metallib || !size)
       return nullptr;
 
+    fatal::breadcrumb("shader library creation");
     obj_handle_t library = newLibraryFromBytes(m_device.handle(), metallib, size);
     if (!library && fallback && fallbackSize) {
       static std::atomic<bool> logged = { false };
