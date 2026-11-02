@@ -628,6 +628,14 @@ namespace dxvk::backend {
           continue;
         }
         auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+        // a view of another kind than the slot's: the null texture of the slot's kind (#150)
+        const uint8_t dim = tableTextureKind(st, slot, fn.ptr());
+        if (unlikely(!texkind::matches(dim, tv->kind))) {
+          if (fn != nullptr)
+            noteTextureKindMismatch(*fn, slot, dim, tv->kind);
+          appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
+          continue;
+        }
         lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
         appendTableTexture(shadow, table, tv->gpuResourceId, slot);
       }
