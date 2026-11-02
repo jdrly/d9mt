@@ -281,6 +281,8 @@ namespace dxvk::backend {
 
     uint64_t screenStreamId() const override { return m_screenStreamId; }
 
+    uint64_t lastVisibility() const override { return m_lastVis.load(); }
+
     void markScreenBreak() override {
       if (m_screenStream)
         m_screenBreak.store(true);

@@ -111,6 +111,10 @@ namespace dxvk {
     // and whenever it changes); `t` is PACE's t (d3d9_screen.h).
     void LogScreen(double t);
 
+    // D9MT_PROFILE: the presenter's state for a HITCH line (lastVisibility, isDrawableStalled);
+    // false without a presenter.
+    bool PresenterState(uint64_t* vis, bool* stalled) const;
+
   private:
 
     enum BindingIds : uint32_t {

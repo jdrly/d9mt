@@ -840,6 +840,15 @@ namespace dxvk {
   }
 
 
+  bool D3D9SwapChainEx::PresenterState(uint64_t* vis, bool* stalled) const {
+    if (m_wctx == nullptr || m_wctx->presenter == nullptr)
+      return false;
+    *vis     = m_wctx->presenter->lastVisibility();
+    *stalled = m_wctx->presenter->isDrawableStalled();
+    return true;
+  }
+
+
   void D3D9SwapChainEx::LogScreen(double t) {
     if (m_wctx == nullptr || m_wctx->presenter == nullptr)
       return;
