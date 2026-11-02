@@ -10,6 +10,7 @@
 #include "../util/util_string.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -255,6 +256,34 @@ namespace dxvk::backend {
       }
 
       m_acquireTimeoutUs.store(us);
+    }
+
+    uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
+                            uint64_t* issued, uint64_t* lost) override {
+      static_assert(sizeof(MtlPresentedRecord) == sizeof(WMTPresentRecord));
+      static_assert(offsetof(MtlPresentedRecord, presentedS) == offsetof(WMTPresentRecord, presented_s));
+      return MetalPresent_drainRecords(reinterpret_cast<WMTPresentRecord*>(out), max,
+        issued, lost, nullptr);
+    }
+
+    MtlScreenState screenState() override {
+      MtlScreenState st;
+      if (m_layer) {
+        WMTLayerProps props = { };
+        MetalLayer_getProps(m_layer, &props);
+        st.displaySync = props.display_sync_enabled;
+        st.drawables   = props.maximum_drawable_count;
+      }
+      if (m_view) {
+        WMTViewPresentInfo info = { };
+        MetalView_presentInfo(m_view, &info);
+        st.windowValid  = info.valid != 0u;
+        st.fullscreen   = info.fullscreen != 0u;
+        st.screenMaxFps = info.screen_max_fps;
+        st.minIntervalS = info.screen_min_interval_s;
+        st.maxIntervalS = info.screen_max_interval_s;
+      }
+      return st;
     }
 
     bool isDrawableStalled() const override {

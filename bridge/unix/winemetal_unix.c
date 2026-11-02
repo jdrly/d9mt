@@ -6774,6 +6774,125 @@ _MetalDrawable_presentAfterMinimumDuration(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* D9MT_PROFILE's SCREEN line (d9mt #153): when each tracked drawable reached the screen.
+ * The driver uses MetalDrawable_presentTracked instead of the plain present only while
+ * profiling. The presented handler runs on a Metal thread: it only claims a slot of a fixed
+ * ring with one atomic add and publishes it with a release store (no lock, no log, no
+ * allocation); the app thread copies the slots out once a second (MetalPresent_drainRecords).
+ * A slot whose tag changed during the copy, or one overwritten before it was read, counts as
+ * lost. Times are host time in seconds (CACurrentMediaTime, the clock of presentedTime). */
+#define D9MT_PRESENT_RING 1024u
+struct d9mt_present_slot {
+  _Atomic uint64_t tag; /* claim index + 1 once written */
+  _Atomic uint64_t seq;
+  _Atomic double submit_s;
+  _Atomic double presented_s;
+};
+static struct d9mt_present_slot g_present_ring[D9MT_PRESENT_RING];
+static _Atomic uint64_t g_present_issued;  /* tracked presents so far */
+static _Atomic uint64_t g_present_claimed; /* presented handlers so far */
+static _Atomic uint64_t g_present_lost;
+static uint64_t g_present_read;            /* the drain's cursor, under g_present_drain_lock */
+static pthread_mutex_t g_present_drain_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static NTSTATUS
+_MetalDrawable_presentTracked(void *obj) {
+  struct unixcall_generic_obj_obj_double_noret *params = obj;
+  id<MTLDrawable> drawable = (id<MTLDrawable>)params->handle;
+  const uint64_t seq = atomic_fetch_add_explicit(&g_present_issued, 1, memory_order_relaxed) + 1;
+  const double submit_s = CACurrentMediaTime();
+  [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+    const uint64_t i = atomic_fetch_add_explicit(&g_present_claimed, 1, memory_order_relaxed);
+    struct d9mt_present_slot *s = &g_present_ring[i % D9MT_PRESENT_RING];
+    atomic_store_explicit(&s->tag, 0, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&s->seq, seq, memory_order_relaxed);
+    atomic_store_explicit(&s->submit_s, submit_s, memory_order_relaxed);
+    atomic_store_explicit(&s->presented_s, d.presentedTime, memory_order_relaxed);
+    atomic_store_explicit(&s->tag, i + 1, memory_order_release);
+  }];
+  if (params->arg1 > 0.0)
+    [drawable presentAfterMinimumDuration:params->arg1];
+  else
+    [drawable present];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MetalPresent_drainRecords(void *obj) {
+  struct unixcall_present_drain *params = obj;
+  struct WMTPresentRecord *out = params->out.ptr;
+  uint32_t n = 0;
+  pthread_mutex_lock(&g_present_drain_lock);
+  const uint64_t end = atomic_load_explicit(&g_present_claimed, memory_order_acquire);
+  if (end - g_present_read > D9MT_PRESENT_RING) {
+    atomic_fetch_add_explicit(&g_present_lost, end - D9MT_PRESENT_RING - g_present_read,
+                              memory_order_relaxed);
+    g_present_read = end - D9MT_PRESENT_RING;
+  }
+  while (g_present_read < end && n < params->max) {
+    struct d9mt_present_slot *s = &g_present_ring[g_present_read % D9MT_PRESENT_RING];
+    const uint64_t want = g_present_read + 1;
+    const uint64_t tag = atomic_load_explicit(&s->tag, memory_order_acquire);
+    if (tag != want) {
+      if (tag > want) { /* overwritten by a later present */
+        atomic_fetch_add_explicit(&g_present_lost, 1, memory_order_relaxed);
+        g_present_read++;
+        continue;
+      }
+      break; /* claimed, not written yet: next drain */
+    }
+    struct WMTPresentRecord r;
+    r.seq = atomic_load_explicit(&s->seq, memory_order_relaxed);
+    r.submit_s = atomic_load_explicit(&s->submit_s, memory_order_relaxed);
+    r.presented_s = atomic_load_explicit(&s->presented_s, memory_order_relaxed);
+    atomic_thread_fence(memory_order_acquire);
+    g_present_read++;
+    if (atomic_load_explicit(&s->tag, memory_order_relaxed) != want) {
+      atomic_fetch_add_explicit(&g_present_lost, 1, memory_order_relaxed);
+      continue;
+    }
+    out[n++] = r;
+  }
+  pthread_mutex_unlock(&g_present_drain_lock);
+  params->ret = n;
+  params->issued = atomic_load_explicit(&g_present_issued, memory_order_relaxed);
+  params->lost = atomic_load_explicit(&g_present_lost, memory_order_relaxed);
+  params->now_s = CACurrentMediaTime();
+  return STATUS_SUCCESS;
+}
+
+/* The window's present-relevant state, read on the main thread (AppKit) and published here;
+ * each call returns the last published values and asks the main thread for fresh ones
+ * (never a synchronous hop: see MetalLayer_setProps). */
+static _Atomic uint32_t g_pinfo_valid, g_pinfo_fullscreen, g_pinfo_pending;
+static _Atomic double g_pinfo_max_fps, g_pinfo_min_iv, g_pinfo_max_iv;
+
+static NTSTATUS
+_MetalView_presentInfo(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  NSView *view = (NSView *)params->handle;
+  struct WMTViewPresentInfo *info = params->arg.ptr;
+  info->valid = atomic_load(&g_pinfo_valid);
+  info->fullscreen = atomic_load(&g_pinfo_fullscreen);
+  info->screen_max_fps = atomic_load(&g_pinfo_max_fps);
+  info->screen_min_interval_s = atomic_load(&g_pinfo_min_iv);
+  info->screen_max_interval_s = atomic_load(&g_pinfo_max_iv);
+  if (view && atomic_exchange(&g_pinfo_pending, 1) == 0) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSWindow *win = view.window;
+      NSScreen *screen = win.screen;
+      atomic_store(&g_pinfo_fullscreen, (win.styleMask & NSWindowStyleMaskFullScreen) ? 1u : 0u);
+      atomic_store(&g_pinfo_max_fps, screen ? (double)screen.maximumFramesPerSecond : 0.0);
+      atomic_store(&g_pinfo_min_iv, screen ? (double)screen.minimumRefreshInterval : 0.0);
+      atomic_store(&g_pinfo_max_iv, screen ? (double)screen.maximumRefreshInterval : 0.0);
+      atomic_store(&g_pinfo_valid, win ? 1u : 0u);
+      atomic_store(&g_pinfo_pending, 0);
+    });
+  }
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
   struct unixcall_mtl4_setvisibilitymode *params = obj;
@@ -7096,6 +7215,9 @@ D9MT_POOLED(_MTLTexture_usage)
 D9MT_POOLED(_MTLTexture_width)
 D9MT_POOLED(_MetalDrawable_present)
 D9MT_POOLED(_MetalDrawable_presentAfterMinimumDuration)
+D9MT_POOLED(_MetalDrawable_presentTracked)
+D9MT_POOLED(_MetalPresent_drainRecords)
+D9MT_POOLED(_MetalView_presentInfo)
 D9MT_POOLED(_MetalView_visibility)
 D9MT_POOLED(_MetalDrawable_texture)
 D9MT_POOLED(_MetalLayer_getEDRValue)
@@ -7389,6 +7511,9 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_MetalDrawable_presentTracked_pooled,
+    &_MetalPresent_drainRecords_pooled,
+    &_MetalView_presentInfo_pooled,
 
 };
 
@@ -7609,6 +7734,9 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_MetalDrawable_presentTracked_pooled,
+    &_MetalPresent_drainRecords_pooled,
+    &_MetalView_presentInfo_pooled,
 
 };
 #endif
