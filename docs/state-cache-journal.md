@@ -56,7 +56,7 @@ Where the implementation differs from the design below:
 
 `docs/state-cache.md` §3 and `driver/mtl/mtl_state_cache.cpp`:
 - The file is rewritten whole, atomically: a temp file, `FlushFileBuffers`, then
-  `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` (`writeAtomic`, `mtl_state_cache.cpp:235-260`).
+  `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` (`writeAtomic` in `mtl_state_cache.cpp`).
   A crash during a write leaves the previous file.
 - Every 384-byte entry has its own FNV-1a `check`, and the header has `headerCheck`. A
   truncated file keeps the complete entries before the cut. A damaged entry is skipped.
@@ -65,9 +65,9 @@ Where the implementation differs from the design below:
   were in flight.
 
 **The gap: records made since the last write are lost** when the process dies without
-`shutdown()`. The writer thread (`writerMain`, `:799-833`) drains the record ring every 250 ms
-(`intake`, `:1001`). It writes the file 20 s after the last change (`WriteDebounce`), or at
-most every 5 minutes while changes keep coming (`WriteMaxInterval`, `:31-32`).
+`shutdown()`. The writer thread (`writerMain`) drains the record ring every 250 ms, or 20 ms
+right after a large intake (`intake`). It writes the file 20 s after the last change
+(`WriteDebounce`), or at most every 5 minutes while changes keep coming (`WriteMaxInterval`).
 - SWTOR always exits this way: `ExitProcess`, so `~D3D9DeviceEx` and the final write never
   run (`docs/state-cache.md` §3, "Games that never release the device").
 - A player who enters a new zone and quits within 20 s loses every PSO that zone added.

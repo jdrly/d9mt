@@ -125,7 +125,8 @@ A change is done only when all of these hold:
       tested and shipped together: there is no version handshake between them.
 - [ ] **Hash suite equals base.** Every program of the hash suite (the D3D9 test programs
       `test/code_*.c`, except `code_sm3_ref` and `code_statecache`, which have harnesses of their
-      own; five frames each) renders frames identical to the base commit's. It
+      own; five frames each, with the exceptions in docs/testing.md § Hash suite) renders frames
+      identical to the base commit's. It
       also runs with `MTL_DEBUG_LAYER=1` (no new Metal API validation messages),
       `D9MT_NO_ATTACHMENT_OPT=1` and `d3d9.reproducibleCommandStream=True`, and, for a change to
       the submission path, with `D9MT_EARLY_COMMIT=always`. `D9MT_LIFETIME_CHECK=1` finds no

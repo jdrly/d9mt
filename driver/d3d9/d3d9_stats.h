@@ -7,6 +7,7 @@
 //     cb=13.0 draws=1520 | ld=12.1 clr=9.0 ldDc=4.0 st=15.2 stDc=6.0 rsv=0.0
 //     restore=0.0 savedMiB=231.4 attMs=1.3 clrFold=6.0 clrPass=1.0 | sh=0 pso=0 wait=0/0.0ms
 //     | allocMiB=5210 att=on | split=8.0 splitSubmit=6.0 splitXfer=0.0 splitClear=2.0 splitMiB=420.1
+//     carried=0.0 carryRefused=0.0 carryCap=0.0
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window

@@ -606,7 +606,7 @@ d3d9.dll only:
 | `driver/mtl/mtl_state_cache.{h,cpp}` (new) | `MtlStateCache`: path resolution, threads, record, prewarm, Win32/POSIX file IO, stats |
 | `driver/mtl/mtl_types.h` | `MtlShaderStateId` |
 | `driver/mtl/mtl_context.h` | `MtlShaderFunction::stateId` (set once at creation, not copied when functions share a library) |
-| `driver/mtl/mtl_compile.h` | `urgentQueued()`; `RenderWaitScope` / `renderWaitedWithin()` |
+| `driver/mtl/mtl_compile.h` | `urgentQueued()`; `RenderWaitScope` / `renderWaiting()` |
 | `driver/mtl/mtl_device.h`, `mtl_device_stub.cpp` | `stateCacheBackend()`, `psoKeySignature()`, `stateCache()` / `setStateCache()` |
 | `driver/backend/mtl_pso_cache.{h,cpp}` | `RenderPsoKey::signature()`, `kPsoKeyMappingVersion`, `Registry`, record hook in the miss path, prewarm entries (quiet failures, not counted as render-path builds) |
 | `driver/backend/mtl_device_impl.{h,cpp}` | implements `MtlStateCacheBackend`; owns the registry |

@@ -1,6 +1,6 @@
 #pragma once
 
-// Memory profiles (MEMORY-PLAN.md §3). Header-only and dependency-free so the
+// Memory profiles (D9MT_MEMORY_PROFILE, docs/configuration.md). Header-only and dependency-free so the
 // tier table can be unit-tested natively (test/native/memory_profile_test.cpp);
 // config/env resolution lives in mtl_memory_profile.cpp.
 
