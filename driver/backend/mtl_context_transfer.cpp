@@ -9,14 +9,53 @@
 #include "../util/log/log.h"
 
 #include "mtl_profiler.h"
+#include "mtl_texture_kind.h"
 
 #include "mtl_blit_metallib.h"
 
 #include "../d3d9/d3d9_caps.h"
 
+#include <mutex>
+
 namespace dxvk::backend {
 
   namespace {
+
+    /* A shader's sampler had a texture of another kind than it declares (a game's binding, e.g.
+     * a 2D texture at a dcl_cube sampler): it is bound as the null texture of the declared kind.
+     * One line per shader, sampler and bound kind, at most 16 (cold: only reached on a mismatch). */
+    __attribute__((noinline, cold)) void noteTextureKindMismatch(
+        const MtlShaderFunction& fn, uint32_t reg, uint8_t dim, uint8_t bound) {
+      static std::mutex s_mutex;
+      static std::array<uint64_t, 16> s_seen = { };
+      static uint32_t s_count = 0u;
+
+      uint64_t sha = 0u;
+      std::memcpy(&sha, fn.stateId.sha, sizeof(sha));
+      const uint64_t key = sha ^ (uint64_t(fn.stage == MtlShaderStage::Fragment) << 63)
+        ^ (uint64_t(reg) << 40) ^ (uint64_t(bound) << 48);
+
+      std::lock_guard lock(s_mutex);
+      if (s_count >= s_seen.size())
+        return;
+      for (uint32_t i = 0u; i < s_count; i++) {
+        if (s_seen[i] == key)
+          return;
+      }
+      s_seen[s_count++] = key;
+
+      static const char digits[] = "0123456789abcdef";
+      std::string hex;
+      for (uint32_t i = 0u; i < 8u; i++) {
+        hex += digits[fn.stateId.sha[i] >> 4u];
+        hex += digits[fn.stateId.sha[i] & 15u];
+      }
+      Logger::warn(str::format("D9MT: texture kind mismatch: ",
+        fn.stage == MtlShaderStage::Fragment ? "ps" : "vs", " ", hex, " sampler s", reg,
+        " declares ", texkind::name(dim), ", a ", texkind::name(bound),
+        " texture is bound: bound as the null ", texkind::name(dim),
+        " texture instead", s_count == s_seen.size() ? " (further mismatches not logged)" : ""));
+    }
 
     WMTAttributeFormat attributeFormat(MtlFormat f) {
       switch (f) {
@@ -482,6 +521,7 @@ namespace dxvk::backend {
           const bool full = layoutChanged || b.abFnId != fnId;
           b.abFnId = fnId;
           uint64_t* sw = b.abShadowWords.data();
+          const texkind::NullIds nulls = { m_null2DId, m_nullCubeId, m_null3DId };
           for (uint32_t i = 0u; i < words; i++) {
             const MtlShaderFunction::AbWord& e = fn->abWords[i];
             uint64_t v;
@@ -501,12 +541,17 @@ namespace dxvk::backend {
               case MtlShaderFunction::AbWordKind::Texture: {
                 if (!full && !(dirtyTexs & (1u << e.reg)))
                   continue;
-                // unbound: the null texture of the slot's declared kind (2D, cube, 3D)
-                v = e.dim == 1u ? m_nullCubeId : e.dim == 2u ? m_null3DId : m_null2DId;
+                // unbound, or a view of another kind than the declared one: the null texture
+                // of the slot's declared kind (2D, cube, 3D; mtl_texture_kind.h)
+                v = texkind::nullOf(e.dim, nulls);
                 if (e.reg < b.textures.size() && b.textures[e.reg] != nullptr) {
                   auto* tv = static_cast<MtlTextureViewImpl*>(b.textures[e.reg].ptr());
-                  v = tv->gpuResourceId;
-                  lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
+                  if (likely(texkind::matches(e.dim, tv->kind))) {
+                    v = tv->gpuResourceId;
+                    lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
+                  } else {
+                    noteTextureKindMismatch(*fn, e.reg, e.dim, tv->kind);
+                  }
                 }
               } break;
               case MtlShaderFunction::AbWordKind::Sampler: {

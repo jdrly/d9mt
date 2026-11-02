@@ -76,6 +76,9 @@ namespace dxvk::backend {
   public:
     WmtTexture owned;
     uint64_t   gpuResourceId = 0u;
+    // The Metal texture type's kind (texkind::ofMetalType): a sampler takes the view only where
+    // the shader declares that kind (#150). key.viewType doesn't say: D3D9's views leave it 2D.
+    uint8_t    kind = 0xFEu;
     // Set for views from createImageView (not the presenter's drawable views): the
     // Metal view is released once the GPU is past every command buffer that may use it.
     class MtlDeviceImpl* residencyDevice = nullptr;
