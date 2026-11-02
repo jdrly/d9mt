@@ -10,15 +10,23 @@
 //     req=16.7 lat=24.1/26.3 hz=60
 //
 //   t         seconds since the first Present (as PACE and STATS)
-//   shown     drawables whose presented handler ran in the window with a presentedTime
-//   dropped   drawables whose presented handler ran with presentedTime 0: macOS reported the
+//   shown     drawables retired in the window with a presentedTime
+//   dropped   drawables retired with presentedTime 0: macOS reported the
 //             drawable as not shown (dropped, or a presentation path that reports no time).
 //             Data, not missing data: `pend` and `lost` are the presents without data
-//   pend      tracked presents whose handler hasn't run yet (in flight at the window's end)
-//   lost      records of this presenter's stream lost in the window: overwritten before they were
-//             read, or dropped by a presented handler that found its slot busy (should stay 0)
-//   onscreen  interval between consecutive shown frames' presentedTime: median / sd / max ms
-//             (the first one of a window is measured from the previous window's last frame)
+//   pend      this stream's presents not yet retired at the window's end (handlers in flight,
+//             or an earlier one the reader is holding for)
+//   lost      presents retired in the window without a record: overwritten before they were
+//             read, given up by a handler that found its slot busy, or unresolved past the
+//             bridge's hold bound (should stay 0)
+//   onscreen  interval between consecutive shown frames' presentedTime: median / sd / max ms.
+//             Records arrive strictly in present order (the bridge retires them by present seq,
+//             present_ring.h), so an interval spans exactly the frames between two presents. The
+//             chain carries over from the previous window, through dropped frames (the previous
+//             frame stayed up), but breaks at a lost present (a seq gap), at a break marker (a
+//             record with times -1 that the presenter puts in before its first present after a
+//             window switch back to it, or after presents it skipped) and when the swapchain
+//             switches to another window's stream: no interval is computed across those
 //   refreshes on-screen intervals by length in refreshes: about 1 / about 2 / 3 or more (an
 //             interval counts as k refreshes when it rounds to k; under 1.5: 1). A sustained
 //             33 ms on a 60 Hz display shows as 0/59/0, 60 fps on 120 Hz as 0/59/0 too
@@ -47,12 +55,13 @@
 //              minimumRefreshInterval-maximumRefreshInterval in ms (a range: adaptive sync)
 //   nsFullscreen  the window is in macOS fullscreen (its own Space); "?" until AppKit answered
 //   d3dWindowed   the game's D3DPRESENT_PARAMETERS.Windowed
-//   forceComposited  D9MT_FORCE_COMPOSITED=1: the bridge keeps the layer off the direct-to-display
-//              path (a 1x1-point sublayer; for a direct-vs-composited A/B)
+//   forceComposited  D9MT_FORCE_COMPOSITED=1: the bridge requests composition (a 1x1-point
+//              sublayer; for a direct-vs-composited A/B). The request, not the measured present
+//              mode: verify with the Metal HUD
 //
-// Each presenter has its own stream (the bridge's ring, present_ring.h); the window restarts
-// (bindStream) when the swapchain's presenter changes, so a recreated device or a second device
-// never inherits another stream's counts.
+// Each presenter has its own stream (the bridge's ring, present_ring.h), which keeps its own
+// accounting (pending, lost): switching between windows (A -> B -> A, presenters cached) or a
+// recreated or second device never mixes counts. bindStream only breaks the interval chain.
 //
 // Off (D9MT_PROFILE unset): never constructed or called, and drawables are presented without a
 // handler. Header-only and dependency-free so the statistics and the format can be unit-tested
@@ -128,59 +137,59 @@ namespace dxvk::screen {
 
   public:
 
-    // Binds the window to a presenter's stream (its id, 0 = none); a different stream than
-    // before starts the window over: its counts are that stream's alone. Returns true then.
+    // The swapchain presents into this stream (its id, 0 = none). Another stream than before
+    // breaks the interval chain (no interval across a switch of windows); the counts are the
+    // streams' own and need no reset. Returns true on a switch.
     bool bindStream(uint64_t streamId) {
       if (streamId == m_streamId)
         return false;
-      *this = Window();
       m_streamId = streamId;
+      breakChain();
       return true;
     }
 
+    // A record retired by the stream, in present order.
     void add(const Record& r) {
-      m_seen++;
+      if (m_lastSeq && r.seq != m_lastSeq + 1u)
+        breakChain(); // a lost present between: no interval across it
+      m_lastSeq = r.seq;
+      if (r.presentedS < 0.0) {
+        // a break marker (window switch back to this stream, or skipped presents): not a frame
+        m_lastShownS = 0.0;
+        return;
+      }
       if (r.presentedS > 0.0) {
-        m_shown.push_back(r.presentedS);
+        m_shown++;
+        if (m_lastShownS > 0.0 && r.presentedS > m_lastShownS)
+          m_iv.push_back((r.presentedS - m_lastShownS) * 1e3);
+        m_lastShownS = r.presentedS;
         if (r.submitS > 0.0 && r.presentedS >= r.submitS)
           m_latMs.push_back((r.presentedS - r.submitS) * 1e3);
       } else {
-        m_dropped++;
+        m_dropped++; // the chain goes on: the previous frame stayed on screen
       }
     }
 
-    // The line for the window that ends now; starts the next one. `issued`: tracked presents
-    // so far, `lost`: records lost so far (both this stream's totals from the bridge), `hz`: the
-    // display refresh rate (outside 20-1000: 60), `reqMs`: the requested cadence (requestedMs;
-    // <= 0: 1 refresh).
-    std::string take(double tSec, double hz, double reqMs, uint64_t issued, uint64_t lost) {
+    // Presents the stream retired as lost (a drain's count).
+    void addLost(uint64_t n) {
+      m_lost += n;
+    }
+
+    // The line for the window that ends now; starts the next one. `pending`: the stream's
+    // presents not yet retired, `hz`: the display refresh rate (outside 20-1000: 60), `reqMs`:
+    // the requested cadence (requestedMs; <= 0: 1 refresh).
+    std::string take(double tSec, double hz, double reqMs, uint64_t pending) {
       if (!(hz >= 20.0 && hz <= 1000.0))
         hz = 60.0;
       const double refreshMs = 1e3 / hz;
       if (!(reqMs > 0.0))
         reqMs = refreshMs;
 
-      std::sort(m_shown.begin(), m_shown.end());
-      std::vector<double> iv;
-      iv.reserve(m_shown.size());
-      double prev = m_lastShownS;
-      for (double p : m_shown) {
-        if (prev > 0.0 && p > prev)
-          iv.push_back((p - prev) * 1e3);
-        if (p > prev)
-          prev = p;
-      }
-      m_lastShownS = prev;
-
-      const uint64_t accounted = m_seen + lost;
-      const uint64_t pend = issued > accounted ? issued - accounted : 0u;
-      const uint64_t lostNow = lost >= m_lostBase ? lost - m_lostBase : 0u;
-      m_lostBase = lost;
-
       char buf[384];
-      int len = std::snprintf(buf, sizeof(buf), "SCREEN t=%.0f shown=%zu dropped=%u pend=%llu lost=%llu",
-        tSec, m_shown.size(), m_dropped, (unsigned long long)pend, (unsigned long long)lostNow);
+      int len = std::snprintf(buf, sizeof(buf), "SCREEN t=%.0f shown=%u dropped=%u pend=%llu lost=%llu",
+        tSec, m_shown, m_dropped, (unsigned long long)pending, (unsigned long long)m_lost);
 
+      const std::vector<double>& iv = m_iv;
       if (!iv.empty()) {
         double mean = 0.0, mx = 0.0;
         for (double v : iv) { mean += v; mx = std::max(mx, v); }
@@ -211,13 +220,20 @@ namespace dxvk::screen {
 
       std::snprintf(buf + len, sizeof(buf) - size_t(len), " hz=%.0f", hz);
 
-      m_shown.clear();
+      m_iv.clear();
       m_latMs.clear();
+      m_shown   = 0u;
       m_dropped = 0u;
+      m_lost    = 0u;
       return buf;
     }
 
   private:
+
+    void breakChain() {
+      m_lastShownS = 0.0;
+      m_lastSeq    = 0u;
+    }
 
     // nearest-rank on a sorted copy (q in [0, 1])
     static double quantile(std::vector<double> v, double q) {
@@ -227,12 +243,13 @@ namespace dxvk::screen {
       return v[std::min(i, v.size() - 1u)];
     }
 
-    std::vector<double> m_shown;
+    std::vector<double> m_iv;
     std::vector<double> m_latMs;
+    uint32_t            m_shown      = 0u;
     uint32_t            m_dropped    = 0u;
-    uint64_t            m_seen       = 0u; // records seen in total (shown + dropped)
-    uint64_t            m_lostBase   = 0u;
+    uint64_t            m_lost       = 0u;
     uint64_t            m_streamId   = 0u;
+    uint64_t            m_lastSeq    = 0u; // the last record's seq (0: chain broken)
     double              m_lastShownS = 0.0;
 
   };

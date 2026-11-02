@@ -1583,9 +1583,10 @@ d9mt_log_allow(struct d9mt_log_limit *l) {
     } \
   } while (0)
 
-/* D9MT_FORCE_COMPOSITED=1 (diagnostic, d9mt #153; off by default): keeps the layer off the
- * direct-to-display path by giving it overlapping content of its own: a 1x1-point opaque black
- * sublayer at the layer's bottom-left corner. Apple: "When you are composited, there may be some
+/* D9MT_FORCE_COMPOSITED=1 (diagnostic, d9mt #153; off by default): requests composition, i.e.
+ * asks macOS to keep the layer off the direct-to-display path, by giving it overlapping content of
+ * its own: a 1x1-point opaque black sublayer at the layer's bottom-left corner. Whether macOS
+ * then composites is not guaranteed: verify with the Metal HUD's present mode. Apple: "When you are composited, there may be some
  * additional buffering and display latency due to system UI elements or your own additional
  * layers overlapping" (Metal HUD tech talk 110339). The layer itself stays opaque, so no part of
  * the game turns see-through (layer.opaque = NO would blend the drawable's alpha). Main thread. */
@@ -1614,7 +1615,7 @@ d9mt_apply_force_composited(CAMetalLayer *layer) {
   dot.opaque = YES;
   [layer addSublayer:dot];
   static struct d9mt_log_limit fc_log;
-  D9MT_DIAG(&fc_log, "layer %p: D9MT_FORCE_COMPOSITED=1, a 1x1-point sublayer keeps it composited",
+  D9MT_DIAG(&fc_log, "layer %p: D9MT_FORCE_COMPOSITED=1, a 1x1-point sublayer requests composition (verify with the Metal HUD)",
             (void *)layer);
 }
 
@@ -6812,8 +6813,9 @@ _MetalDrawable_presentAfterMinimumDuration(void *obj) {
 }
 
 /* D9MT_PROFILE's SCREEN line (d9mt #153): when each tracked drawable reached the screen.
- * One stream per presenter (MetalPresentStream_create/_release); the ring, its slot ownership,
- * loss accounting and lifetime are in present_ring.h (natively tested, also under TSan). The
+ * One stream per presenter (MetalPresentStream_create/_release); the ring, its positions by
+ * present seq, slot ownership, in-order retirement, loss accounting and lifetime are in
+ * present_ring.h (natively tested, also under TSan). The
  * driver uses MetalDrawable_presentTracked instead of the plain present only while profiling.
  * The presented handler (a Metal thread) only claims, fills and publishes a slot: no lock, no
  * log, no allocation (the last reference's free aside). Times are host time in seconds
@@ -6835,18 +6837,23 @@ _MetalPresentStream_release(void *obj) {
 
 static NTSTATUS
 _MetalDrawable_presentTracked(void *obj) {
-  struct unixcall_generic_obj_obj_double_noret *params = obj;
-  id<MTLDrawable> drawable = (id<MTLDrawable>)params->handle;
-  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->arg0;
+  struct unixcall_present_tracked *params = obj;
+  id<MTLDrawable> drawable = (id<MTLDrawable>)params->drawable;
+  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->stream;
   if (ring) {
+    if (params->flags & WMT_PRESENT_TRACKED_BREAK) {
+      /* a break marker at the next position, written here at once (both times -1) */
+      const uint64_t mark = d9mt_present_ring_issue(ring);
+      d9mt_present_ring_record(ring, mark, -1.0, -1.0);
+    }
     const uint64_t seq = d9mt_present_ring_issue(ring); /* the handler's reference */
     const double submit_s = CACurrentMediaTime();
     [drawable addPresentedHandler:^(id<MTLDrawable> d) {
       d9mt_present_ring_record(ring, seq, submit_s, d.presentedTime);
     }];
   }
-  if (params->arg1 > 0.0)
-    [drawable presentAfterMinimumDuration:params->arg1];
+  if (params->after > 0.0)
+    [drawable presentAfterMinimumDuration:params->after];
   else
     [drawable present];
   return STATUS_SUCCESS;
@@ -6858,15 +6865,16 @@ _MetalPresentStream_drain(void *obj) {
   struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->stream;
   struct WMTPresentRecord *out = params->out.ptr;
   uint32_t n = 0;
-  uint64_t issued = 0, lost = 0;
+  uint64_t pending = 0, lost_new = 0;
+  const double now_s = CACurrentMediaTime();
   if (ring) {
     _Static_assert(sizeof(struct d9mt_present_rec) == sizeof(struct WMTPresentRecord), "record layout");
-    n = d9mt_present_ring_drain(ring, (struct d9mt_present_rec *)out, params->max, &issued, &lost);
+    n = d9mt_present_ring_drain(ring, (struct d9mt_present_rec *)out, params->max, now_s, &pending, &lost_new);
   }
   params->ret = n;
-  params->issued = issued;
-  params->lost = lost;
-  params->now_s = CACurrentMediaTime();
+  params->pending = pending;
+  params->lost_new = lost_new;
+  params->now_s = now_s;
   return STATUS_SUCCESS;
 }
 

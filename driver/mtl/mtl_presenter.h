@@ -87,19 +87,24 @@ namespace dxvk {
     virtual bool isDrawableStalled() const { return false; }
 
     // D9MT_PROFILE only: copies up to `max` presented records out of this presenter's stream (the
-    // render thread presents with a presented handler while profiling); `issued` and `lost` are
-    // this stream's totals.
+    // render thread presents with a presented handler while profiling), strictly in present
+    // order; `pending`: the stream's presents not yet retired, `lostNew`: presents this call
+    // retired as lost.
     virtual uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
-                                    uint64_t* issued, uint64_t* lost) {
-      (void)out; (void)max; *issued = 0u; *lost = 0u; return 0u;
+                                    uint64_t* pending, uint64_t* lostNew) {
+      (void)out; (void)max; *pending = 0u; *lostNew = 0u; return 0u;
     }
 
     // D9MT_PROFILE only: the layer's and its window's present-relevant state (never blocks).
     virtual MtlScreenState screenState() { return MtlScreenState(); }
 
     // D9MT_PROFILE only: identifies this presenter's stream (unique in the process, never reused;
-    // 0 = no stream), so the SCREEN window restarts when the presenter changes.
+    // 0 = no stream), so the SCREEN window breaks its interval chain when the presenter changes.
     virtual uint64_t screenStreamId() const { return 0u; }
+
+    // D9MT_PROFILE only, CS thread: the next tracked present puts a break marker into the stream
+    // first (a window switch back to this presenter, or presents skipped in between).
+    virtual void markScreenBreak() { }
   };
 
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc);

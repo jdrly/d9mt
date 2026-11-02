@@ -2260,13 +2260,18 @@ WINEMETAL_API obj_handle_t MetalPresentStream_create(void);
 WINEMETAL_API void MetalPresentStream_release(obj_handle_t stream);
 
 /* present (after > 0: presentAfterMinimumDuration) with a presented handler that records the
- * drawable's presentedTime into the stream (stream 0: a plain present) */
-WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after);
+ * drawable's presentedTime into the stream (stream 0: a plain present). flags
+ * WMT_PRESENT_TRACKED_BREAK: first a break marker (a record with both times -1: no on-screen
+ * interval spans it) */
+#define WMT_PRESENT_TRACKED_BREAK 0x1u
+WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after,
+                                                uint32_t flags);
 
-/* the stream's owner only: copies up to max records out, in present order; *issued = tracked
- * presents of this stream so far, *lost = its records lost so far, *now_s = host time now */
+/* the stream's owner only: copies up to max records out, strictly in present order (a gap in
+ * seq = a lost present); *pending = this stream's presents not yet retired, *lost_new = presents
+ * this call retired as lost, *now_s = host time now */
 WINEMETAL_API uint32_t MetalPresentStream_drain(
-    obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost,
+    obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *pending, uint64_t *lost_new,
     double *now_s);
 
 /* the last values the main thread published (asks it for fresh ones; never blocks) */

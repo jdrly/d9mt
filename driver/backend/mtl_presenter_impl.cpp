@@ -180,6 +180,7 @@ namespace dxvk::backend {
       image.drawable = drawable;
       image.sync.drawable = drawable;
       image.sync.screenStream = m_screenStream;
+      image.sync.screenBreak  = m_screenStream && m_screenBreak.exchange(false);
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
       tex->drawable    = true;
@@ -271,14 +272,19 @@ namespace dxvk::backend {
     }
 
     uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
-                            uint64_t* issued, uint64_t* lost) override {
+                            uint64_t* pending, uint64_t* lostNew) override {
       static_assert(sizeof(MtlPresentedRecord) == sizeof(WMTPresentRecord));
       static_assert(offsetof(MtlPresentedRecord, presentedS) == offsetof(WMTPresentRecord, presented_s));
       return MetalPresentStream_drain(m_screenStream, reinterpret_cast<WMTPresentRecord*>(out), max,
-        issued, lost, nullptr);
+        pending, lostNew, nullptr);
     }
 
     uint64_t screenStreamId() const override { return m_screenStreamId; }
+
+    void markScreenBreak() override {
+      if (m_screenStream)
+        m_screenBreak.store(true);
+    }
 
     MtlScreenState screenState() override {
       MtlScreenState st;
@@ -318,6 +324,7 @@ namespace dxvk::backend {
     uint64_t         m_lastPresented = 0u;
     obj_handle_t     m_screenStream   = 0u; // D9MT_PROFILE (SCREEN line)
     uint64_t         m_screenStreamId = 0u;
+    std::atomic<bool> m_screenBreak   = { false };
     uint64_t         m_completedFrame = 0u;
 
     // Drawable acquisition runs on its own thread so that a WindowServer
