@@ -685,7 +685,8 @@ namespace dxvk::backend {
     MTL4CommandQueue_signalDrawable(m_device->wmtQueue(), sync.drawable);
     // D9MT_PROFILE: the same present with a presented handler (the SCREEN line, d3d9_screen.h)
     if (unlikely(prof::g_profEnabled))
-      MetalDrawable_presentTracked(sync.drawable, sync.screenStream, sync.minDuration);
+      MetalDrawable_presentTracked(sync.drawable, sync.screenStream, sync.minDuration,
+        sync.screenBreak ? WMT_PRESENT_TRACKED_BREAK : 0u);
     else if (sync.minDuration > 0.0)
       MetalDrawable_presentAfterMinimumDuration(sync.drawable, sync.minDuration);
     else

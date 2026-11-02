@@ -193,6 +193,7 @@ namespace dxvk {
     std::string               m_screenInfo;
     double                    m_screenCapMs = 0.0;
     uint32_t                  m_screenInterval = 1u;
+    uint64_t                  m_screenPresentId = 0u; // the stream the last Present went to
 
     HRESULT PresentLocked(
       const RECT*    pSourceRect,

@@ -1,9 +1,11 @@
 // Native unit test for the D9MT_PROFILE SCREEN line (no Wine, no Metal):
 //   clang++ -std=c++17 -I driver/d3d9 test/native/screen_test.cpp -o build/st && build/st
-// Synthetic presentedTime records: steady pacing, a repeated frame, drops, a sustained 33 ms on
-// 60 Hz, 60 fps on 120 Hz (swap interval 1, and capped at 60), the refresh histogram, the
-// requested cadence, latency quantiles, the window carry-over, pending and lost counts, the
-// stream binding (a recreated device, two devices), the D3D9 interval mapping, SCREEN-INFO.
+// Synthetic presentedTime records, in present order as the stream retires them: steady pacing, a
+// repeated frame, drops, a sustained 33 ms on 60 Hz, 60 fps on 120 Hz (swap interval 1, and
+// capped at 60), the refresh histogram, the requested cadence, latency quantiles, the carry-over
+// between windows, chain breaks (a seq gap, a break marker, a stream switch A -> B -> A), the
+// D3D9 interval mapping, SCREEN-INFO. The ring itself, and delayed handlers across drains:
+// present_ring_test.cpp.
 #include "d3d9_screen.h"
 
 #include <cstdio>
@@ -30,7 +32,7 @@ int main() {
     double t0 = 1000.0;
     for (int i = 0; i < 60; i++)
       w.add({ uint64_t(i + 1), t0 + i * P60 - 0.025, t0 + i * P60 });
-    std::string line = w.take(1.0, 60.0, screen::requestedMs(1u, 0.0, R60), 62u, 0u);
+    std::string line = w.take(1.0, 60.0, screen::requestedMs(1u, 0.0, R60), 2u);
     std::printf("%s\n", line.c_str());
     CHECK(has(line, "SCREEN t=1 shown=60 dropped=0 pend=2 lost=0"));
     CHECK(has(line, "onscreen=16.7/0.00/16.7 refreshes=59/0/0 late=0 req=16.7"));
@@ -45,7 +47,7 @@ int main() {
       w.add({ uint64_t(61 + i), p - 0.020, p });
     }
     w.add({ 120u, p, 0.0 });
-    line = w.take(2.0, 60.0, screen::requestedMs(1u, 0.0, R60), 120u, 0u);
+    line = w.take(2.0, 60.0, screen::requestedMs(1u, 0.0, R60), 0u);
     std::printf("%s\n", line.c_str());
     CHECK(has(line, "shown=59 dropped=1 pend=0"));
     CHECK(has(line, "/33.3 refreshes=58/1/0 late=1 req=16.7"));
@@ -64,7 +66,7 @@ int main() {
         p += 2 * P60;
         w.add({ uint64_t(i + 1), p - 0.030, p });
       }
-      std::string line = w.take(3.0, 60.0, screen::requestedMs(interval, 0.0, R60), 31u, 0u);
+      std::string line = w.take(3.0, 60.0, screen::requestedMs(interval, 0.0, R60), 0u);
       std::printf("%s\n", line.c_str());
       CHECK(has(line, "onscreen=33.3/0.00/33.3 refreshes=0/30/0"));
       CHECK(has(line, interval == 1u ? "late=30 req=16.7" : "late=0 req=33.3"));
@@ -83,7 +85,7 @@ int main() {
         p += (i == 30) ? 3 * R : 2 * R;
         w.add({ uint64_t(i + 1), p - 0.010, p });
       }
-      std::string line = w.take(5.0, 120.0, screen::requestedMs(1u, capped ? 1000.0 / 60.0 : 0.0, R120), 61u, 0u);
+      std::string line = w.take(5.0, 120.0, screen::requestedMs(1u, capped ? 1000.0 / 60.0 : 0.0, R120), 0u);
       std::printf("%s\n", line.c_str());
       CHECK(has(line, "onscreen=16.7/"));
       CHECK(has(line, "refreshes=0/59/1"));
@@ -101,64 +103,72 @@ int main() {
       p += (i % 2) ? 0.0183 : 0.0150;
       w.add({ uint64_t(i + 1), p - 0.001 * double(i % 10 + 1), p });
     }
-    std::string line = w.take(7.0, 60.0, screen::requestedMs(1u, 0.0, R60), 40u, 0u);
+    std::string line = w.take(7.0, 60.0, screen::requestedMs(1u, 0.0, R60), 0u);
     std::printf("%s\n", line.c_str());
     CHECK(has(line, "refreshes=39/0/0 late=0"));
     CHECK(!has(line, "/0.00/"));
     CHECK(has(line, "lat=5.0/9.0"));
   }
 
-  // 6. no records: n/a fields; lost is per window (a delta of the stream's total); hz outside
-  //    20-1000 → 60; a requested cadence <= 0 → 1 refresh
+  // 6. no records: n/a fields; pend is the stream's (passed in), lost is what the drains of
+  //    this window reported; hz outside 20-1000 → 60; a requested cadence <= 0 → 1 refresh
   {
     screen::Window w;
-    std::string line = w.take(3.0, 0.0, 0.0, 5u, 2u);
+    w.addLost(2u);
+    std::string line = w.take(3.0, 0.0, 0.0, 3u);
     std::printf("%s\n", line.c_str());
     CHECK(has(line, "shown=0 dropped=0 pend=3 lost=2 onscreen=n/a refreshes=0/0/0 late=0 req=16.7 lat=n/a hz=60"));
-    line = w.take(4.0, 0.0, 0.0, 5u, 2u);
+    line = w.take(4.0, 0.0, 0.0, 3u);
     CHECK(has(line, "pend=3 lost=0"));
   }
 
-  // 7. one frame only: no interval yet; records out of order are sorted
+  // 7. one frame only: no interval yet. A seq gap (a lost present between) breaks the chain: no
+  //    interval across it; the chain goes on after it. A break marker (times -1) breaks it too,
+  //    and is no frame. A dropped frame (presentedTime 0) doesn't break it.
   {
     screen::Window w;
     w.add({ 1u, 0.0, 20.0 });
-    std::string line = w.take(1.0, 60.0, R60, 1u, 0u);
+    std::string line = w.take(1.0, 60.0, R60, 0u);
     CHECK(has(line, "onscreen=n/a"));
     CHECK(has(line, "lat=n/a"));
-    w.add({ 3u, 20.020, 20.0 + 2 * P60 });
-    w.add({ 2u, 20.010, 20.0 + P60 });
-    line = w.take(2.0, 60.0, R60, 3u, 0u);
+    w.add({ 3u, 20.0 + 2 * P60 - 0.01, 20.0 + 2 * P60 });   // seq 2 lost: no 2-refresh interval
+    w.add({ 4u, 20.0 + 3 * P60 - 0.01, 20.0 + 3 * P60 });
+    w.addLost(1u);
+    line = w.take(2.0, 60.0, R60, 0u);
     std::printf("%s\n", line.c_str());
-    CHECK(has(line, "onscreen=16.7/0.00/16.7 refreshes=2/0/0 late=0"));
+    CHECK(has(line, "shown=2 dropped=0 pend=0 lost=1 onscreen=16.7/0.00/16.7 refreshes=1/0/0 late=0"));
+    w.add({ 5u, -1.0, -1.0 });                                // a break marker
+    w.add({ 6u, 30.0 - 0.01, 30.0 });
+    w.add({ 7u, 30.0 + P60, 0.0 });                           // dropped: the frame at 30.0 stays up
+    w.add({ 8u, 30.0 + 2 * P60 - 0.01, 30.0 + 2 * P60 });
+    line = w.take(3.0, 60.0, R60, 0u);
+    std::printf("%s\n", line.c_str());
+    CHECK(has(line, "shown=2 dropped=1 pend=0 lost=0 onscreen=33.3/0.00/33.3 refreshes=0/1/0 late=1"));
   }
 
-  // 8. the stream binding: device A presents and drains 3600, then is destroyed; device B's
-  //    presenter has a new stream whose totals start at 0: the window starts over (pend from B
-  //    only, no carry-over interval, A's lost total not re-reported). Two devices: two windows,
-  //    each with its own stream's totals.
+  // 8. review 2 #1: A -> B -> A (the swapchain's presenters are cached per window). The counts are
+  //    the streams' (pend passed in, lost from the drains), so returning to A reports nothing
+  //    stale; the rebinds only break the chain: no interval spans a switch.
   {
     screen::Window w;
     CHECK(w.bindStream(1u));
     double p = 100.0;
-    for (int i = 0; i < 3600; i++) { p += P60; w.add({ uint64_t(i + 1), p - 0.02, p }); }
-    std::string line = w.take(60.0, 60.0, R60, 3600u, 7u);
-    CHECK(has(line, "pend=0 lost=7"));
-    CHECK(!w.bindStream(1u));                   // same stream: nothing restarts
-    CHECK(w.bindStream(2u));                    // the recreated device's presenter
+    for (int i = 0; i < 100; i++) { p += P60; w.add({ uint64_t(i + 1), p - 0.02, p }); }
+    std::string line = w.take(1.0, 60.0, R60, 0u);
+    CHECK(has(line, "shown=100 dropped=0 pend=0 lost=0"));
+    CHECK(!w.bindStream(1u));                   // same stream: nothing changes
+    CHECK(w.bindStream(2u));                    // window B's presenter
     double q = 500.0;
     for (int i = 0; i < 60; i++) { q += P60; w.add({ uint64_t(i + 1), q - 0.02, q }); }
-    line = w.take(1.0, 60.0, R60, 61u, 0u);
+    line = w.take(2.0, 60.0, R60, 0u);
     std::printf("%s\n", line.c_str());
-    CHECK(has(line, "shown=60 dropped=0 pend=1 lost=0"));
-    CHECK(has(line, "/16.7 refreshes=59/0/0"));  // no interval from A's last frame
-
-    screen::Window a, b;                         // two devices at once
-    a.bindStream(3u); b.bindStream(4u);
-    for (int i = 0; i < 30; i++) a.add({ uint64_t(i + 1), 1.0 + i * P60, 1.02 + i * P60 });
-    for (int i = 0; i < 10; i++) b.add({ uint64_t(i + 1), 2.0 + i * P60, 2.02 + i * P60 });
-    CHECK(has(a.take(1.0, 60.0, R60, 30u, 0u), "shown=30 dropped=0 pend=0"));
-    CHECK(has(b.take(1.0, 60.0, R60, 12u, 0u), "shown=10 dropped=0 pend=2"));
+    CHECK(has(line, "shown=60 dropped=0 pend=0 lost=0 onscreen=16.7/0.00/16.7 refreshes=59/0/0"));
+    CHECK(w.bindStream(1u));                    // back on A: its seq goes on from 100
+    p += 30.0;
+    for (int i = 0; i < 60; i++) { p += P60; w.add({ uint64_t(101 + i), p - 0.02, p }); }
+    line = w.take(3.0, 60.0, R60, 0u);
+    std::printf("%s\n", line.c_str());
+    CHECK(has(line, "shown=60 dropped=0 pend=0 lost=0 onscreen=16.7/0.00/16.7 refreshes=59/0/0 late=0"));
   }
 
   // 9. D3DPRESENT_INTERVAL_* in refreshes, and the requested cadence

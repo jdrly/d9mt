@@ -1797,30 +1797,32 @@ MetalView_visibility(obj_handle_t view) {
 }
 
 WINEMETAL_API void
-MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after) {
-  struct unixcall_generic_obj_obj_double_noret params;
-  params.handle = drawable;
-  params.arg0 = stream;
-  params.arg1 = after;
+MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after, uint32_t flags) {
+  struct unixcall_present_tracked params;
+  params.drawable = drawable;
+  params.stream = stream;
+  params.after = after;
+  params.flags = flags;
+  params.pad = 0;
   UNIX_CALL(213, &params);
 }
 
 WINEMETAL_API uint32_t
-MetalPresentStream_drain(obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *issued,
-                         uint64_t *lost, double *now_s) {
+MetalPresentStream_drain(obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *pending,
+                         uint64_t *lost_new, double *now_s) {
   struct unixcall_present_drain params;
   params.stream = stream;
   WMT_MEMPTR_SET(params.out, out);
   params.max = max;
   params.ret = 0;
-  params.issued = 0;
-  params.lost = 0;
+  params.pending = 0;
+  params.lost_new = 0;
   params.now_s = 0.0;
   UNIX_CALL(214, &params);
-  if (issued)
-    *issued = params.issued;
-  if (lost)
-    *lost = params.lost;
+  if (pending)
+    *pending = params.pending;
+  if (lost_new)
+    *lost_new = params.lost_new;
   if (now_s)
     *now_s = params.now_s;
   return params.ret;

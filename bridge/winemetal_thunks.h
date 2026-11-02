@@ -236,13 +236,21 @@ struct unixcall_present_stream {
   obj_handle_t stream;
 };
 
+struct unixcall_present_tracked {
+  obj_handle_t drawable;
+  obj_handle_t stream;
+  double after;
+  uint32_t flags;
+  uint32_t pad;
+};
+
 struct unixcall_present_drain {
   obj_handle_t stream;
   struct WMTMemoryPointer out;
   uint32_t max;
   uint32_t ret;
-  uint64_t issued;
-  uint64_t lost;
+  uint64_t pending;
+  uint64_t lost_new;
   double now_s;
 };
 

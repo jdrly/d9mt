@@ -844,15 +844,17 @@ namespace dxvk {
     if (m_wctx == nullptr || m_wctx->presenter == nullptr)
       return;
     const Rc<MtlPresenter>& presenter = m_wctx->presenter;
-    // a new presenter (window change, recreated device) has its own stream: start over
+    // another window's presenter (cached per HWND: A -> B -> A) or a new device: the counts
+    // are each stream's own; only the interval chain breaks at the switch
     if (m_screenWindow.bindStream(presenter->screenStreamId()))
       m_screenInfo.clear();
 
     // The bridge's ring holds 1024 records: a few drains a second at most
     MtlPresentedRecord recs[256];
-    uint64_t issued = 0u, lost = 0u;
+    uint64_t pending = 0u, lostNew = 0u;
     for (uint32_t round = 0u; round < 8u; round++) {
-      const uint32_t n = presenter->drainPresented(recs, 256u, &issued, &lost);
+      const uint32_t n = presenter->drainPresented(recs, 256u, &pending, &lostNew);
+      m_screenWindow.addLost(lostNew);
       for (uint32_t i = 0u; i < n; i++)
         m_screenWindow.add({ recs[i].seq, recs[i].submitS, recs[i].presentedS });
       if (n < 256u)
@@ -882,7 +884,7 @@ namespace dxvk {
     const double hz = (m_displayRefreshRate >= 20.0 && m_displayRefreshRate <= 1000.0)
       ? m_displayRefreshRate : 60.0;
     Logger::warn(m_screenWindow.take(t, hz,
-      screen::requestedMs(m_screenInterval, m_screenCapMs, 1e3 / hz), issued, lost));
+      screen::requestedMs(m_screenInterval, m_screenCapMs, 1e3 / hz), pending));
   }
 
 
@@ -904,6 +906,15 @@ namespace dxvk {
 
     m_wctx->frameId += 1;
 
+    // D9MT_PROFILE (SCREEN line): back on a presenter after another window's (A -> B -> A): its
+    // stream gets a break marker before the next present, so no interval spans the switch
+    bool screenBreak = false;
+    if (unlikely(hitch::g_enabled) && m_wctx->presenter != nullptr) {
+      const uint64_t id = m_wctx->presenter->screenStreamId();
+      screenBreak = m_screenPresentId != 0u && id != m_screenPresentId;
+      m_screenPresentId = id;
+    }
+
     // The present (blit/signal/present/release) runs on the CS thread, which
     // takes the drawable from the presenter's acquirer thread with a bounded
     // wait (one drawable in flight at most: acquiring ahead on the producer
@@ -920,8 +931,11 @@ namespace dxvk {
       cParamsW      = uint32_t(m_presentParams.BackBufferWidth),
       cParamsH      = uint32_t(m_presentParams.BackBufferHeight),
       cSignal       = m_wctx->frameLatencySignal,
-      cMinDuration  = MinDuration
+      cMinDuration  = MinDuration,
+      cScreenBreak  = screenBreak
     ] (MtlContext* ctx) {
+      if (unlikely(cScreenBreak))
+        cPresenter->markScreenBreak();
       if (cResolveImage != nullptr && cSrcImage != nullptr) {
         MtlResolveRegion region = { };
         region.dstSubresource = { MtlAspectColor, 0u, 0u, 1u };
@@ -936,6 +950,8 @@ namespace dxvk {
       DumpBackbufferIfRequested(ctx, cDevice, cPresentImage, cParamsW, cParamsH);
 
       if (!cPresenter->isVisible()) {
+        if (unlikely(hitch::g_enabled))
+          cPresenter->markScreenBreak(); // the SCREEN line's chain breaks over skipped presents
         ctx->flushCommandList("present-skipped-not-visible", nullptr);
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
@@ -945,6 +961,8 @@ namespace dxvk {
 
       MtlAcquiredDrawable cDrawable = cPresenter->acquireNextImage(cFrameId);
       if (!cDrawable.valid) {
+        if (unlikely(hitch::g_enabled))
+          cPresenter->markScreenBreak();
         ctx->flushCommandList("present-skipped-no-drawable", nullptr);
         cPresenter->signalFrameLatency(cFrameId);
         if (cSignal != nullptr)
