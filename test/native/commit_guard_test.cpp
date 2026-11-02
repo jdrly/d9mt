@@ -200,7 +200,7 @@ namespace dxvk::backend {
     WmtBuffer m_visBuffer, m_canaryBuffer;
     void*     m_visCpu = nullptr;
     uint64_t* m_canaryCpu = nullptr;
-    std::shared_ptr<int> m_nullBuffer, m_nullImage2D, m_nullImageCube, m_nullView2D, m_nullViewCube, m_nullSampler;
+    std::shared_ptr<int> m_nullBuffer, m_nullImage2D, m_nullImageCube, m_nullImage3D, m_nullView2D, m_nullViewCube, m_nullView3D, m_nullSampler;
     uint64_t  m_canaryLost = 0u;
     enum class CanaryState : uint8_t { Unused, Armed, On, Failed };
     CanaryState m_canaryState = CanaryState::On;
