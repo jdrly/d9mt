@@ -1062,6 +1062,23 @@ static backend::RenderPsoKey drawShapedKey() {
   return k;
 }
 
+// #60: a bound stride of 0 and a divisor of 0 or above 254 are constant; per vertex is 1;
+// per instance is the divisor + 1, so the values before #60 (1, and 2 at divisor 1) stay.
+static void testStepFunction() {
+  using backend::psoStepFunction;
+  CHECK(psoStepFunction(0u, false, 0u) == 0u);     // D3D9 stride 0, an unbound stream
+  CHECK(psoStepFunction(0u, true, 0u) == 0u);      // the null stream
+  CHECK(psoStepFunction(0u, true, 3u) == 0u);      // stride 0 wins over the divisor
+  CHECK(psoStepFunction(24u, false, 0u) == 1u);
+  CHECK(psoStepFunction(24u, false, 7u) == 1u);    // a divisor without instance data
+  CHECK(psoStepFunction(16u, true, 1u) == 2u);
+  CHECK(psoStepFunction(16u, true, 2u) == 3u);
+  CHECK(psoStepFunction(16u, true, 254u) == 255u);
+  CHECK(psoStepFunction(16u, true, 255u) == 0u);
+  CHECK(psoStepFunction(16u, true, 0x7fffffu) == 0u);
+  CHECK(psoStepFunction(16u, true, 0u) == 0u);
+}
+
 static void testKeyValidator() {
   using backend::RenderPsoKey;
   const char* why = nullptr;
@@ -1083,6 +1100,12 @@ static void testKeyValidator() {
   v.layouts[15].stride = 0u;
   v.sampleCount = 4u;
   CHECK(backend::psoStateValid(v.stateBytes(), &why));
+  // Every step function byte (#60): constant, per vertex, per instance at rates 1..254.
+  for (uint32_t step : { 0u, 1u, 2u, 3u, 255u }) {
+    RenderPsoKey b = ok;
+    b.layouts[0].stepFunction = uint8_t(step);
+    CHECK(backend::psoStateValid(b.stateBytes(), &why));
+  }
   for (MtlFormat f : { MtlFormat::R32Float, MtlFormat::RG32Float, MtlFormat::RGBA32Float }) {
     RenderPsoKey b = ok;
     b.colors[0].pixelFormat = uint32_t(f);
@@ -1099,7 +1122,6 @@ static void testKeyValidator() {
     { "buffer index 2",        [] (RenderPsoKey& k) { k.layouts[0].pad = 2u; k.attrs[0].bufferIndex = 2u; k.attrs[1].bufferIndex = 2u; } },
     { "buffer index 20",       [] (RenderPsoKey& k) { k.layouts[1].pad = 20u; k.attrs[2].bufferIndex = 20u; } },
     { "layout twice",          [] (RenderPsoKey& k) { k.layouts[1].pad = 3u; } },
-    { "step function 0",       [] (RenderPsoKey& k) { k.layouts[0].stepFunction = 0u; } },
     { "vertex format 0",       [] (RenderPsoKey& k) { k.attrs[0].format = 0u; } },
     { "vertex format UChar2",  [] (RenderPsoKey& k) { k.attrs[0].format = 1u; } },
     { "vertex format 999",     [] (RenderPsoKey& k) { k.attrs[1].format = 999u; } },
@@ -2280,6 +2302,7 @@ int main(int argc, char** argv) {
   testTwoProcessesMerge();
   testConcurrency();
   testResolveConfig();
+  testStepFunction();
   testKeyValidator();
   testLoadValidation();
   testCrashGuard();
