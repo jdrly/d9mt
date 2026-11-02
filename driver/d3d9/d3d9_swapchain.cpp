@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include "../util/util_fatal_log.h"
 
 namespace dxvk {
 
@@ -219,6 +220,7 @@ namespace dxvk {
     const RGNDATA* pDirtyRegion,
           DWORD    dwFlags) {
     (void)pDirtyRegion;
+    fatal::breadcrumb("Present");
     PresentThrottle throttle = { };
     HRESULT hr;
     high_resolution_clock::time_point until = { };
