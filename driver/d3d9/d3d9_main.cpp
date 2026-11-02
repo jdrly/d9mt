@@ -3,6 +3,8 @@
 
 #include "d3d9_annotation.h"
 
+#include "../util/util_fatal_log.h"
+
 class D3DFE_PROCESSVERTICES;
 using PSGPERRORID = UINT;
 
@@ -16,6 +18,16 @@ namespace dxvk {
           uint32_t       OverrideCount) {
     if (!ppDirect3D9Ex)
       return D3DERR_INVALIDCALL;
+
+    // The fatal-exception log (driver/util/util_fatal_log.h): once per process
+    static const bool s_fatalLog = [] {
+      const bool on = fatal::install();
+      Logger::info(on ? "D9MT: fatal-exception log on (D9MT-FATAL lines; D9MT_FATAL_LOG=0 turns it off)"
+                      : "D9MT: fatal-exception log off");
+      return on;
+    }();
+    (void)s_fatalLog;
+    fatal::breadcrumb("Direct3DCreate9");
 
     *ppDirect3D9Ex = ref(new D3D9InterfaceEx(Extended, pOverrideList, OverrideCount));
     return D3D_OK;

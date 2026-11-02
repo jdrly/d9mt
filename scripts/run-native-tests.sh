@@ -44,6 +44,7 @@ host stats_test -I driver/d3d9 test/native/stats_test.cpp
 host upload_ring_test -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp
 host xfer_stats_test -I driver/d3d9 test/native/xfer_stats_test.cpp
 
+skip fatal_log_test "scripts/test-fatal-log.sh (a mingw exe under Wine)"
 skip lifetime_check_test "hand under Wine (a mingw exe; build line in its source)"
 skip submission_retire_test "hand under Wine (a mingw exe; build line in its source)"
 skip submission_tracker_test "hand under Wine (a mingw exe; build line in its source)"

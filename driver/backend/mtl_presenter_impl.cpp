@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include "../util/util_fatal_log.h"
 
 namespace dxvk::backend {
 
@@ -387,6 +388,7 @@ namespace dxvk::backend {
         lock.unlock();
 
         auto t0 = Clock::now();
+        fatal::breadcrumb("drawable acquire");
         obj_handle_t drawable = MetalLayer_nextDrawable(m_layer);
         auto t1 = Clock::now();
         int64_t ms = msSince(t0, t1);

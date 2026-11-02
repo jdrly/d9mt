@@ -23,6 +23,7 @@
 #include "../util/util_image_math.h"
 
 #include "d3d9_initializer.h"
+#include "../util/util_fatal_log.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -8679,6 +8680,7 @@ namespace dxvk {
 
 
   HRESULT D3D9DeviceEx::ResetSwapChain(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode) {
+    fatal::breadcrumb("ResetSwapChain");
     D3D9Format backBufferFmt = EnumerateFormat(pPresentationParameters->BackBufferFormat);
     bool unlockedFormats = m_parent->HasFormatsUnlocked();
 

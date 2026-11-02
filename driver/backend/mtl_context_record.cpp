@@ -14,6 +14,7 @@
 #include "../util/util_env.h"
 #include "../util/util_string.h"
 #include "../util/util_d9mt_debug.h"
+#include "../util/util_fatal_log.h"
 
 #include "mtl_profiler.h"
 
@@ -344,6 +345,7 @@ namespace dxvk::backend {
     m_device->residency().beforeSubmit();
 
     gpuCaptureBeforeCommit(m_device->wmtDevice());
+    fatal::breadcrumb("command buffer commit");
     MTL4CommandQueue_commit(m_device->wmtQueue(), cbs, cbCount);
     gpuCaptureAfterCommit();
     if (unlikely(prof::g_profEnabled))
