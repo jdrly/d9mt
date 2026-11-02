@@ -42,6 +42,7 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "present_ring.h"
 
 #if DXMT_APITRACE_METAL
 #include "apitrace/metal_capi.h"
@@ -1581,6 +1582,42 @@ d9mt_log_allow(struct d9mt_log_limit *l) {
               d9mt_dropped_ ? " [earlier lines suppressed]" : ""); \
     } \
   } while (0)
+
+/* D9MT_FORCE_COMPOSITED=1 (diagnostic, d9mt #153; off by default): requests composition, i.e.
+ * asks macOS to keep the layer off the direct-to-display path, by giving it overlapping content of
+ * its own: a 1x1-point opaque black sublayer at the layer's bottom-left corner. Whether macOS
+ * then composites is not guaranteed: verify with the Metal HUD's present mode. Apple: "When you are composited, there may be some
+ * additional buffering and display latency due to system UI elements or your own additional
+ * layers overlapping" (Metal HUD tech talk 110339). The layer itself stays opaque, so no part of
+ * the game turns see-through (layer.opaque = NO would blend the drawable's alpha). Main thread. */
+static int
+d9mt_force_composited(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("D9MT_FORCE_COMPOSITED");
+    on = v && v[0] == '1' && v[1] == 0;
+  }
+  return on;
+}
+
+static void
+d9mt_apply_force_composited(CAMetalLayer *layer) {
+  static NSString *const name = @"d9mt-force-composited";
+  if (!d9mt_force_composited())
+    return;
+  for (CALayer *sub in layer.sublayers)
+    if ([sub.name isEqualToString:name])
+      return;
+  CALayer *dot = [CALayer layer]; /* autoreleased; the layer retains it */
+  dot.name = name;
+  dot.frame = CGRectMake(0, 0, 1, 1);
+  dot.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+  dot.opaque = YES;
+  [layer addSublayer:dot];
+  static struct d9mt_log_limit fc_log;
+  D9MT_DIAG(&fc_log, "layer %p: D9MT_FORCE_COMPOSITED=1, a 1x1-point sublayer requests composition (verify with the Metal HUD)",
+            (void *)layer);
+}
 
 /* Main-thread responsiveness probe. Core Animation commits and the AppKit
  * notifications that feed MetalView_visibility only run when wine's main
@@ -3884,6 +3921,7 @@ _MetalLayer_setProps(void *obj) {
       strlcat(changed, " opaque", sizeof(changed));
     }
     dxmt_set_layer_background_black(layer);
+    d9mt_apply_force_composited(layer);
     if (layer.framebufferOnly != (BOOL)props.framebuffer_only) {
       layer.framebufferOnly = props.framebuffer_only;
       strlcat(changed, " framebufferOnly", sizeof(changed));
@@ -6972,6 +7010,103 @@ _MetalDrawable_presentAfterMinimumDuration(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* D9MT_PROFILE's SCREEN line (d9mt #153): when each tracked drawable reached the screen.
+ * One stream per presenter (MetalPresentStream_create/_release); the ring, its positions by
+ * present seq, slot ownership, in-order retirement, loss accounting and lifetime are in
+ * present_ring.h (natively tested, also under TSan). The
+ * driver uses MetalDrawable_presentTracked instead of the plain present only while profiling.
+ * The presented handler (a Metal thread) only claims, fills and publishes a slot: no lock, no
+ * log, no allocation (the last reference's free aside). Times are host time in seconds
+ * (CACurrentMediaTime, the clock of presentedTime). */
+static NTSTATUS
+_MetalPresentStream_create(void *obj) {
+  struct unixcall_present_stream *params = obj;
+  params->stream = (obj_handle_t)d9mt_present_ring_create();
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MetalPresentStream_release(void *obj) {
+  struct unixcall_present_stream *params = obj;
+  if (params->stream)
+    d9mt_present_ring_unref((struct d9mt_present_ring *)params->stream);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MetalDrawable_presentTracked(void *obj) {
+  struct unixcall_present_tracked *params = obj;
+  id<MTLDrawable> drawable = (id<MTLDrawable>)params->drawable;
+  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->stream;
+  if (ring) {
+    if (params->flags & WMT_PRESENT_TRACKED_BREAK) {
+      /* a break marker at the next position, written here at once (both times -1) */
+      const uint64_t mark = d9mt_present_ring_issue(ring);
+      d9mt_present_ring_record(ring, mark, -1.0, -1.0);
+    }
+    const uint64_t seq = d9mt_present_ring_issue(ring); /* the handler's reference */
+    const double submit_s = CACurrentMediaTime();
+    [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+      d9mt_present_ring_record(ring, seq, submit_s, d.presentedTime);
+    }];
+  }
+  if (params->after > 0.0)
+    [drawable presentAfterMinimumDuration:params->after];
+  else
+    [drawable present];
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MetalPresentStream_drain(void *obj) {
+  struct unixcall_present_drain *params = obj;
+  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->stream;
+  struct WMTPresentRecord *out = params->out.ptr;
+  uint32_t n = 0;
+  uint64_t pending = 0, lost_new = 0;
+  const double now_s = CACurrentMediaTime();
+  if (ring) {
+    _Static_assert(sizeof(struct d9mt_present_rec) == sizeof(struct WMTPresentRecord), "record layout");
+    n = d9mt_present_ring_drain(ring, (struct d9mt_present_rec *)out, params->max, now_s, &pending, &lost_new);
+  }
+  params->ret = n;
+  params->pending = pending;
+  params->lost_new = lost_new;
+  params->now_s = now_s;
+  return STATUS_SUCCESS;
+}
+
+/* The window's present-relevant state, read on the main thread (AppKit) and published here;
+ * each call returns the last published values and asks the main thread for fresh ones
+ * (never a synchronous hop: see MetalLayer_setProps). */
+static _Atomic uint32_t g_pinfo_valid, g_pinfo_fullscreen, g_pinfo_pending;
+static _Atomic double g_pinfo_max_fps, g_pinfo_min_iv, g_pinfo_max_iv;
+
+static NTSTATUS
+_MetalView_presentInfo(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  NSView *view = (NSView *)params->handle;
+  struct WMTViewPresentInfo *info = params->arg.ptr;
+  info->valid = atomic_load(&g_pinfo_valid);
+  info->fullscreen = atomic_load(&g_pinfo_fullscreen);
+  info->screen_max_fps = atomic_load(&g_pinfo_max_fps);
+  info->screen_min_interval_s = atomic_load(&g_pinfo_min_iv);
+  info->screen_max_interval_s = atomic_load(&g_pinfo_max_iv);
+  if (view && atomic_exchange(&g_pinfo_pending, 1) == 0) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSWindow *win = view.window;
+      NSScreen *screen = win.screen;
+      atomic_store(&g_pinfo_fullscreen, (win.styleMask & NSWindowStyleMaskFullScreen) ? 1u : 0u);
+      atomic_store(&g_pinfo_max_fps, screen ? (double)screen.maximumFramesPerSecond : 0.0);
+      atomic_store(&g_pinfo_min_iv, screen ? (double)screen.minimumRefreshInterval : 0.0);
+      atomic_store(&g_pinfo_max_iv, screen ? (double)screen.maximumRefreshInterval : 0.0);
+      atomic_store(&g_pinfo_valid, win ? 1u : 0u);
+      atomic_store(&g_pinfo_pending, 0);
+    });
+  }
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTL4RenderCommandEncoder_setVisibilityResultMode(void *obj) {
   struct unixcall_mtl4_setvisibilitymode *params = obj;
@@ -7294,6 +7429,11 @@ D9MT_POOLED(_MTLTexture_usage)
 D9MT_POOLED(_MTLTexture_width)
 D9MT_POOLED(_MetalDrawable_present)
 D9MT_POOLED(_MetalDrawable_presentAfterMinimumDuration)
+D9MT_POOLED(_MetalDrawable_presentTracked)
+D9MT_POOLED(_MetalPresentStream_drain)
+D9MT_POOLED(_MetalPresentStream_create)
+D9MT_POOLED(_MetalPresentStream_release)
+D9MT_POOLED(_MetalView_presentInfo)
 D9MT_POOLED(_MetalView_visibility)
 D9MT_POOLED(_MetalDrawable_texture)
 D9MT_POOLED(_MetalLayer_getEDRValue)
@@ -7587,6 +7727,11 @@ const void *__wine_unix_call_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_MetalDrawable_presentTracked_pooled,
+    &_MetalPresentStream_drain_pooled,
+    &_MetalView_presentInfo_pooled,
+    &_MetalPresentStream_create_pooled,
+    &_MetalPresentStream_release_pooled,
 
 };
 
@@ -7807,6 +7952,11 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTL4CommandBuffer_encodeSpatialScale_pooled,
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
+    &_MetalDrawable_presentTracked_pooled,
+    &_MetalPresentStream_drain_pooled,
+    &_MetalView_presentInfo_pooled,
+    &_MetalPresentStream_create_pooled,
+    &_MetalPresentStream_release_pooled,
 
 };
 #endif

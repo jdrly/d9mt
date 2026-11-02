@@ -136,6 +136,13 @@ int main(int argc, char** argv) {
     CHECK(s.inMs >= 0.9);
   }
 
+  { // The wall-clock stamp and presenter state appended to HITCH/PACE/STATS lines
+    CHECK(hitch::stampSuffix("14:39:37.612") == " | at=14:39:37.612");
+    CHECK(hitch::stampSuffix("14:39:37.612", 0x3u, false) == " | at=14:39:37.612 vis=0x3 stalled=0");
+    CHECK(hitch::stampSuffix("14:39:37.612", 0x2u, true) == " | at=14:39:37.612 vis=0x2 stalled=1");
+    CHECK(hitch::stampSuffix("00:00:00.000", ~0ull, false) == " | at=00:00:00.000 vis=? stalled=0");
+  }
+
   if (g_fail) {
     std::printf("%d check(s) failed\n", g_fail);
     return 1;

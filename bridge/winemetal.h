@@ -2239,6 +2239,44 @@ WINEMETAL_API void MetalDrawable_present(obj_handle_t drawable);
 
 WINEMETAL_API void MetalDrawable_presentAfterMinimumDuration(obj_handle_t drawable, double after);
 
+/* D9MT_PROFILE only (d9mt #153): when tracked drawables reached the screen. */
+struct WMTPresentRecord {
+  uint64_t seq;       /* the tracked present's number, from 1 */
+  double submit_s;    /* host time (s, CACurrentMediaTime) when present was called */
+  double presented_s; /* MTLDrawable.presentedTime; 0 = never shown (dropped) */
+};
+
+struct WMTViewPresentInfo {
+  uint32_t valid;               /* 0 until the main thread has answered once */
+  uint32_t fullscreen;          /* the window has NSWindowStyleMaskFullScreen */
+  double screen_max_fps;        /* NSScreen.maximumFramesPerSecond */
+  double screen_min_interval_s; /* NSScreen.minimumRefreshInterval */
+  double screen_max_interval_s; /* NSScreen.maximumRefreshInterval (> min: adaptive sync) */
+};
+
+/* a presented-time stream (one per presenter; 0 if out of memory) and its owner's release; a
+ * stream lives on until the last pending presented handler has run */
+WINEMETAL_API obj_handle_t MetalPresentStream_create(void);
+WINEMETAL_API void MetalPresentStream_release(obj_handle_t stream);
+
+/* present (after > 0: presentAfterMinimumDuration) with a presented handler that records the
+ * drawable's presentedTime into the stream (stream 0: a plain present). flags
+ * WMT_PRESENT_TRACKED_BREAK: first a break marker (a record with both times -1: no on-screen
+ * interval spans it) */
+#define WMT_PRESENT_TRACKED_BREAK 0x1u
+WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after,
+                                                uint32_t flags);
+
+/* the stream's owner only: copies up to max records out, strictly in present order (a gap in
+ * seq = a lost present); *pending = this stream's presents not yet retired, *lost_new = presents
+ * this call retired as lost, *now_s = host time now */
+WINEMETAL_API uint32_t MetalPresentStream_drain(
+    obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *pending, uint64_t *lost_new,
+    double *now_s);
+
+/* the last values the main thread published (asks it for fresh ones; never blocks) */
+WINEMETAL_API void MetalView_presentInfo(obj_handle_t view, struct WMTViewPresentInfo *info);
+
 #define WMT_VISIBILITY_VISIBLE         0x1u
 #define WMT_VISIBILITY_ON_ACTIVE_SPACE 0x2u
 #define WMT_VISIBILITY_MINIATURIZED    0x4u

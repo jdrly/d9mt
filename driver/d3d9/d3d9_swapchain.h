@@ -4,6 +4,7 @@
 #include "d3d9_device.h"
 #include "d3d9_format.h"
 #include "d3d9_frame_cap.h"
+#include "d3d9_screen.h"
 
 #include "../mtl/mtl_presenter.h"
 
@@ -106,6 +107,14 @@ namespace dxvk {
 
     bool UpdateWindowCtx();
 
+    // D9MT_PROFILE: logs the SCREEN line for the second that ends now (and SCREEN-INFO first
+    // and whenever it changes); `t` is PACE's t (d3d9_screen.h).
+    void LogScreen(double t);
+
+    // D9MT_PROFILE: the presenter's state for a HITCH line (lastVisibility, isDrawableStalled);
+    // false without a presenter.
+    bool PresenterState(uint64_t* vis, bool* stalled) const;
+
   private:
 
     enum BindingIds : uint32_t {
@@ -181,6 +190,14 @@ namespace dxvk {
     framecap::Cadence         m_capCadence;
     uint64_t                  m_capUntilNs = 0u;
     LogLimiter                m_capLog = { 20u, std::chrono::seconds(10) };
+
+    // D9MT_PROFILE (LogScreen): the SCREEN window, the last SCREEN-INFO line, the cap's
+    // minimum duration (ms, 0 = none) and the swap interval of the last Present
+    screen::Window            m_screenWindow;
+    std::string               m_screenInfo;
+    double                    m_screenCapMs = 0.0;
+    uint32_t                  m_screenInterval = 1u;
+    uint64_t                  m_screenPresentId = 0u; // the stream the last Present went to
 
     HRESULT PresentLocked(
       const RECT*    pSourceRect,
