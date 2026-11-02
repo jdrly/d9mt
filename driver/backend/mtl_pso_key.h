@@ -350,7 +350,9 @@ namespace dxvk::backend {
    * fixed-function draw (stream 0 at buffer 3, the null stream at 19) that was buffers 0-2
    * and 4-18, 0-2 being the FF shader's own constant buffers. On an M1 (G13) under macOS
    * 26.1 that pipeline build ends in an x86 integer divide by zero inside Metal (Rosetta
-   * traps it; a player's D9MT-FATAL line, 2026-11-02).
+   * traps it; a player's D9MT-FATAL line, 2026-11-02). These stride-0 layouts are the
+   * suspected trigger, the only zero in the descriptor a driver could divide by; it is not
+   * confirmed until that Mac runs a build with this change.
    *
    * \returns the number of layouts up to the highest set index + 1
    */
