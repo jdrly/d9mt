@@ -17,6 +17,7 @@
 //    until the test releases it), also concurrently: the reporter, another thread's wait and the
 //    device's drain; a serial completed exactly at the end of the wait, or submitted late in it,
 //    is no hang; a serial nobody submits and D9MT_GPU_HUNG=continue give up the wait as before;
+//    D9MT_GPU_HUNG is the tracker's from its construction (changed later, it doesn't apply);
 //  - with DXVK_LOG_LEVEL=none the D9MT-GPU-HUNG line still reaches stderr (--log-none, its own
 //    process).
 // The tracker uses dxvk::thread and the driver's util, so this is a mingw exe run under Wine
@@ -529,6 +530,33 @@ static void gpuHung() {
     CHECK(g_parked.load() == 0);
     gpuComplete(s);
     SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+  }
+
+  { // 5c. the policy is the tracker's, from when it was made: D9MT_GPU_HUNG=continue set later
+    //     doesn't stop a hang from ending the game
+    resetHang();
+    SubmissionTracker t(0x1u);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    uint64_t s = t.onSubmit(0x2u);
+    t.waitFor(s);
+    CHECK(g_terminated.load() == 1);
+    CHECK(g_parked.load() == 1);
+    CHECK(t.gpuHung());
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+    gpuComplete(s);
+  }
+
+  { // 5d. ... and a tracker made with D9MT_GPU_HUNG=continue keeps rendering on after it's unset
+    resetHang();
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", "continue");
+    SubmissionTracker t(0x1u);
+    SetEnvironmentVariableA("D9MT_GPU_HUNG", nullptr);
+    uint64_t s = t.onSubmit(0x2u);
+    t.waitFor(s);
+    CHECK(g_terminated.load() == 0);
+    CHECK(g_parked.load() == 0);
+    CHECK(!t.gpuHung());
+    gpuComplete(s);
   }
 
   { // 6. concurrent: while the reporter is past termination (parked), another thread's wait and
