@@ -45,6 +45,7 @@ host prof_clock_test -I driver/backend test/native/prof_clock_test.cpp
 host prof_clock_test_x64 -arch x86_64 -I driver/backend test/native/prof_clock_test.cpp
 host stats_test -I driver/d3d9 test/native/stats_test.cpp
 host upload_ring_test -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp
+host texture_kind_test -I driver/backend test/native/texture_kind_test.cpp
 host xfer_stats_test -I driver/d3d9 test/native/xfer_stats_test.cpp
 
 skip lifetime_check_test "hand under Wine (a mingw exe; build line in its source)"

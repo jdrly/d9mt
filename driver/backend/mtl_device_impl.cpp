@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "mtl_context_impl.h"
+#include "mtl_texture_kind.h"
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_pfv.h"
 #include "../util/log/log.h"
@@ -513,11 +514,16 @@ namespace dxvk::backend {
      && (key.layerCount == 0u || key.layerCount % 6u != 0u))
       viewShape.cube = false;
 
+    static_assert(texkind::ofMetalType(WMTTextureType2D) == texkind::k2D
+               && texkind::ofMetalType(WMTTextureTypeCube) == texkind::kCube
+               && texkind::ofMetalType(WMTTextureType3D) == texkind::k3D
+               && texkind::ofMetalType(WMTTextureType2DArray) == texkind::kOther);
     uint64_t gpuResourceId = 0u;
+    const WMTTextureType viewType = wmtTextureType(viewShape);
     obj_handle_t handle = MTLTexture_newTextureView(
       impl->owned.handle(),
       wmtFormat(key.format),
-      wmtTextureType(viewShape),
+      viewType,
       key.baseMip, key.mipCount,
       key.baseLayer, key.layerCount,
       swizzle,
@@ -534,6 +540,7 @@ namespace dxvk::backend {
     view->key = key;
     view->image = image;
     view->gpuResourceId = gpuResourceId;
+    view->kind = texkind::ofMetalType(uint32_t(viewType));
     view->residencyDevice = this;
     return view;
   }
