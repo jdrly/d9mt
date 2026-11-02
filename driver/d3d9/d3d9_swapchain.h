@@ -188,10 +188,11 @@ namespace dxvk {
     LogLimiter                m_capLog = { 20u, std::chrono::seconds(10) };
 
     // D9MT_PROFILE (LogScreen): the SCREEN window, the last SCREEN-INFO line, the cap's
-    // minimum duration of the last Present (ms, 0 = none)
+    // minimum duration (ms, 0 = none) and the swap interval of the last Present
     screen::Window            m_screenWindow;
     std::string               m_screenInfo;
     double                    m_screenCapMs = 0.0;
+    uint32_t                  m_screenInterval = 1u;
 
     HRESULT PresentLocked(
       const RECT*    pSourceRect,

@@ -83,7 +83,10 @@ with a scalar model of the D3D9 semantics; `--strict` uses
 every corpus `crs` against a `mul`/`mul`/`add` expansion.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
-ThreadSanitizer) against the built bridge. The scripts under `scripts/run-*`
+ThreadSanitizer) against the built bridge.
+`scripts/test-present-ring.sh` runs `present_ring_test` (the bridge's presented-time ring
+behind the `SCREEN` line, `bridge/unix/present_ring.h`) under ThreadSanitizer; its plain build
+runs in `scripts/run-native-tests.sh`. The scripts under `scripts/run-*`
 and `scripts/dump-verify.sh` drive the D3D9 test programs in `test/` under a
 CrossOver bottle (`CX` and `BOTTLE` must be set).
 
