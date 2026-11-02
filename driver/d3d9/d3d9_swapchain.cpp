@@ -425,8 +425,12 @@ namespace dxvk {
         m_wctx->presenter->setRefreshRate(hz);
       }
       UpdateTargetFrameRate(presentInterval);
-      if (unlikely(hitch::g_enabled))
-        m_screenCapMs = capped ? m_capPlan.minDurationS * 1e3 : 0.0;
+      if (unlikely(hitch::g_enabled)) {
+        m_screenCapMs    = capped ? m_capPlan.minDurationS * 1e3 : 0.0;
+        // the game's D3DPRESENT_INTERVAL_* in refreshes; d3d9.presentInterval counts refreshes
+        m_screenInterval = m_parent->GetOptions()->presentInterval >= 0
+          ? presentInterval : screen::d3dIntervalRefreshes(presentInterval);
+      }
       PresentImage(presentInterval, capped ? m_capPlan.minDurationS : 0.0);
       if (capped)
         m_capUntilNs = m_capCadence.next(clockNs(), m_capPlan.intervalNs);
@@ -840,6 +844,9 @@ namespace dxvk {
     if (m_wctx == nullptr || m_wctx->presenter == nullptr)
       return;
     const Rc<MtlPresenter>& presenter = m_wctx->presenter;
+    // a new presenter (window change, recreated device) has its own stream: start over
+    if (m_screenWindow.bindStream(presenter->screenStreamId()))
+      m_screenInfo.clear();
 
     // The bridge's ring holds 1024 records: a few drains a second at most
     MtlPresentedRecord recs[256];
@@ -856,6 +863,7 @@ namespace dxvk {
     screen::Info info;
     info.displaySync   = st.displaySync;
     info.drawables     = st.drawables;
+    info.interval      = m_screenInterval;
     info.capMs         = m_screenCapMs;
     info.hz            = m_displayRefreshRate;
     info.screenValid   = st.windowValid;
@@ -869,7 +877,10 @@ namespace dxvk {
       Logger::warn(infoLine);
       m_screenInfo = std::move(infoLine);
     }
-    Logger::warn(m_screenWindow.take(t, m_displayRefreshRate, issued, lost));
+    const double hz = (m_displayRefreshRate >= 20.0 && m_displayRefreshRate <= 1000.0)
+      ? m_displayRefreshRate : 60.0;
+    Logger::warn(m_screenWindow.take(t, hz,
+      screen::requestedMs(m_screenInterval, m_screenCapMs, 1e3 / hz), issued, lost));
   }
 
 

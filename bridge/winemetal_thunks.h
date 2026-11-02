@@ -232,7 +232,12 @@ struct unixcall_generic_obj_obj_double_noret {
   double arg1;
 };
 
+struct unixcall_present_stream {
+  obj_handle_t stream;
+};
+
 struct unixcall_present_drain {
+  obj_handle_t stream;
   struct WMTMemoryPointer out;
   uint32_t max;
   uint32_t ret;

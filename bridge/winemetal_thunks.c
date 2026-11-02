@@ -1797,18 +1797,19 @@ MetalView_visibility(obj_handle_t view) {
 }
 
 WINEMETAL_API void
-MetalDrawable_presentTracked(obj_handle_t drawable, double after) {
+MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after) {
   struct unixcall_generic_obj_obj_double_noret params;
   params.handle = drawable;
-  params.arg0 = 0;
+  params.arg0 = stream;
   params.arg1 = after;
   UNIX_CALL(213, &params);
 }
 
 WINEMETAL_API uint32_t
-MetalPresent_drainRecords(struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost,
-                          double *now_s) {
+MetalPresentStream_drain(obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *issued,
+                         uint64_t *lost, double *now_s) {
   struct unixcall_present_drain params;
+  params.stream = stream;
   WMT_MEMPTR_SET(params.out, out);
   params.max = max;
   params.ret = 0;
@@ -1831,6 +1832,21 @@ MetalView_presentInfo(obj_handle_t view, struct WMTViewPresentInfo *info) {
   params.handle = view;
   WMT_MEMPTR_SET(params.arg, info);
   UNIX_CALL(215, &params);
+}
+
+WINEMETAL_API obj_handle_t
+MetalPresentStream_create(void) {
+  struct unixcall_present_stream params;
+  params.stream = 0;
+  UNIX_CALL(216, &params);
+  return params.stream;
+}
+
+WINEMETAL_API void
+MetalPresentStream_release(obj_handle_t stream) {
+  struct unixcall_present_stream params;
+  params.stream = stream;
+  UNIX_CALL(217, &params);
 }
 
 WINEMETAL_API void

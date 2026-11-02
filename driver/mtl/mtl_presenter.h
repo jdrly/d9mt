@@ -86,8 +86,9 @@ namespace dxvk {
     // display rate meanwhile, since nothing else does.
     virtual bool isDrawableStalled() const { return false; }
 
-    // D9MT_PROFILE only: copies up to `max` presented records out of the bridge (the render
-    // thread presents with a presented handler while profiling); `issued` and `lost` are totals.
+    // D9MT_PROFILE only: copies up to `max` presented records out of this presenter's stream (the
+    // render thread presents with a presented handler while profiling); `issued` and `lost` are
+    // this stream's totals.
     virtual uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
                                     uint64_t* issued, uint64_t* lost) {
       (void)out; (void)max; *issued = 0u; *lost = 0u; return 0u;
@@ -95,6 +96,10 @@ namespace dxvk {
 
     // D9MT_PROFILE only: the layer's and its window's present-relevant state (never blocks).
     virtual MtlScreenState screenState() { return MtlScreenState(); }
+
+    // D9MT_PROFILE only: identifies this presenter's stream (unique in the process, never reused;
+    // 0 = no stream), so the SCREEN window restarts when the presenter changes.
+    virtual uint64_t screenStreamId() const { return 0u; }
   };
 
   Rc<MtlPresenter> createMtlPresenter(const Rc<MtlDevice>& device, const MtlPresenterDesc& desc);

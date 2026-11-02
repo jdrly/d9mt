@@ -42,6 +42,7 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "present_ring.h"
 
 #if DXMT_APITRACE_METAL
 #include "apitrace/metal_capi.h"
@@ -6973,42 +6974,39 @@ _MetalDrawable_presentAfterMinimumDuration(void *obj) {
 }
 
 /* D9MT_PROFILE's SCREEN line (d9mt #153): when each tracked drawable reached the screen.
- * The driver uses MetalDrawable_presentTracked instead of the plain present only while
- * profiling. The presented handler runs on a Metal thread: it only claims a slot of a fixed
- * ring with one atomic add and publishes it with a release store (no lock, no log, no
- * allocation); the app thread copies the slots out once a second (MetalPresent_drainRecords).
- * A slot whose tag changed during the copy, or one overwritten before it was read, counts as
- * lost. Times are host time in seconds (CACurrentMediaTime, the clock of presentedTime). */
-#define D9MT_PRESENT_RING 1024u
-struct d9mt_present_slot {
-  _Atomic uint64_t tag; /* claim index + 1 once written */
-  _Atomic uint64_t seq;
-  _Atomic double submit_s;
-  _Atomic double presented_s;
-};
-static struct d9mt_present_slot g_present_ring[D9MT_PRESENT_RING];
-static _Atomic uint64_t g_present_issued;  /* tracked presents so far */
-static _Atomic uint64_t g_present_claimed; /* presented handlers so far */
-static _Atomic uint64_t g_present_lost;
-static uint64_t g_present_read;            /* the drain's cursor, under g_present_drain_lock */
-static pthread_mutex_t g_present_drain_lock = PTHREAD_MUTEX_INITIALIZER;
+ * One stream per presenter (MetalPresentStream_create/_release); the ring, its slot ownership,
+ * loss accounting and lifetime are in present_ring.h (natively tested, also under TSan). The
+ * driver uses MetalDrawable_presentTracked instead of the plain present only while profiling.
+ * The presented handler (a Metal thread) only claims, fills and publishes a slot: no lock, no
+ * log, no allocation (the last reference's free aside). Times are host time in seconds
+ * (CACurrentMediaTime, the clock of presentedTime). */
+static NTSTATUS
+_MetalPresentStream_create(void *obj) {
+  struct unixcall_present_stream *params = obj;
+  params->stream = (obj_handle_t)d9mt_present_ring_create();
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MetalPresentStream_release(void *obj) {
+  struct unixcall_present_stream *params = obj;
+  if (params->stream)
+    d9mt_present_ring_unref((struct d9mt_present_ring *)params->stream);
+  return STATUS_SUCCESS;
+}
 
 static NTSTATUS
 _MetalDrawable_presentTracked(void *obj) {
   struct unixcall_generic_obj_obj_double_noret *params = obj;
   id<MTLDrawable> drawable = (id<MTLDrawable>)params->handle;
-  const uint64_t seq = atomic_fetch_add_explicit(&g_present_issued, 1, memory_order_relaxed) + 1;
-  const double submit_s = CACurrentMediaTime();
-  [drawable addPresentedHandler:^(id<MTLDrawable> d) {
-    const uint64_t i = atomic_fetch_add_explicit(&g_present_claimed, 1, memory_order_relaxed);
-    struct d9mt_present_slot *s = &g_present_ring[i % D9MT_PRESENT_RING];
-    atomic_store_explicit(&s->tag, 0, memory_order_relaxed);
-    atomic_thread_fence(memory_order_release);
-    atomic_store_explicit(&s->seq, seq, memory_order_relaxed);
-    atomic_store_explicit(&s->submit_s, submit_s, memory_order_relaxed);
-    atomic_store_explicit(&s->presented_s, d.presentedTime, memory_order_relaxed);
-    atomic_store_explicit(&s->tag, i + 1, memory_order_release);
-  }];
+  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->arg0;
+  if (ring) {
+    const uint64_t seq = d9mt_present_ring_issue(ring); /* the handler's reference */
+    const double submit_s = CACurrentMediaTime();
+    [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+      d9mt_present_ring_record(ring, seq, submit_s, d.presentedTime);
+    }];
+  }
   if (params->arg1 > 0.0)
     [drawable presentAfterMinimumDuration:params->arg1];
   else
@@ -7017,45 +7015,19 @@ _MetalDrawable_presentTracked(void *obj) {
 }
 
 static NTSTATUS
-_MetalPresent_drainRecords(void *obj) {
+_MetalPresentStream_drain(void *obj) {
   struct unixcall_present_drain *params = obj;
+  struct d9mt_present_ring *ring = (struct d9mt_present_ring *)params->stream;
   struct WMTPresentRecord *out = params->out.ptr;
   uint32_t n = 0;
-  pthread_mutex_lock(&g_present_drain_lock);
-  const uint64_t end = atomic_load_explicit(&g_present_claimed, memory_order_acquire);
-  if (end - g_present_read > D9MT_PRESENT_RING) {
-    atomic_fetch_add_explicit(&g_present_lost, end - D9MT_PRESENT_RING - g_present_read,
-                              memory_order_relaxed);
-    g_present_read = end - D9MT_PRESENT_RING;
+  uint64_t issued = 0, lost = 0;
+  if (ring) {
+    _Static_assert(sizeof(struct d9mt_present_rec) == sizeof(struct WMTPresentRecord), "record layout");
+    n = d9mt_present_ring_drain(ring, (struct d9mt_present_rec *)out, params->max, &issued, &lost);
   }
-  while (g_present_read < end && n < params->max) {
-    struct d9mt_present_slot *s = &g_present_ring[g_present_read % D9MT_PRESENT_RING];
-    const uint64_t want = g_present_read + 1;
-    const uint64_t tag = atomic_load_explicit(&s->tag, memory_order_acquire);
-    if (tag != want) {
-      if (tag > want) { /* overwritten by a later present */
-        atomic_fetch_add_explicit(&g_present_lost, 1, memory_order_relaxed);
-        g_present_read++;
-        continue;
-      }
-      break; /* claimed, not written yet: next drain */
-    }
-    struct WMTPresentRecord r;
-    r.seq = atomic_load_explicit(&s->seq, memory_order_relaxed);
-    r.submit_s = atomic_load_explicit(&s->submit_s, memory_order_relaxed);
-    r.presented_s = atomic_load_explicit(&s->presented_s, memory_order_relaxed);
-    atomic_thread_fence(memory_order_acquire);
-    g_present_read++;
-    if (atomic_load_explicit(&s->tag, memory_order_relaxed) != want) {
-      atomic_fetch_add_explicit(&g_present_lost, 1, memory_order_relaxed);
-      continue;
-    }
-    out[n++] = r;
-  }
-  pthread_mutex_unlock(&g_present_drain_lock);
   params->ret = n;
-  params->issued = atomic_load_explicit(&g_present_issued, memory_order_relaxed);
-  params->lost = atomic_load_explicit(&g_present_lost, memory_order_relaxed);
+  params->issued = issued;
+  params->lost = lost;
   params->now_s = CACurrentMediaTime();
   return STATUS_SUCCESS;
 }
@@ -7414,7 +7386,9 @@ D9MT_POOLED(_MTLTexture_width)
 D9MT_POOLED(_MetalDrawable_present)
 D9MT_POOLED(_MetalDrawable_presentAfterMinimumDuration)
 D9MT_POOLED(_MetalDrawable_presentTracked)
-D9MT_POOLED(_MetalPresent_drainRecords)
+D9MT_POOLED(_MetalPresentStream_drain)
+D9MT_POOLED(_MetalPresentStream_create)
+D9MT_POOLED(_MetalPresentStream_release)
 D9MT_POOLED(_MetalView_presentInfo)
 D9MT_POOLED(_MetalView_visibility)
 D9MT_POOLED(_MetalDrawable_texture)
@@ -7710,8 +7684,10 @@ const void *__wine_unix_call_funcs[] = {
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
     &_MetalDrawable_presentTracked_pooled,
-    &_MetalPresent_drainRecords_pooled,
+    &_MetalPresentStream_drain_pooled,
     &_MetalView_presentInfo_pooled,
+    &_MetalPresentStream_create_pooled,
+    &_MetalPresentStream_release_pooled,
 
 };
 
@@ -7933,8 +7909,10 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalDrawable_presentAfterMinimumDuration_pooled,
     &_MetalView_visibility_pooled,
     &_MetalDrawable_presentTracked_pooled,
-    &_MetalPresent_drainRecords_pooled,
+    &_MetalPresentStream_drain_pooled,
     &_MetalView_presentInfo_pooled,
+    &_MetalPresentStream_create_pooled,
+    &_MetalPresentStream_release_pooled,
 
 };
 #endif

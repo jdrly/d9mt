@@ -2254,14 +2254,20 @@ struct WMTViewPresentInfo {
   double screen_max_interval_s; /* NSScreen.maximumRefreshInterval (> min: adaptive sync) */
 };
 
-/* present (after > 0: presentAfterMinimumDuration) with a presented handler that records the
- * drawable's presentedTime into the bridge's ring */
-WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, double after);
+/* a presented-time stream (one per presenter; 0 if out of memory) and its owner's release; a
+ * stream lives on until the last pending presented handler has run */
+WINEMETAL_API obj_handle_t MetalPresentStream_create(void);
+WINEMETAL_API void MetalPresentStream_release(obj_handle_t stream);
 
-/* copies up to max records out of the ring; *issued = tracked presents so far, *lost = records
- * overwritten before they were read, *now_s = host time now */
-WINEMETAL_API uint32_t MetalPresent_drainRecords(
-    struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost, double *now_s);
+/* present (after > 0: presentAfterMinimumDuration) with a presented handler that records the
+ * drawable's presentedTime into the stream (stream 0: a plain present) */
+WINEMETAL_API void MetalDrawable_presentTracked(obj_handle_t drawable, obj_handle_t stream, double after);
+
+/* the stream's owner only: copies up to max records out, in present order; *issued = tracked
+ * presents of this stream so far, *lost = its records lost so far, *now_s = host time now */
+WINEMETAL_API uint32_t MetalPresentStream_drain(
+    obj_handle_t stream, struct WMTPresentRecord *out, uint32_t max, uint64_t *issued, uint64_t *lost,
+    double *now_s);
 
 /* the last values the main thread published (asks it for fresh ones; never blocks) */
 WINEMETAL_API void MetalView_presentInfo(obj_handle_t view, struct WMTViewPresentInfo *info);

@@ -1,6 +1,7 @@
 #include "mtl_presenter_impl.h"
 
 #include "mtl_device_impl.h"
+#include "mtl_profiler.h"
 
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
@@ -61,6 +62,13 @@ namespace dxvk::backend {
       setRefreshRate(0.0);
       applyProps("create");
 
+      // D9MT_PROFILE: this presenter's presented-time stream (SCREEN line)
+      if (prof::g_profEnabled) {
+        static std::atomic<uint64_t> s_nextStreamId = { 0u };
+        m_screenStream   = MetalPresentStream_create();
+        m_screenStreamId = m_screenStream ? ++s_nextStreamId : 0u;
+      }
+
       attachLayerResidency();
     }
 
@@ -78,6 +86,9 @@ namespace dxvk::backend {
       }
       if (m_view)
         ReleaseMetalView(m_view);
+      // presented handlers still pending keep the stream alive until they have run
+      if (m_screenStream)
+        MetalPresentStream_release(m_screenStream);
     }
 
     void recreate(const MtlPresenterDesc& desc) override {
@@ -168,6 +179,7 @@ namespace dxvk::backend {
 
       image.drawable = drawable;
       image.sync.drawable = drawable;
+      image.sync.screenStream = m_screenStream;
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
       tex->drawable    = true;
@@ -262,9 +274,11 @@ namespace dxvk::backend {
                             uint64_t* issued, uint64_t* lost) override {
       static_assert(sizeof(MtlPresentedRecord) == sizeof(WMTPresentRecord));
       static_assert(offsetof(MtlPresentedRecord, presentedS) == offsetof(WMTPresentRecord, presented_s));
-      return MetalPresent_drainRecords(reinterpret_cast<WMTPresentRecord*>(out), max,
+      return MetalPresentStream_drain(m_screenStream, reinterpret_cast<WMTPresentRecord*>(out), max,
         issued, lost, nullptr);
     }
+
+    uint64_t screenStreamId() const override { return m_screenStreamId; }
 
     MtlScreenState screenState() override {
       MtlScreenState st;
@@ -302,6 +316,8 @@ namespace dxvk::backend {
     bool             m_layerResidencyAttached = false;
     bool             m_layerAttachWarned      = false;
     uint64_t         m_lastPresented = 0u;
+    obj_handle_t     m_screenStream   = 0u; // D9MT_PROFILE (SCREEN line)
+    uint64_t         m_screenStreamId = 0u;
     uint64_t         m_completedFrame = 0u;
 
     // Drawable acquisition runs on its own thread so that a WindowServer
