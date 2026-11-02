@@ -2,32 +2,19 @@
 
 // Buckets nest and are not mutually exclusive — interpret a sub-bucket as a
 // breakdown of its parent, not as additive across the whole frame.
+// The timed buckets, their scope and window live in mtl_profiler_scope.h.
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
-namespace dxvk::backend::prof {
+#include "mtl_profiler_scope.h"
 
-  enum Bucket : uint32_t {
-    BeginRecording = 0,
-    PrepareDraw,
-    ResolvePso,
-    FlushVertexBuffers,
-    FlushResources,
-    FlushDynamicState,
-    EncodeDraw,
-    FlushCmdChunk,
-    Submit,
-    SynchronizeWsi,
-    EndFrame,
-    BucketCount
-  };
+namespace dxvk::backend::prof {
 
   enum Counter : uint32_t {
     CntDraws = 0,
@@ -48,11 +35,7 @@ namespace dxvk::backend::prof {
     CounterCount
   };
 
-  inline const bool g_profEnabled = std::getenv("D9MT_PROFILE") != nullptr;
-
-  inline uint64_t g_ns[BucketCount]     = {};
   inline uint64_t g_counts[CounterCount] = {};
-  inline uint64_t g_frames = 0u;
 
   // MTLSharedEvent_signaledValue reads (SubmissionTracker::completedSerial): any thread, so
   // atomic, and outside g_counts.
@@ -80,22 +63,6 @@ namespace dxvk::backend::prof {
     while (ns > max && !g_unsubWaitMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) { }
   }
 
-  struct Scope {
-    std::chrono::steady_clock::time_point t0;
-    uint32_t bucket;
-    explicit Scope(Bucket b) : bucket(b) {
-      if (!g_profEnabled) return;
-      t0 = std::chrono::steady_clock::now();
-    }
-    ~Scope() {
-      if (!g_profEnabled) return;
-      g_ns[bucket] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - t0).count());
-    }
-    Scope(const Scope&) = delete;
-    Scope& operator=(const Scope&) = delete;
-  };
-
   inline void bump(Counter c, uint64_t n = 1u) {
     if (!g_profEnabled) return;
     g_counts[c] += n;
@@ -103,7 +70,8 @@ namespace dxvk::backend::prof {
 
   inline void onFrameEnd() {
     if (!g_profEnabled) return;
-    if ((++g_frames & 0xFFu) != 0u)
+    double totalMsArr[BucketCount];
+    if (!takeWindow(cheap_clock::process(), totalMsArr))
       return;
 
     static constexpr const char* kNames[BucketCount] = {
@@ -115,10 +83,9 @@ namespace dxvk::backend::prof {
 
     std::string line = str::format("PROF frame=", g_frames, " win=256 ms(avg/f):");
     for (uint32_t i = 0u; i < BucketCount; i++) {
-      double totalMs = double(g_ns[i]) * 1e-6;
+      const double totalMs = totalMsArr[i];
       line += str::format(" ", kNames[i], "=",
         totalMs, "(", totalMs / kFrames, ")");
-      g_ns[i] = 0u;
     }
     line += str::format(" | draws=", g_counts[CntDraws],
       "(", double(g_counts[CntDraws]) / kFrames, "/f)",

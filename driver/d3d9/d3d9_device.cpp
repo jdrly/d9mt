@@ -5819,7 +5819,7 @@ namespace dxvk {
     const uint64_t nowNs = hitch::nowNs();
     uint64_t frame = 0u;
     hitch::FrameStats stats, every;
-    if (m_hitch.endFrame(hitch::ticks(), nowNs, compile,
+    if (m_hitch.endFrame(nowNs, compile,
           dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats, &every))
       Logger::warn(hitch::formatHitch(frame, stats));
 

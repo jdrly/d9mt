@@ -970,7 +970,9 @@ namespace dxvk {
       return LockDeviceProfiled();
     }
 
-    D3D9DeviceLock LockDeviceProfiled() {
+    // D9MT_PROFILE only. Out of line (and cold) so the profile-off LockDevice stays small enough
+    // to inline into every API entry point.
+    [[gnu::noinline, gnu::cold]] D3D9DeviceLock LockDeviceProfiled() {
       const uint64_t t0 = hitch::ticks();
       D3D9DeviceLock lock = m_multithread.AcquireLock();
       lock.AttachHitch(&m_hitch, t0, m_hitch.enter());

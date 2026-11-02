@@ -7,9 +7,10 @@
 // apart as driver work (inD9mtMs close to dtMs) or the game's own (disk
 // streaming, its own threads: inD9mtMs small).
 //
-// Off (D9MT_PROFILE unset): one predictable branch per scope. On: rdtsc (or
-// the steady clock off x86) and a few relaxed atomics per scope; ticks are
-// converted with a ratio calibrated against the steady clock at every frame.
+// Off (D9MT_PROFILE unset): one predictable branch per scope. On: the shared
+// cheap clock (rdtsc on x86, the steady clock otherwise; util_cheap_clock.h,
+// d9mt #126) and a few relaxed atomics per scope; ticks are converted with its
+// one immutable process-wide calibration.
 //
 // Header-only and dependency-free so the formatting and the frame logic can
 // be unit-tested natively (test/native/hitch_test.cpp).
@@ -22,9 +23,7 @@
 #include <cstdlib>
 #include <string>
 
-#if defined(__x86_64__) || defined(__i386__)
-#include <x86intrin.h>
-#endif
+#include "../util/util_cheap_clock.h"
 
 namespace dxvk::hitch {
 
@@ -59,17 +58,11 @@ namespace dxvk::hitch {
   }
 
   inline uint64_t ticks() {
-#if defined(__x86_64__) || defined(__i386__)
-    return __rdtsc();
-#else
-    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count());
-#endif
+    return cheap_clock::now();
   }
 
   inline uint64_t nowNs() {
-    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count());
+    return cheap_clock::steadyNs();
   }
 
   // D9MT_HITCH_MS, default 50.
@@ -171,7 +164,7 @@ namespace dxvk::hitch {
 
     void leave(bool outer, uint64_t t0, uint64_t t1) {
       if (outer)
-        m_inside.fetch_add(t1 - t0, std::memory_order_relaxed);
+        m_inside.fetch_add(cheap_clock::elapsed(t0, t1), std::memory_order_relaxed);
       m_depth.fetch_sub(1, std::memory_order_relaxed);
     }
 
@@ -189,31 +182,23 @@ namespace dxvk::hitch {
     // Called once per Present, after it returned. Fills `out` and returns true
     // if the frame (Present to Present) took at least the threshold. `every`, if
     // given, gets every frame's numbers (PACE, d3d9_pace.h).
-    bool endFrame(uint64_t nowTicks, uint64_t nowNanos, const CompileTotals& compile,
+    bool endFrame(uint64_t nowNanos, const CompileTotals& compile,
                   uint64_t csBehind, double thresholdMs, uint64_t& frameOut, FrameStats& out,
                   FrameStats* every = nullptr) {
-      if (!m_calibTicks) {
-        m_calibTicks = nowTicks;
-        m_calibNs    = nowNanos;
-      }
-
       const uint64_t frame = ++m_frame;
       const double dtMs = m_lastNs ? double(nowNanos - m_lastNs) * 1e-6 : 0.0;
       m_lastNs = nowNanos;
 
-      // ticks -> ns, from everything seen so far (needs some elapsed time).
-      const uint64_t calNs = nowNanos - m_calibNs;
-      if (calNs >= 20000000u && nowTicks > m_calibTicks)
-        m_nsPerTick = double(calNs) / double(nowTicks - m_calibTicks);
+      const cheap_clock::Calibration& cal = cheap_clock::process();
 
       FrameStats s;
       s.dtMs     = dtMs;
-      s.inMs     = double(m_inside.exchange(0u, std::memory_order_relaxed)) * m_nsPerTick * 1e-6;
+      s.inMs     = cal.toMs(m_inside.exchange(0u, std::memory_order_relaxed));
       s.csBehind = csBehind;
       for (uint32_t i = 0u; i < Count; i++) {
         Bucket& b = m_cat[i];
         s.cat[i].n     = b.n.exchange(0u, std::memory_order_relaxed);
-        s.cat[i].ms    = double(b.ticks.exchange(0u, std::memory_order_relaxed)) * m_nsPerTick * 1e-6;
+        s.cat[i].ms    = cal.toMs(b.ticks.exchange(0u, std::memory_order_relaxed));
         s.cat[i].bytes = b.bytes.exchange(0u, std::memory_order_relaxed);
         s.cat[i].aux   = b.aux.exchange(0u, std::memory_order_relaxed);
       }
@@ -228,9 +213,8 @@ namespace dxvk::hitch {
       s.budgetHits   = compile.budgetHits - m_compile.budgetHits;
       m_compile = compile;
 
-      // The first frame has no previous Present; before calibration the
-      // tick ratio is a guess.
-      const bool valid = frame >= 2u && m_nsPerTick > 0.0;
+      // The first frame has no previous Present.
+      const bool valid = frame >= 2u;
       if (every) {
         *every = s;
         if (!valid)
@@ -260,13 +244,6 @@ namespace dxvk::hitch {
     // Frame state: Present's thread only.
     uint64_t      m_frame      = 0u;
     uint64_t      m_lastNs     = 0u;
-    uint64_t      m_calibTicks = 0u;
-    uint64_t      m_calibNs    = 0u;
-#if defined(__x86_64__) || defined(__i386__)
-    double        m_nsPerTick  = 0.0;
-#else
-    double        m_nsPerTick  = 1.0;
-#endif
     CompileTotals m_compile;
 
   };
@@ -292,7 +269,7 @@ namespace dxvk::hitch {
       if (__builtin_expect(m_p == nullptr, 1))
         return;
       const uint64_t t1 = ticks();
-      m_p->add(m_c, m_count, t1 - m_t0, m_bytes, m_aux);
+      m_p->add(m_c, m_count, cheap_clock::elapsed(m_t0, t1), m_bytes, m_aux);
       if (m_entry)
         m_p->leave(m_outer, m_t0, t1);
     }
