@@ -307,21 +307,18 @@ namespace dxvk::backend {
       a.buffer_index = k.bufferIndex;
     }
 
-    uint32_t numLayouts = 0u;
-    for (uint32_t i = 0u; i < key.layoutCount && i < std::size(key.layouts); i++) {
-      const PsoVertexLayout& k = key.layouts[i];
-      uint32_t idx = k.pad;
-      if (idx >= 31u)
-        continue;
-      WMTVertexBufferLayoutInfo& l = vinfo.layouts[idx];
-      // psoStepFunction(): 0 constant, 1 per vertex, 2..255 per instance at the value - 1
-      l.stride        = k.stride;
-      l.step_function = k.stepFunction == kPsoStepConstant ? WMTVertexStepFunctionConstant
-        : k.stepFunction == kPsoStepPerVertex ? WMTVertexStepFunctionPerVertex
+    // Only the key's layouts; every other index stays Metal's default, which the bridge
+    // leaves out (it skips stride 0 per vertex). A zeroed layout would be stride 0 *constant*
+    // and go to Metal as an explicit layout (psoBufferLayouts()).
+    PsoBufferLayout layouts[kPsoMaxBufferLayouts];
+    const uint32_t numLayouts = psoBufferLayouts(key, layouts);
+    for (uint32_t i = 0u; i < numLayouts; i++) {
+      WMTVertexBufferLayoutInfo& l = vinfo.layouts[i];
+      l.stride        = layouts[i].stride;
+      l.step_function = layouts[i].stepFunction == kPsoStepConstant ? WMTVertexStepFunctionConstant
+        : layouts[i].stepFunction == kPsoStepPerVertex ? WMTVertexStepFunctionPerVertex
         : WMTVertexStepFunctionPerInstance;
-      l.step_rate     = k.stepFunction == kPsoStepConstant ? 0u
-        : k.stepFunction == kPsoStepPerVertex ? 1u : k.stepFunction - 1u;
-      numLayouts = std::max(numLayouts, idx + 1u);
+      l.step_rate     = layouts[i].stepRate;
     }
     vinfo.num_layouts = numLayouts;
 

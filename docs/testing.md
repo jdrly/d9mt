@@ -29,7 +29,7 @@ must find no violation. Its runner, `scripts/run-hash-tests.sh`, is on the branc
 No Wine or GPU needed, from the repo root:
 
 ```bash
-scripts/run-native-tests.sh   # the 13 host clang++ tests in test/native/; never starts Wine
+scripts/run-native-tests.sh   # the 15 host clang++ tests in test/native/; never starts Wine
 scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
 ```
 

@@ -41,6 +41,7 @@ host memory_profile_test -I driver/mtl test/native/memory_profile_test.cpp
 host pace_test -I driver/d3d9 test/native/pace_test.cpp
 host pfv_images_test -I driver/mtl test/native/pfv_images_test.cpp
 host pso_gen_test -I driver/backend test/native/pso_gen_test.cpp
+host pso_buffer_layouts_test -I driver/backend test/native/pso_buffer_layouts_test.cpp
 host present_ring_test -I bridge/unix -I driver/d3d9 test/native/present_ring_test.cpp
 host screen_test -I driver/d3d9 test/native/screen_test.cpp
 host prof_clock_test -I driver/backend test/native/prof_clock_test.cpp
