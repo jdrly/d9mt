@@ -1656,58 +1656,86 @@ _NSArray_count(void *obj) {
   return STATUS_SUCCESS;
 }
 
-/* d9mt image map: one "d9mt: image <name> <start>-<end>" line per loaded system image a Metal
- * fault can come from (AGX*, *Metal*, *MTL*, *GPU*, *LLVM*, IOAccel*: the leaf name), its
- * __TEXT range, logged once when it is loaded (dyld calls back for the images loaded already
- * at registration, then for each one loaded later). A D9MT-FATAL line's address outside the
- * PE modules (d3d9.dll's fatal-exception log) then maps to an image and an offset offline,
- * symbolized with atos on a Mac of the same macOS build. Registered at the first device
- * enumeration; nothing of it runs in an exception handler. D9MT_IMAGE_MAP=0 turns it off. */
-static void
-image_map_add(const struct mach_header *mh, intptr_t slide) {
-  static const char *const keys[] = { "AGX", "Metal", "MTL", "GPU", "LLVM", "IOAccel" };
-  Dl_info info;
-  const char *leaf;
-  int match = 0;
-  uint64_t size = 0;
-  (void)slide;
-  if (!mh || !dladdr(mh, &info) || !info.dli_fname)
-    return;
-  leaf = strrchr(info.dli_fname, '/');
-  leaf = leaf ? leaf + 1 : info.dli_fname;
-  for (size_t i = 0; i < sizeof(keys) / sizeof(*keys) && !match; i++)
-    match = strstr(leaf, keys[i]) != NULL;
-  if (!match)
-    return;
-  if (mh->magic == MH_MAGIC_64) {
-    const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
-    const struct load_command *lc = (const struct load_command *)(h + 1);
-    for (uint32_t i = 0; i < h->ncmds; i++) {
-      if (lc->cmd == LC_SEGMENT_64 && !strncmp(((const struct segment_command_64 *)lc)->segname, "__TEXT", 16)) {
-        size = ((const struct segment_command_64 *)lc)->vmsize;
-        break;
-      }
-      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
+/* d9mt image map: "d9mt: image <name> <start>-<end>" lines for the loaded system images a Metal
+ * fault can come from (AGX*, *Metal*, *MTL*, *GPU*, *LLVM*, IOAccel*: the leaf name), each with
+ * its __TEXT range, and once the dyld shared cache's range ("d9mt: image dyld-shared-cache …"), so
+ * libsystem, libc++ or libdispatch addresses map too. A D9MT-FATAL line's address outside the PE
+ * modules (d3d9.dll's fatal-exception log) then maps to an image and an offset offline,
+ * symbolized with atos on a Mac of the same macOS build.
+ *
+ * image_map_flush() logs the images loaded since its last call, walking dyld's image list from a
+ * cursor. It runs in ordinary unix-call context only: at device enumeration and before each
+ * render pipeline build (a compiler plugin loaded late is logged before the build that could
+ * fault in it). No dyld callback, nothing in an exception handler. A trylock: a second thread
+ * skips instead of waiting; the fast path is one load and _dyld_image_count().
+ * D9MT_IMAGE_MAP=0 turns it off. */
+static pthread_mutex_t image_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint32_t image_map_next = 0;
+static _Atomic int image_map_state = 0; /* 0 unknown, 1 on, -1 off */
+
+static uint64_t
+image_text_size(const struct mach_header *mh) {
+  if (!mh || mh->magic != MH_MAGIC_64)
+    return 0;
+  const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
+  const struct load_command *lc = (const struct load_command *)(h + 1);
+  for (uint32_t i = 0; i < h->ncmds; i++) {
+    if (lc->cmd == LC_SEGMENT_64 && !strncmp(((const struct segment_command_64 *)lc)->segname, "__TEXT", 16))
+      return ((const struct segment_command_64 *)lc)->vmsize;
+    lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
   }
-  fprintf(stderr, "d9mt: image %s 0x%016llx-0x%016llx\n", leaf, (unsigned long long)(uintptr_t)mh,
-          (unsigned long long)((uintptr_t)mh + size));
+  return 0;
 }
 
 static void
-image_map_register(void) {
-  const char *off = getenv("D9MT_IMAGE_MAP");
-  if (off && !strcmp(off, "0"))
+image_map_flush(void) {
+  static const char *const keys[] = { "AGX", "Metal", "MTL", "GPU", "LLVM", "IOAccel" };
+  int state = atomic_load_explicit(&image_map_state, memory_order_relaxed);
+  if (state == 0) {
+    const char *off = getenv("D9MT_IMAGE_MAP");
+    state = (off && !strcmp(off, "0")) ? -1 : 1;
+    atomic_store_explicit(&image_map_state, state, memory_order_relaxed);
+  }
+  if (state < 0)
     return;
-  _dyld_register_func_for_add_image(image_map_add);
+  const uint32_t count = _dyld_image_count();
+  if (atomic_load_explicit(&image_map_next, memory_order_acquire) >= count)
+    return;
+  if (pthread_mutex_trylock(&image_map_lock))
+    return;
+  uint32_t i = atomic_load_explicit(&image_map_next, memory_order_relaxed);
+  if (i == 0) {
+    typedef const void *(*shared_cache_range_fn)(size_t *);
+    shared_cache_range_fn range = (shared_cache_range_fn)dlsym(RTLD_DEFAULT, "_dyld_get_shared_cache_range");
+    size_t length = 0;
+    const void *start = range ? range(&length) : NULL;
+    if (start)
+      fprintf(stderr, "d9mt: image dyld-shared-cache 0x%016llx-0x%016llx\n", (unsigned long long)(uintptr_t)start,
+              (unsigned long long)((uintptr_t)start + length));
+  }
+  for (; i < count; i++) {
+    const char *path = _dyld_get_image_name(i);
+    const struct mach_header *mh = _dyld_get_image_header(i);
+    if (!path || !mh)
+      continue;
+    const char *leaf = strrchr(path, '/');
+    leaf = leaf ? leaf + 1 : path;
+    int match = 0;
+    for (size_t k = 0; k < sizeof(keys) / sizeof(*keys) && !match; k++)
+      match = strstr(leaf, keys[k]) != NULL;
+    if (match)
+      fprintf(stderr, "d9mt: image %s 0x%016llx-0x%016llx\n", leaf, (unsigned long long)(uintptr_t)mh,
+              (unsigned long long)((uintptr_t)mh + image_text_size(mh)));
+  }
+  atomic_store_explicit(&image_map_next, count, memory_order_release);
+  pthread_mutex_unlock(&image_map_lock);
 }
 
 static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
-  static pthread_once_t image_map_once = PTHREAD_ONCE_INIT;
-  pthread_once(&image_map_once, image_map_register);
   params->ret = (obj_handle_t)MTLCopyAllDevices();
+  image_map_flush();
   return STATUS_SUCCESS;
 }
 
@@ -6700,6 +6728,7 @@ _MTL4ComputeCommandEncoder_generateMipmaps(void *obj) {
 static NTSTATUS
 _MTL4Compiler_newRenderPipelineState(void *obj) {
   struct unixcall_mtl4_newrenderpso *params = obj;
+  image_map_flush();
   const struct WMTMtl4RenderPipelineInfo *info = params->info.ptr;
   MTL4RenderPipelineDescriptor *descriptor = [[MTL4RenderPipelineDescriptor alloc] init];
 
