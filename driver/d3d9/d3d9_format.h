@@ -198,13 +198,7 @@ namespace dxvk {
 
   private:
 
-    bool CheckImageFormatSupport(
-            MtlFormat             Format) const;
-
     bool m_isExtended;
-
-    bool m_d24s8Support;
-    bool m_d16s8Support;
 
     bool m_dfSupport;
     bool m_x4r4g4b4Support;

@@ -599,23 +599,6 @@ namespace dxvk {
 
     }
 
-    std::optional<uint32_t> getUsedConstantCount(dxbc_spv::ir::BuiltIn builtIn) {
-      using namespace dxbc_spv;
-
-      auto constants = m_analysis.GetConstantsInfo();
-
-      if (builtIn == ir::BuiltIn::eLegacyConstBool)
-        return std::make_optional(constants.boolCount);
-
-      if (builtIn == ir::BuiltIn::eLegacyConstInt)
-        return std::make_optional(constants.intCount);
-
-      if (builtIn == ir::BuiltIn::eLegacyConstFloat && !constants.floatsAccessedDynamically)
-        return std::make_optional(constants.floatCount);
-
-      return std::nullopt;
-    }
-
     // Spec state is read from the SpecData CBV the device re-uploads on every
     // change: the AIR backend has no function-constant PSO variants, and folding
     // to defaults froze bool constants, alpha test, sampler modes and fog.

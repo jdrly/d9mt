@@ -478,8 +478,6 @@ namespace dxvk {
     m_x4r4g4b4Support     = true;
     m_w11v11u10Support    = false;
     m_d16lockableSupport  = true;
-    m_d24s8Support        = true;
-    m_d16s8Support        = true;
     m_d32flockableSupport = true;
     m_d24fs8Support       = true;
   }
@@ -578,13 +576,6 @@ namespace dxvk {
       default:
         return &unknown;
     }
-  }
-
-
-  bool D3D9MtlFormatTable::CheckImageFormatSupport(
-          MtlFormat             Format) const {
-    (void)Format;
-    return true;
   }
 
 
