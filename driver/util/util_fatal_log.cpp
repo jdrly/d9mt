@@ -335,10 +335,18 @@ namespace dxvk::fatal {
       s_wineWrite = procAddress<PFN_wineDbgWrite>(GetModuleHandleA("ntdll.dll"), "__wine_dbg_write");
       s_stderr    = GetStdHandle(STD_ERROR_HANDLE);
 
+      // The exe lives as long as the process, and this module is pinned. Every other module is
+      // referenced while its headers and name are read (GetModuleHandleEx without UNCHANGED_REFCOUNT
+      // adds a reference), so a FreeLibrary on another thread can't unmap it in between
       snapshotModule(GetModuleHandleW(nullptr));
       snapshotModule(self);
-      for (const char* name : SnapshotNames)
-        snapshotModule(GetModuleHandleA(name));
+      for (const char* name : SnapshotNames) {
+        HMODULE module = nullptr;
+        if (GetModuleHandleExA(0u, name, &module) && module != nullptr) {
+          snapshotModule(module);
+          FreeLibrary(module);
+        }
+      }
 
       // Last in the vectored list at install: another vectored handler already registered that
       // resolves an exception (EXCEPTION_CONTINUE_EXECUTION) runs first, so what it resolves isn't
