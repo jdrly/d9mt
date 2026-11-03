@@ -171,6 +171,9 @@ def assemble(text):
             continue
         if op.startswith('dcl'):
             usage = op[4:] if op.startswith('dcl_') else ''
+            dclmod = 0
+            if usage.endswith('_centroid'):  # dcl_texcoord0_centroid: the dst's centroid modifier
+                usage, dclmod = usage[:-len('_centroid')], 4
             if usage in SAMPLER_TYPE:
                 ut = 0x80000000 | (SAMPLER_TYPE[usage] << 27)
             elif usage:
@@ -178,7 +181,7 @@ def assemble(text):
                 ut = 0x80000000 | USAGE[m.group(1)] | ((int(m.group(2)) if m.group(2) else 0) << 16)
             else:
                 ut = 0x80000000
-            body = [ut] + enc_dst(args[0])
+            body = [ut] + enc_dst(args[0], dclmod)
             toks += [(0x1F | (len(body) << 24))] + body
             continue
         if op == 'def':

@@ -49,6 +49,19 @@ namespace dxvk {
     // when functions share a library).
     MtlShaderStateId    stateId;
 
+    // D3DSHADE_FLAT: the pixel shader's colour inputs are flat. Set at
+    // creation, never changed. Not part of stateId: the state cache never
+    // records a pipeline with a flat function (the session compiles it on
+    // first use), so its records and file format are unchanged.
+    bool                flat = false;
+
+    // A D3D9 vertex shader with the constant depth bias in its IR (#163):
+    // z += k * w from the VS depth-bias push block, plus the original
+    // near/far planes as clip distances 6 and 7. The backend then sends the
+    // hardware constant as 0 and clamps depth while k != 0. Only valid once
+    // task->isDone(); false for the fixed-function and blit shaders.
+    bool                depthBiasHook = false;
+
     bool ready() const { return task == nullptr || task->isDone(); }
   };
 

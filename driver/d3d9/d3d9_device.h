@@ -83,6 +83,7 @@ namespace dxvk {
     PushDataShared,
     PushDataVs,
     PushDataFfvs,
+    PushDataVsDepthBias,
     PushDataFfps,
 
     SpecializationEntries,
@@ -897,6 +898,8 @@ namespace dxvk {
 
     void BindDepthBias();
 
+    uint8_t DepthBiasDrawBits(D3DPRIMITIVETYPE PrimitiveType);
+
     template<D3D9ShaderType ShaderType>
     void UpdateShaderConstants();
 
@@ -934,7 +937,14 @@ namespace dxvk {
 
     uint32_t GetInstanceCount() const;
 
-    void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs);
+    void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs, bool Indexed = false);
+
+    /// The draw's effective flat shading: D3DSHADE_FLAT on a topology d9mt
+    /// draws flat (triangle lists and strips, line lists and strips). Triangle
+    /// fans, whose expansion would give Metal's provoking vertex as the hub
+    /// instead of D3D9's vertex t+1 (until the fan index rotation, #170), and
+    /// points stay Gouraud. Logs the session's first FLAT draw.
+    bool EffectiveFlatShading(D3DPRIMITIVETYPE PrimitiveType, bool Indexed);
 
     void EnsureSamplerLimit();
 
@@ -945,7 +955,7 @@ namespace dxvk {
     template <D3D9ShaderType ShaderStage>
     void BindFFUbershader();
 
-    void BindProgrammablePixelShaderLinkage();
+    void BindProgrammablePixelShaderLinkage(bool Flat);
 
     void BindInputLayout();
 
@@ -1497,9 +1507,12 @@ namespace dxvk {
     D3D9FFShaderModuleSet           m_ffModules;
     D3D9SWVPEmulator                m_swvpEmulator;
 
-    // Programs of the PS bound at draw time and the VS it was linked to.
+    // Programs of the PS bound at draw time and the VS it was linked to, and
+    // whether that function is the flat one (D3DSHADE_FLAT, the effective
+    // flat of the draw that bound it).
     const void*                     m_boundPs     = nullptr;
     const void*                     m_boundPsPrev = nullptr;
+    bool                            m_boundPsFlat = false;
 
     Com<D3D9StateBlock, false>      m_recorder;
 
@@ -1573,6 +1586,19 @@ namespace dxvk {
     uint32_t                        m_resetCtr = 0u;
 
     float                           m_depthBiasScale  = 0.0f;
+    // The bound depth-stencil is float-backed (Depth32Float*): the constant
+    // depth bias goes into the vertex shader there (BindDepthBias, #163).
+    bool                            m_depthBiasFloatDs = false;
+    // The per-draw conditions of the VS depth-bias path (DepthBiasDrawBits)
+    // as BindDepthBias last used them.
+    enum : uint8_t {
+      DepthBiasFloatDs        = 1u << 0,
+      DepthBiasProgrammableVs = 1u << 1,
+      DepthBiasTriangles      = 1u << 2,
+      DepthBiasNoPsDepth      = 1u << 3,
+      DepthBiasAllBits        = 0xfu,
+    };
+    uint8_t                         m_depthBiasDrawBits = 0u;
 
     uint32_t                        m_robustSSBOAlignment     = 1;
     uint32_t                        m_robustUBOAlignment      = 1;

@@ -171,13 +171,13 @@ int d9mtair_compile(d9mt_air_compile_params* p) {
   return compileImpl(p);
 }
 
-/* The AIR version this process tags VERS with, (major << 16) | minor: part
-   of the AIR cache's identity, so a cache never returns another tag. */
+/* This process's AIR target as the AIR cache's term T (air_metallib.h
+   airTargetCode: 26 = 0x2828, 27 = 0x2929, legacy 26 = 0x12727, legacy 27 =
+   0x12729): part of the cache's table name, so a cache never returns another
+   target's metallibs. */
 __attribute__((visibility("default")))
-uint32_t d9mtair_vers_air(void) {
-  d9mt::air::MetallibVersions v =
-    d9mt::air::metallibTagVersions(d9mt::air::MetallibVersions());
-  return (uint32_t(v.airMajor) << 16) | v.airMinor;
+uint32_t d9mtair_air_target(void) {
+  return d9mt::air::airTargetCode(d9mt::air::airTarget());
 }
 
 __attribute__((visibility("default")))
