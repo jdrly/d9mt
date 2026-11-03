@@ -8,9 +8,11 @@
  *   out0 = select(x == +0, select(x == -0, 1, 0), 0)   (nested predication, `cmp`)
  *   out1 = select((x == +0) && (x == -0), 1, 0)          (BAnd)
  *   out2 = select(x == +0, select(x == +0, 1, 0), 0)    (the control: one constant, a valid fold)
- * After legalizeIr no output may be the constant 0: at x = 0 every one is 1. The control must
- * still be a live value as well (or the constant-free fold to x == +0), so a pass that gives
- * up on everything doesn't pass by accident.
+ * After legalizeIr no output may be the constant 0: at x = 0 every one is 1. That is the only
+ * assertion, for all three; the control (one constant, which the pass may legitimately fold to a
+ * single select on x == +0) just shows the check isn't failing on any nested select. ArithmeticPass
+ * may canonicalize -0.0 to +0.0 in FEq before ConditionPass runs, in which case all three pass
+ * because the pattern never reaches it; the printed final ops record which happened.
  *
  * Built by scripts/run-native-tests.sh against third_party/dxbc-spirv (host, no GPU). It prints
  * each output's final op and the disassembly of the whole shader for the record. */
