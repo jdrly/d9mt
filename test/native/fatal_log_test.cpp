@@ -12,9 +12,10 @@
 //       OutputDebugString, a breakpoint-class code and a stack overflow (0xC00000FD) are no line;
 //     - a nested fault (in the sink, i.e. inside the handler) is not logged and still reaches
 //       the program's handler, and the outer line still goes out;
-//     - a fault in a DLL loaded after install is `base 0x<its base>+0x<rva>`, also with the
-//       DLL's headers made unreadable (the handler reads nothing of an image);
-//     - a fault in executable memory that isn't an image is "(not in a PE module)";
+//     - a fault in a DLL loaded after install is the raw address, "(no module known at
+//       install)", also with the DLL's headers made unreadable (the handler reads nothing of
+//       an image and asks nothing of the system);
+//     - so is a fault in executable memory that isn't an image;
 //     - the handler allocates nothing: a fault on a thread while every heap of the process is
 //       locked (HeapLock) is logged and resolved, no deadlock;
 //     - the handler never resolves an exception: the test's own vectored handler, registered
@@ -363,7 +364,7 @@ int main(int argc, char** argv) {
   CHECK(g_lines.size() == 3u);
   CHECK(has(2, "c0000001 fatal exception at 0x"));
   CHECK(has(2, ".dll+0x"));
-  CHECK(!has(2, "base 0x"));
+  CHECK(!has(2, "no module known"));
 
   // A nested fault: the sink faults while the divide's line is being written
   fatal::setSinkForTest(faultingSink);
@@ -382,13 +383,12 @@ int main(int argc, char** argv) {
   CHECK(dll != nullptr);
   auto dllDivide = dll != nullptr ? dllProc<PFN_dllVoid>(dll, "fatal_dll_divide") : nullptr;
   CHECK(dllDivide != nullptr);
-  char dllBase[40];
-  std::snprintf(dllBase, sizeof(dllBase), "(base 0x%016llx+0x", (unsigned long long)uintptr_t(dll));
+  const char* unknown = "(no module known at install)";
   if (dllDivide != nullptr) {
     dllDivide();
     CHECK(g_seen[0] == 3);
     CHECK(g_lines.size() == 5u);
-    CHECK(has(4, dllBase));
+    CHECK(has(4, unknown));
 
     DWORD old = 0u;
     const BOOL hidden = VirtualProtect(dll, 4096u, PAGE_NOACCESS, &old);
@@ -398,7 +398,7 @@ int main(int argc, char** argv) {
       VirtualProtect(dll, 4096u, old, &old);
     CHECK(g_seen[0] == 4);
     CHECK(g_lines.size() == 6u);
-    CHECK(has(5, dllBase));
+    CHECK(has(5, unknown));
   }
 
   // Executable memory that isn't an image: xor edx,edx; mov eax,1; div ecx; ret (ecx = 0, the
@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
   }
   CHECK(g_seen[0] == 5);
   CHECK(g_lines.size() == 7u);
-  CHECK(has(6, "(not in a PE module)"));
+  CHECK(has(6, "(no module known at install)"));
 
   // No allocation: every heap locked while a thread faults; the line goes to a fixed buffer
   fatal::setSinkForTest(fixedSink);

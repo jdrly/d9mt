@@ -6,13 +6,16 @@
 #include <cstring>
 
 // The handler runs while the program may be crashing: the heap may be corrupt, another thread may
-// hold the loader lock, an image may be going away. So it allocates nothing, takes no lock, reads
-// no memory it didn't write itself at install (no PE headers, no thread names, no Logger, no
-// snprintf), formats into a fixed buffer on its stack and writes the line with one call.
-// Everything it needs is looked up by install(), outside any exception.
+// hold the loader lock or Wine's virtual-memory lock, an image may be going away. So it allocates
+// nothing, takes no lock, reads no memory it didn't write itself at install (no PE headers, no
+// thread names, no Logger, no snprintf, no VirtualQuery: Wine's NtQueryVirtualMemory takes
+// virtual_mutex), formats into a fixed buffer on its stack and writes the line with one call.
+// Everything it needs is looked up by install(), outside any exception: the module ranges too
+// (each module's base and SizeOfImage, read from its headers at install, never changed after).
+// An address outside them, in a DLL loaded later or outside every image, is the raw address.
 //
-// Its only system calls: GetLastError/SetLastError and GetCurrentThreadId (TEB fields),
-// VirtualQuery (one NtQueryVirtualMemory) and the write.
+// Its only calls into the system: GetLastError/SetLastError and GetCurrentThreadId (TEB fields)
+// and the write.
 //
 // The recursion guard is a fixed table of the thread ids inside the handler, not a TLS slot: in
 // Wine 11 / CrossOver 26.3, TlsSetValue on an index past the first 64 allocates the thread's
@@ -38,13 +41,14 @@ namespace dxvk::fatal {
 
     constexpr DWORD StatusStackOverflow = 0xc00000fdu;
 
-    /** A module named in the lines: its base and file name, taken at install. */
+    /** A module named in the lines: its range and file name, taken at install. */
     struct Module {
       uintptr_t base;
+      uintptr_t size;
       char      name[40];
     };
 
-    /** The modules a fault in the game usually comes from; any other image is `base 0x…`. */
+    /** The modules a fault in the game usually comes from; any other address is printed raw. */
     constexpr const char* SnapshotNames[] = {
       "d3d9.dll", "winemetal.dll", "ntdll.dll", "kernelbase.dll", "kernel32.dll", "user32.dll",
       "win32u.dll", "gdi32.dll", "ucrtbase.dll", "msvcrt.dll", "msvcp140.dll", "vcruntime140.dll",
@@ -127,11 +131,11 @@ namespace dxvk::fatal {
     }
 
 
-    /** The snapshot's name for the image at \p base, or nullptr. */
-    const char* moduleName(uintptr_t base) {
+    /** The snapshot's module that holds \p addr, or nullptr. */
+    const Module* moduleAt(uintptr_t addr) {
       for (size_t i = 0u; i < s_moduleCount; i++) {
-        if (s_modules[i].base == base)
-          return s_modules[i].name;
+        if (addr >= s_modules[i].base && addr - s_modules[i].base < s_modules[i].size)
+          return &s_modules[i];
       }
       return nullptr;
     }
@@ -168,26 +172,16 @@ namespace dxvk::fatal {
       line.str(" at ");
       line.ptr(uint64_t(addr));
 
-      // The image's base from the kernel's region record, not from the image: nothing of the
-      // image is read, so an image unmapped or reprotected meanwhile can't fault here
-      MEMORY_BASIC_INFORMATION mbi;
-      if (VirtualQuery(rec->ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi)
-       && mbi.Type == MEM_IMAGE && mbi.AllocationBase != nullptr
-       && uintptr_t(mbi.AllocationBase) <= addr) {
-        const uintptr_t base = uintptr_t(mbi.AllocationBase);
+      // Only the ranges copied at install: nothing of the image is read and nothing is asked of
+      // the system, so an image unmapped or reprotected meanwhile can't fault here, and no lock
+      if (const Module* m = moduleAt(addr)) {
         line.str(" (");
-        if (const char* name = moduleName(base)) {
-          line.str(name);
-          line.str("+0x");
-        } else {
-          line.str("base ");
-          line.ptr(uint64_t(base));
-          line.str("+0x");
-        }
-        line.hex(uint64_t(addr - base), 1u);
+        line.str(m->name);
+        line.str("+0x");
+        line.hex(uint64_t(addr - m->base), 1u);
         line.str(")");
       } else {
-        line.str(" (not in a PE module)");
+        line.str(" (no module known at install)");
       }
 
       line.str(", thread 0x");
@@ -281,9 +275,27 @@ namespace dxvk::fatal {
     }
 
 
-    /** Adds \p module to the snapshot under its file name, once. */
+    /** The image's SizeOfImage from its headers (at install, outside any exception), 0 if odd. */
+    uintptr_t imageSize(HMODULE module) {
+      const auto* base = reinterpret_cast<const uint8_t*>(module);
+      const auto* dos  = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+      if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096)
+        return 0u;
+      const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+      if (nt->Signature != IMAGE_NT_SIGNATURE
+       || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC)
+        return 0u;
+      return uintptr_t(nt->OptionalHeader.SizeOfImage);
+    }
+
+
+    /** Adds \p module to the snapshot under its file name and range, once. */
     void snapshotModule(HMODULE module) {
-      if (module == nullptr || s_moduleCount >= MaxModules || moduleName(uintptr_t(module)) != nullptr)
+      if (module == nullptr || s_moduleCount >= MaxModules || moduleAt(uintptr_t(module)) != nullptr)
+        return;
+
+      const uintptr_t size = imageSize(module);
+      if (size == 0u || uintptr_t(module) + size < uintptr_t(module))
         return;
 
       char path[MAX_PATH] = { };
@@ -299,6 +311,7 @@ namespace dxvk::fatal {
 
       Module& m = s_modules[s_moduleCount];
       m.base = uintptr_t(module);
+      m.size = size;
       std::strncpy(m.name, leaf, sizeof(m.name) - 1u);
       m.name[sizeof(m.name) - 1u] = '\0';
       s_moduleCount++;

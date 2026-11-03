@@ -9,8 +9,9 @@
 //
 // Why: a game that catches its own crash ends with the exception code as its exit code and
 // nothing in the log (a player's M1 Pro: "exit code 148", the low byte of 0xC0000094). The line
-// names the code, the address as module+RVA (or the image's base+RVA, or "not in a PE module"),
-// the thread's id and the last d9mt step, so the next such report says where it happened.
+// names the code, the address as module+RVA for a module known at install (else the raw address,
+// "no module known at install"), the thread's id and the last d9mt step, so the next such report
+// says where it happened.
 //
 // It never changes what happens: the handler always returns EXCEPTION_CONTINUE_SEARCH and never
 // touches the record or the context. It runs only when an exception is dispatched; the path
@@ -25,6 +26,9 @@
 //     then one line says more were left out;
 //   - installing it pins the module that holds it (d3d9.dll) for the life of the process: the
 //     handler is never removed, so the module can't be unloaded under it;
+//   - module names and ranges are a snapshot taken at install (the exe, d3d9.dll, winemetal.dll,
+//     ntdll, kernelbase, kernel32, user32, the C runtimes, …): a DLL loaded later, or one that
+//     replaced an unloaded one at the same address, shows as a raw address or a stale name;
 //   - no pin (GetModuleHandleEx fails) means no handler;
 //   - at most 64 threads at once inside it; a 65th fault at the same time isn't logged.
 
