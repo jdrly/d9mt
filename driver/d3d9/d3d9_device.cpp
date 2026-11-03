@@ -1896,14 +1896,14 @@ namespace dxvk {
     m_inScene = false;
 
     if (m_state.indices == nullptr) {
-      EmitCs([](MtlContext* ctx) {
+      EmitCsAs<DxvkCsCmdKind::IndexBuffer>([](MtlContext* ctx) {
         ctx->bindIndexBuffer(MtlBufferSlice(), MtlIndexType::Uint32);
       });
     }
 
     for (uint32_t i : bit::BitMask(~static_cast<uint32_t>(m_vbSlotTracking.bound) & ((1 << 16) - 1))) {
       if (m_state.vertexBuffers[i].vertexBuffer == nullptr) {
-        EmitCs([cIndex = i](MtlContext* ctx) {
+        EmitCsAs<DxvkCsCmdKind::VertexBuffer>([cIndex = i](MtlContext* ctx) {
           ctx->bindVertexBuffer(cIndex, MtlBufferSlice(), 0);
         });
       }
@@ -8685,7 +8685,7 @@ namespace dxvk {
       SetStateTexture(i, nullptr);
     }
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Texture>([
       cSize = m_state.textures->size()
     ] (MtlContext* ctx) {
       for (uint32_t i = 0; i < cSize; i++) {

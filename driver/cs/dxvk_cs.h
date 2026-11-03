@@ -11,127 +11,12 @@
 
 #include "../mtl/mtl_context.h"
 
+#include "dxvk_cs_cmd.h"
 #include "dxvk_cs_stats.h"
 
 namespace dxvk {
 
   constexpr static size_t DxvkCsChunkSize = 16384;
-
-  class DxvkCsCmd {
-
-  public:
-
-    virtual ~DxvkCsCmd() { }
-
-    DxvkCsCmd* next() const {
-      return m_next;
-    }
-
-    DxvkCsCmd** chain() {
-      return &m_next;
-    }
-
-    virtual void exec(MtlContext* ctx) = 0;
-
-    // D9MT_PROFILE only (dxvk_cs_stats.h): the kind given at the emit site, Other if none.
-    virtual DxvkCsCmdKind kind() const = 0;
-
-  private:
-
-    DxvkCsCmd* m_next = nullptr;
-
-  };
-
-
-  template<typename T, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
-  class DxvkCsTypedCmd : public DxvkCsCmd {
-
-  public:
-
-    DxvkCsTypedCmd(T&& cmd)
-    : m_command(std::move(cmd)) { }
-
-    DxvkCsTypedCmd             (DxvkCsTypedCmd&&) = delete;
-    DxvkCsTypedCmd& operator = (DxvkCsTypedCmd&&) = delete;
-
-    void exec(MtlContext* ctx) {
-      m_command(ctx);
-    }
-
-    DxvkCsCmdKind kind() const {
-      return K;
-    }
-
-  private:
-
-    T m_command;
-
-  };
-
-
-  class DxvkCsDataBlock {
-    friend class DxvkCsChunk;
-  public:
-
-    size_t count() const {
-      return m_structCount;
-    }
-
-    void* first() {
-      return reinterpret_cast<char*>(this) + m_dataOffset;
-    }
-
-    void* at(uint32_t idx) {
-      return reinterpret_cast<char*>(this) + m_dataOffset + idx * uint32_t(m_structSize);
-    }
-
-  private:
-
-    uint32_t m_dataOffset  = 0u;
-    uint16_t m_structSize  = 0u;
-    uint16_t m_structCount = 0u;
-
-  };
-
-
-  template<typename T, typename M, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
-  class DxvkCsDataCmd : public DxvkCsCmd {
-
-  public:
-
-    DxvkCsDataCmd(T&& cmd)
-    : m_command(std::move(cmd)) { }
-
-    ~DxvkCsDataCmd() {
-      auto data = reinterpret_cast<M*>(m_data.first());
-
-      for (size_t i = 0; i < m_data.count(); i++)
-        data[i].~M();
-    }
-
-    DxvkCsDataCmd             (DxvkCsDataCmd&&) = delete;
-    DxvkCsDataCmd& operator = (DxvkCsDataCmd&&) = delete;
-
-    void exec(MtlContext* ctx) {
-      m_command(ctx, reinterpret_cast<M*>(m_data.first()), m_data.count());
-    }
-
-    DxvkCsCmdKind kind() const {
-      return K;
-    }
-
-    DxvkCsDataBlock* data() {
-      return &m_data;
-    }
-
-  private:
-
-    alignas(std::max(alignof(T), alignof(M)))
-    T               m_command;
-    DxvkCsDataBlock m_data;
-
-  };
-
 
   enum class DxvkCsChunkFlag : uint32_t {
     SingleUse,
@@ -210,10 +95,6 @@ namespace dxvk {
     void reset();
 
   private:
-
-    // D9MT_PROFILE: counts the chunk's commands by kind and its bytes (cs_stats); before
-    // executeAll runs them, since a single-use chunk destroys them as it goes.
-    void countForStats() const;
 
     size_t m_commandOffset = 0;
 
@@ -426,9 +307,10 @@ namespace dxvk {
 
     void threadFunc();
 
-    // D9MT_PROFILE only: m_condOnSync.wait(lock, pred), timed and counted as a csSyncWait.
+    // D9MT_PROFILE only: m_condOnSync.wait(lock, pred) through cs_stats::timedWait (a wait that
+    // blocks counts as a csSyncWait; a chunk already done counts nothing).
     template<typename Pred>
-    void waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred&& pred);
+    void waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred& pred);
 
   };
 

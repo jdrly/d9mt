@@ -21,19 +21,23 @@ namespace dxvk {
   }
 
 
-  void DxvkCsChunk::countForStats() const {
-    uint32_t kinds[cs_stats::kKinds] = { };
-
-    for (auto cmd = m_head; cmd != nullptr; cmd = cmd->next())
-      kinds[uint32_t(cmd->kind())]++;
-
-    cs_stats::g_stats.onRun(m_commandOffset, kinds);
-  }
-
-
   void DxvkCsChunk::executeAll(MtlContext* ctx) {
-    if (unlikely(cs_stats::g_enabled))
-      countForStats();
+    if (unlikely(cs_stats::g_enabled)) {
+      // D9MT_PROFILE: the same execution, counted per command (cs_stats::runCounted).
+      const uint64_t bytes = m_commandOffset;
+      const bool singleUse = m_flags.test(DxvkCsChunkFlag::SingleUse);
+
+      if (singleUse)
+        m_commandOffset = 0;
+
+      cs_stats::runCounted(cs_stats::g_stats, m_head, ctx, bytes, singleUse);
+
+      if (singleUse) {
+        m_head = nullptr;
+        m_next = &m_head;
+      }
+      return;
+    }
 
     auto cmd = m_head;
 
@@ -213,12 +217,9 @@ namespace dxvk {
 
 
   template<typename Pred>
-  void DxvkCsThread::waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred&& pred) {
-    const uint64_t t0 = cheap_clock::now();
-    m_syncWaiters++;
-    m_condOnSync.wait(lock, pred);
-    m_syncWaiters--;
-    cs_stats::g_stats.onSyncWait(cheap_clock::elapsed(t0, cheap_clock::now()));
+  void DxvkCsThread::waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred& pred) {
+    cs_stats::timedWait<cs_stats::CheapClock>(cs_stats::g_stats, m_syncWaiters, pred,
+      [&] { m_condOnSync.wait(lock, pred); });
   }
 
 

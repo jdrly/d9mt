@@ -406,7 +406,10 @@ side: `csChunk` (chunks handed over), `csWake` (handovers that found the CS thre
 `csParkMs` (asleep on an empty queue), `csBusyMs` (the rest of the wall time, waits inside commands
 included), `csSyncWake`. Commands executed by kind: `cmd` = `cmdDraw` + `cmdVb` + `cmdIb` +
 `cmdConst` + `cmdTex` + `cmdShader` + `cmdState` + `cmdProf` (the API tags profiling itself adds)
-+ `cmdOther`. Keys are unique on the line and appear on no other line.
++ `cmdOther`, each counted right before it runs, so the window ends exactly where PROF's does
+(inside the 256th EndFrame); a chunk counts in the window where its first command runs. Producer
+events are taken under a lock with the window, so each lands whole in one window. Keys are unique
+on the line; besides the window's `frame` and `win`, none appears on another line.
 
 **Others**: `RESTORE`/`RESTORE-SUMMARY` (attachment re-clears by image, aspect and reason;
 `driver/mtl/mtl_restore_stats.h`), `XFER` (StretchRect and ColorFill by path), `STATECACHE`
