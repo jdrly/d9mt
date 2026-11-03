@@ -1854,6 +1854,11 @@ namespace dxvk::backend {
       return;
     slot = std::move(fn);
     m_dirty |= DirtyPso;
+
+    // The VS's depth-bias hook decides the hardware constant and the depth
+    // clip mode (flushDynamicState).
+    if (stage == MtlShaderStage::Vertex)
+      m_dirty |= DirtyDepthBias;
   }
 
   void MtlContextImpl::setVertexLayout(

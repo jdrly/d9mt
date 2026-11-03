@@ -402,6 +402,10 @@ namespace dxvk {
     float constantFactor = 0.0f;
     float slopeFactor    = 0.0f;
     float clamp          = 0.0f;
+    // k, the constant bias a hooked vertex shader adds in clip space (the
+    // value pushed to its depth-bias push block); 0 = the hardware constant.
+    // The backend applies it only for a VS with depthBiasHook.
+    float vsConstant     = 0.0f;
   };
 
   struct MtlDepthBounds {

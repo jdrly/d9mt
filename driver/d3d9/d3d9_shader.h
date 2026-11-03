@@ -61,6 +61,11 @@ namespace dxvk {
 
     virtual const std::vector<uint8_t>& serializedIr() const = 0;
 
+    /// A vertex shader whose IR carries the constant depth bias (k from the
+    /// VS depth-bias push block, the original-frustum clip distances d6/d7).
+    /// Immutable after construction. false for pixel shaders.
+    virtual bool depthBiasHook() const { return false; }
+
     struct PairedStageIo {
       const std::vector<uint8_t>* prevStageIr    = nullptr;
       bool                        matchSemantics = true;
@@ -254,6 +259,12 @@ namespace dxvk {
       return m_program != nullptr
         ? m_program->GetFunction(pPrevStage ? pPrevStage->GetProgram() : nullptr, Flat)
         : nullptr;
+    }
+
+    /// A pixel shader that writes depth: its draws keep the hardware
+    /// constant depth bias (#163).
+    bool WritesDepth() const {
+      return m_analysis.WritesDepth();
     }
 
     /// A pixel shader that reads a COLOR input, the only inputs

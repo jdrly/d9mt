@@ -83,6 +83,7 @@ namespace dxvk {
     PushDataShared,
     PushDataVs,
     PushDataFfvs,
+    PushDataVsDepthBias,
     PushDataFfps,
 
     SpecializationEntries,
@@ -897,6 +898,8 @@ namespace dxvk {
 
     void BindDepthBias();
 
+    uint8_t DepthBiasDrawBits(D3DPRIMITIVETYPE PrimitiveType);
+
     template<D3D9ShaderType ShaderType>
     void UpdateShaderConstants();
 
@@ -1585,6 +1588,19 @@ namespace dxvk {
     uint32_t                        m_resetCtr = 0u;
 
     float                           m_depthBiasScale  = 0.0f;
+    // The bound depth-stencil is float-backed (Depth32Float*): the constant
+    // depth bias goes into the vertex shader there (BindDepthBias, #163).
+    bool                            m_depthBiasFloatDs = false;
+    // The per-draw conditions of the VS depth-bias path (DepthBiasDrawBits)
+    // as BindDepthBias last used them.
+    enum : uint8_t {
+      DepthBiasFloatDs        = 1u << 0,
+      DepthBiasProgrammableVs = 1u << 1,
+      DepthBiasTriangles      = 1u << 2,
+      DepthBiasNoPsDepth      = 1u << 3,
+      DepthBiasAllBits        = 0xfu,
+    };
+    uint8_t                         m_depthBiasDrawBits = 0u;
 
     uint32_t                        m_robustSSBOAlignment     = 1;
     uint32_t                        m_robustUBOAlignment      = 1;

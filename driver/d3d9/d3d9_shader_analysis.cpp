@@ -177,6 +177,12 @@ namespace dxvk {
       m_usedRTs |= 1u << op.getDst().getIndex();
     }
 
+    if (GetShaderInfo().getType() == ShaderType::ePixel
+     && ((op.hasDst() && op.getDst().getRegisterType() == RegisterType::eDepthOut)
+      || op.getOpCode() == OpCode::eTexDepth
+      || op.getOpCode() == OpCode::eTexM3x2Depth))
+      m_writesDepth = true;
+
     switch (op.getOpCode()) {
       case OpCode::eDef:
       case OpCode::eDefI:
@@ -300,6 +306,12 @@ namespace dxvk {
 
     RegisterType registerType = dst.getRegisterType();
     uint32_t index = dst.getIndex();
+
+    if (GetShaderInfo().getType() == ShaderType::eVertex
+     && registerType == RegisterType::eOutput
+     && dcl.getSemanticUsage() == dxbc_spv::sm3::SemanticUsage::eTexCoord
+     && dcl.getSemanticIndex() == 15u)
+      m_depthBiasTestMarker = true;
 
     if (registerType == RegisterType::eSampler) {
       switch (dcl.getTextureType()) {

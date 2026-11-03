@@ -1838,14 +1838,22 @@ namespace dxvk {
     // float depth r = 2^(exp(z)-23), i.e. 2^-24 for z in [0.5,1)). D3D9 bias is
     // absolute, so scale by 1/r of the actual Metal format; for float formats
     // (D24S8 is backed by Depth32Float_Stencil8) use the [0.5,1) value, which
-    // is the force-unorm path.
+    // is the force-unorm path. On float formats that is exact only for z in
+    // [0.5,1), so there the constant term goes into the vertex shader instead
+    // (BindDepthBias); the hardware scale stays for the paths that keep it.
     if (ds != nullptr) {
-      const float rValue = GetDepthBufferRValue(
-        ds->GetCommonTexture()->GetFormatMapping().FormatColor, 0, true, true);
-      if (m_depthBiasScale != rValue) {
+      const MtlFormat format = ds->GetCommonTexture()->GetFormatMapping().FormatColor;
+      const float rValue = GetDepthBufferRValue(format, 0, true, true);
+      const bool  isFloat = format == MtlFormat::Depth32Float
+                         || format == MtlFormat::Depth32Float_Stencil8;
+      if (m_depthBiasScale != rValue || m_depthBiasFloatDs != isFloat) {
         m_depthBiasScale = rValue;
+        m_depthBiasFloatDs = isFloat;
         m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
       }
+    } else if (m_depthBiasFloatDs) {
+      m_depthBiasFloatDs = false;
+      m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
     }
 
     m_state.depthStencil = ds;
@@ -2151,12 +2159,19 @@ namespace dxvk {
     if (m_state.viewport == *pViewport)
       return D3D_OK;
 
+    const float oldMinZ = m_state.viewport.MinZ;
+    const float oldMaxZ = m_state.viewport.MaxZ;
+
     m_state.viewport.X = pViewport->X;
     m_state.viewport.Y = pViewport->Y;
     m_state.viewport.Width = pViewport->Width;
     m_state.viewport.Height = pViewport->Height;
     m_state.viewport.MinZ = pViewport->MinZ;
     m_state.viewport.MaxZ = pViewport->MinZ < pViewport->MaxZ ? pViewport->MaxZ : pViewport->MinZ + 0.001f;
+
+    // The VS depth bias is DEPTHBIAS / the depth range.
+    if (oldMinZ != m_state.viewport.MinZ || oldMaxZ != m_state.viewport.MaxZ)
+      m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
 
     m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
     m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
@@ -6575,12 +6590,15 @@ namespace dxvk {
       UpdatePushDataBlock(m_pushData.vs);
     if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataFfvs))
       UpdatePushDataBlock(m_pushData.ffvs);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataVsDepthBias))
+      UpdatePushDataBlock(m_pushData.vsDepthBias);
     if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataFfps))
       UpdatePushDataBlock(m_pushData.ffps);
 
     m_dirty.clr(D3D9DeviceDirtyFlag::PushDataShared,
                 D3D9DeviceDirtyFlag::PushDataVs,
                 D3D9DeviceDirtyFlag::PushDataFfvs,
+                D3D9DeviceDirtyFlag::PushDataVsDepthBias,
                 D3D9DeviceDirtyFlag::PushDataFfps);
   }
 
@@ -6966,21 +6984,99 @@ namespace dxvk {
   }
 
 
+  // D9MT_DEPTH_BIAS_VS=1 (opt-in; off by default): the constant depth bias
+  // in the vertex shader on float depth formats (#163). Read once per process.
+  static bool DepthBiasVsEnabled() {
+    static const bool s_on = [] {
+      const bool on = env::getEnvVar("D9MT_DEPTH_BIAS_VS") == "1";
+      Logger::info(on
+        ? "D9MT: depth bias: the constant term in the vertex shader on float depth formats (D9MT_DEPTH_BIAS_VS=1)"
+        : "D9MT: depth bias: the constant term in hardware (default; D9MT_DEPTH_BIAS_VS=1 moves it into the vertex shader)");
+      return on;
+    } ();
+    return s_on;
+  }
+
+
+  uint8_t D3D9DeviceEx::DepthBiasDrawBits(D3DPRIMITIVETYPE PrimitiveType) {
+    uint8_t bits = 0u;
+
+    if (m_depthBiasFloatDs)
+      bits |= DepthBiasFloatDs;
+
+    if (UseProgrammableVS())
+      bits |= DepthBiasProgrammableVs;
+
+    if (PrimitiveType == D3DPT_TRIANGLELIST
+     || PrimitiveType == D3DPT_TRIANGLESTRIP
+     || PrimitiveType == D3DPT_TRIANGLEFAN)
+      bits |= DepthBiasTriangles;
+
+    if (!UseProgrammablePS() || !GetCommonShader(m_state.pixelShader)->WritesDepth())
+      bits |= DepthBiasNoPsDepth;
+
+    return bits;
+  }
+
+
   void D3D9DeviceEx::BindDepthBias() {
     m_dirty.clr(D3D9DeviceDirtyFlag::DepthBias);
 
     auto& rs = m_state.renderStates;
 
-    float depthBias            = bit::cast<float>(rs[D3DRS_DEPTHBIAS]) * m_depthBiasScale;
+    float apiDepthBias         = bit::cast<float>(rs[D3DRS_DEPTHBIAS]);
+    float depthBias            = apiDepthBias * m_depthBiasScale;
     float slopeScaledDepthBias = bit::cast<float>(rs[D3DRS_SLOPESCALEDEPTHBIAS]);
+    float vsDepthBias          = 0.0f;
 
     if (unlikely(m_dbg.flags & d9mtdbg::NoDepthBias))
-      depthBias = slopeScaledDepthBias = 0.0f;
+      apiDepthBias = depthBias = slopeScaledDepthBias = 0.0f;
+
+    // D3D9's DEPTHBIAS is absolute (depth-buffer units). On Depth32Float,
+    // Metal's constant unit scales with z's exponent, so the hardware gives
+    // DEPTHBIAS * 2^(e+1): right only for z in [0.5,1) (#163). With the
+    // switch on, a float depth-stencil, a programmable VS, a triangle draw
+    // and a PS that doesn't write depth, a hooked VS adds the constant in
+    // clip space instead (z += k * w, k = DEPTHBIAS / the Metal viewport's
+    // depth range), with the original near/far planes as clip distances and
+    // depth clamped (the backend: it also keeps the hardware constant for an
+    // unhooked VS, so the hardware value is always sent). Not with the
+    // depth_clamp debug flag (it keeps its meaning), a zero or non-finite
+    // range, |k| > 2^-6 (the arithmetic bound of the shader's domain) or a
+    // subnormal k (canonicalised to 0: the hardware path).
+    // docs/configuration.md, D9MT_DEPTH_BIAS_VS.
+    const bool eligible = DepthBiasVsEnabled()
+      && m_depthBiasDrawBits == DepthBiasAllBits
+      && !(m_dbg.flags & d9mtdbg::DepthClamp)
+      && apiDepthBias != 0.0f;
+
+    if (eligible) {
+      const D3DVIEWPORT9& vp = m_state.viewport;
+      // exactly as BindViewportAndScissor sets the Metal viewport
+      const float zBias = vp.MinZ >= 0.5f ? 0.0f : 0.001f;
+      const float znear = std::clamp(vp.MinZ,                            0.0f, 1.0f);
+      const float zfar  = std::clamp(std::max(vp.MaxZ, vp.MinZ + zBias), 0.0f, 1.0f);
+      const float range = zfar - znear;
+
+      if (range > 0.0f && std::isfinite(range)) {
+        const float k = apiDepthBias / range;
+
+        if (std::isfinite(k) && std::abs(k) <= 1.0f / 64.0f
+         && std::abs(k) >= std::numeric_limits<float>::min())
+          vsDepthBias = k;
+      }
+    }
+
+    if (m_pushData.vsDepthBias.depthBias != vsDepthBias) {
+      m_pushData.vsDepthBias.depthBias = vsDepthBias;
+      m_dirty.set(D3D9DeviceDirtyFlag::PushDataVsDepthBias);
+    }
 
     MtlDepthBias biases;
     biases.constantFactor = depthBias;
     biases.slopeFactor    = slopeScaledDepthBias;
-    biases.clamp    = 0.0f;
+    biases.clamp          = 0.0f;
+    biases.vsConstant     = vsDepthBias;
 
     EmitCs([
       cBiases = biases
@@ -7329,6 +7425,17 @@ namespace dxvk {
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::RasterizerState)))
       BindRasterizerState();
 
+    // The VS depth-bias path's per-draw conditions (DS kind, VS kind,
+    // topology, PS depth writes), compared on every draw while it's on.
+    if (unlikely(DepthBiasVsEnabled())) {
+      const uint8_t bits = DepthBiasDrawBits(PrimitiveType);
+
+      if (bits != m_depthBiasDrawBits) {
+        m_depthBiasDrawBits = bits;
+        m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
+      }
+    }
+
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::DepthBias)))
       BindDepthBias();
 
@@ -7465,6 +7572,7 @@ namespace dxvk {
     if (m_dirty.any(D3D9DeviceDirtyFlag::PushDataShared,
                     D3D9DeviceDirtyFlag::PushDataVs,
                     D3D9DeviceDirtyFlag::PushDataFfvs,
+                    D3D9DeviceDirtyFlag::PushDataVsDepthBias,
                     D3D9DeviceDirtyFlag::PushDataFfps))
       UpdatePushData();
 
@@ -8806,6 +8914,7 @@ namespace dxvk {
     m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared,
                 D3D9DeviceDirtyFlag::PushDataVs,
                 D3D9DeviceDirtyFlag::PushDataFfvs,
+                D3D9DeviceDirtyFlag::PushDataVsDepthBias,
                 D3D9DeviceDirtyFlag::PushDataFfps);
   }
 
