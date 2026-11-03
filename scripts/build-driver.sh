@@ -38,12 +38,14 @@ mkdir -p "$OBJ"
 # newest and falls back to Compat (MtlDeviceImpl::createShaderFunction).
 MACOS_MIN="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 METAL_TARGET=(-mmacosx-version-min="$MACOS_MIN")
-# metal_pair <src.metal> <out>: <out>.metallib (newest) and <out>-compat.metallib (MACOS_MIN).
+# metal_pair <src.metal> <out> [metal flags...]: <out>.metallib (newest) and
+# <out>-compat.metallib (MACOS_MIN).
 metal_pair() {
-  xcrun -sdk macosx metal -O2 -c "$1" -o "$2.air"
-  xcrun -sdk macosx metallib "$2.air" -o "$2.metallib"
-  xcrun -sdk macosx metal -O2 -c "${METAL_TARGET[@]}" "$1" -o "$2-compat.air"
-  xcrun -sdk macosx metallib "$2-compat.air" -o "$2-compat.metallib"
+  local src=$1 out=$2; shift 2
+  xcrun -sdk macosx metal -O2 "$@" -c "$src" -o "$out.air"
+  xcrun -sdk macosx metallib "$out.air" -o "$out.metallib"
+  xcrun -sdk macosx metal -O2 "$@" -c "${METAL_TARGET[@]}" "$src" -o "$out-compat.air"
+  xcrun -sdk macosx metallib "$out-compat.air" -o "$out-compat.metallib"
 }
 # metallib_array <name> <file>: a byte array <name> and <name>Size for the header.
 metallib_array() {
@@ -89,7 +91,11 @@ FFHDR="$DRV/d3d9/d3d9_ff_metallib.h"
 FFVSRC="$FFSHADERS/d3d9_fixed_function_vert.vert"
 FFFSRC="$FFSHADERS/d3d9_fixed_function_frag.frag"
 FFFLATSRC="$FFSHADERS/d3d9_fixed_function_frag_flat.frag"
-FFHASH="$(src_sha256 "$FFVSRC" "$FFFSRC" "$FFFLATSRC" \
+# The FF VS is compiled with -fpreserve-invariance (its `invariant gl_Position`, as SM3
+# vertex shaders' position, so FF and SM3 passes over the same geometry get the same
+# depth); the flag is part of the recipe, so it's in the hash.
+FFVSFLAGS=(-fpreserve-invariance)
+FFHASH="$(src_sha256 "$FFVSRC" "$FFFSRC" "$FFFLATSRC" <(echo "ff vs ${FFVSFLAGS[*]}") \
            "$FFSHADERS/d3d9_fixed_function_frag.glsl" \
            "$FFSHADERS/d3d9_fixed_function_common.glsl")"
 ff_stale=0
@@ -137,7 +143,9 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
     grep -q '\[\[user(locn9), flat\]\]' "$FFTMP/fs_flat.metal" && grep -q '\[\[user(locn10), flat\]\]' "$FFTMP/fs_flat.metal" \
       || { echo "FATAL: FF flat FS: the colour inputs (locn9, locn10) aren't flat" >&2; exit 1; }
 
-    metal_pair "$FFTMP/vs.metal" "$FFTMP/vs"
+    grep -q '\[\[position, invariant\]\]' "$FFTMP/vs.metal" \
+      || { echo "FATAL: FF VS: spirv-cross's MSL has no [[position, invariant]]" >&2; exit 1; }
+    metal_pair "$FFTMP/vs.metal" "$FFTMP/vs" "${FFVSFLAGS[@]}"
     metal_pair "$FFTMP/fs.metal" "$FFTMP/fs"
     metal_pair "$FFTMP/fs_flat.metal" "$FFTMP/fs_flat"
     {
