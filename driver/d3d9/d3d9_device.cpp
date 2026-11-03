@@ -7385,7 +7385,7 @@ namespace dxvk {
     if (unlikely(s_flatCheck) && s_flatDraws.fetch_add(1u) < 64u) {
       Logger::info(str::format("D9MT-FLAT-DRAW topo=", uint32_t(PrimitiveType), " indexed=", Indexed ? 1 : 0,
         " effective=", drawFlat ? 1 : 0, UseProgrammablePS() ? " ps=sm psflat=" : " ps=ff psflat=",
-        UseProgrammablePS() && m_boundPsFlat ? 1 : 0));
+        UseProgrammablePS() ? (m_boundPsFlat ? 1 : 0) : (m_boundFfFsFlat ? 1 : 0)));
     }
 
     uint32_t nullOrUnusedMask = ~usedSamplerMask | ~usedTextureMask;
@@ -7501,8 +7501,10 @@ namespace dxvk {
       ? MtlShaderStage::Vertex
       : MtlShaderStage::Fragment;
 
-    if (ShaderStage == D3D9ShaderType::PixelShader)
+    if (ShaderStage == D3D9ShaderType::PixelShader) {
       m_boundPs = nullptr;
+      m_boundFfFsFlat = false;
+    }
 
     EmitCs([
       cShader = m_ffModules.GetShader<ShaderStage>()
@@ -7518,8 +7520,19 @@ namespace dxvk {
     // never blocks: the function is a future the CS thread waits on (or, with
     // D9MT_ASYNC_SKIP or a spent wait budget, skips draws for) only if it is
     // still compiling.
-    if (!UseProgrammablePS())
+    if (!UseProgrammablePS()) {
+      // The fixed-function FS: its flat variant for a draw whose effective
+      // flat is set (BindFFUbershader binds the Gouraud one).
+      if (unlikely(m_boundFfFsFlat != Flat)) {
+        m_boundFfFsFlat = Flat;
+        EmitCs([
+          cShader = m_ffModules.GetPixelShader(Flat)
+        ] (MtlContext* ctx) mutable {
+          ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
+        });
+      }
       return;
+    }
 
     const D3D9CommonShader* ps = GetCommonShader(m_state.pixelShader);
     const D3D9CommonShader* vs = UseProgrammableVS()

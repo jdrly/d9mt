@@ -1510,6 +1510,8 @@ namespace dxvk {
     const void*                     m_boundPs     = nullptr;
     const void*                     m_boundPsPrev = nullptr;
     bool                            m_boundPsFlat = false;
+    // The fixed-function FS bound is the flat one (D3DSHADE_FLAT).
+    bool                            m_boundFfFsFlat = false;
 
     Com<D3D9StateBlock, false>      m_recorder;
 
