@@ -3,7 +3,10 @@ Version:  DXVK 3.0 tree (extracted by neo773 in July 2026; the exact commit
           was not recorded). d3d9/d3d9.def is identical to DXVK
           v3.0.2-21-g3a4c6fa3.
 Synced:   d3d9/util: v3.0.2 (6b20f622); dxbc-spirv 76236b82 +
-          patches/dxbc-spirv 0001/0002/0003 (scripts/fetch-deps.sh)
+          patches/dxbc-spirv 0001/0002/0003 (scripts/fetch-deps.sh);
+          d3d9 fixed-function ports: ef81c30f + 836b6418 (linear fog with
+          start == end), 3a4c6fa3 (no clip planes for pre-transformed
+          vertices), 8d252af1 (DOTPRODUCT3 alpha op keeps colour stages)
 
 This directory is an ALTERED version of DXVK and is not the original
 software. DXVK's license notice is in ../LICENSES/DXVK-LICENSE.txt (verbatim)

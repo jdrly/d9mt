@@ -6540,7 +6540,7 @@ namespace dxvk {
       m_pushData.shared.fogColor[2] = uint8_t(fogColor >> 16u);
       m_pushData.shared.fogDensity = fogDensity;
       m_pushData.shared.fogDistanceEnd = fogEnd;
-      m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
+      m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : std::numeric_limits<float>::max();
 
       m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
     }
@@ -8229,6 +8229,7 @@ namespace dxvk {
       auto& data = m_state.textureStages[i];
 
       auto colorOp = D3DTEXTUREOP(data[DXVK_TSS_COLOROP]);
+      auto alphaOp = D3DTEXTUREOP(data[DXVK_TSS_ALPHAOP]);
 
       if (colorOp == D3DTOP_DISABLE)
         break;
@@ -8246,6 +8247,11 @@ namespace dxvk {
 
       if (colorOp == D3DTOP_BUMPENVMAP || colorOp == D3DTOP_BUMPENVMAPLUMINANCE)
         preserveColorStageMask |= 1u << i;
+
+      // Dot product can be used as an alpha op, but consumes color. Might need
+      // to preserve all previous color stages (DXVK 8d252af1).
+      if (alphaOp == D3DTOP_DOTPRODUCT3)
+        preserveColorStageMask |= (1u << i) - 1u;
 
       activeTextureStageCount += 1u;
     }
