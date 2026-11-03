@@ -184,6 +184,8 @@ __attribute__((noinline)) static uint32_t recurse(uint32_t n) {
   volatile char pad[4096];
   pad[0] = char(n);
   pad[sizeof(pad) - 1u] = char(n);
+  if (n > 1000000u)   // never: 4 GiB of stack
+    return n;
   return recurse(n + 1u) + uint32_t(pad[0]) + uint32_t(pad[sizeof(pad) - 1u]);
 }
 
@@ -233,12 +235,27 @@ static int dllUnload() {
   return g_fail ? 1 : 0;
 }
 
+static std::string warmUp(const std::string& s) {
+  static const std::string first = s;   // a guarded static: the runtime's own TLS use happens here
+  return first;
+}
+
 static int tlsExhausted() {
+  // The test program's runtime (mingw's static-init guard, stdio) takes TLS slots on first use and
+  // aborts without one; that's the test's runtime, not the log. So it's warmed up first, and every
+  // slot is free again before anything else runs.
+  std::printf("fatal_log_test --tls-exhausted: %s\n", warmUp("start").c_str());
+  std::fflush(stdout);
+  static DWORD taken[4096];
   DWORD slots = 0u;
-  while (slots < 100000u && TlsAlloc() != TLS_OUT_OF_INDEXES)
-    slots++;
-  CHECK(TlsAlloc() == TLS_OUT_OF_INDEXES);
-  CHECK(fatal::install());
+  for (DWORD i; slots < 4096u && (i = TlsAlloc()) != TLS_OUT_OF_INDEXES; )
+    taken[slots++] = i;
+  const bool exhausted = TlsAlloc() == TLS_OUT_OF_INDEXES;
+  const bool installed = fatal::install();
+  for (DWORD i = 0u; i < slots; i++)
+    TlsFree(taken[i]);
+  CHECK(exhausted);
+  CHECK(installed);
 
   fatal::setSinkForTest(sink);
   AddVectoredExceptionHandler(0u, testHandler);
