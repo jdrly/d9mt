@@ -55,6 +55,11 @@ namespace dxvk {
     // first use), so its records and file format are unchanged.
     bool                flat = false;
 
+    // The fixed-function fragment shader (both variants): stage s's texture is bound at the
+    // table slot of its kind, s (2D), 8+s (cube) or 16+s (3D), and the null texture of the
+    // other two kinds at the others (#152). Set at creation, never changed.
+    bool                ffStageTextures = false;
+
     bool ready() const { return task == nullptr || task->isDone(); }
   };
 

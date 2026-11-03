@@ -74,7 +74,9 @@ fi
 #                       VS: SpecConsts=0 ShaderData=1 ClipPlanes=2 VertexBlend=22
 #                           RenderStates=20 (kPushConstantIndex)
 #                       FS: SpecConsts=0 SharedData=1 RenderStates=20
-#                           t2d=texture(0) tcube=8 t3d=16 (+shadow arrays 24/32)
+#                           t2d=texture(0) tcube=8 t3d=16 (+shadow arrays 24/32, unused):
+#                           stage s's texture at the slot of its kind (#152,
+#                           MtlShaderFunction::ffStageTextures)
 #                           samplers=sampler(0)
 #   xcrun metal+metallib  MSL -> .metallib, embedded as g_ffVsMetallib/g_ffFsMetallib.
 #   A second fragment shader, d3d9_fixed_function_frag_flat.frag (FF_FLAT: flat colour
@@ -140,6 +142,11 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
       s/(> tcubeShadow )\[\[texture\(\d+\)\]\]/${1}[[texture(32)]]/;
       s/(> samplers )\[\[sampler\(\d+\)\]\]/${1}[[sampler(0)]]/;
     ' "$FFTMP/fs.metal" "$FFTMP/fs_flat.metal"
+    for f in "$FFTMP/fs.metal" "$FFTMP/fs_flat.metal"; do
+      for pin in 't2d \[\[texture(0)\]\]' 'tcube \[\[texture(8)\]\]' 't3d \[\[texture(16)\]\]'; do
+        grep -q "$pin" "$f" || { echo "FATAL: FF FS texture slot pin ($pin) did not apply in $f" >&2; exit 1; }
+      done
+    done
     grep -q '\[\[user(locn9), flat\]\]' "$FFTMP/fs_flat.metal" && grep -q '\[\[user(locn10), flat\]\]' "$FFTMP/fs_flat.metal" \
       || { echo "FATAL: FF flat FS: the colour inputs (locn9, locn10) aren't flat" >&2; exit 1; }
 

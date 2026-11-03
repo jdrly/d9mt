@@ -207,11 +207,14 @@ uniform RenderStates {
     uint packedSamplerIndices[TextureStageCount / 2u];
 };
 
-// v2: only t2d + tcube (2 arrays x TextureStageCount = 16) so the FF fragment
-// stage fits Metal's ~16-slot argument table. t3d and the depth-compare shadow
-// arrays (t2dShadow/tcubeShadow) were dropped — see sampleTexture().
+// v2: t2d, tcube and t3d (3 arrays x TextureStageCount = 24 texture slots: 0-7,
+// 8-15, 16-23, pinned by build-driver.sh). The backend binds stage s's texture
+// at the slot of its kind and the null texture of the other kinds at the
+// other two (MtlShaderFunction::ffStageTextures, #152). The depth-compare
+// shadow arrays (t2dShadow/tcubeShadow) were dropped — see sampleTexture().
 layout(set = SRV_SET, binding = SRV_PS_BASE) uniform texture2D t2d[TextureStageCount];
 layout(set = SRV_SET, binding = SRV_PS_BASE) uniform textureCube tcube[TextureStageCount];
+layout(set = SRV_SET, binding = SRV_PS_BASE) uniform texture3D t3d[TextureStageCount];
 
 // v2 adaptation: DXVK's bindless `sampler sampler_heap[]` (indexed by a packed
 // per-stage heap index) is replaced by a fixed sampler array matching v2's
@@ -316,19 +319,20 @@ vec4 sampleTexture(uint stage, vec4 texcoord, vec4 previousStageTextureVal) {
     // that case, but make it so that the multiplication has no effect for now.
     vec4 texVal = vec4(1.0f);
 
-    // v2: Metal's argument table caps at ~16 texture bindings, but the DXVK FF
-    // layout wants 5 type-arrays x8 = 40 [[texture]] slots. Keep only t2d + tcube
-    // (16 total) so every referenced binding fits and is set. The dropped arrays
-    // — t3d and the depth-compare shadow variants — are virtually never used in
-    // FF; TYPE_3D falls back to a 2D sample, and DREF/shadow modes sample the
-    // colour texture (no hardware depth compare).
+    // v2: the DXVK FF layout wants 5 type-arrays x8 = 40 [[texture]] slots. Keep
+    // t2d, tcube and t3d (24, the argument table's texture slots). The dropped
+    // depth-compare shadow variants are virtually never used in FF; DREF/shadow
+    // modes sample the colour texture (no hardware depth compare).
     switch (state.type) {
         case TEXTURE_TYPE_NULL:
             break;
         case TEXTURE_TYPE_CUBE:
             texVal = texture(samplerCube(tcube[stage], samplers[stage]), texcoord.xyz);
             break;
-        default: // TEXTURE_TYPE_2D and TEXTURE_TYPE_3D
+        case TEXTURE_TYPE_3D:
+            texVal = texture(sampler3D(t3d[stage], samplers[stage]), texcoord.xyz);
+            break;
+        default: // TEXTURE_TYPE_2D
             texVal = texture(sampler2D(t2d[stage], samplers[stage]), texcoord.xy);
             break;
     }

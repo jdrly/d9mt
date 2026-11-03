@@ -158,9 +158,14 @@ namespace dxvk::backend {
     static constexpr uint32_t kVertexBufferBaseIndex = 3u;
     static constexpr uint32_t kPushConstantIndex = 20u;
     static constexpr uint32_t kAbIndex = 21u;
-    /* The fixed-function fragment shader's texture slots: t2d 0-7, tcube 8-15
-     * (scripts/build-driver.sh pins them). */
+    /* The fixed-function fragment shader's texture slots: t2d 0-7, tcube 8-15, t3d 16-23
+     * (scripts/build-driver.sh pins them); its stage s reads slot s, 8+s or 16+s by the
+     * stage's texture type (#152). */
     static constexpr uint32_t kNullCubeFirstSlot = 8u;
+    static constexpr uint32_t kNull3DFirstSlot = 16u;
+    static constexpr uint32_t kFfTextureStages = 8u;
+    /* texture slots per argument table: the D3D9 samplers' 16, and the FF FS's t3d 16-23 */
+    static constexpr uint32_t kTableTextures = 24u;
     static constexpr uint32_t kPushSharedBlockSize = 32u;
     static constexpr size_t kCmdChunkFlushBytes = 1u << 22;
 
@@ -185,11 +190,12 @@ namespace dxvk::backend {
       uint64_t abFnId = 0u;
       uint64_t tableFnId = 0u;   // the shader whose texture kinds the unbound table slots hold
       uint8_t abActive = 0u;
+      uint8_t ffTex3DSlots = 0u; // the FF FS's t3d slots (16-23) may hold a texture: reset them for any other shader
     };
 
     struct ArgTableShadow {
       std::array<uint64_t, 31> bufferGpuAddress = { };
-      std::array<uint64_t, 16> textureId = { };
+      std::array<uint64_t, kTableTextures> textureId = { };
       std::array<uint64_t, 16> samplerId = { };
     };
 
@@ -561,7 +567,7 @@ namespace dxvk::backend {
     ArgTablePair createArgumentTablePair() const;
     void initNullBindings(ArgTablePair& pair) const;
     /* The null texture for an unbound table slot: of the kind the shader declares there (#62),
-     * else the fixed-function shader's (2D, and cube for fragment slots 8-15). */
+     * else the fixed-function shader's (2D; cube for fragment slots 8-15, 3D for 16-23). */
     uint64_t nullTextureId(uint32_t stage, uint32_t slot, const MtlShaderFunction* fn = nullptr) const {
       const uint8_t dim = fn != nullptr && slot < fn->textureDim.size()
         ? fn->textureDim[slot] : MtlShaderFunction::NoTextureDim;
@@ -571,6 +577,8 @@ namespace dxvk::backend {
         return m_nullCubeId;
       if (dim == 0u)
         return m_null2DId;
+      if (stage == 1u && slot >= kNull3DFirstSlot)
+        return m_null3DId;
       return stage == 1u && slot >= kNullCubeFirstSlot ? m_nullCubeId : m_null2DId;
     }
     /* The kind a table slot's texture must have (#150), as nullTextureId picks the null texture:
@@ -580,6 +588,8 @@ namespace dxvk::backend {
         ? fn->textureDim[slot] : MtlShaderFunction::NoTextureDim;
       if (dim <= 2u)
         return dim;
+      if (stage == 1u && slot >= kNull3DFirstSlot)
+        return 2u;
       return stage == 1u && slot >= kNullCubeFirstSlot ? 1u : 0u;
     }
     void selectArgumentTablesForPass();
