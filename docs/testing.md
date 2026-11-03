@@ -205,6 +205,22 @@ t's flat values from vertex t+1, Metal would take the hub of the expanded
 `(0, t+1, t+2)`; non-indexed fans follow once the fan index rotation lands,
 #170), and points have nothing to interpolate.
 
+`test/code_depth_bias.c` checks `D9MT_DEPTH_BIAS_VS` (the constant depth bias in
+the vertex shader, #163): one frame renders about 150 cells into a 2048x1536
+target, 1x and then 4x MSAA, and prints a `D9MT-DEPTHBIAS` line per checked
+pixel and a summary per pass. The cells cover:
+- the bias at several depths, both signs, mixed w, slope plus constant;
+- reduced and degenerate viewports, the k guard;
+- the clamp policy (viewport clamp, late clamp, per-sample clamp);
+- coverage at the near and far planes, the six user clip planes, wireframe,
+  the guard band, negative and near-zero w;
+- the shader's arithmetic domain;
+- lines and points, pixel shaders writing depth, fixed function, transitions.
+
+The file's header explains the expected values and the runs: switch on, every gating
+line ok; switch off, equal to the base build; `D9MT_DEPTH_BIAS_TEST_UNHOOK=1`;
+and the `no_depthbias` run.
+
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
 `scripts/test-present-ring.sh` runs `present_ring_test` (the bridge's presented-time ring
