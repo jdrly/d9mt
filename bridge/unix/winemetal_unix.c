@@ -5995,6 +5995,10 @@ NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
 #include <CommonCrypto/CommonDigest.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 
@@ -6083,7 +6087,13 @@ _MTLDevice_newArgumentTable(void *obj) {
  * Runtime switches that don't change the target (D9MT_AIR_INVARIANT,
  * D9MT_AIR_FASTMATH) aren't in the partition, and the AIR cache's state
  * (D9MT_AIR_CACHE=0, a failed prepare) doesn't matter: the identity opens no
- * database. The newest
+ * database. A live process holds its partition's lease (<base>/.locks/<leaf>.lock,
+ * flock shared); another partition is removed only under its lease taken
+ * exclusively, so live instances with different targets or codegens keep each
+ * other's. A build without a valid identity (cunknown) removes none. Below the
+ * base, every file operation goes through opened directory fds and never
+ * follows a link: a linked partition is refused, a linked stale entry is
+ * unlinked itself. The newest
  * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
  * it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
@@ -6098,7 +6108,9 @@ _MTLDevice_newArgumentTable(void *obj) {
 
 static id<MTL4PipelineDataSetSerializer> g_pso_serializer;
 static MTL4CompilerTaskOptions          *g_pso_task_options;
-static NSString                         *g_pso_dir;
+static NSString                         *g_pso_dir;      /* the partition's real path (F_GETPATH) */
+static int                               g_pso_dir_fd = -1; /* the partition, opened no-follow */
+static int                               g_pso_lease_fd = -1; /* the partition's lease, held shared */
 static NSString                         *g_pso_session;
 static unsigned                          g_pso_seq;
 static unsigned                          g_pso_flush_every = D9MT_PSO_FLUSH_DEFAULT;
@@ -6116,34 +6128,101 @@ static pthread_cond_t                    g_pso_gate_cond = PTHREAD_COND_INITIALI
 #define D9MT_PSO_RETRY_NS (50000000ull)
 static uint64_t                          g_pso_force_ns = D9MT_PSO_FORCE_NS;
 
+/* Every file operation in the partition is relative to its directory fd and never follows a
+ * symlink (O_NOFOLLOW, unlinkat/renameat of the entry itself): nothing outside the PSO
+ * directory is read through, or deleted by, a link planted in it. */
+
+/* "<size> <sha256>" of a regular file in the partition; nil if it isn't one. */
 static NSString *
-pso_sum_text(NSString *path) {
-  NSData *d = [[NSData alloc] initWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
-  if (!d)
+pso_sum_text(int dirfd, NSString *name) {
+  const int fd = openat(dirfd, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    return nil;
+  struct stat st;
+  if (fstat(fd, &st) || !S_ISREG(st.st_mode)) {
+    close(fd);
+    return nil;
+  }
+  CC_SHA256_CTX ctx;
+  CC_SHA256_Init(&ctx);
+  unsigned char buf[65536];
+  unsigned long long total = 0u;
+  ssize_t n;
+  while ((n = read(fd, buf, sizeof(buf))) > 0) {
+    CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
+    total += (unsigned long long)n;
+  }
+  close(fd);
+  if (n < 0)
     return nil;
   unsigned char h[CC_SHA256_DIGEST_LENGTH];
-  CC_SHA256(d.bytes, (CC_LONG)d.length, h);
-  NSMutableString *s = [NSMutableString stringWithFormat:@"%llu ", (unsigned long long)d.length];
+  CC_SHA256_Final(h, &ctx);
+  NSMutableString *s = [NSMutableString stringWithFormat:@"%llu ", total];
   for (unsigned i = 0u; i < sizeof(h); i++)
     [s appendFormat:@"%02x", h[i]];
-  [d release];
   return s;
 }
 
 static bool
-pso_archive_valid(NSString *path) {
-  NSString *want = [NSString stringWithContentsOfFile:[path stringByAppendingString:@".sum"]
-                                             encoding:NSUTF8StringEncoding error:nil];
-  if (!want)
+pso_archive_valid(int dirfd, NSString *name) {
+  NSString *sumName = [name stringByAppendingString:@".sum"];
+  const int fd = openat(dirfd, sumName.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
     return false;
-  NSString *have = pso_sum_text(path);
-  return have && [have isEqualToString:want];
+  char buf[160];
+  struct stat st;
+  const ssize_t n = !fstat(fd, &st) && S_ISREG(st.st_mode) ? read(fd, buf, sizeof(buf) - 1u) : -1;
+  close(fd);
+  if (n <= 0)
+    return false;
+  buf[n] = '\0';
+  NSString *want = [NSString stringWithUTF8String:buf];
+  NSString *have = pso_sum_text(dirfd, name);
+  return want && have && [have isEqualToString:want];
 }
 
 static void
-pso_remove_archive(NSString *path) {
-  unlink(path.fileSystemRepresentation);
-  unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
+pso_remove_archive(int dirfd, NSString *name) {
+  unlinkat(dirfd, name.fileSystemRepresentation, 0);
+  unlinkat(dirfd, [name stringByAppendingString:@".sum"].fileSystemRepresentation, 0);
+}
+
+/* Removes the entry `name` of directory parentfd: a symlink or a file is unlinked itself (a
+ * link's target is never touched), a directory is emptied through its own no-follow fd first. */
+static void
+pso_remove_tree_at(int parentfd, const char *name, unsigned depth) {
+  struct stat st;
+  if (fstatat(parentfd, name, &st, AT_SYMLINK_NOFOLLOW))
+    return;
+  if (!S_ISDIR(st.st_mode)) {
+    unlinkat(parentfd, name, 0);
+    return;
+  }
+  if (depth > 8u)
+    return;
+  const int fd = openat(parentfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  const int lfd = dup(fd);
+  DIR *d = lfd >= 0 ? fdopendir(lfd) : NULL;
+  if (!d) {
+    if (lfd >= 0)
+      close(lfd);
+    close(fd);
+    return;
+  }
+  NSMutableArray<NSString *> *names = [NSMutableArray array];
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    NSString *n = [NSString stringWithUTF8String:e->d_name];
+    if (n && strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+      [names addObject:n];
+  }
+  closedir(d);
+  for (NSString *n in names)
+    pso_remove_tree_at(fd, n.fileSystemRepresentation, depth + 1u);
+  close(fd);
+  unlinkat(parentfd, name, AT_REMOVEDIR);
 }
 
 /* Caller holds g_pso_lock exclusively. */
@@ -6152,25 +6231,38 @@ pso_flush_locked(void) {
   if (!g_pso_serializer || !atomic_load(&g_pso_pending))
     return;
   atomic_store(&g_pso_pending, 0u);
-  NSString *path = [g_pso_dir stringByAppendingPathComponent:
-    [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
-  NSString *tmp = [path stringByAppendingString:@".tmp"];
-  NSString *sumTmp = [path stringByAppendingString:@".sum.tmp"];
+  const int dfd = g_pso_dir_fd;
+  NSString *name = [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++];
+  NSString *tmp = [name stringByAppendingString:@".tmp"];
+  NSString *sumName = [name stringByAppendingString:@".sum"];
+  NSString *sumTmp = [name stringByAppendingString:@".sum.tmp"];
+  /* Metal writes by path: the partition's real path, resolved from its no-follow fd at setup.
+   * Everything after that goes through the fd. */
   NSError *err = nil;
-  if (![g_pso_serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&err]) {
+  if (![g_pso_serializer serializeAsArchiveAndFlushToURL:
+        [NSURL fileURLWithPath:[g_pso_dir stringByAppendingPathComponent:tmp]] error:&err]) {
     fprintf(stderr, "d9mt: PSO archive flush failed: %s\n",
             err ? err.localizedDescription.UTF8String : "(no error)");
-    unlink(tmp.fileSystemRepresentation);
+    unlinkat(dfd, tmp.fileSystemRepresentation, 0);
     return;
   }
-  NSString *sum = pso_sum_text(tmp);
-  if (!sum || ![sum writeToFile:sumTmp atomically:NO encoding:NSUTF8StringEncoding error:nil]
-   || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
-   || rename(sumTmp.fileSystemRepresentation, [path stringByAppendingString:@".sum"].fileSystemRepresentation)) {
-    unlink(tmp.fileSystemRepresentation);
-    unlink(sumTmp.fileSystemRepresentation);
-    pso_remove_archive(path);
-    fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+  NSData *sumData = [pso_sum_text(dfd, tmp) dataUsingEncoding:NSUTF8StringEncoding];
+  bool ok = false;
+  if (sumData) {
+    const int sfd = openat(dfd, sumTmp.fileSystemRepresentation,
+                           O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (sfd >= 0) {
+      ok = write(sfd, sumData.bytes, sumData.length) == (ssize_t)sumData.length;
+      ok = !close(sfd) && ok;
+    }
+  }
+  if (!ok
+   || renameat(dfd, tmp.fileSystemRepresentation, dfd, name.fileSystemRepresentation)
+   || renameat(dfd, sumTmp.fileSystemRepresentation, dfd, sumName.fileSystemRepresentation)) {
+    unlinkat(dfd, tmp.fileSystemRepresentation, 0);
+    unlinkat(dfd, sumTmp.fileSystemRepresentation, 0);
+    pso_remove_archive(dfd, name);
+    fprintf(stderr, "d9mt: PSO archive write failed (%s/%s)\n", g_pso_dir.UTF8String, name.UTF8String);
   }
 }
 
@@ -6303,11 +6395,13 @@ pso_archive_init(id<MTLDevice> device) {
     strcpy(osbuild, "unknown");
   /* the AIR partition: c<the effective AIR identity's first 8 bytes>-t<T>;
    * cunknown for a build without a well-formed codegen id (its AIR cache is
-   * off; its archives still work, by content) */
+   * off; its archives still work, by content, but it removes no other
+   * partition: nothing says a valid codegen's archives are stale) */
   uint8_t ident[16];
   const struct d9mt_air_lineage *lineage;
   char cpart[2u * 8u + 1u] = "unknown";
-  if (d9mt_air_effective_identity(ident, &lineage)) {
+  const bool haveIdentity = d9mt_air_effective_identity(ident, &lineage);
+  if (haveIdentity) {
     for (unsigned i = 0u; i < 8u; i++)
       snprintf(cpart + 2u * i, 3u, "%02x", ident[i]);
   }
@@ -6316,30 +6410,113 @@ pso_archive_init(id<MTLDevice> device) {
     pso_sanitize(device.name ?: @"gpu"), cpart, d9mtair_air_target()];
   NSString *dir = [base stringByAppendingPathComponent:leaf];
 
+  /* The base may be a link (a user's D9MT_PSO_ARCHIVE_DIR); below it, every step goes through
+   * opened directory fds. */
   NSFileManager *fm = [NSFileManager defaultManager];
-  if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) {
-    fprintf(stderr, "d9mt: PSO archives disabled (cannot create %s)\n", dir.UTF8String);
+  [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+  const int basefd = open(base.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (basefd < 0) {
+    fprintf(stderr, "d9mt: PSO archives disabled (cannot open %s)\n", base.UTF8String);
     return;
   }
-  for (NSString *name in [fm contentsOfDirectoryAtPath:base error:nil]) {
-    if ([name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
-      [fm removeItemAtPath:[base stringByAppendingPathComponent:name] error:nil];
+  /* Leases: <base>/.locks/<partition>.lock, outside the partitions and never deleted (a lock
+   * file deleted and created again would split one partition's lease in two). A live process
+   * holds its partition's lease shared for its lifetime; a partition is removed only by a
+   * process that gets its lease exclusively, so two live instances on one OS and GPU with
+   * different AIR targets or codegens keep each other's partitions. A bridge from before the
+   * leases (0.1.7) takes none, so its partition can't be protected. */
+  mkdirat(basefd, ".locks", 0755);
+  const int locksfd = openat(basefd, ".locks", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  const int lease = locksfd >= 0
+    ? openat(locksfd, [leaf stringByAppendingString:@".lock"].fileSystemRepresentation,
+             O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644) : -1;
+  bool leased = false;
+  for (unsigned i = 0u; lease >= 0 && i < 300u && !leased; i++) {
+    leased = !flock(lease, LOCK_SH | LOCK_NB);
+    if (!leased)
+      usleep(10000);  /* a sweeper holds it exclusively while it removes a stale copy */
   }
+  if (!leased) {
+    fprintf(stderr, "d9mt: PSO archives disabled (no lease on %s)\n", leaf.UTF8String);
+    if (lease >= 0)
+      close(lease);
+    if (locksfd >= 0)
+      close(locksfd);
+    close(basefd);
+    return;
+  }
+  /* The partition itself: a plain directory, never a link (O_NOFOLLOW). */
+  mkdirat(basefd, leaf.fileSystemRepresentation, 0755);
+  const int dirfd = openat(basefd, leaf.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  char realdir[MAXPATHLEN];
+  if (dirfd < 0 || fcntl(dirfd, F_GETPATH, realdir) == -1) {
+    fprintf(stderr, "d9mt: PSO archives disabled (%s is not a plain directory)\n", dir.UTF8String);
+    if (dirfd >= 0)
+      close(dirfd);
+    close(lease);
+    close(locksfd);
+    close(basefd);
+    return;
+  }
+  dir = [NSString stringWithUTF8String:realdir] ?: dir;
+
+  /* The other partitions: removed when their lease is free, entry by entry without following
+   * links (a stale entry that is a link is unlinked itself). Not without a valid identity. */
+  if (haveIdentity) {
+    const int lfd = dup(basefd);
+    DIR *d = lfd >= 0 ? fdopendir(lfd) : NULL;
+    NSMutableArray<NSString *> *stale = [NSMutableArray array];
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+      NSString *name = [NSString stringWithUTF8String:e->d_name];
+      if (name && [name hasPrefix:@"os-"] && ![name isEqualToString:leaf])
+        [stale addObject:name];
+    }
+    if (d)
+      closedir(d);
+    else if (lfd >= 0)
+      close(lfd);
+    for (NSString *name in stale) {
+      const int other = openat(locksfd, [name stringByAppendingString:@".lock"].fileSystemRepresentation,
+                               O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+      if (other < 0)
+        continue;
+      if (!flock(other, LOCK_EX | LOCK_NB))
+        pso_remove_tree_at(basefd, name.fileSystemRepresentation, 0u);
+      close(other);  /* releases the lock; the lock file stays */
+    }
+  }
+  close(locksfd);
+  close(basefd);
 
   /* Collect archives, drop leftovers of interrupted writes and orphans. */
   NSMutableArray<NSString *> *names = [NSMutableArray array];
   const time_t now = time(NULL);
-  for (NSString *name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
-    NSString *path = [dir stringByAppendingPathComponent:name];
-    if ([name hasSuffix:@".mtl4archive"]) {
-      [names addObject:name];
-    } else if ([name hasSuffix:@".tmp"]) {
+  {
+    const int lfd = dup(dirfd);
+    DIR *d = lfd >= 0 ? fdopendir(lfd) : NULL;
+    NSMutableArray<NSString *> *all = [NSMutableArray array];
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+      NSString *name = [NSString stringWithUTF8String:e->d_name];
+      if (name && strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+        [all addObject:name];
+    }
+    if (d)
+      closedir(d);
+    else if (lfd >= 0)
+      close(lfd);
+    for (NSString *name in all) {
       struct stat st;
-      if (!stat(path.fileSystemRepresentation, &st) && now - st.st_mtime > 600)
-        unlink(path.fileSystemRepresentation);
-    } else if ([name hasSuffix:@".mtl4archive.sum"]) {
-      if (![fm fileExistsAtPath:[path stringByDeletingPathExtension]])
-        unlink(path.fileSystemRepresentation);
+      if ([name hasSuffix:@".mtl4archive"]) {
+        [names addObject:name];
+      } else if ([name hasSuffix:@".tmp"]) {
+        if (!fstatat(dirfd, name.fileSystemRepresentation, &st, AT_SYMLINK_NOFOLLOW) && now - st.st_mtime > 600)
+          unlinkat(dirfd, name.fileSystemRepresentation, 0);
+      } else if ([name hasSuffix:@".mtl4archive.sum"]) {
+        if (fstatat(dirfd, [name stringByDeletingPathExtension].fileSystemRepresentation, &st, AT_SYMLINK_NOFOLLOW))
+          unlinkat(dirfd, name.fileSystemRepresentation, 0);
+      }
     }
   }
   /* "<unix-time>-<pid>-<seq>": lexical order == age; newest first. */
@@ -6354,8 +6531,8 @@ pso_archive_init(id<MTLDevice> device) {
     if (session && ![sessions containsObject:session] && sessions.count < D9MT_PSO_KEEP_SESSIONS)
       [sessions addObject:session];
     if (!session || ![sessions containsObject:session] || archives.count >= D9MT_PSO_MAX_ARCHIVES
-     || !pso_archive_valid(path)) {
-      pso_remove_archive(path);
+     || !pso_archive_valid(dirfd, name)) {
+      pso_remove_archive(dirfd, name);
       continue;
     }
     NSError *err = nil;
@@ -6366,7 +6543,7 @@ pso_archive_init(id<MTLDevice> device) {
     } else {
       fprintf(stderr, "d9mt: dropping PSO archive %s: %s\n", name.UTF8String,
               err ? err.localizedDescription.UTF8String : "(no error)");
-      pso_remove_archive(path);
+      pso_remove_archive(dirfd, name);
     }
   }
   if (archives.count) {
@@ -6378,8 +6555,11 @@ pso_archive_init(id<MTLDevice> device) {
   sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
   g_pso_serializer = [device newPipelineDataSetSerializerWithDescriptor:sd];
   [sd release];
+  /* the partition's lease stays held for the life of the process (lookup and capture) */
+  g_pso_lease_fd = lease;
   if (g_pso_serializer) {
     g_pso_dir = [dir retain];
+    g_pso_dir_fd = dirfd;
     g_pso_session = [[NSString stringWithFormat:@"%010llu-%d", (unsigned long long)now, (int)getpid()] retain];
     pthread_t thread;
     if (want_async && !pthread_create(&thread, NULL, pso_flush_thread, NULL)) {
@@ -6391,10 +6571,12 @@ pso_archive_init(id<MTLDevice> device) {
         fprintf(stderr, "d9mt: PSO archive flush thread not started: flushing on the build thread\n");
       atexit(pso_flush_atexit);
     }
+  } else {
+    close(dirfd);
   }
-  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)\n",
+  fprintf(stderr, "d9mt: PSO archives: %lu loaded from %s, capture %s (flush every %u)%s\n",
           (unsigned long)archives.count, dir.UTF8String, g_pso_serializer ? "on" : "off",
-          g_pso_flush_every);
+          g_pso_flush_every, haveIdentity ? "" : " (no AIR identity: other partitions kept)");
 }
 
 static void
