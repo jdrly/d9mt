@@ -115,5 +115,6 @@ equals no AIR target term `T`. The effective AIR identity is a pure resolver,
 AIR cache and by the PSO archives, which are partitioned by it and by `T`
 (`os-<build>-<gpu>-c<identity>-t<T>`): 0.1.7's archives are removed on the first 0.1.8 start
 instead of being searched on every miss for up to eight sessions. A retention rule, not a
-correctness one (Metal's lookup matches functions by content). `scripts/test-pso-partition.sh`
-checks it.
+correctness one (Metal's lookup matches functions by content). A live process holds its
+partition's lease (`<base>/.locks`), and only partitions whose lease is free are removed; a
+build without a valid identity removes none. `scripts/test-pso-partition.sh` checks it.
