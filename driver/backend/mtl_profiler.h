@@ -12,6 +12,8 @@
 #include "../util/log/log.h"
 #include "../util/util_string.h"
 
+#include "../cs/dxvk_cs_stats.h"
+
 #include "mtl_profiler_scope.h"
 
 namespace dxvk::backend::prof {
@@ -118,6 +120,10 @@ namespace dxvk::backend::prof {
       g_counts[i] = 0u;
 
     Logger::info(line);
+
+    // The CS handoff over the same window, as its own line (driver/cs/dxvk_cs_stats.h).
+    Logger::info(cs_stats::g_stats.take(g_frames, kWindowFrames,
+      cheap_clock::process(), cheap_clock::now()));
   }
 
 }

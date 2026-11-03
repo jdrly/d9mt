@@ -11,114 +11,12 @@
 
 #include "../mtl/mtl_context.h"
 
+#include "dxvk_cs_cmd.h"
+#include "dxvk_cs_stats.h"
+
 namespace dxvk {
 
   constexpr static size_t DxvkCsChunkSize = 16384;
-
-  class DxvkCsCmd {
-
-  public:
-
-    virtual ~DxvkCsCmd() { }
-
-    DxvkCsCmd* next() const {
-      return m_next;
-    }
-
-    DxvkCsCmd** chain() {
-      return &m_next;
-    }
-
-    virtual void exec(MtlContext* ctx) = 0;
-
-  private:
-
-    DxvkCsCmd* m_next = nullptr;
-
-  };
-
-
-  template<typename T>
-  class DxvkCsTypedCmd : public DxvkCsCmd {
-
-  public:
-
-    DxvkCsTypedCmd(T&& cmd)
-    : m_command(std::move(cmd)) { }
-
-    DxvkCsTypedCmd             (DxvkCsTypedCmd&&) = delete;
-    DxvkCsTypedCmd& operator = (DxvkCsTypedCmd&&) = delete;
-
-    void exec(MtlContext* ctx) {
-      m_command(ctx);
-    }
-
-  private:
-
-    T m_command;
-
-  };
-
-
-  class DxvkCsDataBlock {
-    friend class DxvkCsChunk;
-  public:
-
-    size_t count() const {
-      return m_structCount;
-    }
-
-    void* first() {
-      return reinterpret_cast<char*>(this) + m_dataOffset;
-    }
-
-    void* at(uint32_t idx) {
-      return reinterpret_cast<char*>(this) + m_dataOffset + idx * uint32_t(m_structSize);
-    }
-
-  private:
-
-    uint32_t m_dataOffset  = 0u;
-    uint16_t m_structSize  = 0u;
-    uint16_t m_structCount = 0u;
-
-  };
-
-
-  template<typename T, typename M>
-  class DxvkCsDataCmd : public DxvkCsCmd {
-
-  public:
-
-    DxvkCsDataCmd(T&& cmd)
-    : m_command(std::move(cmd)) { }
-
-    ~DxvkCsDataCmd() {
-      auto data = reinterpret_cast<M*>(m_data.first());
-
-      for (size_t i = 0; i < m_data.count(); i++)
-        data[i].~M();
-    }
-
-    DxvkCsDataCmd             (DxvkCsDataCmd&&) = delete;
-    DxvkCsDataCmd& operator = (DxvkCsDataCmd&&) = delete;
-
-    void exec(MtlContext* ctx) {
-      m_command(ctx, reinterpret_cast<M*>(m_data.first()), m_data.count());
-    }
-
-    DxvkCsDataBlock* data() {
-      return &m_data;
-    }
-
-  private:
-
-    alignas(std::max(alignof(T), alignof(M)))
-    T               m_command;
-    DxvkCsDataBlock m_data;
-
-  };
-
 
   enum class DxvkCsChunkFlag : uint32_t {
     SingleUse,
@@ -138,9 +36,9 @@ namespace dxvk {
       return m_commandOffset == 0;
     }
 
-    template<typename T>
+    template<DxvkCsCmdKind K = DxvkCsCmdKind::Other, typename T>
     bool push(T& command) {
-      using FuncType = DxvkCsTypedCmd<T>;
+      using FuncType = DxvkCsTypedCmd<T, K>;
       void* ptr = alloc<FuncType>(0u);
 
       if (unlikely(!ptr))
@@ -151,16 +49,16 @@ namespace dxvk {
       return true;
     }
 
-    template<typename T>
+    template<DxvkCsCmdKind K = DxvkCsCmdKind::Other, typename T>
     bool push(T&& command) {
-      return push(command);
+      return push<K>(command);
     }
 
-    template<typename M, typename T>
+    template<typename M, typename T, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
     DxvkCsDataBlock* pushCmd(T& command, size_t count) {
       size_t dataSize = count * sizeof(M);
 
-      using FuncType = DxvkCsDataCmd<T, M>;
+      using FuncType = DxvkCsDataCmd<T, M, K>;
       void* ptr = alloc<FuncType>(dataSize);
 
       if (unlikely(!ptr))
@@ -380,6 +278,9 @@ namespace dxvk {
     std::atomic<bool>           m_stopped     = { false };
     std::atomic<bool>           m_hasHighPrio = { false };
 
+    // D9MT_PROFILE only (cs_stats): threads inside a csSyncWait, under m_counterMutex.
+    uint32_t                    m_syncWaiters = 0u;
+
     alignas(CACHE_LINE_SIZE)
     dxvk::mutex                 m_mutex;
     dxvk::condition_variable    m_condOnAdd;
@@ -387,6 +288,10 @@ namespace dxvk {
 
     DxvkCsChunkQueue            m_queueOrdered;
     DxvkCsChunkQueue            m_queueHighPrio;
+
+    // D9MT_PROFILE only (cs_stats): the CS thread sleeps on m_condOnAdd, under m_mutex. The
+    // first handover that finds it set counts the wake and clears it.
+    bool                        m_parked      = false;
 
     dxvk::thread                m_thread;
 
@@ -401,6 +306,11 @@ namespace dxvk {
     }
 
     void threadFunc();
+
+    // D9MT_PROFILE only: m_condOnSync.wait(lock, pred) through cs_stats::timedWait (a wait that
+    // blocks counts as a csSyncWait; a chunk already done counts nothing).
+    template<typename Pred>
+    void waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred& pred);
 
   };
 

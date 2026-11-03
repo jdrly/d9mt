@@ -33,6 +33,7 @@ host attachment_opt_test -I driver/backend test/native/attachment_opt_test.cpp
 host block_fill_test -I driver test/native/block_fill_test.cpp
 host buffer_tracking_test -I driver/d3d9 -I driver/mtl test/native/buffer_tracking_test.cpp
 host canary_gate_test -I driver/backend test/native/canary_gate_test.cpp
+host cs_stats_test -I driver/cs test/native/cs_stats_test.cpp
 host draw_bounds_test -g -fsanitize=address,undefined -fno-sanitize-recover=all -I driver/backend test/native/draw_bounds_test.cpp
 host fenced_pool_test -I driver/util test/native/fenced_pool_test.cpp
 host frame_cap_test -I driver/d3d9 test/native/frame_cap_test.cpp
