@@ -53,6 +53,8 @@ extern "C" void MTL4CommandQueue_commit(obj_handle_t, const obj_handle_t*, uint6
 
 namespace dxvk {
   namespace str { template<typename... T> std::string format(const T&...) { return std::string(); } }
+  // driver/util/util_fatal_log.h (#155): the commit path marks its step for the fatal-exception log
+  namespace fatal { inline void breadcrumb(const char*) { } }
   struct Logger {
     static void err(const std::string&) { }
     static void warn(const std::string& m) {
