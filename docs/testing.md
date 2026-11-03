@@ -179,6 +179,15 @@ check of every pixel shader function (expected values in the file's header).
 The fixed-function pipeline draws `D3DSHADE_FLAT` with its own flat fragment
 shader (`ffFsMainFlat`: colour inputs flat; `test/code_ff_flat.c` checks every
 primitive against D3D9's provoking vertex).
+The fixed-function batch's tests read back their own pixels and print
+`PASS`/`FAIL` (each file's header gives the oracle): `code_ff_fog.c` (linear
+fog with start == end, fixed function and SM1/2 emulated fog, an SM3 control),
+`code_ff_cliprhw.c` (no user clip planes for pre-transformed vertices),
+`code_ff_dot3.c` (a DOTPRODUCT3 alpha op on a depth-only target),
+`code_ff_cube3d.c` (cube and volume textures in fixed-function stages, #152;
+run it under `MTL_SHADER_VALIDATION=1` too) and `code_ff_invariant.c` (a
+fixed-function depth pass and an SM3 EQUAL pass: reported, with an asserted
+depth-offset control).
 Flat shading is partial: triangle fans stay Gouraud (D3D9 takes fan triangle
 t's flat values from vertex t+1, Metal would take the hub of the expanded
 `(0, t+1, t+2)`; non-indexed fans follow once the fan index rotation lands,
