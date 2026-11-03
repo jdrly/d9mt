@@ -52,6 +52,14 @@ namespace dxvk {
       return Stage == D3D9ShaderType::VertexShader ? m_vs : m_fs;
     }
 
+    /// The fragment shader for a draw: the flat one (colour inputs flat,
+    /// D3DSHADE_FLAT) when the draw's effective flat is set. The flat one is
+    /// never announced to the state cache, and the recorder skips pipelines
+    /// with it (MtlShaderFunction::flat).
+    Rc<MtlShaderFunction> GetPixelShader(bool Flat) {
+      return Flat && m_fsFlat != nullptr ? m_fsFlat : m_fs;
+    }
+
     /// Tells the state cache the fixed-function shaders exist. The cache
     /// keeps pointers to members: shut it down before this set goes away.
     void AnnounceToStateCache(MtlStateCache* pStateCache);
@@ -67,6 +75,7 @@ namespace dxvk {
 
     Rc<MtlShaderFunction> m_vs;
     Rc<MtlShaderFunction> m_fs;
+    Rc<MtlShaderFunction> m_fsFlat;
 
     PrewarmShader m_vsPrewarm;
     PrewarmShader m_fsPrewarm;

@@ -13,6 +13,15 @@
 #define INTERP_MODE
 #endif
 
+// D3DSHADE_FLAT (d3d9_fixed_function_frag_flat.frag): the colour inputs are
+// flat, from the primitive's provoking vertex. Fog and texture coordinates
+// stay interpolated, as in D3D9.
+#ifdef FF_FLAT
+#define COLOR_INTERP_MODE flat
+#else
+#define COLOR_INTERP_MODE INTERP_MODE
+#endif
+
 layout(location = 0) INTERP_MODE in vec4 in_Normal;
 layout(location = 1) INTERP_MODE in vec4 in_Texcoord0;
 layout(location = 2) INTERP_MODE in vec4 in_Texcoord1;
@@ -22,8 +31,8 @@ layout(location = 5) INTERP_MODE in vec4 in_Texcoord4;
 layout(location = 6) INTERP_MODE in vec4 in_Texcoord5;
 layout(location = 7) INTERP_MODE in vec4 in_Texcoord6;
 layout(location = 8) INTERP_MODE in vec4 in_Texcoord7;
-layout(location = 9) INTERP_MODE in vec4 in_Color0;
-layout(location = 10) INTERP_MODE in vec4 in_Color1;
+layout(location = 9) COLOR_INTERP_MODE in vec4 in_Color0;
+layout(location = 10) COLOR_INTERP_MODE in vec4 in_Color1;
 layout(location = 11) INTERP_MODE in float in_Fog;
 
 layout(location = 0) out vec4 out_Color0;

@@ -176,6 +176,9 @@ without COLOR inputs and a VS/PS pair that needs semantic reconciliation. Its
 frames must hash as base until the AIR compiler honours flat; with
 `D9MT_FLAT_CHECK=1` its log shows each draw's flat choice and the final-IR
 check of every pixel shader function (expected values in the file's header).
+The fixed-function pipeline draws `D3DSHADE_FLAT` with its own flat fragment
+shader (`ffFsMainFlat`: colour inputs flat; `test/code_ff_flat.c` checks every
+primitive against D3D9's provoking vertex).
 Flat shading is partial: triangle fans stay Gouraud (D3D9 takes fan triangle
 t's flat values from vertex t+1, Metal would take the hub of the expanded
 `(0, t+1, t+2)`; non-indexed fans follow once the fan index rotation lands,
