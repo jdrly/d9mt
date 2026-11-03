@@ -10,22 +10,28 @@
  * its own viewport), first 1x, then 4x MSAA (resolved by StretchRect) when the device has it, and
  * prints one line per checked sample:
  *
- *   D9MT-DEPTHBIAS x<1|4> <cell> <sample> want=<w> got=<g> legacy=<l> ok|FAIL|cross|info
+ *   D9MT-DEPTHBIAS x<1|4> <cell> <sample> want=<w> got=<g> px=<rrggbb> legacy=<l> ok|FAIL|cross|info
  *
  * then "D9MT-DEPTHBIAS-SUMMARY x<n> gating ok=<n> fail=<n> cross=<n> fixture=<n>". Classes:
- * R red (the probe passed), G green (the reference held), B blue (nothing drawn), M a mix. Wants:
- * R/G/B exact; r: red present (4x line/wireframe partial coverage); C: equals the same draw with
- * B = 0 (the cell's control, coverage); S: cross-run, must equal the D9MT_DEPTH_BIAS_VS=0 run's
- * line (paths that keep the hardware bias); I: informational. "legacy" is the B*2^(e+1)
- * hardware model (informational). A depth sample's want comes from the oracle
+ * R red (the probe passed), G green (the reference held), B blue (nothing drawn), M a mix; px is
+ * the raw resolved pixel. Wants: R/G/B exact; r: red present (4x line/wireframe partial
+ * coverage); C: the resolved bytes equal the same draw with B = 0 (the cell's control, coverage);
+ * c: the same comparison, informational (a 1x pixel centre exactly on a clipping edge); S:
+ * cross-run, the whole line (px included) must equal the D9MT_DEPTH_BIAS_VS=0 run's (paths that
+ * keep the hardware bias); I: informational. "legacy" is the B*2^(e+1) hardware model
+ * (informational). D3D9 pixel centres are at integer coordinates (d9mt offsets the viewport by
+ * half a pixel), so pixel (px, py) is sampled at (px, py). A depth sample's want comes from the oracle
  *
  *   final = clamp(d_win(p) + B * sum(mu_i a_i) + S * m_e, zn, zf)
  *
  * (mu: screen-space barycentrics, a_i: the vertex is in the shader's domain |z| <= 2^126,
  * 2^-100 <= |w| <= 2^126, m_e: the emitted plane's max(|dz/dx|, |dz/dy|) per pixel, [zn, zf]:
- * d9mt's Metal viewport depth range) compared with the reference by the cell's ZFUNC. In the 4x
- * pass a depth sample must also satisfy |final - Ref| > (|dz/dx| + |dz/dy|) / 2 + 2^-22, or it is
- * a fixture failure, not a driver result.
+ * d9mt's Metal viewport depth range) compared with the reference by the cell's ZFUNC. Every 4x
+ * depth sample (a reference and a want of R, G, r or the oracle, explicit wants included) must
+ * also satisfy |final - Ref| > (|dz/dx| + |dz/dy|) / 2 + 2^-22 for the depth its want predicts,
+ * checked at start-up (D9MT-DEPTHBIAS-FIXTURE lines) before any draw: a violation is reported as
+ * fixture-FAIL in the 4x pass, not as a driver result. MASK_AUTO cells must find their two
+ * covered and two uncovered control samples, or the cell is a fixture failure.
  *
  * Runs (GATES.md): D9MT_DEPTH_BIAS_VS=1 (every gating line ok), D9MT_DEPTH_BIAS_VS unset and the
  * base build (S lines compared across runs; the switch-off run equals base line for line),
@@ -102,6 +108,9 @@ typedef struct {
   double ref;          /* window depth of the reference quad */
   char want1, want4;   /* 0: the oracle */
   int any3;            /* classify the reddest of rows py-1..py+1 (line rasterization) */
+  int mset;            /* the 4x margin uses mfinal/mgx/mgy, not the cell's oracle */
+  double mfinal, mgx, mgy;
+  int fixtureBad;      /* the 4x margin assertion failed (validate_fixture) */
 } Sample;
 
 typedef struct {
@@ -119,7 +128,7 @@ typedef struct {
   int ps, vs;
   float psDepth;       /* PS_DEPTH_CONST: c1.x */
   int ns;
-  Sample s[8];
+  Sample s[16];
   int ctrl;            /* the B = 0 control cell, or -1 */
   int mask;            /* MASK_*: compare the cell with its control */
   int exclX0, exclX1;  /* MASK_FULL: excluded columns (the crossing) */
@@ -199,9 +208,17 @@ static void quad_x(Cell *c, double f0, double f1) {
 static void quad_flat(Cell *c, double ndc) { quad_x(c, ndc, ndc); }
 
 static void sample(Cell *c, int px, int py, int hasRef, double ref, char want1, char want4) {
-  if (c->ns >= 8) { printf("FAIL too many samples in %s\n", c->name); ExitProcess(2); }
+  if (c->ns >= 16) { printf("FAIL too many samples in %s\n", c->name); ExitProcess(2); }
   Sample *s = &c->s[c->ns++];
-  s->px = px; s->py = py; s->hasRef = hasRef; s->ref = ref; s->want1 = want1; s->want4 = want4; s->any3 = 0;
+  memset(s, 0, sizeof(*s));
+  s->px = px; s->py = py; s->hasRef = hasRef; s->ref = ref; s->want1 = want1; s->want4 = want4;
+}
+
+/* the depth the last sample's explicit want predicts, for the 4x margin (cells whose geometry the
+ * oracle doesn't see: T sequences, F's wireframe edge, N's no_depthbias run) */
+static void sample_margin(Cell *c, double final, double gx, double gy) {
+  Sample *s = &c->s[c->ns - 1];
+  s->mset = 1; s->mfinal = final; s->mgx = gx; s->mgy = gy;
 }
 
 /* a B = 0 copy of cell i (same geometry, no samples): the coverage control */
@@ -531,8 +548,49 @@ static int red_present(DWORD p) { return ((p >> 16) & 0xff) >= 60; }
 
 static int nOk, nFail, nCross, nFixture;
 
-static void report(int ms, const Cell *c, const char *sname, char want, char got, char legacy, const char *verdict) {
-  printf("D9MT-DEPTHBIAS x%d %s %s want=%c got=%c legacy=%c %s\n", ms ? 4 : 1, c->name, sname, want, got, legacy, verdict);
+static void report(int ms, const Cell *c, const char *sname, char want, char got, DWORD p, char legacy,
+                   const char *verdict) {
+  printf("D9MT-DEPTHBIAS x%d %s %s want=%c got=%c px=%06lx legacy=%c %s\n", ms ? 4 : 1, c->name, sname,
+         want, got, (unsigned long)p, legacy, verdict);
+}
+
+/* a sample whose 4x verdict compares a depth with its reference (DESIGN 5.1's 4x-gated depth
+ * samples): the oracle's or an explicit R/G/r. S, I, C, c and reference-less samples aren't. */
+static int depth_gated4(const Sample *s) {
+  return s->hasRef && (s->want4 == 0 || s->want4 == 'R' || s->want4 == 'G' || s->want4 == 'r');
+}
+
+/* DESIGN 5.1: every 4x-gated depth sample satisfies |final - Ref| > (|g_x| + |g_y|) / 2 + 2^-22
+ * for the depth its want predicts, so all 4 samples of the pixel agree with the centre oracle.
+ * Runs once after build(), before any draw: a violation marks the sample (reported as
+ * fixture-FAIL in the 4x pass), never a driver result. */
+static int validate_fixture(void) {
+  int checked = 0, bad = 0;
+  for (int i = 0; i < ncells; i++) {
+    Cell *c = &cells[i];
+    if (c->isControl) continue;
+    for (int j = 0; j < c->ns; j++) {
+      Sample *s = &c->s[j];
+      if (!depth_gated4(s)) continue;
+      double fin, gx, gy;
+      if (s->mset) { fin = s->mfinal; gx = s->mgx; gy = s->mgy; }
+      else {
+        Oracle o = oracle(c, s->px, s->py);
+        if (!o.covered) continue;   /* the probe doesn't reach the sample: no depth compare */
+        fin = o.final; gx = o.gx; gy = o.gy;
+      }
+      double need = 0.5 * (fabs(gx) + fabs(gy)) + 0x1p-22;
+      checked++;
+      if (!(fabs(fin - s->ref) > need)) {
+        s->fixtureBad = 1;
+        bad++;
+        printf("D9MT-DEPTHBIAS-FIXTURE %s s%d(%d,%d) final=%.9g ref=%.9g need>%.3g FAIL\n", c->name, j,
+               s->px, s->py, fin, s->ref, need);
+      }
+    }
+  }
+  printf("D9MT-DEPTHBIAS-FIXTURE 4x margin checked=%d bad=%d\n", checked, bad);
+  return bad;
 }
 
 static void check_cell(int ms, const Cell *c) {
@@ -556,37 +614,38 @@ static void check_cell(int ms, const Cell *c) {
     if (c->legacy && o.covered && o.legacyOk && s->hasRef)
       legacy = zpass(c->zfunc, o.legacy, s->ref) ? 'R' : 'G';
 
+    if (ms && s->fixtureBad) {
+      report(ms, c, sname, want ? want : '?', got, p, legacy, "fixture-FAIL");
+      nFixture++;
+      continue;
+    }
+
     if (!want) {
       if (!o.covered) want = s->hasRef ? 'G' : 'B';
       else if (!s->hasRef) want = 'R';
       else want = zpass(c->zfunc, o.final, s->ref) ? 'R' : 'G';
-      if (ms && o.covered && s->hasRef
-       && !(fabs(o.final - s->ref) > 0.5 * (fabs(o.gx) + fabs(o.gy)) + 0x1p-22)) {
-        report(ms, c, sname, want, got, legacy, "fixture-FAIL");
-        nFixture++;
-        continue;
-      }
     }
 
     switch (want) {
-      case 'S': report(ms, c, sname, want, got, legacy, "cross"); nCross++; break;
-      case 'I': report(ms, c, sname, want, got, legacy, "info"); break;
+      case 'S': report(ms, c, sname, want, got, p, legacy, "cross"); nCross++; break;
+      case 'I': report(ms, c, sname, want, got, p, legacy, "info"); break;
       case 'r': {
         int ok = red_present(p);
-        report(ms, c, sname, want, ok ? 'r' : got, legacy, ok ? "ok" : "FAIL");
+        report(ms, c, sname, want, ok ? 'r' : got, p, legacy, ok ? "ok" : "FAIL");
         if (ok) nOk++; else nFail++;
       } break;
-      case 'C': {
+      case 'C':
+      case 'c': {
         const Cell *k = &cells[c->ctrl];
         DWORD q = pixel(k->x0 + s->px, k->y0 + s->py);
         int ok = p == q;
-        printf("D9MT-DEPTHBIAS x%d %s %s want=C got=%06lx ctl=%06lx %s\n", ms ? 4 : 1, c->name, sname,
-               (unsigned long)p, (unsigned long)q, ok ? "ok" : "FAIL");
-        if (ok) nOk++; else nFail++;
+        printf("D9MT-DEPTHBIAS x%d %s %s want=%c got=%06lx ctl=%06lx %s\n", ms ? 4 : 1, c->name, sname, want,
+               (unsigned long)p, (unsigned long)q, want == 'c' ? "info" : ok ? "ok" : "FAIL");
+        if (want == 'C') { if (ok) nOk++; else nFail++; }
       } break;
       default: {
         int ok = got == want;
-        report(ms, c, sname, want, got, legacy, ok ? "ok" : "FAIL");
+        report(ms, c, sname, want, got, p, legacy, ok ? "ok" : "FAIL");
         if (ok) nOk++; else nFail++;
       }
     }
@@ -607,7 +666,9 @@ static void check_cell(int ms, const Cell *c) {
              c->name, mism, c->exclX0, c->exclX1, mism == 0 ? "ok" : "FAIL");
       if (mism == 0) nOk++; else nFail++;
     } else {
-      /* MASK_AUTO: up to 4 samples whose 9x9 neighbourhood is uniform in the control */
+      /* MASK_AUTO: 2 covered and 2 uncovered samples whose 9x9 neighbourhood is uniform in the
+       * control; the resolved bytes must equal the control's. A control without both regions
+       * (a blank or a fully covered cell) proves nothing: fixture failure. */
       int picked = 0, wantR = 2, wantN = 2;
       for (int y = 6; y < CELL_H - 6 && picked < 4; y += 5)
         for (int x = 6; x < CELL_W - 6 && picked < 4; x += 7) {
@@ -624,6 +685,11 @@ static void check_cell(int ms, const Cell *c) {
                  x, y, (unsigned long)p, (unsigned long)q, ok ? "ok" : "FAIL");
           if (ok) nOk++; else nFail++;
         }
+      if (picked != 4 || wantR != 0 || wantN != 0) {
+        printf("D9MT-DEPTHBIAS x%d %s auto picked=%d (covered missing %d, uncovered missing %d) fixture-FAIL\n",
+               ms ? 4 : 1, c->name, picked, wantR, wantN);
+        nFixture++;
+      }
       printf("D9MT-DEPTHBIAS x%d %s mask mismatches=%d (whole cell) info\n", ms ? 4 : 1, c->name, mism);
     }
   }
@@ -752,7 +818,11 @@ static void build(void) {
     add_control((int)(c - cells));
   }
 
-  /* U: six user planes (keep y_ndc <= Y_i) + d6/d7 */
+  /* U: six user planes (keep y_ndc <= Y_i) + d6/d7. U1's clipping edges against its B = 0
+   * control (same planes): the far crossing (NDC 1 at x = 64) and plane 5's edge (y_ndc = 0.5 at
+   * y = 24) each run through a pixel centre, so at 4x those pixels are half covered and the
+   * resolved bytes witness the edge's sub-pixel position; their neighbours are fully in or out.
+   * At 1x the centre lies on the edge itself: informational (c). */
   for (int i = 0; i < 3; i++) {
     snprintf(n, sizeof(n), "U%d", i + 1);
     c = add_cell(n); quad_x(c, 0.9, 1.1); c->bias = B; c->zfunc = D3DCMP_ALWAYS;
@@ -760,18 +830,31 @@ static void build(void) {
     sample(c, 32, 60, 0, 0, 'R', 'R');
     sample(c, 100, 60, 0, 0, 'B', 'B');
     sample(c, 32, 10, 0, 0, i < 2 ? 'B' : 'R', i < 2 ? 'B' : 'R');
+    if (i == 0) {
+      for (int dx = -1; dx <= 1; dx++) sample(c, 64 + dx, 60, 0, 0, dx ? 'C' : 'c', 'C');
+      for (int dy = -1; dy <= 1; dy++) sample(c, 32, 24 + dy, 0, 0, dy ? 'C' : 'c', 'C');
+      add_control((int)(c - cells));
+    }
   }
 
-  /* R: wireframe crossing the far / near plane: rows 79..81 equal the B = 0 draw */
+  /* R: wireframe crossing the far / near plane: rows 79..81 equal the B = 0 draw. The bottom
+   * edge's depth is 0.9 -> 1.1 (0.1 -> -0.1) over x = 0..128, so it crosses at x = 64, a pixel
+   * centre: R1's crossing pixel (64, rows 79..81) is partially covered at 4x (bytes gating), its
+   * neighbours 63/65 fully in/out; at 1x the crossing centre is informational (c). */
   for (int i = 0; i < 2; i++) {
     snprintf(n, sizeof(n), "R%d", i + 1);
     c = add_cell(n);
-    if (i == 0) tri(c, vp(0, 80, 0.9, 1), vp(127, 80, 1.1, 1), vp(64, 10, 1.0, 1));
-    else tri(c, vp(0, 80, 0.1, 1), vp(127, 80, -0.1, 1), vp(64, 10, 0.0, 1));
+    if (i == 0) tri(c, vp(0, 80, 0.9, 1), vp(CELL_W, 80, 1.1, 1), vp(64, 10, 1.0, 1));
+    else tri(c, vp(0, 80, 0.1, 1), vp(CELL_W, 80, -0.1, 1), vp(64, 10, 0.0, 1));
     c->fill = D3DFILL_WIREFRAME; c->bias = B; c->zfunc = D3DCMP_ALWAYS;
     for (int dy = -1; dy <= 1; dy++) {
       sample(c, 32, 80 + dy, 0, 0, 'C', 'C');
       sample(c, 96, 80 + dy, 0, 0, 'C', 'C');
+    }
+    if (i == 0) {
+      for (int dy = -1; dy <= 1; dy++) sample(c, 64, 80 + dy, 0, 0, 'c', 'C');
+      sample(c, 63, 80, 0, 0, 'C', 'C');
+      sample(c, 65, 80, 0, 0, 'C', 'C');
     }
     add_control((int)(c - cells));
   }
@@ -838,6 +921,13 @@ static void build(void) {
   sample(c, 100, 56, 0, 0, 'C', 'C');
   sample(c, 60, 48, 0, 0, 'C', 'C');
   sample(c, 40, 48, 0, 0, 'C', 'C');
+  /* the near crossing: NDC depth -1 + 1.5 (x - 8) / 112 = 0 at x = 82.67 (a vertical line). Pixel 83
+   * (centre 83, 1x in) is partially covered at 4x, 82 is out, 84 in. */
+  sample(c, 82, 48, 0, 0, 'C', 'C');
+  sample(c, 83, 48, 0, 0, 'C', 'C');
+  sample(c, 84, 48, 0, 0, 'C', 'C');
+  sample(c, 83, 40, 0, 0, 'C', 'C');
+  sample(c, 83, 56, 0, 0, 'C', 'C');
   add_control((int)(c - cells));
 
   /* D: degenerate viewports */
@@ -896,30 +986,41 @@ static void build(void) {
     c->fill = D3DFILL_WIREFRAME; c->bias = -B;
     sample(c, 64, 80, 1, z, 'R', 'r');
     c->s[0].any3 = 1;
+    /* flat: every covered sample of the edge (4x partial coverage) has the depth z - B/4 */
+    sample_margin(c, z + 0.75 * B - B, 0.0, 0.0);
   }
 
-  /* T: the transition sequences (run_sequences) */
-  for (int t = 1; t <= 4; t++) {
-    snprintf(n, sizeof(n), "T%d", t);
-    c = add_cell(n); c->seq = t;
-    switch (t) {
-      case 1:
-        sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample(c, 48, 48, 1, 0.2, 'S', 'S');
-        sample(c, 80, 48, 1, 0.2, 'S', 'S'); sample(c, 112, 48, 1, 0.2, 'R', 'R');
-        break;
-      case 2:
-        sample(c, 16, 48, 1, 0.2, 'R', 'R');
-        sample(c, 48, 48, 1, 0.2, unhookActive ? 'G' : 'R', unhookActive ? 'G' : 'R');
-        sample(c, 80, 48, 1, 0.2, 'R', 'R');
-        break;
-      case 3:
-        sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample(c, 48, 48, 1, 0.2, 'R', 'R');
-        sample(c, 80, 48, 1, 0.2, 'R', 'R'); sample(c, 112, 48, 1, 0.2, 'R', 'R');
-        break;
-      case 4:
-        sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample(c, 48, 48, 1, 0.2, 'S', 'S');
-        sample(c, 80, 48, 1, 0.2, 'R', 'R');
-        break;
+  /* T: the transition sequences (run_sequences). Their probes are flat sub-quads at
+   * pz = 0.2 + 0.75B with -B (the cells have no oracle geometry): an R want predicts the D3D9
+   * depth pz - B (VS path, D16's exact hardware bias; null DS has no test); the unhooked G the
+   * hardware model pz - B/4 (B * 2^(e+1), e = -3). Gradient 0. */
+  {
+    const double pz = 0.2 + 0.75 * B, dR = pz - B, dLegacy = pz - B / 4;
+    for (int t = 1; t <= 4; t++) {
+      snprintf(n, sizeof(n), "T%d", t);
+      c = add_cell(n); c->seq = t;
+      switch (t) {
+        case 1:
+          sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          sample(c, 48, 48, 1, 0.2, 'S', 'S');
+          sample(c, 80, 48, 1, 0.2, 'S', 'S');
+          sample(c, 112, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          break;
+        case 2:
+          sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          sample(c, 48, 48, 1, 0.2, unhookActive ? 'G' : 'R', unhookActive ? 'G' : 'R');
+          sample_margin(c, unhookActive ? dLegacy : dR, 0.0, 0.0);
+          sample(c, 80, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          break;
+        case 3:
+          for (int j = 0; j < 4; j++) { sample(c, 16 + 32 * j, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0); }
+          break;
+        case 4:
+          sample(c, 16, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          sample(c, 48, 48, 1, 0.2, 'S', 'S');
+          sample(c, 80, 48, 1, 0.2, 'R', 'R'); sample_margin(c, dR, 0.0, 0.0);
+          break;
+      }
     }
   }
 
@@ -958,6 +1059,7 @@ static void build(void) {
     c = add_cell(n); quad_flat(c, 0.6 + (j ? 1.25 : 0.75) * B); c->bias = -B;
     char w = noDepthBiasRun ? 'G' : 'I';
     sample(c, 64, 48, 1, 0.6, w, w);
+    sample_margin(c, 0.6 + (j ? 1.25 : 0.75) * B, 0.0, 0.0);   /* no_depthbias: the unbiased depth */
   }
 
   /* Z: no bias */
@@ -1055,6 +1157,7 @@ int main(void) {
   build();
   printf("D9MT-DEPTHBIAS cells=%d 4x=%s unhook=%d no_depthbias=%d\n", ncells, have4x ? "yes" : "no",
          unhookActive, noDepthBiasRun);
+  validate_fixture();
 
   /* D9MT_DEBUG_FILE is polled once a second: the no_depthbias run renders after ~2 s */
   const int renderFrame = noDepthBiasRun ? 120 : 0;

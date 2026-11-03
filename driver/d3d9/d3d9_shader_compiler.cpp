@@ -147,10 +147,12 @@ namespace dxvk {
     /// overflow for finite inputs. With k = 0 the stored z is the original
     /// and d6 = d7 = 0 (never clips): the switch-off A/A.
     ///
-    /// The position stores are dxbc-spirv's IoMap::flushOutputs: one
-    /// OutputStore per component, z before w, in main's last block. The z
-    /// store moves after the w store; d6/d7 follow it, before main's only
-    /// return. The clip-distance output grows from f32[6] (the D3D9 user
+    /// It runs in phase A before legalizeIr, so it sees the converter's
+    /// pre-SSA IR. The position stores are dxbc-spirv's IoMap::flushOutputs:
+    /// one OutputStore per component of a TmpLoad of that component's scalar
+    /// temporary, z before w, at the top level of main after all of main's
+    /// code. The z store moves after the w store; d6/d7 follow it, on main's
+    /// only exit. The clip-distance output grows from f32[6] (the D3D9 user
     /// planes d0..d5, which read the unbiased temps) to f32[8] in the IR only.
     /// Any other shape: nothing is changed, false (unhooked).
     bool emitDepthBias() {
@@ -224,9 +226,13 @@ namespace dxvk {
           ", w ", wCount, ", other ", otherCount, ")"));
       }
 
-      // Both in main, z before w in one block, and no return of main before
-      // the w store or in another block after it: the stores added after the
-      // w store then run on main's only exit.
+      // This runs before legalizeIr: control flow is still scoped
+      // (ScopedIf/Loop/Switch; Label/Branch come from ConvertControlFlowPass)
+      // and an SM3 `ret` moves the converter's code into main_wrapped, so the
+      // entry function normally has no Return. Required: both stores in main
+      // at scope depth 0, z before w, no control flow from the z store to
+      // main's end, and at most one return, after the w store. The stores
+      // added after the w store then run on main's only exit.
       auto mainFn = ir::SsaDef(m_builder.getOp(m_entryPoint).getOperand(0u));
 
       if (!mainFn || m_builder.getOp(mainFn).getOpCode() != ir::OpCode::eFunction)
@@ -235,6 +241,7 @@ namespace dxvk {
       enum class Seen { None, Z, W };
       Seen seen = Seen::None;
       uint32_t returns = 0u;
+      uint32_t depth = 0u;
 
       for (auto def = m_builder.getNext(mainFn); ; def = m_builder.getNext(def)) {
         if (!def)
@@ -245,30 +252,51 @@ namespace dxvk {
         if (op.getOpCode() == ir::OpCode::eFunctionEnd)
           break;
 
-        if (def == zStore) {
-          seen = Seen::Z;
-          continue;
-        }
+        if (def == zStore || def == wStore) {
+          if (depth)
+            return fail("a position store is inside a scoped construct");
 
-        if (def == wStore) {
-          if (seen != Seen::Z)
+          if (def == wStore && seen != Seen::Z)
             return fail("the w store doesn't follow the z store in main");
-          seen = Seen::W;
+
+          seen = def == zStore ? Seen::Z : Seen::W;
           continue;
         }
 
         switch (op.getOpCode()) {
+          case ir::OpCode::eScopedIf:
+          case ir::OpCode::eScopedLoop:
+          case ir::OpCode::eScopedSwitch:
+            if (seen != Seen::None)
+              return fail("control flow after the position stores");
+            depth++;
+            break;
+
+          case ir::OpCode::eScopedEndIf:
+          case ir::OpCode::eScopedEndLoop:
+          case ir::OpCode::eScopedEndSwitch:
+            if (seen != Seen::None || !depth)
+              return fail("control flow after the position stores");
+            depth--;
+            break;
+
+          case ir::OpCode::eScopedElse:
+          case ir::OpCode::eScopedLoopBreak:
+          case ir::OpCode::eScopedLoopContinue:
+          case ir::OpCode::eScopedSwitchCase:
+          case ir::OpCode::eScopedSwitchDefault:
+          case ir::OpCode::eScopedSwitchBreak:
           case ir::OpCode::eLabel:
           case ir::OpCode::eBranch:
           case ir::OpCode::eBranchConditional:
           case ir::OpCode::eSwitch:
           case ir::OpCode::eUnreachable:
             if (seen != Seen::None)
-              return fail("the position stores aren't in main's last block");
+              return fail("control flow after the position stores");
             break;
 
           case ir::OpCode::eReturn:
-            if (seen != Seen::W)
+            if (seen != Seen::W || depth)
               return fail("main returns before the position stores");
             returns++;
             break;
@@ -284,19 +312,62 @@ namespace dxvk {
       if (seen != Seen::W || returns > 1u)
         return fail("the position stores aren't on main's only exit");
 
+      // The stored values. Before SSA construction, flushOutputs stores
+      // TmpLoad(<the output's vector type>, <scalar f32 DclTmp>) per component
+      // (dxbc-spirv sm3_io_map.cpp flushOutputs): the load carries the
+      // vector type of the whole output although its temporary is scalar.
+      // SsaConstructionPass later replaces each load with the temporary's
+      // reaching scalar definition (rewriteDef), so the load's own type never
+      // reaches the final IR. The new arithmetic needs a scalar f32 operand
+      // now: such a load is accepted and retyped to f32 below (only after
+      // every check passed). A value that is already scalar f32 (an SSA
+      // form) is used as it is. Anything else: unhooked.
       auto zValue = ir::SsaDef(m_builder.getOp(zStore).getOperand(2u));
       auto wValue = ir::SsaDef(m_builder.getOp(wStore).getOperand(2u));
 
-      const auto& zType = m_builder.getOp(zValue).getType();
-      const auto& wType = m_builder.getOp(wValue).getType();
+      auto isScalarF32 = [] (const ir::Type& type) {
+        return type.isScalarType() && type.getBaseType(0u).getBaseType() == ir::ScalarType::eF32;
+      };
 
-      if (!zType.isScalarType() || zType.getBaseType(0u).getBaseType() != ir::ScalarType::eF32
-       || !wType.isScalarType() || wType.getBaseType(0u).getBaseType() != ir::ScalarType::eF32)
-        return fail("the z or w value isn't a 32-bit float");
+      // 1: scalar f32 already; 2: a pre-SSA load of a scalar f32 temporary
+      // that needs its type normalised; 0: not in the expected form.
+      auto classifyValue = [&] (ir::SsaDef value) -> uint32_t {
+        const auto& op = m_builder.getOp(value);
+
+        if (isScalarF32(op.getType()))
+          return 1u;
+
+        if (op.getOpCode() != ir::OpCode::eTmpLoad)
+          return 0u;
+
+        const auto& type = op.getType();
+
+        if (!type.isBasicType() || type.getBaseType(0u).getBaseType() != ir::ScalarType::eF32)
+          return 0u;
+
+        const auto& tmp = m_builder.getOpForOperand(op, 0u);
+
+        if (!tmp || tmp.getOpCode() != ir::OpCode::eDclTmp || !isScalarF32(tmp.getType()))
+          return 0u;
+
+        return 2u;
+      };
+
+      uint32_t zForm = classifyValue(zValue);
+      uint32_t wForm = classifyValue(wValue);
+
+      if (!zForm || !wForm)
+        return fail("the z or w value isn't a 32-bit float (or a load of a scalar f32 temporary)");
 
       // Everything checked: rewrite.
       constexpr auto f32 = ir::ScalarType::eF32;
       constexpr auto b1  = ir::ScalarType::eBool;
+
+      if (zForm == 2u)
+        m_builder.rewriteOp(zValue, ir::Op(m_builder.getOp(zValue)).setType(f32));
+
+      if (wForm == 2u)
+        m_builder.rewriteOp(wValue, ir::Op(m_builder.getOp(wValue)).setType(f32));
 
       auto pushType = ir::Type().addStructMember(f32);
 

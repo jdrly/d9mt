@@ -219,7 +219,10 @@ pixel and a summary per pass. The cells cover:
 
 The file's header explains the expected values and the runs: switch on, every gating
 line ok; switch off, equal to the base build; `D9MT_DEPTH_BIAS_TEST_UNHOOK=1`;
-and the `no_depthbias` run.
+and the `no_depthbias` run. Every line carries the raw resolved pixel (`px=`), so
+the cross-run comparisons compare bytes, not only the colour class. Fixture checks
+(the 4x depth margin, asserted at start-up, and the automatic coverage samples)
+report `fixture-FAIL`, never a driver result.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
