@@ -137,10 +137,9 @@ namespace dxvk {
             m_constants.boolMask |= 1u << index;
         } break;
 
-        case RegisterType::eConst:
-        case RegisterType::eConst2:
-        case RegisterType::eConst3:
-        case RegisterType::eConst4: {
+        /* dxbc-spirv's parser reports the higher banks (c2048+) as eConst
+         * with the bank folded into the index (ed45371), as DXVK 5870d2e2. */
+        case RegisterType::eConst: {
           m_constants.floatCount = std::max(m_constants.floatCount, index + count);
 
           if (src.hasRelativeAddressing()) {
@@ -154,6 +153,17 @@ namespace dxvk {
           } else {
             for (uint32_t j = 0u; j < count; j++)
               setBit(constMaskF, index + j);
+          }
+        } break;
+
+        case RegisterType::eInput: {
+          // SM1/2 pixel shaders have no semantics (SM1 not even declarations): their
+          // input registers v0/v1 are the colours (DXVK 5cc97888).
+          if (GetShaderInfo().getType() == ShaderType::ePixel && GetShaderInfo().getVersion().first < 3u) {
+            auto location = FindLocationInFixedFunctionIO({ dxbc_spv::sm3::SemanticUsage::eColor, index });
+
+            if (location)
+              m_flatShadingMask |= 1u << *location;
           }
         } break;
 
@@ -322,8 +332,9 @@ namespace dxvk {
     }
 
     if (GetShaderInfo().getType() == ShaderType::ePixel
-      && dcl.getSemanticUsage() == SemanticUsage::eColor
-      && dcl.getSemanticIndex() < 2u) {
+     && GetShaderInfo().getVersion().first == 3u
+     && dcl.getSemanticUsage() == SemanticUsage::eColor
+     && dcl.getSemanticIndex() < 2u) {
       Semantic semantic = { dcl.getSemanticUsage(), dcl.getSemanticIndex() };
 
       auto location = FindLocationInFixedFunctionIO(semantic);

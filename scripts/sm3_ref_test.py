@@ -19,6 +19,9 @@ D3D9 semantics computed here.
 --x86         the driver is the 32-bit build (i686 harness)
 --skip file   leave out the cases whose names the file lists (one per line)
 
+The pin_* cases cover the dxbc-spirv 76236b82 pin (pin_cases(): fixes, the
+predicate truth table, the signed-zero gate); `--only pin_` runs just them.
+
 Comparison: exact bits, except that +0 and -0 are equal, any NaN equals
 any NaN, and cases built from non-dyadic inputs allow 2 ulps (their
 products round, and the compiler may fuse a multiply into the subtraction).
@@ -416,6 +419,67 @@ def vs_in_cases():
     return cases
 
 
+def pin_cases():
+    """The dxbc-spirv 76236b82 pin (PR "dxbc-spirv pin"), all named pin_*:
+    - pin_fix_*: fixes that fail on the old pin c5c1a5b9 and must pass now: an unpacked v[aL]
+      over two registers and every component (1005c5f), and the two assert paths a loop or
+      block made unreachable takes (dcd27e1, fcfbee3; witnesses, which may also pass on the old
+      pin if an earlier fold hides the pattern: the night records which).
+    - pin_pred_*: the predicate truth table, if p0 / if !p0 / breakp p0 / breakp !p0, each with
+      the predicate true (_t) and false (_f). The old pin rejects all of them; 76236b82 without
+      patch 0003 must get if !p0 wrong and abort on breakp p0, and pass if p0 and breakp !p0
+      (the controls); with 0003 all eight pass.
+    - pin_sz_*: the signed-zero gate of ConditionPass (76236b8): x == +0.0 and x == -0.0 are
+      both true at x = 0, but distinct constants make the pass judge them exclusive. Nested
+      predication (select in select) and nested if_eq, at x = +0, -0 (both true: 1) and 1
+      (both false: 0)."""
+    cases = []
+    z4, o4 = [0.0] * 4, [1.0] * 4
+
+    def ps_case(name, body, a=z4, b=o4, want=None):
+        ps = ('ps_3_0\ndcl_texcoord0 v0\ndcl_texcoord1 v1\n' + def_line('c0', z4) + '\n'
+              + def_line('c1', o4) + '\ndefi i0, 4, 0, 1, 0\nmov r0, c0\n' + body + 'mov oC0, r0\n')
+        cases.append(Case('pin_' + name, VS_PASS2, ps, ELEMS3, POS + list(a) + list(b), expect_rt(want)))
+
+    # 1005c5f: relative input reads of unpacked registers, PS and VS
+    dcls = [('texcoord0', 'v0', ''), ('texcoord1', 'v1', '')]
+    want = [x + y for x, y in zip(SEMVAL['texcoord0'], SEMVAL['texcoord1'])]
+    cases.append(ps_io_case('rel_unpacked', dcls, 'defi i0, 2, 0, 1, 0\ndef c0, 0, 0, 0, 0\nmov r0, c0\n'
+                            'loop aL, i0\nadd r0, r0, v0[aL]\nendloop\nmov oC0, r0\n', [want]))
+    cases[-1].name = 'pin_fix_ps_rel_unpacked'
+    T, N = [1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]
+    vs = ('vs_3_0\ndcl_position v0\ndcl_texcoord0 v1\ndcl_normal v2\ndcl_position o0\ndcl_texcoord0 o1\n'
+          'dcl_texcoord1 o2\nmov o0, v0\ndefi i0, 2, 0, 1, 0\ndef c0, 0, 0, 0, 0\nmov r0, c0\n'
+          'loop aL, i0\nadd r0, r0, v1[aL]\nendloop\nmov o1, r0\n')
+    cases.append(Case('pin_fix_vs_rel_unpacked', vs, 'ps_3_0\ndcl_texcoord0 v0\nmov oC0, v0\n',
+                      [(D_POS, 0, T_F4, 0), (D_TEX, 0, T_F4, 16), (D_NORMAL, 0, T_F4, 32)], POS + T + N,
+                      expect_rt([t + n for t, n in zip(T, N)])))
+    # dcd27e1 / fcfbee3: a loop, and a self-referencing temp in one, behind a never-taken if
+    ps_case('fix_unreach_loop', 'if_gt c0.x, c0.x\nrep i0\nadd r0, r0, c1\nendrep\nendif\n', want=z4)
+    ps_case('fix_unreach_selfphi', 'mov r0, c1\nif_gt c0.x, c0.x\nrep i0\nmov r0, r0\nendrep\nendif\n',
+            want=o4)
+    # the predicate truth table: p0 = v0 < v1 (true) or v0 > v1 (false), v0 = 0, v1 = 1
+    for p, setp in ((True, 'setp_lt p0, v0, v1\n'), (False, 'setp_gt p0, v0, v1\n')):
+        t = 't' if p else 'f'
+        ps_case('pred_if_p0_' + t, setp + 'if p0.x\nmov r0, c1\nendif\n', want=o4 if p else z4)
+        ps_case('pred_if_notp0_' + t, setp + 'if !p0.x\nmov r0, c1\nendif\n', want=z4 if p else o4)
+        ps_case('pred_breakp_p0_' + t, setp + 'rep i0\nbreakp p0.x\nadd r0, r0, c1\nendrep\n',
+                want=z4 if p else [4.0] * 4)
+        ps_case('pred_breakp_notp0_' + t, setp + 'rep i0\nbreakp !p0.x\nadd r0, r0, c1\nendrep\n',
+                want=[4.0] * 4 if p else z4)
+    # the signed-zero gate: c2 = +0.0, c3 = -0.0 (raw bits), x = v0.x
+    sz_defs = 'def c2, 0x00000000, 0x00000000, 0x00000000, 0x00000000\n' \
+              'def c3, 0x80000000, 0x80000000, 0x80000000, 0x80000000\nmov r1, v0\n'
+    for xname, x, both in (('pos', 0.0, True), ('neg', -0.0, True), ('one', 1.0, False)):
+        a = [x] * 4
+        want = o4 if both else z4
+        ps_case('sz_pred_' + xname, sz_defs + 'mov r3, c0\nsetp_eq p0.x, r1.x, c2.x\nsetp_eq p0.y, r1.x, c3.x\n'
+                '(p0.y) mov r3, c1\n(p0.x) mov r0, r3\n', a=a, want=want)
+        ps_case('sz_if_' + xname, sz_defs + 'if_eq r1.x, c2.x\nif_eq r1.x, c3.x\nmov r0, c1\nendif\nendif\n',
+                a=a, want=want)
+    return cases
+
+
 def all_cases(legacy):
     cases = []
     for st in ('ps', 'vs'):
@@ -439,7 +503,7 @@ def all_cases(legacy):
                 cases.append(setp_case(st, m, cmp))
             cases.append(setp_case(st, m, 'gt', neg=True))
             cases.append(setp_case(st, m, 'lt', sw='wzyx'))
-    cases += ps_io_cases() + vs_out_cases() + vs_in_cases()
+    cases += ps_io_cases() + vs_out_cases() + vs_in_cases() + pin_cases()
     return cases
 
 

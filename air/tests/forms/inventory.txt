@@ -1,0 +1,138 @@
+# The AIR built-in forms contract (scripts/test-air-forms.sh, PR "AIR target per macOS").
+#
+# form <declared name> <fixture>... [apple-unmatched: <reason>]
+#   Every intrinsic declaration AirBuilder (air/air_builder.cpp) can emit, by its declared name.
+#   Each fixture must declare it: ir:<case> is air/tests/forms/gen_ir.cpp's hand-built IR through
+#   `airlib_loopback --ir`; sm3:<name> is air/tests/bin/<name>.bin through the SM3 front end. The
+#   declaration is compared, per target, with Apple's for the same name from forms.metal (the
+#   group named in the form's `apple` column below). apple-unmatched entries (Apple's MSL can't
+#   produce that exact overload) are listed in the output and reviewed by hand, never passed.
+#   Half operands of the fast-math functions compute in float (callScalarMath): the math_half
+#   fixture feeds them half inputs and they declare only the .f32 forms.
+# site "<literal>" <form>...
+#   Every "air.… literal in air_builder.cpp that names a called function, and the forms it
+#   produces. A literal with neither a site nor a meta line fails the completeness check.
+# meta "<literal>"
+#   A literal that is metadata, a module flag or a compile option, not a function.
+# LLVM's own intrinsics (llvm.fma, llvm.minnum, …) are outside this contract.
+
+# form                                 fixtures                          apple group
+form air.fast_sin.f32                  ir:math ir:math_half              math
+form air.fast_cos.f32                  ir:math ir:math_half              math
+form air.fast_exp2.f32                 ir:math ir:math_half              math
+form air.fast_log2.f32                 ir:math ir:math_half              math
+form air.fast_rsqrt.f32                ir:math ir:math_half              math
+form air.fast_fract.f32                ir:math ir:math_half              math
+form air.fast_pow.f32                  ir:math ir:math_half              math
+form air.sign.f32                      ir:math ir:math_half              math
+form air.abs.s.i32                     ir:int                            int
+form air.max.s.i32                     ir:int                            int
+form air.min.s.i32                     ir:int                            int
+form air.max.u.i32                     ir:int                            int
+form air.min.u.i32                     ir:int                            int
+form air.dfdx.f32                      ir:deriv                          deriv
+form air.dfdx.v2f32                    ir:deriv                          deriv
+form air.dfdx.v3f32                    ir:deriv                          deriv
+form air.dfdx.v4f32                    ir:deriv                          deriv
+form air.dfdy.f32                      ir:deriv                          deriv
+form air.dfdy.v2f32                    ir:deriv                          deriv
+form air.dfdy.v3f32                    ir:deriv                          deriv
+form air.dfdy.v4f32                    ir:deriv                          deriv
+form air.discard_fragment              ir:discard sm3:ps_texkill_tex     discard
+form air.sample_texture_2d.v4f32       ir:sample_2d sm3:ps_texld         sample_2d
+form air.sample_texture_cube.v4f32     ir:sample_cube sm3:ps_texcube     sample_cube
+form air.sample_texture_3d.v4f32       ir:sample_3d sm3:ps_tex3d         sample_3d
+form air.sample_texture_2d_grad.v4f32  ir:sample_2d_grad sm3:ps_texldd   sample_2d_grad
+form air.sample_texture_cube_grad.v4f32 ir:sample_cube_grad              sample_cube_grad
+form air.sample_texture_3d_grad.v4f32  ir:sample_3d_grad                 sample_3d_grad
+form air.sample_compare_depth_2d.f32   ir:compare_2d                     compare_2d
+form air.sample_compare_depth_cube.f32 ir:compare_cube                   compare_cube
+form air.sample_compare_depth_2d_grad.f32 ir:compare_2d_grad             compare_2d_grad
+form air.sample_compare_depth_cube_grad.f32 ir:compare_cube_grad         compare_cube_grad
+form air.gather_texture_2d.v4f32       ir:gather_2d                      gather_2d
+form air.gather_texture_cube.v4f32     ir:gather_cube                    gather_cube
+form air.get_width_texture_2d          ir:query_2d                       query_2d
+form air.get_height_texture_2d         ir:query_2d                       query_2d
+form air.get_num_mip_levels_texture_2d ir:query_2d                       query_2d
+form air.get_width_texture_cube        ir:query_cube                     query_cube
+form air.get_height_texture_cube       ir:query_cube                     query_cube
+form air.get_num_mip_levels_texture_cube ir:query_cube                   query_cube
+form air.get_width_texture_3d          ir:query_3d                       query_3d
+form air.get_height_texture_3d         ir:query_3d                       query_3d
+form air.get_depth_texture_3d          ir:query_3d                       query_3d
+form air.get_num_mip_levels_texture_3d ir:query_3d                       query_3d
+
+# The emit sites (air_builder.cpp)
+site "air.fast_sin"        air.fast_sin.f32
+site "air.fast_cos"        air.fast_cos.f32
+site "air.fast_exp2"       air.fast_exp2.f32
+site "air.fast_log2"       air.fast_log2.f32
+site "air.fast_rsqrt"      air.fast_rsqrt.f32
+site "air.fast_fract"      air.fast_fract.f32
+site "air.fast_pow"        air.fast_pow.f32
+site "air.sign"            air.sign.f32
+site "air.abs.s.i32"       air.abs.s.i32
+site "air.max.s.i32"       air.max.s.i32
+site "air.min.s.i32"       air.min.s.i32
+site "air.max.u.i32"       air.max.u.i32
+site "air.min.u.i32"       air.min.u.i32
+site "air.dfdx"            air.dfdx.f32 air.dfdx.v2f32 air.dfdx.v3f32 air.dfdx.v4f32
+site "air.dfdy"            air.dfdy.f32 air.dfdy.v2f32 air.dfdy.v3f32 air.dfdy.v4f32
+site "air.discard_fragment" air.discard_fragment
+site "air.sample_"         air.sample_texture_2d.v4f32 air.sample_texture_cube.v4f32 air.sample_texture_3d.v4f32 air.sample_texture_2d_grad.v4f32 air.sample_texture_cube_grad.v4f32 air.sample_texture_3d_grad.v4f32
+site "air.sample_compare_" air.sample_compare_depth_2d.f32 air.sample_compare_depth_cube.f32 air.sample_compare_depth_2d_grad.f32 air.sample_compare_depth_cube_grad.f32
+site "air.gather_"         air.gather_texture_2d.v4f32 air.gather_texture_cube.v4f32
+site "air.get_"            air.get_width_texture_2d air.get_height_texture_2d air.get_num_mip_levels_texture_2d air.get_width_texture_cube air.get_height_texture_cube air.get_num_mip_levels_texture_cube air.get_width_texture_3d air.get_height_texture_3d air.get_depth_texture_3d air.get_num_mip_levels_texture_3d
+
+# Metadata, module flags and compile options
+meta "air.address_space"
+meta "air.any"
+meta "air.arg_name"
+meta "air.arg_type_align_size"
+meta "air.arg_type_name"
+meta "air.arg_type_size"
+meta "air.buffer"
+meta "air.buffer_size"
+meta "air.center"
+meta "air.clip_distance"
+meta "air.clip_distance_array_size"
+meta "air.compile.denorms_disable"
+meta "air.compile.fast_math_disable"
+meta "air.compile.fast_math_enable"
+meta "air.compile.framebuffer_fetch_enable"
+meta "air.compile_options"
+meta "air.depth"
+meta "air.depth_qualifier"
+meta "air.fc_initializer"
+meta "air.fragment"
+meta "air.fragment_input"
+meta "air.front_facing"
+meta "air.function_constants"
+meta "air.indirect_argument"
+meta "air.indirect_buffer"
+meta "air.invariant"
+meta "air.language_version"
+meta "air.location_index"
+meta "air.max_constant_buffers"
+meta "air.max_device_buffers"
+meta "air.max_read_write_textures"
+meta "air.max_samplers"
+meta "air.max_textures"
+meta "air.max_threadgroup_buffers"
+meta "air.no_perspective"
+meta "air.perspective"
+meta "air.point_coord"
+meta "air.point_size"
+meta "air.position"
+meta "air.read"
+meta "air.render_target"
+meta "air.sample"
+meta "air.sampler"
+meta "air.source_file_name"
+meta "air.static_init"
+meta "air.struct_type_info"
+meta "air.texture"
+meta "air.version"
+meta "air.vertex"
+meta "air.vertex_input"
+meta "air.vertex_output"

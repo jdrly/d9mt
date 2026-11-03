@@ -27,11 +27,10 @@ const char* kDataLayout =
   "-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256"
   "-v512:512:512-v1024:1024:1024-n8:16:32";
 
-const d9mt::air::MetallibVersions kVersions;
-
-std::string targetTriple() {
-  return "air64-apple-macosx" + std::to_string(kVersions.osMajor) + "."
-    + std::to_string(kVersions.osMinor) + ".0";
+/* The AIR target for this process (air_metallib.h): the triple, air.version,
+ * air.language_version and the metallib container all come from it. */
+const d9mt::air::AirTarget& buildTarget() {
+  return d9mt::air::airTarget();
 }
 
 constexpr unsigned kAsConstant = 2u;
@@ -56,6 +55,7 @@ struct OutputVar {
   AllocaInst* storage = nullptr;
   Type* type = nullptr;
   int32_t retIndex = -1;
+  bool invariant = false;  /* the IR's OpFlag::eInvariant on the declaration */
 };
 
 struct SpecVar {
@@ -161,12 +161,25 @@ struct AirBuilderImpl {
 
   Function* discardFn = nullptr;
 
+  /* Apple's -fpreserve-invariance form (xcrun metal, every macOS target): a
+   * vertex shader whose position output the IR marks invariant (dxbc-spirv
+   * does for every SM3 VS, so passes drawing the same position expression
+   * with different vertex shaders get the same depth). Module-wide, as Apple
+   * does: the instructions lose reassoc and contract, the functions carry
+   * the three "invariance-late-*" attributes instead of "unsafe-fp-math"
+   * (the backend contracts and reassociates again after its own invariance
+   * analysis), the position output says air.invariant, and the compile
+   * options say fast_math_disable even under fastMath. Off with
+   * options.invariance = false (D9MT_AIR_FLAG_NO_INVARIANCE). Set by
+   * scanDeclarations(), before any instruction is built. */
+  bool preserveInvariance = false;
+
   AirBuilderImpl(const ir::Builder& irBuilder, const AirBuilder::Options& opt)
   : ir(irBuilder), options(opt), useAB(opt.useArgumentBuffer) {
     ctx.setOpaquePointers(false); /* AIR is pre-opaque-pointer LLVM */
     mod = std::make_unique<Module>("air_shader", ctx);
     mod->setDataLayout(kDataLayout);
-    mod->setTargetTriple(targetTriple());
+    mod->setTargetTriple(d9mt::air::airTargetTriple(buildTarget()));
     b = std::make_unique<IRBuilder<>>(ctx);
 
     b->setFastMathFlags(mathFlags());
@@ -185,6 +198,10 @@ struct AirBuilderImpl {
       fmf.setAllowReciprocal();
       fmf.setAllowContract();
       fmf.setApproxFunc();
+    }
+    if (preserveInvariance) {
+      fmf.setAllowReassoc(false);
+      fmf.setAllowContract(false);
     }
     return fmf;
   }
@@ -385,6 +402,7 @@ struct AirBuilderImpl {
           out.def = op.getDef();
           out.isBuiltin = true;
           out.builtin = ir::BuiltIn(op.getOperand(1u));
+          out.invariant = bool(op.getFlags() & ir::OpFlag::eInvariant);
           out.type = mapType(op.getType(), false);
           switch (out.builtin) {
             case ir::BuiltIn::ePosition:     out.orderKey = 0u; break;
@@ -467,6 +485,14 @@ struct AirBuilderImpl {
       [](const OutputVar& a, const OutputVar& b) {
         return a.orderKey < b.orderKey;
       });
+
+    if (options.invariance && stage == ir::ShaderStage::eVertex) {
+      for (const auto& out : outputs) {
+        if (out.isBuiltin && out.builtin == ir::BuiltIn::ePosition && out.invariant)
+          preserveInvariance = true;
+      }
+    }
+    b->setFastMathFlags(mathFlags());
 
     if (m_havePush) {
       BufferVar buf;
@@ -777,7 +803,13 @@ struct AirBuilderImpl {
     }
     fn->addFnAttr("no-signed-zeros-fp-math", "true");
     fn->addFnAttr("no-trapping-math", "true");
-    fn->addFnAttr("unsafe-fp-math", "true");
+    if (preserveInvariance) {
+      fn->addFnAttr("invariance-late-contract");
+      fn->addFnAttr("invariance-late-reassoc");
+      fn->addFnAttr("invariance-late-unsafe-fp-math");
+    } else {
+      fn->addFnAttr("unsafe-fp-math", "true");
+    }
     fn->addFnAttr("frame-pointer", "all");
     fn->addFnAttr("min-legal-vector-width", "128");
     fn->addFnAttr("no-builtins");
@@ -2089,10 +2121,17 @@ struct AirBuilderImpl {
     SmallVector<Metadata*, 4> outputMd;
     for (const auto& out : outputs) {
       if (out.isBuiltin && out.builtin == ir::BuiltIn::ePosition) {
-        outputMd.push_back(mdTuple({
-          mdString("air.position"),
-          mdString("air.arg_type_name"), mdString("float4"),
-          mdString("air.arg_name"), mdString("pos") }));
+        if (preserveInvariance) {
+          outputMd.push_back(mdTuple({
+            mdString("air.position"), mdString("air.invariant"),
+            mdString("air.arg_type_name"), mdString("float4"),
+            mdString("air.arg_name"), mdString("pos") }));
+        } else {
+          outputMd.push_back(mdTuple({
+            mdString("air.position"),
+            mdString("air.arg_type_name"), mdString("float4"),
+            mdString("air.arg_name"), mdString("pos") }));
+        }
       } else if (out.isBuiltin && out.builtin == ir::BuiltIn::ePointSize) {
         outputMd.push_back(mdTuple({
           mdString("air.point_size"),
@@ -2233,15 +2272,15 @@ struct AirBuilderImpl {
 
     auto* opts = mod->getOrInsertNamedMetadata("air.compile_options");
     opts->addOperand(mdTuple({ mdString("air.compile.denorms_disable") }));
-    opts->addOperand(mdTuple({ mdString(options.fastMath
+    opts->addOperand(mdTuple({ mdString(options.fastMath && !preserveInvariance
       ? "air.compile.fast_math_enable" : "air.compile.fast_math_disable") }));
     opts->addOperand(mdTuple({ mdString("air.compile.framebuffer_fetch_enable") }));
 
     mod->getOrInsertNamedMetadata("air.version")->addOperand(
-      mdTuple({ mdI32(kVersions.airMajor), mdI32(kVersions.airMinor), mdI32(0u) }));
+      mdTuple({ mdI32(buildTarget().airMajor), mdI32(buildTarget().airMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.language_version")->addOperand(
-      mdTuple({ mdString("Metal"), mdI32(kVersions.languageMajor),
-                mdI32(kVersions.languageMinor), mdI32(0u) }));
+      mdTuple({ mdString("Metal"), mdI32(buildTarget().languageMajor),
+                mdI32(buildTarget().languageMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.source_file_name")->addOperand(
       mdTuple({ mdString("dxbc-spirv-air") }));
     mod->getOrInsertNamedMetadata("llvm.ident")->addOperand(
@@ -2356,8 +2395,7 @@ struct AirBuilderImpl {
     }
 
     return d9mt::air::writeMetallib(
-      bitcode.data(), bitcode.size(), { fn },
-      d9mt::air::metallibTagVersions(kVersions));
+      bitcode.data(), bitcode.size(), { fn }, buildTarget());
   }
 };
 

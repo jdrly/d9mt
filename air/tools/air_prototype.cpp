@@ -225,13 +225,9 @@ int main(int argc, char** argv) {
   functions.push_back({
     "fs_main", d9mt::air::MetallibFunctionType::Fragment, {} });
 
-  d9mt::air::MetallibVersions versions;
-  versions.airMajor = 2u;
-  versions.airMinor = 7u;
-  versions.languageMajor = 3u;
-  versions.languageMinor = 0u;
-  versions.osMajor = 15u;
-  versions.osMinor = 0u;
+  /* The prototype's module says AIR 2.7 / Metal 3.0 / macOS 15 (kTriple),
+   * which is the legacy target's bitcode; on macOS 26 its VERS is 2.7/3.0. */
+  const d9mt::air::AirTarget versions = d9mt::air::airTargetFor(26u, true);
 
   std::vector<uint8_t> metallib = d9mt::air::writeMetallib(
     bitcode.data(), bitcode.size(), functions, versions);

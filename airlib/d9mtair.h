@@ -23,6 +23,9 @@ enum d9mt_air_status {
 #define D9MT_AIR_FLAG_FOLD_SPEC (1u << 0)
 #define D9MT_AIR_FLAG_ARG_BUFFER (1u << 1)
 #define D9MT_AIR_FLAG_FAST_MATH (1u << 2)
+/* no position invariance (D9MT_AIR_INVARIANT=0): a diagnostic switch, part of
+ * every AIR cache entry key through the flags */
+#define D9MT_AIR_FLAG_NO_INVARIANCE (1u << 3)
 
 struct d9mt_air_version_params {
   uint32_t abi_version;

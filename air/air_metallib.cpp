@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include <sys/sysctl.h>
 
@@ -38,8 +39,6 @@ struct ByteStream {
 constexpr uint16_t kPlatformMacOS = 0x8001u;
 constexpr uint8_t  kFileTypeExecutable = 0x00u;
 constexpr uint8_t  kOsMacOS = 0x81u;
-constexpr uint16_t kContainerVersionMajor = 2u;
-constexpr uint16_t kContainerVersionMinor = 7u;
 
 void writeFunctionTags(
         ByteStream&             s,
@@ -48,7 +47,7 @@ void writeFunctionTags(
         uint64_t                bitcodeSize,
         uint64_t                publicMdOffset,
         uint64_t                privateMdOffset,
-        const MetallibVersions& v) {
+        const AirTarget&        t) {
   s.fourcc("NAME");
   s.u16(uint16_t(fn.name.size() + 1u));
   s.cstr(fn.name);
@@ -73,10 +72,10 @@ void writeFunctionTags(
 
   s.fourcc("VERS");
   s.u16(8u);
-  s.u16(v.airMajor);
-  s.u16(v.airMinor);
-  s.u16(v.languageMajor);
-  s.u16(v.languageMinor);
+  s.u16(t.versAirMajor);
+  s.u16(t.versAirMinor);
+  s.u16(t.versLanguageMajor);
+  s.u16(t.versLanguageMinor);
 
   s.fourcc("ENDT");
 }
@@ -122,8 +121,8 @@ void writeFunctionConstantRecord(
   s.patchU16(sizeFixup, uint16_t(s.tell() - sizeFixup - 2u));
 }
 
-/* "<major>[.<n>...]" with a major of 1 to 999; anything else is 0 (the
-   bitcode's own tag). */
+/* "<major>[.<n>...]" with a major of 1 to 999; anything else is 0 (target
+   macOS 26). */
 unsigned parseMacOSMajor(const char* s) {
   unsigned major = 0u, digits = 0u;
   for (; *s >= '0' && *s <= '9'; s++) {
@@ -155,27 +154,69 @@ unsigned macOSMajor() {
 
 }
 
-MetallibVersions metallibTagVersions(const MetallibVersions& bitcode) {
-  static const unsigned major = [] {
-    unsigned m = macOSMajor();
-    std::fprintf(stderr, "d9mt: AIR metallibs tagged for macOS %u (%s)\n", m,
-      m >= 27u ? "AIR 2.9" : "the bitcode's AIR version");
-    return m;
-  }();
-
-  MetallibVersions v = bitcode;
-  if (major >= 27u) {
-    v.airMajor = 2u;
-    v.airMinor = 9u;
+AirTarget airTargetFor(unsigned macOSMajor, bool legacy) {
+  AirTarget t;
+  t.macOS = macOSMajor >= 27u ? 27u : 26u;
+  t.legacy = legacy;
+  if (legacy) {
+    /* The defaults: 0.1.7's bitcode and container; VERS per #110. */
+    if (t.macOS == 27u)
+      t.versAirMinor = 9u;
+    return t;
   }
-  return v;
+  const uint16_t minor = t.macOS == 27u ? 9u : 8u;
+  t.airMajor = 2u;
+  t.airMinor = minor;
+  t.languageMajor = 4u;
+  t.languageMinor = t.macOS == 27u ? 1u : 0u;
+  t.osMajor = uint16_t(t.macOS);
+  t.osMinor = 0u;
+  t.containerMajor = 2u;
+  t.containerMinor = 9u;
+  t.versAirMajor = t.airMajor;
+  t.versAirMinor = t.airMinor;
+  t.versLanguageMajor = t.languageMajor;
+  t.versLanguageMinor = t.languageMinor;
+  t.versionedTriple = true;
+  return t;
+}
+
+const AirTarget& airTarget() {
+  static const AirTarget target = [] {
+    const char* env = std::getenv("D9MT_AIR_LEGACY");
+    AirTarget t = airTargetFor(macOSMajor(), env && !std::strcmp(env, "1"));
+    std::fprintf(stderr, "d9mt: AIR target macOS %u%s: AIR %u.%u / Metal %u.%u",
+      t.macOS, t.legacy ? " (legacy, D9MT_AIR_LEGACY=1)" : "",
+      t.airMajor, t.airMinor, t.languageMajor, t.languageMinor);
+    if (t.versAirMajor != t.airMajor || t.versAirMinor != t.airMinor
+     || t.versLanguageMajor != t.languageMajor || t.versLanguageMinor != t.languageMinor)
+      std::fprintf(stderr, ", VERS %u.%u / %u.%u", t.versAirMajor, t.versAirMinor,
+        t.versLanguageMajor, t.versLanguageMinor);
+    std::fprintf(stderr, "\n");
+    return t;
+  }();
+  return target;
+}
+
+std::string airTargetTriple(const AirTarget& target) {
+  std::string arch = "air64";
+  if (target.versionedTriple)
+    arch += "_v" + std::to_string(target.airMajor) + std::to_string(target.airMinor);
+  return arch + "-apple-macosx" + std::to_string(target.osMajor) + "."
+    + std::to_string(target.osMinor) + ".0";
+}
+
+uint32_t airTargetCode(const AirTarget& target) {
+  return (uint32_t(target.legacy) << 16)
+       | (uint32_t(target.airMajor & 0xfu) << 12) | (uint32_t(target.airMinor & 0xfu) << 8)
+       | (uint32_t(target.versAirMajor & 0xfu) << 4) | uint32_t(target.versAirMinor & 0xfu);
 }
 
 std::vector<uint8_t> writeMetallib(
         const void*                           bitcode,
         size_t                                bitcodeSize,
         const std::vector<MetallibFunction>&  functions,
-        const MetallibVersions&               versions) {
+        const AirTarget&                      target) {
   Sha256Digest hash = sha256(bitcode, bitcodeSize);
 
   ByteStream publicMd;
@@ -185,7 +226,7 @@ std::vector<uint8_t> writeMetallib(
   for (const auto& fn : functions) {
     ByteStream tags;
     writeFunctionTags(tags, fn, hash, bitcodeSize,
-      publicMd.tell(), privateMd.tell(), versions);
+      publicMd.tell(), privateMd.tell(), target);
     fnList.u32(uint32_t(tags.tell() + 4u));
     fnList.raw(tags.bytes.data(), tags.bytes.size());
 
@@ -215,12 +256,12 @@ std::vector<uint8_t> writeMetallib(
 
   out.fourcc("MTLB");
   out.u16(kPlatformMacOS);
-  out.u16(kContainerVersionMajor);
-  out.u16(kContainerVersionMinor);
+  out.u16(target.containerMajor);
+  out.u16(target.containerMinor);
   out.u8(kFileTypeExecutable);
   out.u8(kOsMacOS);
-  out.u16(versions.osMajor);
-  out.u16(versions.osMinor);
+  out.u16(target.osMajor);
+  out.u16(target.osMinor);
   out.u64(fileSize);
   out.u64(headerSize);
   out.u64(functionListSize);

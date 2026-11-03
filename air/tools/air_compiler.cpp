@@ -38,6 +38,7 @@ struct Args {
   bool lowerLegacy = false;
   bool argBuffer = false;
   bool testSpec = false;
+  bool noInvariance = false;
 };
 
 void buildSpecTestIr(dxbc_spv::ir::Builder& b) {
@@ -263,6 +264,8 @@ bool parseArgs(int argc, char** argv, Args& args) {
       args.argBuffer = true;
     } else if (a == "--test-spec") {
       args.testSpec = true;
+    } else if (a == "--no-invariance") {
+      args.noInvariance = true;
     } else if (a == "-o" && i + 1 < argc) {
       args.outPath = argv[++i];
     } else if (a == "--ref-msl" && i + 1 < argc) {
@@ -352,6 +355,7 @@ int main(int argc, char** argv) {
     dxbc_spv::air::AirBuilder::Options airOptions = {};
     airOptions.entryName = args.name.c_str();
     airOptions.useArgumentBuffer = args.argBuffer;
+    airOptions.invariance = !args.noInvariance;
     airOptions.emitIrText = args.dumpAir;
 
     dxbc_spv::air::AirBuilder airBuilder(builder, airOptions);
