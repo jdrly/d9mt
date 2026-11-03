@@ -5,6 +5,11 @@
 #
 # Cases are (VS, PS) pairs. EXPECTED_FAIL lists cases for planned-but-
 # unimplemented features; they report XFAIL (or XPASS once fixed).
+#
+# AIR_DIFF_SAMPLES=4: the MSAA mode. Both paths render a triangle whose edges
+# cross the target into a 4x target and resolve it (air_diff_test --samples),
+# so centroid interpolation shows on the edges; the SPIRV-Cross reference
+# honours centroid and flat. Cases with a depth output are left out.
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$V2/build/air-compiler"
@@ -114,9 +119,18 @@ art_tag() { # <name>[@cbv|@spec] -> artifact tag
   esac
 }
 
+SAMPLES="${AIR_DIFF_SAMPLES:-1}"
+[[ "$SAMPLES" =~ ^(1|2|4|8)$ ]] || { echo "FATAL: AIR_DIFF_SAMPLES must be 1, 2, 4 or 8" >&2; exit 1; }
+SAMPLE_ARGS=()
+[ "$SAMPLES" != 1 ] && SAMPLE_ARGS=(--samples "$SAMPLES")
+echo "samples: $SAMPLES"
+
 pass=0; fail=0; xfail=0; xpass=0
 for entry in "${CASES[@]}"; do
   IFS=':' read -r name vs ps extra <<< "$entry"
+  if [ "$SAMPLES" != 1 ] && [ "$name" = ps_odepth ]; then
+    continue   # depth output: single-sample only
+  fi
 
   expected_fail=0
   for x in $EXPECTED_FAIL; do [ "$x" = "$name" ] && expected_fail=1; done
@@ -136,7 +150,7 @@ for entry in "${CASES[@]}"; do
       "$OUT/$pstag.air.metallib" "$OUT/$pstag.air.json" \
       "$OUT/$vstag.ref.metallib" "$OUT/$vstag.ref.json" \
       "$OUT/$pstag.ref.metallib" "$OUT/$pstag.ref.json" \
-      ${extra:-}; then
+      ${extra:-} "${SAMPLE_ARGS[@]}"; then
     if [ "$expected_fail" = 1 ]; then xpass=$((xpass+1)); else pass=$((pass+1)); fi
   else
     if [ "$expected_fail" = 1 ]; then

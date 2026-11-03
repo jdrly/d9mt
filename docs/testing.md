@@ -88,6 +88,16 @@ assert paths of unreachable loops, the `if`/`breakp` predicate truth table
 `conditions_signed_zero_test` (in `run-native-tests.sh`) checks the same
 signed-zero case on the IR after `legalizeIr`.
 
+`test/code_centroid.c` renders two sliver triangles into a 4x MSAA target,
+resolves and reads it back: a COLOR input and a `dcl_texcoord0_centroid` atlas
+sample must show no extrapolated sample (it prints the counts and PASS/FAIL;
+base, sampling at the pixel centre, fails). `test/code_flat.c` reads back one
+probe pixel per primitive under `D3DSHADE_FLAT` and compares it with D3D9's
+provoking vertex (the first of a list or strip primitive, vertex t+1 of a fan
+triangle); indexed fans stay Gouraud. `AIR_DIFF_SAMPLES=4
+scripts/run-air-diff.sh` runs the AIR/SPIRV-Cross differential on a 4x
+target with edges inside it, where centroid interpolation shows.
+
 `test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
 d9mt draws flat and the ones it keeps Gouraud (indexed fans), a pixel shader
 without COLOR inputs and a VS/PS pair that needs semantic reconciliation. Its

@@ -1,6 +1,8 @@
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -195,6 +197,7 @@ bool renderPath(
         const Manifest&  psManifest,
         const SpecValues& specValues,
         const char*      label,
+        uint32_t         samples,
         std::vector<uint8_t>& pixels,
         std::vector<float>&   depthPixels) {
   NSError* err = nil;
@@ -275,6 +278,13 @@ bool renderPath(
     pd.colorAttachments[rt].pixelFormat = MTLPixelFormatBGRA8Unorm;
   if (depthOut)
     pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  // --samples N: an N-sample target resolved into the readback texture, so
+  // centroid and sample interpolation show on the triangle's edges
+  pd.rasterSampleCount = samples;
+  if (samples > 1u && depthOut) {
+    fprintf(stderr, "FAIL[%s]: depth output isn't supported with --samples\n", label);
+    return false;
+  }
 
   id<MTLRenderPipelineState> pso =
     [device newRenderPipelineStateWithDescriptor:pd error:&err];
@@ -295,6 +305,20 @@ bool renderPath(
   }
   id<MTLTexture> target = targets[0];
 
+  std::vector<id<MTLTexture>> msTargets;
+  if (samples > 1u) {
+    for (uint32_t rt = 0; rt < rtCount; rt++) {
+      MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        width:kSize height:kSize mipmapped:NO];
+      td.textureType = MTLTextureType2DMultisample;
+      td.sampleCount = samples;
+      td.usage = MTLTextureUsageRenderTarget;
+      td.storageMode = MTLStorageModePrivate;
+      msTargets.push_back([device newTextureWithDescriptor:td]);
+    }
+  }
+
   id<MTLTexture> depthTarget = nil;
   if (depthOut) {
     MTLTextureDescriptor* dd = [MTLTextureDescriptor
@@ -310,6 +334,16 @@ bool renderPath(
      3.f, -1.f, 0.5f, 1.f,    0.f, 1.f, 0.f, 1.f,   2.f, 0.f, 0.f, 0.f,
     -1.f,  3.f, 0.5f, 1.f,    0.f, 0.f, 1.f, 1.f,   0.f, 2.f, 0.f, 0.f,
   };
+  // With --samples: a triangle whose edges cross the target, so pixels are
+  // partly covered (the full-screen one covers every sample of every pixel);
+  // the same attributes, so the two paths compare the same values.
+  if (samples > 1u) {
+    static const float edge[3][2] = { { -0.9f, -0.8f }, { 0.85f, -0.6f }, { -0.3f, 0.9f } };
+    for (uint32_t v = 0; v < 3u; v++) {
+      verts[12u * v + 0u] = edge[v][0];
+      verts[12u * v + 1u] = edge[v][1];
+    }
+  }
   id<MTLBuffer> vb = [device newBufferWithBytes:verts length:sizeof(verts)
     options:MTLResourceStorageModeShared];
 
@@ -318,10 +352,16 @@ bool renderPath(
 
   MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
   for (uint32_t rt = 0; rt < rtCount; rt++) {
-    rp.colorAttachments[rt].texture = targets[rt];
     rp.colorAttachments[rt].loadAction = MTLLoadActionClear;
     rp.colorAttachments[rt].clearColor = MTLClearColorMake(0, 0, 0, 1);
-    rp.colorAttachments[rt].storeAction = MTLStoreActionStore;
+    if (samples > 1u) {
+      rp.colorAttachments[rt].texture = msTargets[rt];
+      rp.colorAttachments[rt].resolveTexture = targets[rt];
+      rp.colorAttachments[rt].storeAction = MTLStoreActionMultisampleResolve;
+    } else {
+      rp.colorAttachments[rt].texture = targets[rt];
+      rp.colorAttachments[rt].storeAction = MTLStoreActionStore;
+    }
   }
   if (depthOut) {
     rp.depthAttachment.texture = depthTarget;
@@ -418,17 +458,21 @@ int main(int argc, char** argv) {
   if (argc < 10) {
     fprintf(stderr, "usage: %s <name> <air_vs.mtl> <air_vs.json> "
       "<air_ps.mtl> <air_ps.json> <ref_vs.mtl> <ref_vs.json> "
-      "<ref_ps.mtl> <ref_ps.json> [--spec idx=value]...\n", argv[0]);
+      "<ref_ps.mtl> <ref_ps.json> [--spec idx=value]... [--samples N]\n", argv[0]);
     return 2;
   }
   const char* name = argv[1];
 
   SpecValues specValues;
+  uint32_t samples = 1u;
   for (int i = 10; i + 1 < argc; i++) {
     if (std::string(argv[i]) == "--spec") {
       uint32_t idx = 0u, value = 0u;
       if (sscanf(argv[i + 1], "%u=%u", &idx, &value) == 2)
         specValues.values.emplace_back(idx, value);
+      i++;
+    } else if (std::string(argv[i]) == "--samples") {
+      samples = uint32_t(std::max(1, atoi(argv[i + 1])));
       i++;
     }
   }
@@ -447,10 +491,10 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> airPixels, refPixels;
     std::vector<float> airDepth, refDepth;
     if (!renderPath(device, argv[2], airVs, argv[4], airPs, specValues,
-          "air", airPixels, airDepth))
+          "air", samples, airPixels, airDepth))
       return 1;
     if (!renderPath(device, argv[6], refVs, argv[8], refPs, specValues,
-          "ref", refPixels, refDepth))
+          "ref", samples, refPixels, refDepth))
       return 1;
 
     if (airPixels.size() != refPixels.size() ||
