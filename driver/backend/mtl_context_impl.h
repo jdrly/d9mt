@@ -591,7 +591,12 @@ namespace dxvk::backend {
     // A2, commit != complete: commitRecorded() ends and commits the recorded command buffers
     // with no serial; submit() adds the serial and its bookkeeping; commitPrefix() begins the
     // next command buffer under the same serial (G1, carryOpenPass).
-    void commitRecorded();
+    // commitRecorded() returns false only at process detach, when the residency set couldn't be
+    // committed (#63): nothing was committed, the device's submissions are abandoned, and the
+    // caller leaves its submit path at once through abandonRecording(): no serial, no
+    // retirement, no wait, no canary check.
+    bool commitRecorded();
+    void abandonRecording();
     void commitPrefix();
     bool carryOpenPass();
     void completeCarry();
