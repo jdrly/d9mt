@@ -35,9 +35,10 @@ scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under AS
 
 `scripts/run-native-tests.sh` builds and runs every `test/native/*_test.cpp` that
 needs only the host's clang++ (each source's first lines give its own command), and
-names the runner of each of the other six: `state_cache_test`
+names the runner of each of the other seven: `state_cache_test`
 (`scripts/test-state-cache.sh`), `pso_key_hash_test` (`scripts/test-pso-key-hash.sh`),
-`upload_copy_test` (`scripts/test-upload-copy.sh`), and `lifetime_check_test`,
+`upload_copy_test` (`scripts/test-upload-copy.sh`), `fatal_log_test`
+(`scripts/test-fatal-log.sh`, a mingw program it builds and runs under Wine), and `lifetime_check_test`,
 `submission_retire_test` and `submission_tracker_test`, which are mingw programs run
 by hand under Wine (the build line is in each source). A test in neither list fails
 the run, and so does any failing or unbuildable test (exit status 1).

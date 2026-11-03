@@ -11,6 +11,7 @@
 
 #include <stdatomic.h>
 #include <dlfcn.h>
+#include <mach-o/loader.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -1691,10 +1692,164 @@ _NSArray_count(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* d9mt image map: "d9mt: image <when> <name> <start>-<end>" lines for the system images a Metal
+ * fault comes from, each with its __TEXT range, and the dyld shared cache's range ("d9mt: image
+ * <when> dyld-shared-cache …"), so libsystem, libc++ or libdispatch addresses map too. A D9MT-FATAL
+ * address that no PE module holds (d3d9.dll's fatal-exception log) then maps to an image and an
+ * offset offline, symbolized with atos on a Mac of the same macOS build.
+ *
+ * Twice per process, each once: at the first device enumeration ("devices") and before the first
+ * render pipeline build ("first-pso": an image Metal loads late). Ordinary unix-call context only:
+ * no dyld callback, nothing in an exception handler.
+ *
+ * No walk of dyld's image list (an image another thread unloads in the middle would be read after
+ * its unmapping). Each image is found from an address it holds: Metal (MTLCreateSystemDefaultDevice),
+ * each device's driver (AGXMetal…: the device's class object), IOGPU, MetalTools and GPUCompiler
+ * (an exported symbol, dlsym; absent ones are skipped). An image is logged only if its header lies
+ * inside the shared cache, which is mapped for the life of the process, headers and names included
+ * (on macOS 26 and 27 all of these are in it; the AGX drivers exist nowhere else). dladdr gives the
+ * image's header and path; dlopen(path, RTLD_NOLOAD) also holds the image (it loads nothing) while
+ * dladdr is asked again and the header is read; then dlclose.
+ * D9MT_IMAGE_MAP=0 turns it off (and the device info below). */
+static _Atomic int image_map_state = 0; /* 0 unknown, 1 on, -1 off */
+static _Atomic(const void *) image_map_driver_anchor[4];
+
+static int
+image_map_on(void) {
+  int state = atomic_load_explicit(&image_map_state, memory_order_relaxed);
+  if (state == 0) {
+    const char *off = getenv("D9MT_IMAGE_MAP");
+    state = (off && !strcmp(off, "0")) ? -1 : 1;
+    atomic_store_explicit(&image_map_state, state, memory_order_relaxed);
+  }
+  return state > 0;
+}
+
+static uint64_t
+image_text_size(const struct mach_header *mh) {
+  if (!mh || mh->magic != MH_MAGIC_64)
+    return 0;
+  const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
+  const struct load_command *lc = (const struct load_command *)(h + 1);
+  for (uint32_t i = 0; i < h->ncmds; i++) {
+    if (lc->cmd == LC_SEGMENT_64 && !strncmp(((const struct segment_command_64 *)lc)->segname, "__TEXT", 16))
+      return ((const struct segment_command_64 *)lc)->vmsize;
+    lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+  }
+  return 0;
+}
+
+/* The image that holds anchor, if it's in the shared cache: held with dlopen(RTLD_NOLOAD) while its
+ * header is read. */
+static void
+image_map_log_image(const char *when, const void *anchor, uintptr_t cache_start, uintptr_t cache_end) {
+  Dl_info info;
+  if (!anchor || !dladdr(anchor, &info) || !info.dli_fbase || !info.dli_fname)
+    return;
+  const uintptr_t base = (uintptr_t)info.dli_fbase;
+  if (!(base >= cache_start && base < cache_end))
+    return;
+  void *held = dlopen(info.dli_fname, RTLD_NOLOAD | RTLD_LAZY | RTLD_LOCAL);
+  if (!held)
+    return;
+  Dl_info again;
+  if (dladdr(anchor, &again) && (uintptr_t)again.dli_fbase == base && again.dli_fname) {
+    const char *leaf = strrchr(again.dli_fname, '/');
+    leaf = leaf ? leaf + 1 : again.dli_fname;
+    fprintf(stderr, "d9mt: image %s %s 0x%016llx-0x%016llx\n", when, leaf, (unsigned long long)base,
+            (unsigned long long)(base + image_text_size((const struct mach_header *)again.dli_fbase)));
+  }
+  dlclose(held);
+}
+
+static void
+image_map_log(const char *when) {
+  typedef const void *(*shared_cache_range_fn)(size_t *);
+  shared_cache_range_fn range = (shared_cache_range_fn)dlsym(RTLD_DEFAULT, "_dyld_get_shared_cache_range");
+  size_t length = 0;
+  const void *start = range ? range(&length) : NULL;
+  const uintptr_t cache_start = (uintptr_t)start, cache_end = start ? cache_start + length : 0;
+  if (!start)
+    return;
+  fprintf(stderr, "d9mt: image %s dyld-shared-cache 0x%016llx-0x%016llx\n", when,
+          (unsigned long long)cache_start, (unsigned long long)cache_end);
+
+  image_map_log_image(when, (const void *)&MTLCreateSystemDefaultDevice, cache_start, cache_end);
+  for (size_t i = 0; i < sizeof(image_map_driver_anchor) / sizeof(*image_map_driver_anchor); i++) {
+    const void *anchor = atomic_load_explicit(&image_map_driver_anchor[i], memory_order_acquire);
+    int dup = 0;
+    for (size_t k = 0; k < i && !dup; k++)
+      dup = atomic_load_explicit(&image_map_driver_anchor[k], memory_order_acquire) == anchor;
+    if (anchor && !dup)
+      image_map_log_image(when, anchor, cache_start, cache_end);
+  }
+  static const char *const cached[] = { "IOGPUCommandQueueCreate", "MTLToolsGetAssociatedObject", "AIRCreateNativeScript" };
+  for (size_t i = 0; i < sizeof(cached) / sizeof(*cached); i++)
+    image_map_log_image(when, dlsym(RTLD_DEFAULT, cached[i]), cache_start, cache_end);
+}
+
+/* At the first device enumeration: remembers each device's class (in its driver's image; only the
+ * pointer is kept, and only an address inside the shared cache is ever looked at), then logs. */
+static void
+image_map_devices(NSArray *devices) {
+  static _Atomic int done = 0;
+  if (!image_map_on() || atomic_exchange(&done, 1))
+    return;
+  size_t n = 0;
+  for (id d in devices) {
+    if (n >= sizeof(image_map_driver_anchor) / sizeof(*image_map_driver_anchor))
+      break;
+    atomic_store_explicit(&image_map_driver_anchor[n++], (const void *)object_getClass(d), memory_order_release);
+  }
+  image_map_log("devices");
+}
+
+/* Before the first render pipeline build. */
+static void
+image_map_first_pso(void) {
+  static _Atomic int done = 0;
+  if (atomic_load_explicit(&done, memory_order_relaxed) || !image_map_on() || atomic_exchange(&done, 1))
+    return;
+  image_map_log("first-pso");
+}
+
+/* d9mt device info: once per process, after the first device enumeration, one "d9mt: device …"
+ * line per Metal device with the limits and families a Metal routine could divide by or branch
+ * on, so a fault in Metal's own code (a player's M1 Pro on macOS 26.1: an integer divide by zero
+ * in Metal.framework during the first render pipeline build) can be held against them: a 0
+ * among them is a divisor candidate. Logged with the image map (D9MT_IMAGE_MAP=0 turns both off). */
+static void
+device_info_log(NSArray *devices) {
+  static _Atomic int logged = 0;
+  if (!image_map_on() || atomic_exchange(&logged, 1))
+    return;
+  for (id<MTLDevice> d in devices) {
+    MTLSize tg = d.maxThreadsPerThreadgroup;
+    fprintf(stderr,
+            "d9mt: device \"%s\" arch %s registryID 0x%llx: maxThreadsPerThreadgroup %lux%lux%lu, "
+            "maxThreadgroupMemoryLength %lu, maxBufferLength %lu, recommendedMaxWorkingSetSize %llu, "
+            "maxArgumentBufferSamplerCount %lu, sparseTileSizeInBytes %lu, maximumConcurrentCompilationTaskCount %lu, "
+            "shouldMaximizeConcurrentCompilation %d, argumentBuffersSupport %lu, readWriteTextureSupport %lu, "
+            "unifiedMemory %d, families Apple7 %d Apple8 %d Apple9 %d Apple10 %d Metal3 %d Metal4 %d\n",
+            d.name.UTF8String ?: "?", d.architecture.name.UTF8String ?: "?", (unsigned long long)d.registryID,
+            (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth,
+            (unsigned long)d.maxThreadgroupMemoryLength, (unsigned long)d.maxBufferLength,
+            (unsigned long long)d.recommendedMaxWorkingSetSize, (unsigned long)d.maxArgumentBufferSamplerCount,
+            (unsigned long)d.sparseTileSizeInBytes, (unsigned long)d.maximumConcurrentCompilationTaskCount,
+            (int)d.shouldMaximizeConcurrentCompilation, (unsigned long)d.argumentBuffersSupport,
+            (unsigned long)d.readWriteTextureSupport, (int)d.hasUnifiedMemory,
+            (int)[d supportsFamily:(MTLGPUFamily)1007], (int)[d supportsFamily:(MTLGPUFamily)1008],
+            (int)[d supportsFamily:(MTLGPUFamily)1009], (int)[d supportsFamily:(MTLGPUFamily)1010],
+            (int)[d supportsFamily:(MTLGPUFamily)5001], (int)[d supportsFamily:(MTLGPUFamily)5002]);
+  }
+}
+
 static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
   params->ret = (obj_handle_t)MTLCopyAllDevices();
+  image_map_devices((NSArray *)params->ret);
+  device_info_log((NSArray *)params->ret);
   return STATUS_SUCCESS;
 }
 
@@ -6886,6 +7041,7 @@ _MTL4ComputeCommandEncoder_generateMipmaps(void *obj) {
 static NTSTATUS
 _MTL4Compiler_newRenderPipelineState(void *obj) {
   struct unixcall_mtl4_newrenderpso *params = obj;
+  image_map_first_pso();
   const struct WMTMtl4RenderPipelineInfo *info = params->info.ptr;
   MTL4RenderPipelineDescriptor *descriptor = [[MTL4RenderPipelineDescriptor alloc] init];
 
