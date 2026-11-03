@@ -5,12 +5,44 @@
 #
 # Cases are (VS, PS) pairs. EXPECTED_FAIL lists cases for planned-but-
 # unimplemented features; they report XFAIL (or XPASS once fixed).
+#
+# The AIR side follows D9MT_AIR_MACOS and D9MT_AIR_LEGACY (air/air_metallib.h
+# AirTarget). Artifacts live under build/air-compiler/diff/<key>, the key being
+# the effective AIR target (t26, t27, tL26, tL27), the math mode, the
+# invariance mode and the sample count, so one mode's metallibs never serve
+# another; and before rendering, every AIR artifact's triple, air.version,
+# Metal version, container and VERS must be its target's
+# (scripts/air-fields.py --expect; needs an LLVM 15 llvm-dis, as
+# test-air-versions.sh).
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$V2/build/air-compiler"
 BIN="$V2/air/tests/bin"
-OUT="$BUILD/diff"
+
+# The effective AIR target, parsed as air_metallib.cpp does: a version
+# "<1-3 digits>[.<digits>...]" of 27 or later is 27, anything else 26.
+air_mode() {
+  local v=${D9MT_AIR_MACOS:-$(sw_vers -productVersion)} major=0 m=26
+  if [[ $v =~ ^([0-9]{1,3})(\.[0-9]+)*$ ]]; then major=$((10#${BASH_REMATCH[1]})); fi
+  [ "$major" -ge 27 ] && m=27
+  [ "${D9MT_AIR_LEGACY:-}" = 1 ] && m=L$m
+  echo "$m"
+}
+AIR_MODE=$(air_mode)
+# air_compiler has one math mode (relaxed: AirBuilder's default), no
+# invariance switch and renders at 1x; those parts of the key change when it
+# gains the options.
+AIR_MATH=relaxed AIR_INVARIANCE=none AIR_SAMPLES=1
+OUT="$BUILD/diff/t$AIR_MODE-math-$AIR_MATH-inv-$AIR_INVARIANCE-s$AIR_SAMPLES"
 mkdir -p "$OUT"
+if [ -z "${LLVM_DIS:-}" ]; then
+  for c in "$V2/toolchains/llvm-build/bin/llvm-dis" /opt/homebrew/opt/llvm@15/bin/llvm-dis; do
+    [ -x "$c" ] && { LLVM_DIS=$c; break; }
+  done
+fi
+[ -n "${LLVM_DIS:-}" ] && [ -x "$LLVM_DIS" ] \
+  || { echo "FATAL: no llvm-dis (set LLVM_DIS, or: ninja -C toolchains/llvm-build llvm-dis)" >&2; exit 1; }
+echo "AIR target $AIR_MODE, artifacts in ${OUT#$V2/}"
 
 # case = name:vs:ps
 CASES=(
@@ -131,6 +163,11 @@ for entry in "${CASES[@]}"; do
   fi
 
   vstag="$(art_tag "$vs")"; pstag="$(art_tag "$ps")"
+  if ! fields=$(python3 -I "$V2/scripts/air-fields.py" --llvm-dis "$LLVM_DIS" --expect "$AIR_MODE" \
+                  "$OUT/$vstag.air.metallib" "$OUT/$pstag.air.metallib"); then
+    printf '%-24s FAIL (not target %s: %s)\n' "$name" "$AIR_MODE" "$fields"; fail=$((fail+1))
+    continue
+  fi
   if "$BUILD/air_diff_test" "$name" \
       "$OUT/$vstag.air.metallib" "$OUT/$vstag.air.json" \
       "$OUT/$pstag.air.metallib" "$OUT/$pstag.air.json" \

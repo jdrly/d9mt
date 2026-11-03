@@ -27,11 +27,10 @@ const char* kDataLayout =
   "-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256"
   "-v512:512:512-v1024:1024:1024-n8:16:32";
 
-const d9mt::air::MetallibVersions kVersions;
-
-std::string targetTriple() {
-  return "air64-apple-macosx" + std::to_string(kVersions.osMajor) + "."
-    + std::to_string(kVersions.osMinor) + ".0";
+/* The AIR target for this process (air_metallib.h): the triple, air.version,
+ * air.language_version and the metallib container all come from it. */
+const d9mt::air::AirTarget& buildTarget() {
+  return d9mt::air::airTarget();
 }
 
 constexpr unsigned kAsConstant = 2u;
@@ -166,7 +165,7 @@ struct AirBuilderImpl {
     ctx.setOpaquePointers(false); /* AIR is pre-opaque-pointer LLVM */
     mod = std::make_unique<Module>("air_shader", ctx);
     mod->setDataLayout(kDataLayout);
-    mod->setTargetTriple(targetTriple());
+    mod->setTargetTriple(d9mt::air::airTargetTriple(buildTarget()));
     b = std::make_unique<IRBuilder<>>(ctx);
 
     b->setFastMathFlags(mathFlags());
@@ -2238,10 +2237,10 @@ struct AirBuilderImpl {
     opts->addOperand(mdTuple({ mdString("air.compile.framebuffer_fetch_enable") }));
 
     mod->getOrInsertNamedMetadata("air.version")->addOperand(
-      mdTuple({ mdI32(kVersions.airMajor), mdI32(kVersions.airMinor), mdI32(0u) }));
+      mdTuple({ mdI32(buildTarget().airMajor), mdI32(buildTarget().airMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.language_version")->addOperand(
-      mdTuple({ mdString("Metal"), mdI32(kVersions.languageMajor),
-                mdI32(kVersions.languageMinor), mdI32(0u) }));
+      mdTuple({ mdString("Metal"), mdI32(buildTarget().languageMajor),
+                mdI32(buildTarget().languageMinor), mdI32(0u) }));
     mod->getOrInsertNamedMetadata("air.source_file_name")->addOperand(
       mdTuple({ mdString("dxbc-spirv-air") }));
     mod->getOrInsertNamedMetadata("llvm.ident")->addOperand(
@@ -2356,8 +2355,7 @@ struct AirBuilderImpl {
     }
 
     return d9mt::air::writeMetallib(
-      bitcode.data(), bitcode.size(), { fn },
-      d9mt::air::metallibTagVersions(kVersions));
+      bitcode.data(), bitcode.size(), { fn }, buildTarget());
   }
 };
 

@@ -13,15 +13,23 @@
 
 #include "d9mtair.h"
 
+/* airlib_loopback <d9mtair.so> <sm3.bin> <out.metallib>: SM3 -> legalizeIr ->
+ * d9mtair_compile, as the driver does.
+ * airlib_loopback <d9mtair.so> --ir <file.ir> <out.metallib>: serialized IR
+ * (air/tests/forms/gen_ir.cpp) straight to d9mtair_compile, no SM3 front end
+ * and no legalizeIr: forms the SM3 converter never emits. */
 int main(int argc, char** argv) {
-  if (argc < 4) {
-    fprintf(stderr, "usage: %s <d9mtair.so> <sm3.bin> <out.metallib>\n", argv[0]);
+  const bool irInput = argc >= 5 && !strcmp(argv[2], "--ir");
+  if (argc < 4 || (!strcmp(argv[2], "--ir") && !irInput)) {
+    fprintf(stderr, "usage: %s <d9mtair.so> (<sm3.bin> | --ir <file.ir>) <out.metallib>\n", argv[0]);
     return 2;
   }
+  const char* inPath = irInput ? argv[3] : argv[2];
+  const char* outPath = irInput ? argv[4] : argv[3];
 
-  std::ifstream f(argv[2], std::ios::binary | std::ios::ate);
+  std::ifstream f(inPath, std::ios::binary | std::ios::ate);
   if (!f) {
-    fprintf(stderr, "cannot read %s\n", argv[2]);
+    fprintf(stderr, "cannot read %s\n", inPath);
     return 1;
   }
   std::vector<uint8_t> bytecode(size_t(f.tellg()));
@@ -29,27 +37,32 @@ int main(int argc, char** argv) {
   f.read(reinterpret_cast<char*>(bytecode.data()),
     std::streamsize(bytecode.size()));
 
-  dxbc_spv::util::ByteReader reader(bytecode.data(), bytecode.size());
+  std::vector<uint8_t> irBlob;
+  if (irInput) {
+    irBlob = bytecode;
+  } else {
+    dxbc_spv::util::ByteReader reader(bytecode.data(), bytecode.size());
 
-  dxbc_spv::sm3::Converter::Options convOptions = {};
-  convOptions.name = "main";
-  convOptions.includeDebugNames = true;
+    dxbc_spv::sm3::Converter::Options convOptions = {};
+    convOptions.name = "main";
+    convOptions.includeDebugNames = true;
 
-  dxbc_spv::ir::Builder builder;
-  dxbc_spv::sm3::Converter converter(reader, convOptions);
-  if (!converter.convertShader(builder)) {
-    fprintf(stderr, "FATAL: sm3 conversion failed\n");
-    return 1;
-  }
+    dxbc_spv::ir::Builder builder;
+    dxbc_spv::sm3::Converter converter(reader, convOptions);
+    if (!converter.convertShader(builder)) {
+      fprintf(stderr, "FATAL: sm3 conversion failed\n");
+      return 1;
+    }
 
-  dxbc_spv::ir::CompileOptions compileOptions = {};
-  dxbc_spv::ir::legalizeIr(builder, compileOptions);
+    dxbc_spv::ir::CompileOptions compileOptions = {};
+    dxbc_spv::ir::legalizeIr(builder, compileOptions);
 
-  dxbc_spv::ir::Serializer serializer(builder);
-  std::vector<uint8_t> irBlob(serializer.computeSerializedSize());
-  if (!serializer.serialize(irBlob.data(), irBlob.size())) {
-    fprintf(stderr, "FATAL: ir serialization failed\n");
-    return 1;
+    dxbc_spv::ir::Serializer serializer(builder);
+    irBlob.resize(serializer.computeSerializedSize());
+    if (!serializer.serialize(irBlob.data(), irBlob.size())) {
+      fprintf(stderr, "FATAL: ir serialization failed\n");
+      return 1;
+    }
   }
 
   void* dylib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
@@ -91,7 +104,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  std::ofstream out(argv[3], std::ios::binary);
+  std::ofstream out(outPath, std::ios::binary);
   out.write(reinterpret_cast<const char*>(uintptr_t(params.out_metallib)),
     std::streamsize(params.out_size));
   out.close();
@@ -114,6 +127,6 @@ int main(int argc, char** argv) {
   freeFn(&freeParams);
 
   printf("ok %s (%llu bytes, %u reflection entries)\n",
-    argv[3], (unsigned long long)params.out_size, entryCount);
+    outPath, (unsigned long long)params.out_size, entryCount);
   return 0;
 }

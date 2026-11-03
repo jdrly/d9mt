@@ -98,7 +98,7 @@ Findings:
 |---|---|---|
 | **(a) Warm** (AIR warm, archives hold the session's PSOs) | ~0.45 ms × ~350 hit builds ≈ 150 ms of render-thread wait (≈ 110 ms in the world). Plus in-world cold builds for content that dropped out of the archives (1529: 3, ≈ 0.6 s; dev2: 10, ≈ 1 s). Plus the 0.5–0.67 s flush stall in the world. | The hit builds run in the background during login; the draw finds a finished PSO, so ≈ 0 ms. Previously seen content is rebuilt in the background. The 256th build now happens during the prewarm at startup, so the flush stall leaves the world (it can still delay a character-select draw that builds at that moment). The gain is small but real: ≈ 0.1–0.2 s of small waits plus moving one 0.5 s stall. |
 | **(b) Bridge update, AIR codegen output unchanged** (only `LC_UUID` changed) | AIR cache cold: 1925 shaders recompile on the workers during the first seconds (cold AIR cost to be measured, phase 2). PSO archives should still hit: the archive directory isn't keyed by `LC_UUID`, and identical metallib bytes give identical function hashes. This is inferred, and phase 2 verifies it. | Same shader cost (the existing prefetch already compiles every shader at creation). PSO side as in (a). |
-| **(b') Bridge update that changes the AIR bytes** (codegen fix, new flags), or **macOS update** (the `os-<build>` archive directory is wiped) | Every PSO is cold: ~350 builds × 20–220 ms (dev4 mean ≈ 51 ms for ≥ 20 ms builds), ≈ 250 of them in the world. That is several seconds of render-thread wait spread over the first minutes: dev4 had 1.8 s with only 34 cold builds. Estimate: 5–15 s. | The prewarm starts at ≈ 2 s (shaders created and their functions compiled), ordered by first use in earlier sessions, ≈ 50–60 ms per PSO. With 2 prewarm threads ≈ 350 PSOs take ≈ 10 s, so the character-select set is ready around s 10 and the world set before s 21. Expected in-world compile waits: near zero (first-time-ever content excepted). |
+| **(b') Bridge update that changes the AIR bytes** (codegen fix, new flags), or **macOS update** (the `os-<build>-…` archive directory is wiped; since 0.1.8 a new AIR codegen or AIR target wipes it too) | Every PSO is cold: ~350 builds × 20–220 ms (dev4 mean ≈ 51 ms for ≥ 20 ms builds), ≈ 250 of them in the world. That is several seconds of render-thread wait spread over the first minutes: dev4 had 1.8 s with only 34 cold builds. Estimate: 5–15 s. | The prewarm starts at ≈ 2 s (shaders created and their functions compiled), ordered by first use in earlier sessions, ≈ 50–60 ms per PSO. With 2 prewarm threads ≈ 350 PSOs take ≈ 10 s, so the character-select set is ready around s 10 and the world set before s 21. Expected in-world compile waits: near zero (first-time-ever content excepted). |
 | **(c) Archive eviction** (content last seen more than 8 sessions ago) | Those PSOs are cold builds (20–220 ms each) in the world. | Every recorded PSO is rebuilt each session, cheaply as an archive hit while one exists, and captured into this session's archive again. Recorded PSOs therefore never age out of the archives, and the 8-session limit stops mattering for them. |
 
 The main value is (b'), (c) and the macOS-update case, as #10 expects. In (a)
@@ -137,6 +137,10 @@ Shader identity, which is D3D9-side and stable:
   (`D3D9FFShaderModuleSet`, entry names `ffVsMain`/`ffFsMain`). The identity
   is just "FF".
 - **Not recorded**:
+  - Pipelines with a flat pixel shader function (`D3DSHADE_FLAT`,
+    `MtlShaderFunction::flat`): flat isn't part of the shader identity, so
+    replay and prewarm only ever know Gouraud functions, and a flat pipeline
+    compiles on its first use in each session. The file format is unchanged.
   - Software-VP emulation shaders (`d3d9_swvp_emu.cpp`): SWTOR doesn't use
     them, and they are keyed by vertex elements.
   - Internal clear/blit/depth-clear PSOs (`getSync`): a handful per render

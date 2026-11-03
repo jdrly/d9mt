@@ -48,7 +48,8 @@ namespace dxvk {
             MtlShaderFunction*    pFn)
     : m_program(pProgram)
     , m_prev(const_cast<D3D9ShaderProgram*>(pPrev))
-    , m_fn(pFn) { }
+    , m_fn(pFn)
+    , m_flat(pFn->flat) { }
 
   protected:
 
@@ -65,6 +66,7 @@ namespace dxvk {
     Rc<D3D9ShaderProgram> m_program;
     Rc<D3D9ShaderProgram> m_prev;
     Rc<MtlShaderFunction> m_fn;
+    bool                  m_flat;
 
     void Compile() {
       // Phase A of both stages; runs them here if no worker has yet.
@@ -79,6 +81,7 @@ namespace dxvk {
         return;
 
       ID3D9MetalShaderBackend::PairedStageIo paired = { };
+      paired.flat = m_flat;
 
       if (m_prev != nullptr && m_prev->m_backend != nullptr)
         paired.prevStageIr = &m_prev->m_backend->serializedIr();
@@ -135,20 +138,23 @@ namespace dxvk {
       ApplyCbvSlotMap(m_fn.ptr(), cbvMap);
     }
 
-    // A failed linked PS falls back to the standalone PS, unless that is
-    // the very IR that just failed (whose owner may be waiting on us).
+    // A failed linked PS falls back to the standalone PS with the same
+    // flat, unless that is the very IR that just failed (whose owner may be
+    // waiting on us).
     void Fallback(const Sha1Hash* pFailedHash) {
       if (m_prev == nullptr)
         return;
 
       if (pFailedHash != nullptr) {
-        std::vector<uint8_t> ir = m_program->m_backend->getFinalIr({ });
+        ID3D9MetalShaderBackend::PairedStageIo standaloneIo = { };
+        standaloneIo.flat = m_flat;
+        std::vector<uint8_t> ir = m_program->m_backend->getFinalIr(standaloneIo);
 
         if (ir.empty() || Sha1Hash::compute(ir.data(), ir.size()) == *pFailedHash)
           return;
       }
 
-      Rc<MtlShaderFunction> standalone = m_program->GetFunction(nullptr);
+      Rc<MtlShaderFunction> standalone = m_program->GetFunction(nullptr, m_flat);
       standalone->task->wait();
       CopyFunction(m_fn.ptr(), standalone.ptr());
     }
@@ -176,23 +182,26 @@ namespace dxvk {
     static const bool s_psPrefetch = env::getEnvVar("D9MT_PS_PREFETCH") != "0";
 
     if (Stage == MtlShaderStage::Vertex || s_psPrefetch) {
-      Rc<MtlShaderFunction> fn = CreateFunction(nullptr);
-      m_functions.emplace(nullptr, fn);
+      Rc<MtlShaderFunction> fn = CreateFunction(nullptr, false);
+      m_functions.emplace(FunctionKey { nullptr, false }, fn);
       m_prefetch = fn->task;
     }
   }
 
 
-  Rc<MtlShaderFunction> D3D9ShaderProgram::GetFunction(const D3D9ShaderProgram* pPrev) {
+  Rc<MtlShaderFunction> D3D9ShaderProgram::GetFunction(const D3D9ShaderProgram* pPrev, bool Flat) {
     Rc<MtlShaderFunction> fn;
 
+    // Only pixel shaders have a flat variant.
+    Flat &= m_stage == MtlShaderStage::Fragment;
+
     { std::lock_guard lock(m_mutex);
-      auto& slot = m_functions[pPrev];
+      auto& slot = m_functions[FunctionKey { pPrev, Flat }];
 
       if (slot != nullptr)
         return slot;
 
-      slot = fn = CreateFunction(pPrev);
+      slot = fn = CreateFunction(pPrev, Flat);
     }
 
     m_device->submitCompile(fn->task, true);
@@ -205,18 +214,19 @@ namespace dxvk {
     const D3D9ShaderProgram* prev = static_cast<D3D9ShaderProgram*>(pPrev);
 
     std::lock_guard lock(m_mutex);
-    auto& slot = m_functions[prev];
+    auto& slot = m_functions[FunctionKey { prev, false }];
 
     if (slot == nullptr)
-      slot = CreateFunction(prev);
+      slot = CreateFunction(prev, false);
 
     return slot;
   }
 
 
-  Rc<MtlShaderFunction> D3D9ShaderProgram::CreateFunction(const D3D9ShaderProgram* pPrev) {
+  Rc<MtlShaderFunction> D3D9ShaderProgram::CreateFunction(const D3D9ShaderProgram* pPrev, bool Flat) {
     Rc<MtlShaderFunction> fn = new MtlShaderFunction();
     fn->stage   = m_stage;
+    fn->flat    = Flat;
     fn->task    = new D3D9ShaderFunctionTask(this, pPrev, fn.ptr());
     fn->stateId = m_stateId;
     fn->stateId.linked = pPrev != nullptr ? 1u : 0u;
