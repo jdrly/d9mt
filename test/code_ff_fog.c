@@ -9,9 +9,9 @@
  *   row 2: a ps_2_0 shader (mov oC0, v0): SM1/2 pixel shaders get emulated fog;
  *   row 3: a ps_3_0 shader (the same): SM3 pixel shaders do their own fog, so none is added.
  * The oracle, read back from the render target on frame 1, the centre pixel of each quad:
- *   rows 1 and 2, z 0.25: red (no fog); z 0.75: blue (full fog); z 0.5: exactly red or exactly blue
- *     (the ported formula (end - depth) * FLT_MAX lands on one side or gives 0: never a blend), and
- *     the line says which;
+ *   rows 1 and 2, z 0.25: red (no fog); z 0.5 and 0.75: blue (full fog). At z = end the ported
+ *     formula gives (end - depth) * FLT_MAX = 0 * FLT_MAX = 0, a fog factor of 0 (a quad of
+ *     constant z = 0.5 and rhw = 2 has depth exactly 0.5 in both fog modes);
  *   row 3: red at every depth;
  *   alpha 0x80 everywhere (fog never touches alpha).
  * Prints "code_ff_fog <row> z=<z>: <got> <ok|FAIL>" per probe and "code_ff_fog: PASS|FAIL" once.
@@ -134,12 +134,8 @@ int main(void) {
             const int x = 40 + 200 * col + 80, y = 40 + 150 * row + 55;
             const DWORD got = ((const DWORD *)((const char *)lr.pBits + y * lr.Pitch))[x];
             const DWORD blue = 0x800000ffu;
-            int ok;
-            const char *what = "";
-            if (row == 2 || col == 0) ok = got == RED;
-            else if (col == 2) ok = got == blue;
-            else { ok = got == RED || got == blue; what = got == RED ? " (no fog)" : got == blue ? " (full fog)" : ""; }
-            printf("code_ff_fog %s z=%.2f: %08lx %s%s\n", rows[row], k_z[col], (unsigned long)got, ok ? "ok" : "FAIL", what);
+            const int ok = (row == 2 || col == 0) ? got == RED : got == blue;
+            printf("code_ff_fog %s z=%.2f: %08lx %s\n", rows[row], k_z[col], (unsigned long)got, ok ? "ok" : "FAIL");
             all &= ok;
           }
         IDirect3DSurface9_UnlockRect(sys);
