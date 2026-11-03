@@ -440,9 +440,12 @@ namespace dxvk::backend {
 
     // Metal has no fan primitive: one shared index buffer holds the fan
     // pattern, and a fan of N vertices consumes its first 3*(N-2) indices.
+    // Triangle t is (0, t+1, t+2); for a flat fragment function (D3DSHADE_FLAT)
+    // it is rotated to (t+1, t+2, 0), same winding, so that Metal's provoking
+    // vertex (the first) is D3D9's (vertex t+1) and not the hub.
     static constexpr uint32_t  kFanMaxVerts = 16386u;
-    Rc<MtlBuffer>              m_fanIndices;
-    bool ensureFanIndices();
+    Rc<MtlBuffer>              m_fanIndices[2];   // [0] Gouraud, [1] flat
+    bool ensureFanIndices(bool flat);
 
     bool presentUpscale(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src) override;
     struct FxScaler { obj_handle_t scaler; uint64_t lastUse; };

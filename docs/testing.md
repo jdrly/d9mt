@@ -81,7 +81,31 @@ environment) renders `crs`/`setp` with every write mask, modifier and
 predicate and packed I/O declarations on the GPU and compares the results
 with a scalar model of the D3D9 semantics; `--strict` uses
 `d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
-every corpus `crs` against a `mul`/`mul`/`add` expansion.
+every corpus `crs` against a `mul`/`mul`/`add` expansion. Its `pin_*` cases
+(`--only pin_`) cover the dxbc-spirv pin: unpacked relative input reads, the
+assert paths of unreachable loops, the `if`/`breakp` predicate truth table
+(with and without NOT) and the signed-zero witnesses of ConditionPass.
+`conditions_signed_zero_test` (in `run-native-tests.sh`) checks the same
+signed-zero case on the IR after `legalizeIr`.
+
+`test/code_centroid.c` renders two sliver triangles into a 4x MSAA target,
+resolves and reads it back: a COLOR input and a `dcl_texcoord0_centroid` atlas
+sample must show no extrapolated sample (it prints the counts and PASS/FAIL;
+base, sampling at the pixel centre, fails). `test/code_flat.c` reads back one
+probe pixel per primitive under `D3DSHADE_FLAT` and compares it with D3D9's
+provoking vertex (the first of a list or strip primitive, vertex t+1 of a fan
+triangle); indexed fans stay Gouraud. `AIR_DIFF_SAMPLES=4
+scripts/run-air-diff.sh` runs the AIR/SPIRV-Cross differential on a 4x
+target with edges inside it, where centroid interpolation shows.
+
+`test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
+d9mt draws flat and the ones it keeps Gouraud (indexed fans), a pixel shader
+without COLOR inputs and a VS/PS pair that needs semantic reconciliation. Its
+frames must hash as base until the AIR compiler honours flat; with
+`D9MT_FLAT_CHECK=1` its log shows each draw's flat choice and the final-IR
+check of every pixel shader function (expected values in the file's header).
+Flat shading is partial: indexed triangle fans stay Gouraud (no index remap
+for D3D9's provoking vertex), and points have nothing to interpolate.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.

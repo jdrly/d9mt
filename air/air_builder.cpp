@@ -1,5 +1,7 @@
 #include "air_builder.h"
 
+#include <atomic>
+#include <cstdio>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -73,7 +75,14 @@ struct InputVar {
   Type* type = nullptr;
   bool isBuiltin = false;
   ir::BuiltIn builtin = ir::BuiltIn::ePosition;
+  ir::InterpolationModes interp = {};   // a pixel shader input's DclInput operand 3
 };
+
+/* Once per process: an unexpected interpolation input (see fragmentInterpolation). */
+void logOnce(std::atomic<bool>& done, const char* what) {
+  if (!done.exchange(true))
+    std::fprintf(stderr, "d9mt: AIR %s\n", what);
+}
 
 struct BufferVar {
   ir::SsaDef def = {};
@@ -348,6 +357,8 @@ struct AirBuilderImpl {
           in.def = op.getDef();
           in.location = uint32_t(op.getOperand(1u));
           in.type = mapType(op.getType(), false);
+          if (op.getOperandCount() > 3u)
+            in.interp = ir::InterpolationModes(op.getOperand(3u));
           inputs.push_back(in);
         } break;
 
@@ -2075,6 +2086,36 @@ struct AirBuilderImpl {
   /* MSL type name of a user varying, from its actual LLVM type. Declaring a
    * scalar varying (e.g. the D3D9 fog value) as float4 makes the AGX compiler
    * crash in InstCombine (macOS 27) once the value is used. */
+  /* A fragment input's interpolation metadata, as Apple's compiler writes it
+   * (and DXMT): flat alone; else the location (sample, centroid or center)
+   * and then no_perspective or perspective. Integer inputs are always flat,
+   * as Metal requires; one that arrives without eFlat is logged once, not
+   * failed (it compiled as center/perspective before). d9mt never asks for
+   * sample interpolation; eSample is mapped and logged once if it appears. */
+  static void fragmentInterpolation(const InputVar& in, SmallVectorImpl<StringRef>& out) {
+    static std::atomic<bool> loggedInt = { false }, loggedSample = { false };
+    const bool isInt = in.type->getScalarType()->isIntegerTy();
+    if (in.interp & ir::InterpolationMode::eFlat) {
+      out.push_back("air.flat");
+      return;
+    }
+    if (isInt) {
+      logOnce(loggedInt, "integer fragment input without flat interpolation: made flat");
+      out.push_back("air.flat");
+      return;
+    }
+    if (in.interp & ir::InterpolationMode::eSample) {
+      logOnce(loggedSample, "sample interpolation requested (unexpected in d9mt)");
+      out.push_back("air.sample");
+    } else if (in.interp & ir::InterpolationMode::eCentroid) {
+      out.push_back("air.centroid");
+    } else {
+      out.push_back("air.center");
+    }
+    out.push_back(in.interp & ir::InterpolationMode::eNoPerspective
+      ? "air.no_perspective" : "air.perspective");
+  }
+
   static std::string varyingTypeName(Type* t) {
     uint32_t width = t->isVectorTy()
       ? uint32_t(cast<FixedVectorType>(t)->getNumElements()) : 1u;
@@ -2153,13 +2194,18 @@ struct AirBuilderImpl {
           mdString("air.arg_name"),
           mdString("v" + std::to_string(in.location)) }));
       } else {
-        inputMd.push_back(mdTuple({
+        SmallVector<StringRef, 2> interp;
+        fragmentInterpolation(in, interp);
+        SmallVector<Metadata*, 10> md = {
           mdI32(in.argIndex), mdString("air.fragment_input"),
-          mdString(varyingName(in.location)),
-          mdString("air.center"), mdString("air.perspective"),
-          mdString("air.arg_type_name"), mdString(varyingTypeName(in.type)),
-          mdString("air.arg_name"),
-          mdString("v" + std::to_string(in.location)) }));
+          mdString(varyingName(in.location)) };
+        for (StringRef s : interp)
+          md.push_back(mdString(s));
+        md.push_back(mdString("air.arg_type_name"));
+        md.push_back(mdString(varyingTypeName(in.type)));
+        md.push_back(mdString("air.arg_name"));
+        md.push_back(mdString("v" + std::to_string(in.location)));
+        inputMd.push_back(mdTuple(md));
       }
     }
 

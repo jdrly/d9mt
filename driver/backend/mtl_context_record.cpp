@@ -2067,8 +2067,9 @@ namespace dxvk::backend {
   }
 
 
-  bool MtlContextImpl::ensureFanIndices() {
-    if (m_fanIndices != nullptr)
+  bool MtlContextImpl::ensureFanIndices(bool flat) {
+    Rc<MtlBuffer>& slot = m_fanIndices[flat ? 1u : 0u];
+    if (slot != nullptr)
       return true;
     MtlBufferCreateInfo bi = {};
     bi.size      = uint64_t(3u * (kFanMaxVerts - 2u)) * 4u;
@@ -2081,11 +2082,17 @@ namespace dxvk::backend {
       return false;
     }
     for (uint32_t t = 0u; t + 2u < kFanMaxVerts; t++) {
-      *p++ = 0u;
-      *p++ = t + 1u;
-      *p++ = t + 2u;
+      if (flat) {
+        *p++ = t + 1u;
+        *p++ = t + 2u;
+        *p++ = 0u;
+      } else {
+        *p++ = 0u;
+        *p++ = t + 1u;
+        *p++ = t + 2u;
+      }
     }
-    m_fanIndices = std::move(buf);
+    slot = std::move(buf);
     return true;
   }
 
@@ -2113,10 +2120,15 @@ namespace dxvk::backend {
       updateDrawLimits();
     const drawbounds::Limits limits = m_drawLimits;
     if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
-      if (!ensureFanIndices())
+      // The flat pattern only for a flat fragment function, which the PE side
+      // binds only for a draw whose effective D3DSHADE_FLAT is set: Gouraud
+      // fans keep their indices (and frames).
+      const bool flat = m_fs != nullptr && m_fs->flat;
+      if (!ensureFanIndices(flat))
         return;
-      if (m_fanIndices->trackingSerial() != m_currentSerial)
-        m_fanIndices->setTrackingSerial(m_currentSerial);
+      const Rc<MtlBuffer>& fanIndices = m_fanIndices[flat ? 1u : 0u];
+      if (fanIndices->trackingSerial() != m_currentSerial)
+        fanIndices->setTrackingSerial(m_currentSerial);
       for (uint32_t i = 0; i < count; i++) {
         const uint32_t vertexCount = drawbounds::clamp(args[i].firstVertex, args[i].vertexCount, limits.vertices);
         const uint32_t instances   = drawbounds::clamp(args[i].firstInstance,
@@ -2129,8 +2141,8 @@ namespace dxvk::backend {
         cmd->primitive           = uint64_t(WMTPrimitiveTypeTriangle);
         cmd->index_count         = 3u * (verts - 2u);
         cmd->index_type          = uint64_t(WMTIndexTypeUInt32);
-        cmd->index_buffer        = m_fanIndices->gpuAddress(0u);
-        cmd->index_buffer_length = m_fanIndices->size;
+        cmd->index_buffer        = fanIndices->gpuAddress(0u);
+        cmd->index_buffer_length = fanIndices->size;
         cmd->instance_count      = instances;
         cmd->base_vertex         = int64_t(args[i].firstVertex);
         cmd->base_instance       = args[i].firstInstance;
