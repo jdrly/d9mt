@@ -157,6 +157,17 @@ namespace dxvk {
           }
         } break;
 
+        case RegisterType::eInput: {
+          // SM1/2 pixel shaders have no semantics (SM1 not even declarations): their
+          // input registers v0/v1 are the colours (DXVK 5cc97888).
+          if (GetShaderInfo().getType() == ShaderType::ePixel && GetShaderInfo().getVersion().first < 3u) {
+            auto location = FindLocationInFixedFunctionIO({ dxbc_spv::sm3::SemanticUsage::eColor, index });
+
+            if (location)
+              m_flatShadingMask |= 1u << *location;
+          }
+        } break;
+
         default: break;
       }
     }
@@ -322,8 +333,9 @@ namespace dxvk {
     }
 
     if (GetShaderInfo().getType() == ShaderType::ePixel
-      && dcl.getSemanticUsage() == SemanticUsage::eColor
-      && dcl.getSemanticIndex() < 2u) {
+     && GetShaderInfo().getVersion().first == 3u
+     && dcl.getSemanticUsage() == SemanticUsage::eColor
+     && dcl.getSemanticIndex() < 2u) {
       Semantic semantic = { dcl.getSemanticUsage(), dcl.getSemanticIndex() };
 
       auto location = FindLocationInFixedFunctionIO(semantic);
