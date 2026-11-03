@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -17,7 +18,9 @@
  * d9mtair_compile, as the driver does.
  * airlib_loopback <d9mtair.so> --ir <file.ir> <out.metallib>: serialized IR
  * (air/tests/forms/gen_ir.cpp) straight to d9mtair_compile, no SM3 front end
- * and no legalizeIr: forms the SM3 converter never emits. */
+ * and no legalizeIr: forms the SM3 converter never emits.
+ * The compile flags follow the driver's switches: D9MT_AIR_FASTMATH=1 and
+ * D9MT_AIR_INVARIANT=0 (scripts/test-air-invariance.sh); no other flag. */
 int main(int argc, char** argv) {
   const bool irInput = argc >= 5 && !strcmp(argv[2], "--ir");
   if (argc < 4 || (!strcmp(argv[2], "--ir") && !irInput)) {
@@ -96,6 +99,12 @@ int main(int argc, char** argv) {
   params.ir_data = uint64_t(uintptr_t(irBlob.data()));
   params.ir_size = irBlob.size();
   params.entry_name = uint64_t(uintptr_t(entryName));
+  const char* fastMath = getenv("D9MT_AIR_FASTMATH");
+  const char* invariant = getenv("D9MT_AIR_INVARIANT");
+  if (fastMath && !strcmp(fastMath, "1"))
+    params.flags |= D9MT_AIR_FLAG_FAST_MATH;
+  if (invariant && !strcmp(invariant, "0"))
+    params.flags |= D9MT_AIR_FLAG_NO_INVARIANCE;
 
   compileFn(&params);
 

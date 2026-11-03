@@ -1,8 +1,9 @@
 // AIR cache test harness (scripts/test-air-cache-lineage.sh, ADR-0006): the AIR codegen of a
 // winemetal.so on SM3 shaders, without Wine. Each .bin goes through dxbc-spirv's sm3 front end and
-// legalize (as the driver does), then, with six flag sets, through the bridge's AIR compile thunk
+// legalize (as the driver does), then, with seven flag sets, through the bridge's AIR compile thunk
 // (unix call 155, with the AIR cache D9MT_AIR_CACHE names), or with AIR_THUNK=0 through
-// d9mtair_compile (no cache). Every output (metallib + reflection blob) is written to
+// d9mtair_compile (no cache). AIR_VARIANTS=<flags>[,<flags>...] (decimal) runs only those flag
+// sets. Every output (metallib + reflection blob) is written to
 // <outdir>/<bin>.f<flags>.{metallib,refl} and listed in <outdir>/manifest.txt with its status,
 // sizes and SHA-256.
 //   air_cache_test <winemetal.so> <outdir> <sm3 .bin>...
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -68,11 +70,22 @@ int main(int argc, char** argv) {
   if (!compile || !release) { fprintf(stderr, "FATAL: symbols\n"); return 1; }
   const std::string out = argv[2];
   FILE* man = fopen((out + "/manifest.txt").c_str(), "w");
-  static const uint32_t variants[] = {
+  static const uint32_t allVariants[] = {
     0u, D9MT_AIR_FLAG_FOLD_SPEC, D9MT_AIR_FLAG_ARG_BUFFER, D9MT_AIR_FLAG_FAST_MATH,
     D9MT_AIR_FLAG_ARG_BUFFER | D9MT_AIR_FLAG_FAST_MATH,
     D9MT_AIR_FLAG_FOLD_SPEC | D9MT_AIR_FLAG_ARG_BUFFER | D9MT_AIR_FLAG_FAST_MATH,
+    D9MT_AIR_FLAG_FOLD_SPEC | D9MT_AIR_FLAG_ARG_BUFFER | D9MT_AIR_FLAG_NO_INVARIANCE,
   };
+  std::vector<uint32_t> variants(std::begin(allVariants), std::end(allVariants));
+  if (const char* only = getenv("AIR_VARIANTS")) {
+    variants.clear();
+    for (const char* s = only; *s; ) {
+      char* end = nullptr;
+      variants.push_back(uint32_t(strtoul(s, &end, 10)));
+      if (end == s) { fprintf(stderr, "FATAL: AIR_VARIANTS=%s\n", only); return 2; }
+      s = *end == ',' ? end + 1 : end;
+    }
+  }
   int bad = 0;
   for (int i = 3; i < argc; i++) {
     std::string name = argv[i];

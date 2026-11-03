@@ -21,6 +21,10 @@ public:
     bool foldSpecConstants = false;
     bool useArgumentBuffer = false;
     bool fastMath = false;
+    // Apple's -fpreserve-invariance form for a vertex shader whose position
+    // output the IR marks invariant (every SM3 VS). Off: D9MT_AIR_INVARIANT=0
+    // (D9MT_AIR_FLAG_NO_INVARIANCE), a diagnostic switch.
+    bool invariance = true;
     // Textual LLVM IR dump for getIrText(); off in the driver hot path.
     bool emitIrText = false;
     std::unordered_map<uint32_t, uint32_t> specValues;

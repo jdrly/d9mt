@@ -75,6 +75,19 @@ IR through `airlib_loopback --ir`, or an SM3 corpus shader) must declare it,
 with the same normalized signature Apple's compiler gives the
 `forms.metal` group for it, for targets 26 and 27.
 
+`scripts/test-air-invariance.sh` (same needs) checks position invariance:
+every vertex shader of the AIR corpus carries exactly the form Apple's
+compiler writes for `[[position, invariant]]` with `-fpreserve-invariance`
+(the floating-point function attributes, the instructions' fast-math flags,
+`air.invariant`, `fast_math_disable` even under `D9MT_AIR_FASTMATH=1`), and
+with `D9MT_AIR_INVARIANT=0` Apple's form without it; pixel shaders keep the
+form without invariance in every mode. `test/code_invariant.c` draws one
+mesh twice with two vertex shaders that share the position expression (the
+second with unrelated outputs and scheduling), the second pass with
+`D3DCMP_EQUAL`, and counts the pixels that fail it (must be 0).
+`test/perf/bench_vs.c` is the vertex-bound bench for its cost: about 2 M
+vertices a frame through a 4-bone skinning vertex shader into 640x360.
+
 `scripts/test-air-cache-lineage.sh` (after `scripts/build-bridge.sh`) checks the
 AIR cache's identity (ADR-0006) on scratch caches, without Wine: the AIR codegen
 id ignores an object's SDK version stamp but not a byte of its code, a warm run
@@ -85,11 +98,15 @@ a new table that already holds rows, left whole while another process holds the
 write lock (that session runs without the cache) and adopted by the next start,
 and dropped under `D9MT_AIR_MACOS=26`. The four AIR targets (26, 27, legacy
 26, legacy 27) get four distinct cache terms and four tables, and 0.1.5.1's
-table is dropped, not adopted.
+table is dropped, not adopted. Position invariance off is in the key: on one
+cache, the driver's flags with invariance on, then off, then on give a forced
+compile's outputs each time, the third run hits every entry, and invariance
+off changes every vertex shader's metallib and no pixel shader's.
 `OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
 that bridge itself and compares it row by row first.
 
-`scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS` and `D9MT_AIR_LEGACY`: its
+`scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS`, `D9MT_AIR_LEGACY` and
+`D9MT_AIR_INVARIANT` (`0`: `air_compiler --no-invariance`): its
 artifacts live under `build/air-compiler/diff/<target, math, invariance,
 samples>`, and every AIR artifact's target fields are checked before it renders.
 

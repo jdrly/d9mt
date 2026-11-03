@@ -29,10 +29,13 @@ air_mode() {
   echo "$m"
 }
 AIR_MODE=$(air_mode)
-# air_compiler has one math mode (relaxed: AirBuilder's default), no
-# invariance switch and renders at 1x; those parts of the key change when it
-# gains the options.
-AIR_MATH=relaxed AIR_INVARIANCE=none AIR_SAMPLES=1
+# air_compiler has one math mode (relaxed: AirBuilder's default) and renders
+# at 1x; those parts of the key change when it gains the options. Position
+# invariance follows D9MT_AIR_INVARIANT as the driver does (0: off,
+# air_compiler --no-invariance).
+AIR_MATH=relaxed AIR_INVARIANCE=on AIR_SAMPLES=1
+AIR_INV_ARG=""
+[ "${D9MT_AIR_INVARIANT:-}" = 0 ] && { AIR_INVARIANCE=off; AIR_INV_ARG="--no-invariance"; }
 OUT="$BUILD/diff/t$AIR_MODE-math-$AIR_MATH-inv-$AIR_INVARIANCE-s$AIR_SAMPLES"
 mkdir -p "$OUT"
 if [ -z "${LLVM_DIS:-}" ]; then
@@ -125,7 +128,7 @@ compile_shader() { # <name>[@cbv|@spec]
   if [ ! -f "$OUT/$tag.air.metallib" ] \
      || { [ -n "$input" ] && [ "$input" -nt "$OUT/$tag.air.metallib" ]; } \
      || [ "$BUILD/air_compiler" -nt "$OUT/$tag.air.metallib" ]; then
-    "$BUILD/air_compiler" $input $mode \
+    "$BUILD/air_compiler" $input $mode $AIR_INV_ARG \
       -o "$OUT/$tag.air.metallib" --manifest "$OUT/$tag.air.json" \
       > /dev/null || return 1
     "$BUILD/air_compiler" $input ${mode/--lower-legacy/} \
