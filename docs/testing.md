@@ -54,11 +54,26 @@ SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
 directory.
 
 `scripts/test-air-versions.sh` (after `scripts/build-bridge.sh`; needs Xcode's
-metal toolchain) compiles the AIR corpus through d9mtair for macOS 26, for
-macOS 27 and for this Mac (`D9MT_AIR_MACOS`). For macOS 26 each runtime
-metallib's OS version and VERS tags must equal what Apple's `metallib` writes
-for the same bitcode (a newer VERS makes Metal reject every game shader); for
-macOS 27 they keep AIR 2.9, and nothing else differs.
+metal toolchain and an LLVM 15 `llvm-dis`: `LLVM_DIS`, or
+`ninja -C toolchains/llvm-build llvm-dis`) compiles the AIR corpus through
+d9mtair for each AIR target (`D9MT_AIR_MACOS`, `D9MT_AIR_LEGACY`). Targets 26
+and 27: the metallib container (file version, header OS, every VERS) and the
+bitcode (triple, `air.version`, `air.language_version`, datalayout) must equal
+what Apple's toolchain writes for that macOS (`xcrun metal
+-mmacosx-version-min=<os>.0` and `metallib` on a probe shader; a newer VERS
+makes Metal reject every game shader). Legacy 26 and 27: the fields 0.1.7
+wrote, VERS 2.9 on 27 included. Unset gives this Mac's mode. With
+`OLD_LOOPBACK=<build/airlib of a d9mt 73511be tree>` it also requires legacy
+output byte-identical to that build's (the AIR target PR's acceptance check;
+later codegen changes legacy bitcode on purpose).
+
+`scripts/test-air-forms.sh` (same needs) checks the AIR built-in forms
+contract: `air/tests/forms/inventory.txt` lists every intrinsic declaration
+AirBuilder can emit and every `"air.…` literal in its source (a new emitter
+without an entry fails); each form's fixture (`air/tests/forms/gen_ir.cpp`
+IR through `airlib_loopback --ir`, or an SM3 corpus shader) must declare it,
+with the same normalized signature Apple's compiler gives the
+`forms.metal` group for it, for targets 26 and 27.
 
 `scripts/test-air-cache-lineage.sh` (after `scripts/build-bridge.sh`) checks the
 AIR cache's identity (ADR-0006) on scratch caches, without Wine: the AIR codegen
@@ -68,9 +83,15 @@ lineage that adopts a predecessor table, that table is adopted on macOS 27 with
 every row kept and every compile a hit (also next to a stray table), merged into
 a new table that already holds rows, left whole while another process holds the
 write lock (that session runs without the cache) and adopted by the next start,
-and dropped under `D9MT_AIR_MACOS=26`.
+and dropped under `D9MT_AIR_MACOS=26`. The four AIR targets (26, 27, legacy
+26, legacy 27) get four distinct cache terms and four tables, and 0.1.5.1's
+table is dropped, not adopted.
 `OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
 that bridge itself and compares it row by row first.
+
+`scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS` and `D9MT_AIR_LEGACY`: its
+artifacts live under `build/air-compiler/diff/<target, math, invariance,
+samples>`, and every AIR artifact's target fields are checked before it renders.
 
 `scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
 patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
