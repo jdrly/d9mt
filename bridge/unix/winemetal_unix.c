@@ -6079,7 +6079,9 @@ _MTLDevice_newArgumentTable(void *obj) {
  *   D9MT_PSO_FLUSH_EVERY=<n>        PSOs per flush (default 256)
  *   D9MT_PSO_ASYNC_FLUSH=1          flush on the flush thread (default 0)
  *   D9MT_PSO_FLUSH_FORCE_MS=<n>     the flush thread's overdue deadline (default
- *                                   60000; tests only) */
+ *                                   60000; tests only)
+ *   D9MT_EXIT_TRACE=1               the exit-time flush's steps on stderr (#164;
+ *                                   diagnostics only, see exit_trace) */
 #define D9MT_PSO_KEEP_SESSIONS 8u
 #define D9MT_PSO_MAX_ARCHIVES  256u
 #define D9MT_PSO_FLUSH_DEFAULT 256u
@@ -6134,11 +6136,36 @@ pso_remove_archive(NSString *path) {
   unlink([path stringByAppendingString:@".sum"].fileSystemRepresentation);
 }
 
-/* Caller holds g_pso_lock exclusively. */
+/* D9MT_EXIT_TRACE=1 (#164): the exit-time flush's steps on stderr, each as
+ * "D9MT-EXIT <step> +<us since the atexit handler started> (pid N)". Once the
+ * last Windows thread is gone, wineserver SIGKILLs the process if exit() takes
+ * more than ~0.48 s (server/process.c process_sigkill), and this flush runs in
+ * that window: a run that ends with 137 shows the step it was in. write(2), not
+ * stdio: a thread killed at ExitProcess may hold the FILE lock. */
+static bool g_exit_trace;
+
 static void
-pso_flush_locked(void) {
-  if (!g_pso_serializer || !atomic_load(&g_pso_pending))
+exit_trace(uint64_t t0, const char *step, unsigned n) {
+  if (!g_exit_trace || !t0)
     return;
+  char buf[128];
+  const uint64_t us = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000u;
+  int len = n != ~0u
+    ? snprintf(buf, sizeof(buf), "D9MT-EXIT %s %u +%llu us (pid %d)\n", step, n, (unsigned long long)us, (int)getpid())
+    : snprintf(buf, sizeof(buf), "D9MT-EXIT %s +%llu us (pid %d)\n", step, (unsigned long long)us, (int)getpid());
+  if (len > 0)
+    (void)!write(2, buf, len < (int)sizeof(buf) ? (size_t)len : sizeof(buf) - 1u);
+}
+
+/* Caller holds g_pso_lock exclusively. trace_t0: the atexit handler's start
+ * for exit_trace, 0 for any other flush. */
+static void
+pso_flush_locked(uint64_t trace_t0) {
+  if (!g_pso_serializer || !atomic_load(&g_pso_pending)) {
+    exit_trace(trace_t0, "nothing pending", ~0u);
+    return;
+  }
+  exit_trace(trace_t0, "flush start, pending", atomic_load(&g_pso_pending));
   atomic_store(&g_pso_pending, 0u);
   NSString *path = [g_pso_dir stringByAppendingPathComponent:
     [NSString stringWithFormat:@"%@-%04u.mtl4archive", g_pso_session, g_pso_seq++]];
@@ -6149,9 +6176,12 @@ pso_flush_locked(void) {
     fprintf(stderr, "d9mt: PSO archive flush failed: %s\n",
             err ? err.localizedDescription.UTF8String : "(no error)");
     unlink(tmp.fileSystemRepresentation);
+    exit_trace(trace_t0, "serialize failed", ~0u);
     return;
   }
+  exit_trace(trace_t0, "serialized", ~0u);
   NSString *sum = pso_sum_text(tmp);
+  exit_trace(trace_t0, "summed", ~0u);
   if (!sum || ![sum writeToFile:sumTmp atomically:NO encoding:NSUTF8StringEncoding error:nil]
    || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)
    || rename(sumTmp.fileSystemRepresentation, [path stringByAppendingString:@".sum"].fileSystemRepresentation)) {
@@ -6159,19 +6189,27 @@ pso_flush_locked(void) {
     unlink(sumTmp.fileSystemRepresentation);
     pso_remove_archive(path);
     fprintf(stderr, "d9mt: PSO archive write failed (%s)\n", path.UTF8String);
+    exit_trace(trace_t0, "write failed", ~0u);
+    return;
   }
+  exit_trace(trace_t0, "renamed", ~0u);
 }
 
 static void
 pso_flush_atexit(void) {
+  const uint64_t t0 = g_exit_trace ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0u;
+  exit_trace(t0, "atexit", ~0u);
   /* Another thread may still be compiling (or died holding the lock while
    * the process tears down): never block exit on it. */
-  if (pthread_rwlock_trywrlock(&g_pso_lock))
+  if (pthread_rwlock_trywrlock(&g_pso_lock)) {
+    exit_trace(t0, "lock busy, skipped", ~0u);
     return;
+  }
   @autoreleasepool {
-    pso_flush_locked();
+    pso_flush_locked(t0);
   }
   pthread_rwlock_unlock(&g_pso_lock);
+  exit_trace(t0, "done", ~0u);
 }
 
 static void *
@@ -6217,7 +6255,7 @@ pso_flush_thread(void *arg) {
       }
       if (locked) {
         @autoreleasepool {
-          pso_flush_locked();
+          pso_flush_locked(0u);
         }
         pthread_rwlock_unlock(&g_pso_lock);
       }
@@ -6267,6 +6305,8 @@ pso_archive_init(id<MTLDevice> device) {
     g_pso_flush_every = (unsigned)atoi(every);
   const char *async = getenv("D9MT_PSO_ASYNC_FLUSH");
   const bool want_async = async && !strcmp(async, "1");
+  const char *trace = getenv("D9MT_EXIT_TRACE");
+  g_exit_trace = trace && !strcmp(trace, "1");
   const char *force = getenv("D9MT_PSO_FLUSH_FORCE_MS");
   if (force && atoi(force) > 0)
     g_pso_force_ns = (uint64_t)atoi(force) * 1000000ull;
@@ -6412,7 +6452,7 @@ pso_note_compiled(void) {
     if (atomic_fetch_add(&g_pso_pending, 1u) + 1u < g_pso_flush_every)
       return;
     pthread_rwlock_wrlock(&g_pso_lock);
-    pso_flush_locked();
+    pso_flush_locked(0u);
     pthread_rwlock_unlock(&g_pso_lock);
     return;
   }
