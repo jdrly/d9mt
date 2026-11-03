@@ -934,7 +934,13 @@ namespace dxvk {
 
     uint32_t GetInstanceCount() const;
 
-    void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs);
+    void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs, bool Indexed = false);
+
+    /// The draw's effective flat shading: D3DSHADE_FLAT on a topology d9mt
+    /// draws flat (triangle lists and strips, non-indexed fans, line lists and
+    /// strips). Indexed fans, which have no index remap for D3D9's provoking
+    /// vertex, and points stay Gouraud. Logs the session's first FLAT draw.
+    bool EffectiveFlatShading(D3DPRIMITIVETYPE PrimitiveType, bool Indexed);
 
     void EnsureSamplerLimit();
 
@@ -945,7 +951,7 @@ namespace dxvk {
     template <D3D9ShaderType ShaderStage>
     void BindFFUbershader();
 
-    void BindProgrammablePixelShaderLinkage();
+    void BindProgrammablePixelShaderLinkage(bool Flat);
 
     void BindInputLayout();
 
@@ -1497,9 +1503,12 @@ namespace dxvk {
     D3D9FFShaderModuleSet           m_ffModules;
     D3D9SWVPEmulator                m_swvpEmulator;
 
-    // Programs of the PS bound at draw time and the VS it was linked to.
+    // Programs of the PS bound at draw time and the VS it was linked to, and
+    // whether that function is the flat one (D3DSHADE_FLAT, the effective
+    // flat of the draw that bound it).
     const void*                     m_boundPs     = nullptr;
     const void*                     m_boundPsPrev = nullptr;
+    bool                            m_boundPsFlat = false;
 
     Com<D3D9StateBlock, false>      m_recorder;
 

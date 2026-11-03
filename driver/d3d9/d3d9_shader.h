@@ -64,10 +64,15 @@ namespace dxvk {
     struct PairedStageIo {
       const std::vector<uint8_t>* prevStageIr    = nullptr;
       bool                        matchSemantics = true;
+      /// D3DSHADE_FLAT: the PS's colour inputs are flat (the analysis's
+      /// flat shading mask). Only a flat function gets the mask; a Gouraud
+      /// one keeps the inputs' own interpolation.
+      bool                        flat           = false;
     };
 
-    /// Final IR (I/O lowered, linked against the previous stage if given);
-    /// empty on failure. Identical bytes compile to identical metallibs.
+    /// Final IR (I/O lowered, linked against the previous stage if given,
+    /// colour inputs flat if asked); empty on failure. Identical bytes
+    /// compile to identical metallibs.
     /// Thread-safe (the backend is immutable after construction).
     virtual std::vector<uint8_t> getFinalIr(const PairedStageIo& paired) const = 0;
 
@@ -172,11 +177,13 @@ namespace dxvk {
       const void*                     pBytecode);
 
     /// Function future for this shader linked against pPrev (nullptr =
-    /// standalone). Never blocks; the first request queues the compile.
-    Rc<MtlShaderFunction> GetFunction(const D3D9ShaderProgram* pPrev);
+    /// standalone), with flat colour inputs if Flat (D3DSHADE_FLAT). Never
+    /// blocks; the first request queues the compile.
+    Rc<MtlShaderFunction> GetFunction(const D3D9ShaderProgram* pPrev, bool Flat = false);
 
-    /// State cache prewarm: the same function future, but not queued (the
-    /// prewarm thread runs it). pPrev is a D3D9 vertex shader program.
+    /// State cache prewarm: the same (Gouraud) function future, but not
+    /// queued (the prewarm thread runs it). pPrev is a D3D9 vertex shader
+    /// program. The state cache holds no flat functions.
     Rc<MtlShaderFunction> prewarmFunction(MtlStateCacheShader* pPrev) override;
 
     /// The state cache identity: the module key's SHA-1.
@@ -201,7 +208,18 @@ namespace dxvk {
     Rc<ID3D9MetalShaderBackend> m_backend;
 
     dxvk::mutex                 m_mutex;
-    std::unordered_map<const D3D9ShaderProgram*, Rc<MtlShaderFunction>> m_functions;
+    // One function per (paired VS, flat).
+    struct FunctionKey {
+      const D3D9ShaderProgram* prev;
+      bool                     flat;
+      bool operator == (const FunctionKey& o) const { return prev == o.prev && flat == o.flat; }
+    };
+    struct FunctionKeyHash {
+      size_t operator () (const FunctionKey& k) const {
+        return std::hash<const void*>()(k.prev) ^ size_t(k.flat);
+      }
+    };
+    std::unordered_map<FunctionKey, Rc<MtlShaderFunction>, FunctionKeyHash> m_functions;
     struct IrHash {
       size_t operator () (const Sha1Hash& h) const { return h.dword(0); }
     };
@@ -209,7 +227,7 @@ namespace dxvk {
     std::unordered_map<Sha1Hash, Rc<MtlShaderFunction>, IrHash> m_byIr;
     Rc<MtlCompileTask>          m_prefetch;
 
-    Rc<MtlShaderFunction> CreateFunction(const D3D9ShaderProgram* pPrev);
+    Rc<MtlShaderFunction> CreateFunction(const D3D9ShaderProgram* pPrev, bool Flat);
 
     Rc<MtlShaderFunction> ClaimIr(const Sha1Hash& Hash, const Rc<MtlShaderFunction>& Fn);
 
@@ -232,10 +250,16 @@ namespace dxvk {
       return m_program != nullptr ? m_program->GetFunction(nullptr) : nullptr;
     }
 
-    Rc<MtlShaderFunction> GetShaderForLinkage(const D3D9CommonShader* pPrevStage) const {
+    Rc<MtlShaderFunction> GetShaderForLinkage(const D3D9CommonShader* pPrevStage, bool Flat = false) const {
       return m_program != nullptr
-        ? m_program->GetFunction(pPrevStage ? pPrevStage->GetProgram() : nullptr)
+        ? m_program->GetFunction(pPrevStage ? pPrevStage->GetProgram() : nullptr, Flat)
         : nullptr;
+    }
+
+    /// A pixel shader that reads a COLOR input, the only inputs
+    /// D3DSHADE_FLAT makes flat (the analysis's flat shading mask).
+    bool ReadsColorInput() const {
+      return m_analysis.GetFlatShadingMask() != 0u;
     }
 
     const D3D9ShaderProgram* GetProgram() const {
