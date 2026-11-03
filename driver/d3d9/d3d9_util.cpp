@@ -2,6 +2,8 @@
 
 #include "../util/util_win32_compat.h"
 
+#include <atomic>
+
 namespace dxvk {
 
   typedef HRESULT (STDMETHODCALLTYPE *D3DXDisassembleShader) (
@@ -238,7 +240,13 @@ namespace dxvk {
 
   MtlTriangleFillMode DecodeFillMode(D3DFILLMODE Mode) {
     switch (Mode) {
-      case D3DFILL_POINT:     return MtlTriangleFillMode::Lines;
+      case D3DFILL_POINT: {
+        // Metal has no point fill mode: such draws render solid (#161)
+        static std::atomic<bool> s_warned { false };
+        if (!s_warned.exchange(true))
+          Logger::warn("D3D9: D3DFILL_POINT is not supported by Metal, drawing solid");
+        return MtlTriangleFillMode::Fill;
+      }
       case D3DFILL_WIREFRAME: return MtlTriangleFillMode::Lines;
       default:
       case D3DFILL_SOLID:     return MtlTriangleFillMode::Fill;
