@@ -1,6 +1,7 @@
 #include "mtl_presenter_impl.h"
 
 #include "mtl_device_impl.h"
+#include "mtl_profiler.h"
 
 #include "../mtl/mtl_context.h"
 #include "../util/log/log.h"
@@ -10,6 +11,7 @@
 #include "../util/util_string.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -60,6 +62,13 @@ namespace dxvk::backend {
       setRefreshRate(0.0);
       applyProps("create");
 
+      // D9MT_PROFILE: this presenter's presented-time stream (SCREEN line)
+      if (prof::g_profEnabled) {
+        static std::atomic<uint64_t> s_nextStreamId = { 0u };
+        m_screenStream   = MetalPresentStream_create();
+        m_screenStreamId = m_screenStream ? ++s_nextStreamId : 0u;
+      }
+
       attachLayerResidency();
     }
 
@@ -77,6 +86,9 @@ namespace dxvk::backend {
       }
       if (m_view)
         ReleaseMetalView(m_view);
+      // presented handlers still pending keep the stream alive until they have run
+      if (m_screenStream)
+        MetalPresentStream_release(m_screenStream);
     }
 
     void recreate(const MtlPresenterDesc& desc) override {
@@ -167,6 +179,8 @@ namespace dxvk::backend {
 
       image.drawable = drawable;
       image.sync.drawable = drawable;
+      image.sync.screenStream = m_screenStream;
+      image.sync.screenBreak  = m_screenStream && m_screenBreak.exchange(false);
 
       Rc<MtlTextureImpl> tex = new MtlTextureImpl();
       tex->drawable    = true;
@@ -257,6 +271,43 @@ namespace dxvk::backend {
       m_acquireTimeoutUs.store(us);
     }
 
+    uint32_t drainPresented(MtlPresentedRecord* out, uint32_t max,
+                            uint64_t* pending, uint64_t* lostNew) override {
+      static_assert(sizeof(MtlPresentedRecord) == sizeof(WMTPresentRecord));
+      static_assert(offsetof(MtlPresentedRecord, presentedS) == offsetof(WMTPresentRecord, presented_s));
+      return MetalPresentStream_drain(m_screenStream, reinterpret_cast<WMTPresentRecord*>(out), max,
+        pending, lostNew, nullptr);
+    }
+
+    uint64_t screenStreamId() const override { return m_screenStreamId; }
+
+    uint64_t lastVisibility() const override { return m_lastVis.load(); }
+
+    void markScreenBreak() override {
+      if (m_screenStream)
+        m_screenBreak.store(true);
+    }
+
+    MtlScreenState screenState() override {
+      MtlScreenState st;
+      if (m_layer) {
+        WMTLayerProps props = { };
+        MetalLayer_getProps(m_layer, &props);
+        st.displaySync = props.display_sync_enabled;
+        st.drawables   = props.maximum_drawable_count;
+      }
+      if (m_view) {
+        WMTViewPresentInfo info = { };
+        MetalView_presentInfo(m_view, &info);
+        st.windowValid  = info.valid != 0u;
+        st.fullscreen   = info.fullscreen != 0u;
+        st.screenMaxFps = info.screen_max_fps;
+        st.minIntervalS = info.screen_min_interval_s;
+        st.maxIntervalS = info.screen_max_interval_s;
+      }
+      return st;
+    }
+
     bool isDrawableStalled() const override {
       return m_stalledFlag.load(std::memory_order_relaxed);
     }
@@ -273,6 +324,9 @@ namespace dxvk::backend {
     bool             m_layerResidencyAttached = false;
     bool             m_layerAttachWarned      = false;
     uint64_t         m_lastPresented = 0u;
+    obj_handle_t     m_screenStream   = 0u; // D9MT_PROFILE (SCREEN line)
+    uint64_t         m_screenStreamId = 0u;
+    std::atomic<bool> m_screenBreak   = { false };
     uint64_t         m_completedFrame = 0u;
 
     // Drawable acquisition runs on its own thread so that a WindowServer

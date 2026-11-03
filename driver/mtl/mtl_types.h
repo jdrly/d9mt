@@ -466,6 +466,11 @@ namespace dxvk {
     MtlObjectHandle drawable = MtlNullHandle;
     uint64_t        frameId = 0;
     double          minDuration = 0.0;
+    // D9MT_PROFILE: the presenter's presented-time stream (SCREEN line); null when not profiling
+    MtlObjectHandle screenStream = MtlNullHandle;
+    // D9MT_PROFILE: put a break marker into the stream before this present (the first present
+    // after a window switch or after skipped presents: no on-screen interval across the gap)
+    bool            screenBreak  = false;
   };
 
   struct MtlSubmitStatus {

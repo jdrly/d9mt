@@ -5829,8 +5829,15 @@ namespace dxvk {
     uint64_t frame = 0u;
     hitch::FrameStats stats, every;
     if (m_hitch.endFrame(nowNs, compile,
-          dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats, &every))
-      Logger::warn(hitch::formatHitch(frame, stats));
+          dispatched > executed ? dispatched - executed : 0u, m_hitchMs, frame, stats, &every)) {
+      // the wall clock and the presenter's state: a hitch at a Space switch (the window left the
+      // screen) tells itself apart from one on screen
+      uint64_t vis = ~0ull;
+      bool stalled = false;
+      if (m_mostRecentlyUsedSwapchain == nullptr || !m_mostRecentlyUsedSwapchain->PresenterState(&vis, &stalled))
+        vis = ~0ull;
+      Logger::warn(hitch::formatHitch(frame, stats) + hitch::stampSuffix(wallClockStamp(), vis, stalled));
+    }
 
     // PACE: the blocked part of the time inside d9mt (these don't nest in each other)
     const double waitMs = every.cat[hitch::Latency].ms + every.cat[hitch::CsSync].ms
@@ -5844,7 +5851,11 @@ namespace dxvk {
         auto ft = [] (const FILETIME& f) { return (uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
         cpuNs = (ft(kernel) + ft(user)) * 100u;
       }
-      Logger::warn(m_paceWindow.take(nowNs, cpuNs));
+      const double paceT = m_paceWindow.seconds(nowNs);
+      Logger::warn(m_paceWindow.take(nowNs, cpuNs) + hitch::stampSuffix(wallClockStamp()));
+      // SCREEN: when this second's frames reached the screen (d3d9_screen.h)
+      if (m_mostRecentlyUsedSwapchain != nullptr)
+        m_mostRecentlyUsedSwapchain->LogScreen(paceT);
     }
 
     if (m_statsWindow.addFrame(nowNs)) {
@@ -5860,7 +5871,7 @@ namespace dxvk {
                 : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
       const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
       const double t = m_statsWindow.seconds(nowNs);
-      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra));
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra) + hitch::stampSuffix(wallClockStamp()));
       std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())

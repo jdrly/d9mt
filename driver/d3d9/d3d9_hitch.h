@@ -12,6 +12,13 @@
 // d9mt #126) and a few relaxed atomics per scope; ticks are converted with its
 // one immutable process-wide calibration.
 //
+// HITCH, PACE and STATS lines end in " | at=HH:MM:SS.mmm" (local wall clock, when the line was
+// logged), and HITCH also in the presenter's state then: " vis=0x3 stalled=0" (the window
+// visibility d9mt last saw, WMT_VISIBILITY_*: 0x3 = visible on the active Space; "?" before
+// the first check; stalled = presents skipped for want of a drawable). A HITCH at a Space
+// switch (vis 0x2/0x0, or stalled=1 with a "no drawable" line within ~200 ms) is the window
+// leaving the screen, not a stutter on screen (lane LW, 2026-11-02).
+//
 // Header-only and dependency-free so the formatting and the frame logic can
 // be unit-tested natively (test/native/hitch_test.cpp).
 
@@ -93,6 +100,21 @@ namespace dxvk::hitch {
     // budget) and waits the budget cut short; only shown when non-zero.
     uint64_t skipped = 0u, budgetHits = 0u;
   };
+
+  // " | at=<stamp>" for HITCH/PACE/STATS lines; with presenter state (HITCH): " vis=0x<v>
+  // stalled=<0|1>", vis ~0 = not known yet ("?").
+  inline std::string stampSuffix(const std::string& stamp) {
+    return " | at=" + stamp;
+  }
+
+  inline std::string stampSuffix(const std::string& stamp, uint64_t vis, bool stalled) {
+    char buf[64];
+    if (vis == ~0ull)
+      std::snprintf(buf, sizeof(buf), " vis=? stalled=%d", int(stalled));
+    else
+      std::snprintf(buf, sizeof(buf), " vis=0x%llx stalled=%d", (unsigned long long)vis, int(stalled));
+    return stampSuffix(stamp) + buf;
+  }
 
   inline std::string formatHitch(uint64_t frame, const FrameStats& s, uint32_t maxCats = 8u) {
     constexpr double MiB = 1.0 / double(1u << 20);

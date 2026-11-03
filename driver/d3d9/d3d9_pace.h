@@ -72,6 +72,11 @@ namespace dxvk::pace {
       return nowNs - m_winStartNs >= PeriodNs;
     }
 
+    // Seconds since the first Present (the line's t).
+    double seconds(uint64_t nowNs) const {
+      return m_startNs ? double(nowNs - m_startNs) * 1e-9 : 0.0;
+    }
+
     // The line for the window that ends now; starts the next window.
     // `threadCpuNs`: the Present thread's total CPU time so far (0: unknown).
     std::string take(uint64_t nowNs, uint64_t threadCpuNs) {
