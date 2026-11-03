@@ -219,6 +219,9 @@ int main(void) {
       TranslateMessage(&msg);
       DispatchMessageA(&msg);
     }
+    /* D3D9's Clear honours the viewport: the last frame ended on the right half's */
+    D3DVIEWPORT9 full = { 0u, 0u, 640u, 480u, 0.0f, 1.0f };
+    IDirect3DDevice9_SetViewport(dev, &full);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(16, 16, 24), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
     for (int half = 0; half < 2; half++) {   /* 0 the test, 1 the control */
