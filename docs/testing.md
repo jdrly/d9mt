@@ -147,6 +147,13 @@ off changes every vertex shader's metallib and no pixel shader's.
 `OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
 that bridge itself and compares it row by row first.
 
+`scripts/test-pso-partition.sh` (after `scripts/build-bridge.sh`; no Wine) checks the
+PSO archives' partition, `os-<build>-<gpu>-c<identity>-t<T>`: this build's
+identity and AIR target, 0.1.7's and other identities' directories removed,
+two starts keeping the directory, the same directory with `D9MT_AIR_CACHE=0`,
+four targets in four directories, and a lineaged codegen id (a copy of the
+bridge carrying 0.1.5.1's) keeping its predecessor's directory.
+
 `scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS`, `D9MT_AIR_LEGACY` and
 `D9MT_AIR_INVARIANT` (`0`: `air_compiler --no-invariance`): its
 artifacts live under `build/air-compiler/diff/<target, math, invariance,

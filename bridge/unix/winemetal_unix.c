@@ -44,6 +44,7 @@
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
 #include "present_ring.h"
+#include "air_cache_lineage.h"
 
 #if DXMT_APITRACE_METAL
 #include "apitrace/metal_capi.h"
@@ -6070,8 +6071,19 @@ _MTLDevice_newArgumentTable(void *obj) {
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum (size + SHA-256) written
  *    after it and is only loaded when that matches; anything else is deleted.
- * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>/; other
- * os-* directories (OS or GPU change) are removed. The newest
+ * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>-c<identity>-t<T>/:
+ * the OS build, the GPU, the effective AIR identity's first 8 bytes
+ * (d9mt_air_effective_identity: the codegen id or its lineage's identity) and
+ * the AIR target term T (d9mtair_air_target), so a new AIR codegen or another
+ * AIR target starts a new partition. Other os-* directories (an OS, GPU, AIR
+ * codegen or target change, and 0.1.7's os-<build>-<gpu>) are removed: a
+ * retention and partition rule, not a correctness one (Metal's archive lookup
+ * matches functions by content, so a stale archive can't return a wrong
+ * shader, but it would be searched on every miss for up to 8 sessions).
+ * Runtime switches that don't change the target (D9MT_AIR_INVARIANT,
+ * D9MT_AIR_FASTMATH) aren't in the partition, and the AIR cache's state
+ * (D9MT_AIR_CACHE=0, a failed prepare) doesn't matter: the identity opens no
+ * database. The newest
  * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
  * it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
@@ -6254,6 +6266,8 @@ pso_sanitize(NSString *s) {
   return [NSString stringWithUTF8String:out];
 }
 
+extern uint32_t d9mtair_air_target(void);
+
 static void
 pso_archive_init(id<MTLDevice> device) {
   const char *off = getenv("D9MT_PSO_ARCHIVE");
@@ -6287,9 +6301,19 @@ pso_archive_init(id<MTLDevice> device) {
   size_t oslen = sizeof(osbuild);
   if (sysctlbyname("kern.osversion", osbuild, &oslen, NULL, 0))
     strcpy(osbuild, "unknown");
-  NSString *leaf = [NSString stringWithFormat:@"os-%@-%@",
+  /* the AIR partition: c<the effective AIR identity's first 8 bytes>-t<T>;
+   * cunknown for a build without a well-formed codegen id (its AIR cache is
+   * off; its archives still work, by content) */
+  uint8_t ident[16];
+  const struct d9mt_air_lineage *lineage;
+  char cpart[2u * 8u + 1u] = "unknown";
+  if (d9mt_air_effective_identity(ident, &lineage)) {
+    for (unsigned i = 0u; i < 8u; i++)
+      snprintf(cpart + 2u * i, 3u, "%02x", ident[i]);
+  }
+  NSString *leaf = [NSString stringWithFormat:@"os-%@-%@-c%s-t%x",
     pso_sanitize([NSString stringWithUTF8String:osbuild] ?: @"unknown"),
-    pso_sanitize(device.name ?: @"gpu")];
+    pso_sanitize(device.name ?: @"gpu"), cpart, d9mtair_air_target()];
   NSString *dir = [base stringByAppendingPathComponent:leaf];
 
   NSFileManager *fm = [NSFileManager defaultManager];
