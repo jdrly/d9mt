@@ -7253,8 +7253,11 @@ namespace dxvk {
       case D3DPT_LINELIST:
       case D3DPT_LINESTRIP:
         return true;
+      // Triangle fans stay Gouraud: D3D9 takes fan triangle t's flat values
+      // from vertex t+1, Metal from the first vertex of the expanded
+      // (0, t+1, t+2), the hub. Non-indexed fans join the list with the fan
+      // index rotation (t+1, t+2, 0) (#170); indexed fans have no remap.
       case D3DPT_TRIANGLEFAN:
-        return !Indexed;
       default:
         return false;
     }
