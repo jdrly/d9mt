@@ -186,6 +186,17 @@ store is skipped ([configuration](docs/configuration.md#attachment-loadstore-opt
 The re-clear that gives a reader the contents of an attachment whose store was skipped (`restore`
 in `STATS`, `RESTORE` lines) ([configuration](docs/configuration.md#attachment-loadstore-optimization)).
 
+**Lossless compression**
+Apple GPUs' transparent compression of textures, render targets included, which saves memory
+bandwidth. A texture with `PixelFormatView` usage doesn't get it, so d9mt chooses it per texture
+with that flag (`D9MT_TEX_PFV`, `driver/mtl/mtl_pfv.h`; [configuration](docs/configuration.md#developer-and-diagnostic-switches)).
+
+**Resolve image**
+The single-sampled texture of a multisampled one (`D3D9CommonTexture::GetResolveImage`) that d9mt
+resolves into when a resolve can't write the game's texture directly: a `StretchRect` sub-rect, a
+stretching blit, a readback, and on GPUs before Apple10 every resolve into a game's texture (the
+resolve image has no lossless compression there; a copy into the game's texture follows).
+
 **Rules B, C, E, F**
 The frame-pass rules of the experimental `D9MT_DEFERRED` mode (`flushFramePasses` in
 `driver/backend/mtl_context_record.cpp`; `D9MT_NO_RULE_{B,C,E,F}` in [configuration](docs/configuration.md#developer-and-diagnostic-switches)). _Open:_ they are

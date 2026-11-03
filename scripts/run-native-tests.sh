@@ -39,6 +39,7 @@ host frame_cap_test -I driver/d3d9 test/native/frame_cap_test.cpp
 host hitch_test -I driver/d3d9 test/native/hitch_test.cpp
 host memory_profile_test -I driver/mtl test/native/memory_profile_test.cpp
 host pace_test -I driver/d3d9 test/native/pace_test.cpp
+host pfv_images_test -I driver/mtl test/native/pfv_images_test.cpp
 host pso_gen_test -I driver/backend test/native/pso_gen_test.cpp
 host prof_clock_test -I driver/backend test/native/prof_clock_test.cpp
 host prof_clock_test_x64 -arch x86_64 -I driver/backend test/native/prof_clock_test.cpp
