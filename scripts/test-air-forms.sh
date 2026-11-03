@@ -72,7 +72,7 @@ for target in 26 27; do
          >/dev/null 2> "$T/ours/ir_$c.err"; then
       dis "$T/ours/ir_$c.metallib" "$T/ours/ir_$c.ll"
     else
-      echo "ir:$c [$target] compile failed: $(tail -1 "$T/ours/ir_$c.err")"
+      echo "ir:$c [$target] FAIL: compile: $(tail -1 "$T/ours/ir_$c.err")"; fail=1
     fi
   done
   for s in $(sed -n 's/^form .*sm3:\([a-z0-9_]*\).*/\1/p' "$FORMS/inventory.txt" | sort -u); do
@@ -80,20 +80,31 @@ for target in 26 27; do
          >/dev/null 2> "$T/ours/sm3_$s.err"; then
       dis "$T/ours/sm3_$s.metallib" "$T/ours/sm3_$s.ll"
     else
-      echo "sm3:$s [$target] compile failed: $(tail -1 "$T/ours/sm3_$s.err")"
+      echo "sm3:$s [$target] FAIL: compile: $(tail -1 "$T/ours/sm3_$s.err")"; fail=1
     fi
   done
-  # the whole SM3 corpus: nothing outside the inventory
+  # the whole SM3 corpus: nothing outside the inventory. Every shader must compile and
+  # disassemble, or the sweep would pass on part of the corpus.
+  ncorpus=0; dropped=()
   for bin in "$V2"/air/tests/bin/*.bin; do
-    n=$(basename "$bin" .bin)
-    env -u D9MT_AIR_LEGACY D9MT_AIR_MACOS=$target "$LOOP" "$OUT/d9mtair.so" "$bin" "$T/corpus/$n.metallib" >/dev/null 2>&1 \
-      && dis "$T/corpus/$n.metallib" "$T/corpus/$n.ll"
+    n=$(basename "$bin" .bin); ncorpus=$((ncorpus+1))
+    if ! env -u D9MT_AIR_LEGACY D9MT_AIR_MACOS=$target "$LOOP" "$OUT/d9mtair.so" "$bin" "$T/corpus/$n.metallib" \
+           >/dev/null 2> "$T/corpus/$n.err" \
+       || ! dis "$T/corpus/$n.metallib" "$T/corpus/$n.ll" 2>> "$T/corpus/$n.err"; then
+      dropped+=("$n")
+      echo "corpus $n [$target] FAIL: $(tail -1 "$T/corpus/$n.err")"
+    fi
   done
+  if [ "${#dropped[@]}" -gt 0 ]; then
+    echo "corpus [$target] FAIL: ${#dropped[@]} of $ncorpus shaders not swept: ${dropped[*]}"; fail=1
+  else
+    echo "corpus [$target] PASS: all $ncorpus shaders swept"
+  fi
   # Apple, per group
   for g in $("${PY[@]}" groups "$FORMS/inventory.txt"); do
     group "$g" "$T/apple/$g.metal"
     xcrun -sdk macosx metal -O2 -mmacosx-version-min=$target.0 -S -emit-llvm "$T/apple/$g.metal" -o "$T/apple/$g.ll" \
-      2> "$T/apple/$g.err" || { echo "Apple rejected group $g [$target]: $(head -1 "$T/apple/$g.err")"; rm -f "$T/apple/$g.ll"; }
+      2> "$T/apple/$g.err" || { echo "Apple rejected group $g [$target]: $(head -1 "$T/apple/$g.err") (its forms fail unless apple-unmatched)"; rm -f "$T/apple/$g.ll"; }
   done
   "${PY[@]}" compare "$FORMS/inventory.txt" "$target" "$T/ours" "$T/apple" "$T/corpus" || fail=1
 done
