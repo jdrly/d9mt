@@ -23,6 +23,10 @@
 #  8. Links: a selected partition that is a link is refused (archives off for that start) and
 #     nothing behind it is touched; a stale partition that is a link is unlinked itself, its
 #     target kept; a link inside the partition named like an archive is unlinked, its target kept.
+#  9. FIFOs never block setup: an archive's .sum, an archive and a .tmp that are FIFOs (no
+#     writer) are rejected and removed; a stale partition whose lock file is a FIFO is left alone;
+#     the partition's own lock file a FIFO turns archives off for that start. Every start runs
+#     under a 60 s alarm, so a hang fails the run instead of stalling it.
 # Needs build/bridge from scripts/build-bridge.sh (and build/airlib's objects for step 5).
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,7 +53,8 @@ check() {  # check <name> <0|1 ok> [detail]
 # directory it logged (empty if none); its exit status goes to $WORK/<name>.rc, checked at the end.
 start() {
   local n=$1 so=$2 base=$3 rc; shift 3
-  env -u D9MT_AIR_MACOS -u D9MT_AIR_LEGACY -u D9MT_AIR_CACHE -u D9MT_PSO_ARCHIVE \
+  perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' 60 \
+    env -u D9MT_AIR_MACOS -u D9MT_AIR_LEGACY -u D9MT_AIR_CACHE -u D9MT_PSO_ARCHIVE \
     D9MT_AIR_CACHE="$WORK/$n.air-cache.sqlite3" "$@" D9MT_PSO_ARCHIVE_DIR="$base" \
     "$WORK/pso_partition_test" "$so" > "$WORK/$n.log" 2>&1
   rc=$?
@@ -200,6 +205,35 @@ if [ -n "$L8b" ]; then
     "$([ ! -L "$B/$L8b/0000000002-1-0000.mtl4archive" ] && [ -f "$EXT/file.mtl4archive" ] && echo 1 || echo 0)"
 else
   check "a link inside the partition: (no partition: the previous start failed)" 0
+fi
+
+# 9. FIFOs (no writer) never block setup
+B=$WORK/base9
+L9=$(start fifo0 "$SO" "$B")
+if [ -n "$L9" ]; then
+  P=$B/$L9
+  echo junk > "$P/0000000001-1-0000.mtl4archive"; mkfifo "$P/0000000001-1-0000.mtl4archive.sum"
+  mkfifo "$P/0000000002-1-0000.mtl4archive"; echo "0 x" > "$P/0000000002-1-0000.mtl4archive.sum"
+  mkfifo "$P/0000000003-1-0000.mtl4archive.sum.tmp"
+  STALE="os-$OSB-$GPU-c0000000000000000-t$HOSTT"
+  mkdir -p "$B/$STALE"; mkfifo "$B/.locks/$STALE.lock"
+  t0=$(date +%s)
+  L9b=$(start fifo1 "$SO" "$B")
+  t1=$(date +%s)
+  check "FIFOs: setup finished (no hang) in the same partition" \
+    "$([ "$L9b" = "$L9" ] && [ $((t1 - t0)) -lt 30 ] && echo 1 || echo 0)" "$((t1 - t0)) s"
+  check "FIFOs: the FIFO .sum and the FIFO archive rejected and removed with their pairs" \
+    "$([ ! -e "$P/0000000001-1-0000.mtl4archive.sum" ] && [ ! -e "$P/0000000001-1-0000.mtl4archive" ] \
+       && [ ! -e "$P/0000000002-1-0000.mtl4archive" ] && [ ! -e "$P/0000000002-1-0000.mtl4archive.sum" ] && echo 1 || echo 0)" \
+    "$(ls "$P" | tr '\n' ' ')"
+  check "FIFOs: a stale partition whose lock file is a FIFO is left alone" "$([ -d "$B/$STALE" ] && echo 1 || echo 0)"
+  B=$WORK/base10
+  mkdir -p "$B/.locks"; mkfifo "$B/.locks/$L.lock"
+  L10=$(start fifolock "$SO" "$B")
+  check "FIFOs: the own lock file a FIFO: archives off for that start, no hang" \
+    "$(grep -q 'no lease on' "$WORK/fifolock.log" && [ -z "$L10" ] && echo 1 || echo 0)"
+else
+  check "FIFOs: (no partition: the first start failed)" 0
 fi
 
 # every start's harness exited 0
