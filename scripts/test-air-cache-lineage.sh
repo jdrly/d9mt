@@ -12,7 +12,12 @@
 #    row by row first) is adopted under macOS 27 with every row kept and every compile a hit, also
 #    with a stray table next to it; merged into a new table that already holds rows (empty or not);
 #    left whole while another process holds the write lock (no cache that session) and adopted by
-#    the next start; and dropped under D9MT_AIR_MACOS=26 (VERS 2.7 rows instead).
+#    the next start; and dropped under D9MT_AIR_MACOS=26 (target 26's VERS 2.8 rows instead).
+#  - The AIR target (air/air_metallib.h): targets 26 and 27 and legacy 26 and 27 have four pairwise
+#    distinct terms T and four tables, each named by the identity, the ABI and its T; switching a
+#    cache file's target drops the other target's table; the log's lineage claim agrees with the
+#    lineage table; and 0.1.5.1's table (its lineage names only the 0.1.5.1-0.1.7 codegen id, and
+#    its adopt value equals no T) is dropped like any foreign table.
 # Needs build/bridge from scripts/build-bridge.sh.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,15 +55,18 @@ for (t,) in db.execute("select name from sqlite_master where type='table' order 
         print(t, rowid, k.hex(), hashlib.sha256(v).hexdigest(), 'VERS%d.%d' % struct.unpack_from('<2H', m, j + 6))
 EOF
 }
-# run <name> <winemetal.so> <cache dir> <host|26>: the corpus through the thunk; <name>.rows lists the cache
+# run <name> <winemetal.so> <cache dir> <host|26|27|L26|L27>: the corpus through the thunk
+# (L = D9MT_AIR_LEGACY=1); <name>.rows lists the cache
 run() {
   local n=$1 so=$2 c=$3 m=$4
+  local -a e=(env -u D9MT_AIR_MACOS -u D9MT_AIR_LEGACY)
+  case "$m" in
+    host) ;;
+    L*) e+=(D9MT_AIR_LEGACY=1 "D9MT_AIR_MACOS=${m#L}");;
+    *) e+=("D9MT_AIR_MACOS=$m");;
+  esac
   mkdir -p "$WORK/$n"
-  if [ "$m" = 26 ]; then
-    D9MT_AIR_MACOS=26 D9MT_AIR_CACHE="$c/air-cache.sqlite3" "$WORK/air_cache_test" "$so" "$WORK/$n" "$WORK"/corpus/*.bin > "$WORK/$n.log" 2>&1
-  else
-    env -u D9MT_AIR_MACOS D9MT_AIR_CACHE="$c/air-cache.sqlite3" "$WORK/air_cache_test" "$so" "$WORK/$n" "$WORK"/corpus/*.bin > "$WORK/$n.log" 2>&1
-  fi
+  "${e[@]}" D9MT_AIR_CACHE="$c/air-cache.sqlite3" "$WORK/air_cache_test" "$so" "$WORK/$n" "$WORK"/corpus/*.bin > "$WORK/$n.log" 2>&1
   dump "$c/air-cache.sqlite3" > "$WORK/$n.rows"
 }
 tables() { cut -d' ' -f1 "$WORK/$1.rows" | sort -u | tr '\n' ' '; }
@@ -119,6 +127,33 @@ sqlite3 "$C/foreign/air-cache.sqlite3" "ALTER TABLE $T27 RENAME TO cache_42;"
 run foreign "$SO" "$C/foreign" host
 check "a foreign table is dropped, the cache starts cold" \
   "$([ "$(tables foreign)" = "$T27 " ] && ! grep -q 'kept' "$WORK/foreign.log" && echo 1 || echo 0)"
+# 0.1.5.1's table (the 0.1.5.1 lineage's adopt_table): inert under the per-macOS AIR target
+cp -R "$C/own" "$C/old0151"
+sqlite3 "$C/old0151/air-cache.sqlite3" "ALTER TABLE $T27 RENAME TO cache_6138817854601476907;"
+run old0151 "$SO" "$C/old0151" host
+check "0.1.5.1's table is dropped, not adopted" \
+  "$([ "$(tables old0151)" = "$T27 " ] && ! grep -q 'kept' "$WORK/old0151.log" && echo 1 || echo 0)"
+
+# 2b. the AIR target: four targets, four terms, four tables
+if grep -q "\"$ID\"" "$V2/bridge/unix/air_cache_lineage.c"; then
+  check "lineage: the log names the lineage the table lists for ${ID:0:12}" \
+    "$(grep -q 'AIR cache .*, lineage ' "$WORK/cold.log" && echo 1 || echo 0)"
+else
+  check "lineage: ${ID:0:12} has none, and the log says so" \
+    "$(grep -q 'AIR cache .*, no lineage)' "$WORK/cold.log" && echo 1 || echo 0)"
+fi
+for m in 26 27 L26 L27; do run "t$m" "$SO" "$C/t$m" "$m"; done
+read -r ok detail < <(python3 -I "$V2/scripts/air-target-tables.py" "$WORK" "$ID")
+check "targets 26, 27, legacy 26, legacy 27: four T, four tables" "$ok" "$detail"
+for m in 26 27 L26 L27; do
+  case $m in 26) want=2.8;; 27|L27) want=2.9;; L26) want=2.7;; esac
+  check "target $m: every row VERS $want, as many as compiled" \
+    "$([ "$(grep -vc " VERS$want\$" "$WORK/t$m.rows")" = 0 ] && [ "$(wc -l < "$WORK/t$m.rows" | tr -d ' ')" = "$n" ] && echo 1 || echo 0)"
+done
+cp -R "$C/t26" "$C/switch"
+run switch "$SO" "$C/switch" L26
+check "one cache file, target 26 then legacy 26: target 26's table dropped" \
+  "$([ "$(tables switch)" = "$(tables tL26)" ] && echo 1 || echo 0)" "$(tables switch)"
 
 # 3. the lineage's adoption
 read -r LEG LNAME < <(python3 -I - "$V2/bridge/unix/air_cache_lineage.c" "$ID" <<'EOF'
@@ -191,8 +226,8 @@ EOF
   T26=$(table_of a26)
   check "macOS 26: not adopted, $LNAME's table dropped" \
     "$(! grep -q 'kept' "$WORK/a26.log" && [ "$(tables a26)" = "$T26 " ] && [ "$T26" != "$T27" ] && echo 1 || echo 0)" "$T26"
-  check "macOS 26: every row VERS 2.7, as many as compiled" \
-    "$([ "$(grep -vc ' VERS2.7$' "$WORK/a26.rows")" = 0 ] && [ "$(wc -l < "$WORK/a26.rows" | tr -d ' ')" = "$n" ] && echo 1 || echo 0)"
+  check "macOS 26: every row VERS 2.8, as many as compiled" \
+    "$([ "$(grep -vc ' VERS2.8$' "$WORK/a26.rows")" = 0 ] && [ "$(wc -l < "$WORK/a26.rows" | tr -d ' ')" = "$n" ] && echo 1 || echo 0)"
 fi
 echo "----"
 echo "pass=$pass fail=$fail"
