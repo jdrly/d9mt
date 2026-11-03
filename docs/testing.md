@@ -54,11 +54,26 @@ SWTOR-like many-pipeline workload, under Wine with every cache in a scratch
 directory.
 
 `scripts/test-air-versions.sh` (after `scripts/build-bridge.sh`; needs Xcode's
-metal toolchain) compiles the AIR corpus through d9mtair for macOS 26, for
-macOS 27 and for this Mac (`D9MT_AIR_MACOS`). For macOS 26 each runtime
-metallib's OS version and VERS tags must equal what Apple's `metallib` writes
-for the same bitcode (a newer VERS makes Metal reject every game shader); for
-macOS 27 they keep AIR 2.9, and nothing else differs.
+metal toolchain and an LLVM 15 `llvm-dis`: `LLVM_DIS`, or
+`ninja -C toolchains/llvm-build llvm-dis`) compiles the AIR corpus through
+d9mtair for each AIR target (`D9MT_AIR_MACOS`, `D9MT_AIR_LEGACY`). Targets 26
+and 27: the metallib container (file version, header OS, every VERS) and the
+bitcode (triple, `air.version`, `air.language_version`, datalayout) must equal
+what Apple's toolchain writes for that macOS (`xcrun metal
+-mmacosx-version-min=<os>.0` and `metallib` on a probe shader; a newer VERS
+makes Metal reject every game shader). Legacy 26 and 27: the fields 0.1.7
+wrote, VERS 2.9 on 27 included. Unset gives this Mac's mode. With
+`OLD_LOOPBACK=<build/airlib of a d9mt 73511be tree>` it also requires legacy
+output byte-identical to that build's (the AIR target PR's acceptance check;
+later codegen changes legacy bitcode on purpose).
+
+`scripts/test-air-forms.sh` (same needs) checks the AIR built-in forms
+contract: `air/tests/forms/inventory.txt` lists every intrinsic declaration
+AirBuilder can emit and every `"air.…` literal in its source (a new emitter
+without an entry fails); each form's fixture (`air/tests/forms/gen_ir.cpp`
+IR through `airlib_loopback --ir`, or an SM3 corpus shader) must declare it,
+with the same normalized signature Apple's compiler gives the
+`forms.metal` group for it, for targets 26 and 27.
 
 `scripts/test-air-cache-lineage.sh` (after `scripts/build-bridge.sh`) checks the
 AIR cache's identity (ADR-0006) on scratch caches, without Wine: the AIR codegen
@@ -68,9 +83,15 @@ lineage that adopts a predecessor table, that table is adopted on macOS 27 with
 every row kept and every compile a hit (also next to a stray table), merged into
 a new table that already holds rows, left whole while another process holds the
 write lock (that session runs without the cache) and adopted by the next start,
-and dropped under `D9MT_AIR_MACOS=26`.
+and dropped under `D9MT_AIR_MACOS=26`. The four AIR targets (26, 27, legacy
+26, legacy 27) get four distinct cache terms and four tables, and 0.1.5.1's
+table is dropped, not adopted.
 `OLD_BRIDGE=<the predecessor's winemetal.so>` makes the predecessor table with
 that bridge itself and compares it row by row first.
+
+`scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS` and `D9MT_AIR_LEGACY`: its
+artifacts live under `build/air-compiler/diff/<target, math, invariance,
+samples>`, and every AIR artifact's target fields are checked before it renders.
 
 `scripts/sm3_hazard_test.py` checks the `D3D9 SM3 hazard` warning (shader
 patterns dxbc-spirv's SM3 converter mishandles, GitHub issue #8) under Wine:
@@ -81,7 +102,36 @@ environment) renders `crs`/`setp` with every write mask, modifier and
 predicate and packed I/O declarations on the GPU and compares the results
 with a scalar model of the D3D9 semantics; `--strict` uses
 `d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
-every corpus `crs` against a `mul`/`mul`/`add` expansion.
+every corpus `crs` against a `mul`/`mul`/`add` expansion. Its `pin_*` cases
+(`--only pin_`) cover the dxbc-spirv pin: unpacked relative input reads, the
+assert paths of unreachable loops, the `if`/`breakp` predicate truth table
+(with and without NOT) and the signed-zero witnesses of ConditionPass.
+`conditions_signed_zero_test` (in `run-native-tests.sh`) checks the same
+signed-zero case on the IR after `legalizeIr`.
+
+`test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
+d9mt draws flat and the ones it keeps Gouraud (triangle fans), a pixel shader
+without COLOR inputs and a VS/PS pair that needs semantic reconciliation. Its
+frames must hash as base until the AIR compiler honours flat; with
+`D9MT_FLAT_CHECK=1` its log shows each draw's flat choice and the final-IR
+check of every pixel shader function (expected values in the file's header).
+The fixed-function pipeline draws `D3DSHADE_FLAT` with its own flat fragment
+shader (`ffFsMainFlat`: colour inputs flat; `test/code_ff_flat.c` checks every
+primitive against D3D9's provoking vertex).
+The fixed-function batch's tests read back their own pixels and print
+`PASS`/`FAIL` (each file's header gives the oracle): `code_ff_fog.c` (linear
+fog with start == end: no fog in front of the end, full fog at and behind it, fixed
+function and SM1/2 emulated fog, an SM3 control),
+`code_ff_cliprhw.c` (no user clip planes for pre-transformed vertices),
+`code_ff_dot3.c` (a DOTPRODUCT3 alpha op on a depth-only target),
+`code_ff_cube3d.c` (cube and volume textures in fixed-function stages, #152;
+run it under `MTL_SHADER_VALIDATION=1` too) and `code_ff_invariant.c` (a
+fixed-function depth pass and an SM3 EQUAL pass: reported, with an asserted
+depth-offset control).
+Flat shading is partial: triangle fans stay Gouraud (D3D9 takes fan triangle
+t's flat values from vertex t+1, Metal would take the hub of the expanded
+`(0, t+1, t+2)`; non-indexed fans follow once the fan index rotation lands,
+#170), and points have nothing to interpolate.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.

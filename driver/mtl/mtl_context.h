@@ -49,6 +49,17 @@ namespace dxvk {
     // when functions share a library).
     MtlShaderStateId    stateId;
 
+    // D3DSHADE_FLAT: the pixel shader's colour inputs are flat. Set at
+    // creation, never changed. Not part of stateId: the state cache never
+    // records a pipeline with a flat function (the session compiles it on
+    // first use), so its records and file format are unchanged.
+    bool                flat = false;
+
+    // The fixed-function fragment shader (both variants): stage s's texture is bound at the
+    // table slot of its kind, s (2D), 8+s (cube) or 16+s (3D), and the null texture of the
+    // other two kinds at the others (#152). Set at creation, never changed.
+    bool                ffStageTextures = false;
+
     bool ready() const { return task == nullptr || task->isDone(); }
   };
 
