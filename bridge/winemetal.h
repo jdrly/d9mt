@@ -2336,6 +2336,7 @@ enum WMTMtl4RenderCommandType : uint16_t {
   WMTMtl4RenderCommandDrawIndexed,
   WMTMtl4RenderCommandBarrier,
   WMTMtl4RenderCommandSetDepthClipMode,
+  WMTMtl4RenderCommandSetTriangleFillMode,
 };
 
 struct wmtcmd_mtl4_nop {
@@ -2406,6 +2407,13 @@ struct wmtcmd_mtl4_setcullmode {
 };
 
 struct wmtcmd_mtl4_setdepthclipmode {
+  enum WMTMtl4RenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  uint64_t mode;
+};
+
+struct wmtcmd_mtl4_settrianglefillmode {
   enum WMTMtl4RenderCommandType type;
   uint16_t reserved[3];
   struct WMTMemoryPointer next;
