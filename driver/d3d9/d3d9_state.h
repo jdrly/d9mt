@@ -68,6 +68,17 @@ namespace dxvk {
     float pointScaleC = 0.0f;
   };
 
+  /// The constant depth bias the vertex shader adds to clip-space z (#163):
+  /// z += depthBias * w, depthBias = D3DRS_DEPTHBIAS / the viewport's depth
+  /// range, or 0 where the hardware applies the constant (BindDepthBias).
+  /// After the fixed-function block, so the FF shaders' layout stays put.
+  struct D3D9VsDepthBiasPushData {
+    static constexpr MtlStageMask Stages = MtlStageVertex;
+    static constexpr uint32_t           Offset = sizeof(D3D9VsPushData) + sizeof(D3D9FfvsPushData);
+
+    float depthBias = 0.0f;
+  };
+
   struct D3D9FfpsPushData {
     static constexpr MtlStageMask Stages = MtlStageFragment;
     static constexpr uint32_t           Offset = 0u;
@@ -79,8 +90,11 @@ namespace dxvk {
     D3D9SharedPushData shared;
     D3D9VsPushData vs;
     D3D9FfvsPushData ffvs;
+    D3D9VsDepthBiasPushData vsDepthBias;
     D3D9FfpsPushData ffps;
   };
+
+  static_assert(D3D9VsDepthBiasPushData::Offset == 20u);
 
   enum class D3D9SamplerMode : uint8_t {
     Default   = 0,

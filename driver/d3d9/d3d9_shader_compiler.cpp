@@ -22,6 +22,7 @@
 #include "d9mtair.h"
 
 #include <array>
+#include <limits>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -98,9 +99,256 @@ namespace dxvk {
             break;
         }
       }
+
+      if (m_shaderStage == ir::ShaderStage::eVertex)
+        m_depthBiasHook = emitDepthBias();
+    }
+
+    /// The VS: whether phase A biased this shader's position (DESIGN: the
+    /// "hook"). false = the shader's IR is unchanged; the backend keeps the
+    /// hardware constant for it (fail-closed).
+    bool depthBiasHook() const {
+      return m_depthBiasHook;
+    }
+
+    /// The VS: why emitDepthBias left the shader alone, for the log.
+    const std::string& depthBiasProblem() const {
+      return m_depthBiasProblem;
+    }
+
+    /// Tests (D9MT_DEPTH_BIAS_TEST_UNHOOK): leave this VS unhooked.
+    void disableDepthBias() {
+      m_depthBiasEnabled = false;
     }
 
   private:
+
+    bool                      m_depthBiasEnabled = true;
+    bool                      m_depthBiasHook = false;
+    std::string               m_depthBiasProblem;
+
+    /// The constant depth bias in the vertex shader (#163; docs/configuration.md,
+    /// D9MT_DEPTH_BIAS_VS). D3D9's D3DRS_DEPTHBIAS is
+    /// absolute, in depth-buffer units; Metal's constant bias on Depth32Float
+    /// (which backs D24) scales with z's exponent, so it shrinks below 0.5.
+    /// With k = DEPTHBIAS / the viewport's depth range from the VS depth-bias
+    /// push block (0 = off, the default):
+    ///
+    ///   z'  = (k != 0 && inDomain) ? z + k*w : z
+    ///   d6  = (k != 0 && finite)   ? z               : 0   (near:  z >= 0)
+    ///   d7  = (k != 0 && finite)   ? 0.5*w - 0.5*z   : 0   (far:   w - z >= 0)
+    ///
+    /// from the original z and w; inDomain = |z| <= 2^126 && 2^-100 <= |w| <=
+    /// 2^126 (z + k*w can't overflow for |k| <= 2^-6), finite = both finite.
+    /// d6/d7 are the original near/far planes, so with the device's depth
+    /// clamp (while k != 0) coverage stays the original frustum and the
+    /// biased depth clamps per sample. The half scale is the same at every
+    /// vertex (the plane and its interpolation are unchanged) and can't
+    /// overflow for finite inputs. With k = 0 the stored z is the original
+    /// and d6 = d7 = 0 (never clips): the switch-off A/A.
+    ///
+    /// The position stores are dxbc-spirv's IoMap::flushOutputs: one
+    /// OutputStore per component, z before w, in main's last block. The z
+    /// store moves after the w store; d6/d7 follow it, before main's only
+    /// return. The clip-distance output grows from f32[6] (the D3D9 user
+    /// planes d0..d5, which read the unbiased temps) to f32[8] in the IR only.
+    /// Any other shape: nothing is changed, false (unhooked).
+    bool emitDepthBias() {
+      using namespace dxbc_spv;
+
+      auto fail = [this] (std::string what) {
+        m_depthBiasProblem = std::move(what);
+        return false;
+      };
+
+      if (!m_depthBiasEnabled)
+        return fail("left unhooked by D9MT_DEPTH_BIAS_TEST_UNHOOK");
+
+      ir::SsaDef posDecl = {};
+      ir::SsaDef clipDecl = {};
+
+      for (auto iter = m_builder.getDeclarations().first;
+                iter != m_builder.getDeclarations().second; iter++) {
+        if (iter->getOpCode() != ir::OpCode::eDclOutputBuiltIn)
+          continue;
+
+        auto builtIn = ir::BuiltIn(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+
+        if (builtIn == ir::BuiltIn::ePosition)
+          posDecl = iter->getDef();
+        else if (builtIn == ir::BuiltIn::eClipDistance)
+          clipDecl = iter->getDef();
+      }
+
+      if (!posDecl)
+        return fail("no position output");
+
+      if (!clipDecl)
+        return fail("no clip-distance output");
+
+      const auto& clipType = m_builder.getOp(clipDecl).getType();
+
+      if (!clipType.isArrayType() || clipType.getArrayDimensions() != 1u
+       || clipType.getArraySize(0u) != 6u
+       || clipType.getBaseType(0u).getBaseType() != ir::ScalarType::eF32
+       || clipType.getBaseType(0u).getVectorSize() != 1u)
+        return fail("the clip-distance output isn't f32[6]");
+
+      // The position stores
+      ir::SsaDef zStore = {};
+      ir::SsaDef wStore = {};
+      uint32_t zCount = 0u, wCount = 0u, otherCount = 0u;
+
+      for (auto iter = m_builder.getCode().first;
+                iter != m_builder.getCode().second; iter++) {
+        if (iter->getOpCode() != ir::OpCode::eOutputStore
+         || ir::SsaDef(iter->getOperand(0u)) != posDecl)
+          continue;
+
+        const auto& addressOp = m_builder.getOpForOperand(*iter, 1u);
+
+        if (!addressOp || !addressOp.isConstant() || !addressOp.getType().isScalarType()) {
+          otherCount++;
+          continue;
+        }
+
+        switch (uint32_t(addressOp.getOperand(0u))) {
+          case 2u: zStore = iter->getDef(); zCount++; break;
+          case 3u: wStore = iter->getDef(); wCount++; break;
+          default: break;
+        }
+      }
+
+      if (zCount != 1u || wCount != 1u || otherCount) {
+        return fail(str::format("not one z and one w position store (z ", zCount,
+          ", w ", wCount, ", other ", otherCount, ")"));
+      }
+
+      // Both in main, z before w in one block, and no return of main before
+      // the w store or in another block after it: the stores added after the
+      // w store then run on main's only exit.
+      auto mainFn = ir::SsaDef(m_builder.getOp(m_entryPoint).getOperand(0u));
+
+      if (!mainFn || m_builder.getOp(mainFn).getOpCode() != ir::OpCode::eFunction)
+        return fail("no main function");
+
+      enum class Seen { None, Z, W };
+      Seen seen = Seen::None;
+      uint32_t returns = 0u;
+
+      for (auto def = m_builder.getNext(mainFn); ; def = m_builder.getNext(def)) {
+        if (!def)
+          return fail("main has no end");
+
+        const auto& op = m_builder.getOp(def);
+
+        if (op.getOpCode() == ir::OpCode::eFunctionEnd)
+          break;
+
+        if (def == zStore) {
+          seen = Seen::Z;
+          continue;
+        }
+
+        if (def == wStore) {
+          if (seen != Seen::Z)
+            return fail("the w store doesn't follow the z store in main");
+          seen = Seen::W;
+          continue;
+        }
+
+        switch (op.getOpCode()) {
+          case ir::OpCode::eLabel:
+          case ir::OpCode::eBranch:
+          case ir::OpCode::eBranchConditional:
+          case ir::OpCode::eSwitch:
+          case ir::OpCode::eUnreachable:
+            if (seen != Seen::None)
+              return fail("the position stores aren't in main's last block");
+            break;
+
+          case ir::OpCode::eReturn:
+            if (seen != Seen::W)
+              return fail("main returns before the position stores");
+            returns++;
+            break;
+
+          case ir::OpCode::eFunction:
+            return fail("main has no end");
+
+          default:
+            break;
+        }
+      }
+
+      if (seen != Seen::W || returns > 1u)
+        return fail("the position stores aren't on main's only exit");
+
+      auto zValue = ir::SsaDef(m_builder.getOp(zStore).getOperand(2u));
+      auto wValue = ir::SsaDef(m_builder.getOp(wStore).getOperand(2u));
+
+      const auto& zType = m_builder.getOp(zValue).getType();
+      const auto& wType = m_builder.getOp(wValue).getType();
+
+      if (!zType.isScalarType() || zType.getBaseType(0u).getBaseType() != ir::ScalarType::eF32
+       || !wType.isScalarType() || wType.getBaseType(0u).getBaseType() != ir::ScalarType::eF32)
+        return fail("the z or w value isn't a 32-bit float");
+
+      // Everything checked: rewrite.
+      constexpr auto f32 = ir::ScalarType::eF32;
+      constexpr auto b1  = ir::ScalarType::eBool;
+
+      auto pushType = ir::Type().addStructMember(f32);
+
+      auto pushData = m_builder.add(ir::Op::DclPushData(pushType, m_entryPoint,
+        D3D9VsDepthBiasPushData::Offset, getPushDataStage(D3D9VsDepthBiasPushData::Stages)));
+      m_builder.add(ir::Op::DebugName(pushData, "vsDepthBias"));
+      m_builder.add(ir::Op::DebugMemberName(pushData, 0u, "depthBias"));
+
+      auto zero = m_builder.makeConstant(0.0f);
+      auto half = m_builder.makeConstant(0.5f);
+
+      ir::SsaDef cursor = wStore;
+
+      auto emit = [&] (ir::Op op) {
+        cursor = m_builder.addAfter(cursor, std::move(op));
+        return cursor;
+      };
+
+      auto k        = emit(ir::Op::PushDataLoad(f32, pushData, m_builder.makeConstant(0u)));
+      auto kOn      = emit(ir::Op::FNe(b1, k, zero));
+      auto absZ     = emit(ir::Op::FAbs(f32, zValue));
+      auto absW     = emit(ir::Op::FAbs(f32, wValue));
+
+      auto zInDom   = emit(ir::Op::FLe(b1, absZ, m_builder.makeConstant(0x1p126f)));
+      auto wInDomHi = emit(ir::Op::FLe(b1, absW, m_builder.makeConstant(0x1p126f)));
+      auto wInDomLo = emit(ir::Op::FGe(b1, absW, m_builder.makeConstant(0x1p-100f)));
+      auto inDomain = emit(ir::Op::BAnd(b1, zInDom, emit(ir::Op::BAnd(b1, wInDomHi, wInDomLo))));
+      auto biasOn   = emit(ir::Op::BAnd(b1, kOn, inDomain));
+
+      auto kw       = emit(ir::Op::FMul(f32, k, wValue).setFlags(ir::OpFlag::ePrecise));
+      auto biased   = emit(ir::Op::FAdd(f32, zValue, kw).setFlags(ir::OpFlag::ePrecise));
+      auto zOut     = emit(ir::Op::Select(f32, biasOn, biased, zValue));
+      emit(ir::Op::OutputStore(posDecl, m_builder.makeConstant(2u), zOut));
+
+      auto zFinite  = emit(ir::Op::FLe(b1, absZ, m_builder.makeConstant(std::numeric_limits<float>::max())));
+      auto wFinite  = emit(ir::Op::FLe(b1, absW, m_builder.makeConstant(std::numeric_limits<float>::max())));
+      auto clipOn   = emit(ir::Op::BAnd(b1, kOn, emit(ir::Op::BAnd(b1, zFinite, wFinite))));
+
+      auto halfW    = emit(ir::Op::FMul(f32, wValue, half).setFlags(ir::OpFlag::ePrecise));
+      auto halfZ    = emit(ir::Op::FMul(f32, zValue, half).setFlags(ir::OpFlag::ePrecise));
+      auto farDist  = emit(ir::Op::FSub(f32, halfW, halfZ).setFlags(ir::OpFlag::ePrecise));
+      auto d6       = emit(ir::Op::Select(f32, clipOn, zValue, zero));
+      auto d7       = emit(ir::Op::Select(f32, clipOn, farDist, zero));
+      emit(ir::Op::OutputStore(clipDecl, m_builder.makeConstant(6u), d6));
+      emit(ir::Op::OutputStore(clipDecl, m_builder.makeConstant(7u), d7));
+
+      m_builder.remove(zStore);
+
+      m_builder.rewriteOp(clipDecl, ir::Op(m_builder.getOp(clipDecl))
+        .setType(ir::Type(f32).addArrayDimension(8u)));
+      return true;
+    }
 
     struct SpecFunction {
       uint8_t specId   = 0u;
@@ -1079,6 +1327,10 @@ namespace dxvk {
       return m_ir;
     }
 
+    bool depthBiasHook() const override {
+      return m_depthBiasHook;
+    }
+
     std::vector<uint8_t> getFinalIr(const PairedStageIo& paired) const override {
       using namespace dxbc_spv;
 
@@ -1411,6 +1663,7 @@ namespace dxvk {
     D3D9ShaderAnalysis   m_analysis;
     std::string          m_name;
     std::vector<uint8_t> m_ir;
+    bool                 m_depthBiasHook = false;
 
     void runPhaseA(const D3D9ShaderOptions& options, const void* bytecode) {
       using namespace dxbc_spv;
@@ -1435,7 +1688,27 @@ namespace dxvk {
       }
 
       D3D9ShaderLowerLegacyInputPass lowerLegacyPass(builder, options, m_analysis);
+
+      // Tests only: D9MT_DEPTH_BIAS_TEST_UNHOOK=1 leaves every VS that
+      // declares a TEXCOORD15 output unhooked (test/code_depth_bias.c).
+      static const bool s_testUnhook = env::getEnvVar("D9MT_DEPTH_BIAS_TEST_UNHOOK") == "1";
+
+      if (unlikely(s_testUnhook) && isVs && m_analysis.HasDepthBiasTestMarker())
+        lowerLegacyPass.disableDepthBias();
+
       lowerLegacyPass.run();
+
+      // An unhooked VS keeps the hardware constant (the backend checks the
+      // hook bit): the night gate counts these lines (expected 0 for the
+      // corpus, apart from the test's marked shader).
+      if (isVs) {
+        m_depthBiasHook = lowerLegacyPass.depthBiasHook();
+
+        if (!m_depthBiasHook) {
+          Logger::warn(str::format("D9MT: depth bias: ", m_name, ": not in the expected form (",
+            lowerLegacyPass.depthBiasProblem(), "); this VS keeps the hardware constant depth bias"));
+        }
+      }
 
       ir::CompileOptions compileOptions = { };
       ir::legalizeIr(builder, compileOptions);
