@@ -38,7 +38,7 @@ namespace dxvk {
     if (m_offset + size > m_size) {
       m_cpuSlice = m_cpuBuffer->allocateStorage();
 
-      m_device->EmitCs([
+      m_device->EmitCsAs<DxvkCsCmdKind::Constants>([
         cBinding    = uint32_t(m_kind),
         cStages     = m_stages,
         cCpuBuffer  = m_cpuBuffer,
@@ -56,7 +56,7 @@ namespace dxvk {
       m_offset = size;
       return m_cpuSlice->mapPtr;
     } else {
-      m_device->EmitCs([
+      m_device->EmitCsAs<DxvkCsCmdKind::Constants>([
         cBinding  = uint32_t(m_kind),
         cStages   = m_stages,
         cOffset   = m_offset,
@@ -99,7 +99,7 @@ namespace dxvk {
       m_gpuBuffer = m_cpuBuffer;
     }
 
-    m_device->EmitCs([
+    m_device->EmitCsAs<DxvkCsCmdKind::Constants>([
       cBinding  = uint32_t(m_kind),
       cStages   = m_stages,
       cSlice    = MtlBufferSlice(m_gpuBuffer, 0u, m_gpuBuffer->size)
@@ -121,7 +121,7 @@ namespace dxvk {
     if (m_streamCmd && !Discard) {
       m_streamCmd->size = Offset + Size - m_streamCmd->offset;
     } else {
-      auto block = m_device->EmitCsCmd<StreamCommand>(D3D9CmdType::None, 1u, [
+      auto block = m_device->EmitCsCmdAs<StreamCommand, DxvkCsCmdKind::Constants>(D3D9CmdType::None, 1u, [
         cCpuBuffer = m_cpuBuffer,
         cGpuBuffer = m_gpuBuffer,
         cDiscard   = Discard

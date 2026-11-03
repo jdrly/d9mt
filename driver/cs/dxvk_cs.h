@@ -11,6 +11,8 @@
 
 #include "../mtl/mtl_context.h"
 
+#include "dxvk_cs_stats.h"
+
 namespace dxvk {
 
   constexpr static size_t DxvkCsChunkSize = 16384;
@@ -31,6 +33,9 @@ namespace dxvk {
 
     virtual void exec(MtlContext* ctx) = 0;
 
+    // D9MT_PROFILE only (dxvk_cs_stats.h): the kind given at the emit site, Other if none.
+    virtual DxvkCsCmdKind kind() const = 0;
+
   private:
 
     DxvkCsCmd* m_next = nullptr;
@@ -38,7 +43,7 @@ namespace dxvk {
   };
 
 
-  template<typename T>
+  template<typename T, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
   class DxvkCsTypedCmd : public DxvkCsCmd {
 
   public:
@@ -51,6 +56,10 @@ namespace dxvk {
 
     void exec(MtlContext* ctx) {
       m_command(ctx);
+    }
+
+    DxvkCsCmdKind kind() const {
+      return K;
     }
 
   private:
@@ -85,7 +94,7 @@ namespace dxvk {
   };
 
 
-  template<typename T, typename M>
+  template<typename T, typename M, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
   class DxvkCsDataCmd : public DxvkCsCmd {
 
   public:
@@ -105,6 +114,10 @@ namespace dxvk {
 
     void exec(MtlContext* ctx) {
       m_command(ctx, reinterpret_cast<M*>(m_data.first()), m_data.count());
+    }
+
+    DxvkCsCmdKind kind() const {
+      return K;
     }
 
     DxvkCsDataBlock* data() {
@@ -138,9 +151,9 @@ namespace dxvk {
       return m_commandOffset == 0;
     }
 
-    template<typename T>
+    template<DxvkCsCmdKind K = DxvkCsCmdKind::Other, typename T>
     bool push(T& command) {
-      using FuncType = DxvkCsTypedCmd<T>;
+      using FuncType = DxvkCsTypedCmd<T, K>;
       void* ptr = alloc<FuncType>(0u);
 
       if (unlikely(!ptr))
@@ -151,16 +164,16 @@ namespace dxvk {
       return true;
     }
 
-    template<typename T>
+    template<DxvkCsCmdKind K = DxvkCsCmdKind::Other, typename T>
     bool push(T&& command) {
-      return push(command);
+      return push<K>(command);
     }
 
-    template<typename M, typename T>
+    template<typename M, typename T, DxvkCsCmdKind K = DxvkCsCmdKind::Other>
     DxvkCsDataBlock* pushCmd(T& command, size_t count) {
       size_t dataSize = count * sizeof(M);
 
-      using FuncType = DxvkCsDataCmd<T, M>;
+      using FuncType = DxvkCsDataCmd<T, M, K>;
       void* ptr = alloc<FuncType>(dataSize);
 
       if (unlikely(!ptr))
@@ -197,6 +210,10 @@ namespace dxvk {
     void reset();
 
   private:
+
+    // D9MT_PROFILE: counts the chunk's commands by kind and its bytes (cs_stats); before
+    // executeAll runs them, since a single-use chunk destroys them as it goes.
+    void countForStats() const;
 
     size_t m_commandOffset = 0;
 
@@ -380,6 +397,9 @@ namespace dxvk {
     std::atomic<bool>           m_stopped     = { false };
     std::atomic<bool>           m_hasHighPrio = { false };
 
+    // D9MT_PROFILE only (cs_stats): threads inside a csSyncWait, under m_counterMutex.
+    uint32_t                    m_syncWaiters = 0u;
+
     alignas(CACHE_LINE_SIZE)
     dxvk::mutex                 m_mutex;
     dxvk::condition_variable    m_condOnAdd;
@@ -387,6 +407,10 @@ namespace dxvk {
 
     DxvkCsChunkQueue            m_queueOrdered;
     DxvkCsChunkQueue            m_queueHighPrio;
+
+    // D9MT_PROFILE only (cs_stats): the CS thread sleeps on m_condOnAdd, under m_mutex. The
+    // first handover that finds it set counts the wake and clears it.
+    bool                        m_parked      = false;
 
     dxvk::thread                m_thread;
 
@@ -401,6 +425,10 @@ namespace dxvk {
     }
 
     void threadFunc();
+
+    // D9MT_PROFILE only: m_condOnSync.wait(lock, pred), timed and counted as a csSyncWait.
+    template<typename Pred>
+    void waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred&& pred);
 
   };
 

@@ -21,7 +21,20 @@ namespace dxvk {
   }
 
 
+  void DxvkCsChunk::countForStats() const {
+    uint32_t kinds[cs_stats::kKinds] = { };
+
+    for (auto cmd = m_head; cmd != nullptr; cmd = cmd->next())
+      kinds[uint32_t(cmd->kind())]++;
+
+    cs_stats::g_stats.onRun(m_commandOffset, kinds);
+  }
+
+
   void DxvkCsChunk::executeAll(MtlContext* ctx) {
+    if (unlikely(cs_stats::g_enabled))
+      countForStats();
+
     auto cmd = m_head;
 
     if (m_flags.test(DxvkCsChunkFlag::SingleUse)) {
@@ -128,6 +141,11 @@ namespace dxvk {
       entry.chunk = std::move(chunk);
       entry.seq = seq;
 
+      if (unlikely(cs_stats::g_enabled)) {
+        cs_stats::g_stats.onHandover(m_parked);
+        m_parked = false;
+      }
+
       m_condOnAdd.notify_one();
     }
 
@@ -148,6 +166,11 @@ namespace dxvk {
       entry.chunk = std::move(chunk);
       entry.seq = timeline;
 
+      if (unlikely(cs_stats::g_enabled)) {
+        cs_stats::g_stats.onHandover(m_parked);
+        m_parked = false;
+      }
+
       m_condOnAdd.notify_one();
 
       if (queue == DxvkCsQueue::HighPriority) {
@@ -158,9 +181,14 @@ namespace dxvk {
     if (synchronize) {
       std::unique_lock<dxvk::mutex> lock(m_counterMutex);
 
-      m_condOnSync.wait(lock, [this, queue, timeline] {
+      auto pred = [this, queue, timeline] {
         return getCounter(queue).load() >= timeline;
-      });
+      };
+
+      if (unlikely(cs_stats::g_enabled))
+        waitOnSyncProfiled(lock, pred);
+      else
+        m_condOnSync.wait(lock, pred);
     }
   }
 
@@ -171,16 +199,34 @@ namespace dxvk {
         seq = m_queueOrdered.seqDispatch;
 
       { std::unique_lock<dxvk::mutex> lock(m_counterMutex);
-        m_condOnSync.wait(lock, [this, seq] {
+        auto pred = [this, seq] {
           return m_seqOrdered.load() >= seq;
-        });
+        };
+
+        if (unlikely(cs_stats::g_enabled))
+          waitOnSyncProfiled(lock, pred);
+        else
+          m_condOnSync.wait(lock, pred);
       }
     }
   }
 
 
+  template<typename Pred>
+  void DxvkCsThread::waitOnSyncProfiled(std::unique_lock<dxvk::mutex>& lock, Pred&& pred) {
+    const uint64_t t0 = cheap_clock::now();
+    m_syncWaiters++;
+    m_condOnSync.wait(lock, pred);
+    m_syncWaiters--;
+    cs_stats::g_stats.onSyncWait(cheap_clock::elapsed(t0, cheap_clock::now()));
+  }
+
+
   void DxvkCsThread::threadFunc() {
     env::setThreadName("dxvk-cs");
+
+    if (unlikely(cs_stats::g_enabled))
+      cs_stats::g_stats.startOnce(cheap_clock::now());
 
     std::vector<DxvkCsQueuedChunk> ordered;
     std::vector<DxvkCsQueuedChunk> highPrio;
@@ -196,9 +242,19 @@ namespace dxvk {
           };
 
           if (unlikely(!pred())) {
-            m_condOnAdd.wait(lock, [&] {
-              return pred();
-            });
+            if (unlikely(cs_stats::g_enabled)) {
+              const uint64_t t0 = cheap_clock::now();
+              m_parked = true;
+              m_condOnAdd.wait(lock, [&] {
+                return pred();
+              });
+              m_parked = false;
+              cs_stats::g_stats.onPark(cheap_clock::elapsed(t0, cheap_clock::now()));
+            } else {
+              m_condOnAdd.wait(lock, [&] {
+                return pred();
+              });
+            }
           }
 
           std::swap(ordered, m_queueOrdered.queue);
@@ -231,6 +287,9 @@ namespace dxvk {
 
             auto& counter = isHighPrio ? m_seqHighPrio : m_seqOrdered;
             counter.store(entry.seq);
+
+            if (unlikely(cs_stats::g_enabled) && m_syncWaiters)
+              cs_stats::g_stats.onSyncWake();
 
             m_condOnSync.notify_all();
           }

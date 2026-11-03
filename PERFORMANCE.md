@@ -399,6 +399,15 @@ submit, syncWsi, endFrame; they nest) and counters: `psoMiss`, `psoKeyBuild`, `a
 `abRebuild`, `chunkFlush`, `passClose` by cause, `evRead` (shared-event reads, each a unix call),
 `unsubWait` (waits on a serial not yet submitted, also as `PROF-UNSUB` lines).
 
+**`PROF-CS`**, right after each `PROF` line, over the same window (`driver/cs/dxvk_cs_stats.h`,
+#127): the handoff between the game thread and the CS thread, every value per frame. Producer
+side: `csChunk` (chunks handed over), `csWake` (handovers that found the CS thread asleep),
+`csSyncWait`/`csSyncWaitMs` (waits for the CS thread). CS thread: `csRun`, `csKiB`, `csPark`/
+`csParkMs` (asleep on an empty queue), `csBusyMs` (the rest of the wall time, waits inside commands
+included), `csSyncWake`. Commands executed by kind: `cmd` = `cmdDraw` + `cmdVb` + `cmdIb` +
+`cmdConst` + `cmdTex` + `cmdShader` + `cmdState` + `cmdProf` (the API tags profiling itself adds)
++ `cmdOther`. Keys are unique on the line and appear on no other line.
+
 **Others**: `RESTORE`/`RESTORE-SUMMARY` (attachment re-clears by image, aspect and reason;
 `driver/mtl/mtl_restore_stats.h`), `XFER` (StretchRect and ColorFill by path), `STATECACHE`
 (`hits`, `late`, `misses`, `boosts`; [docs/state-cache.md](docs/state-cache.md) §7),

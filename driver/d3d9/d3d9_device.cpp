@@ -3052,7 +3052,7 @@ namespace dxvk {
       }
     }
 
-    EmitCsCmd<MtlDrawArgs>(D3D9CmdType::Draw, 1u,
+    EmitCsCmdAs<MtlDrawArgs, DxvkCsCmdKind::Draw>(D3D9CmdType::Draw, 1u,
       [this] (MtlContext* ctx, const MtlDrawArgs* drawArgs, uint32_t drawCount) {
         ctx->draw(drawCount, drawArgs);
       });
@@ -3107,7 +3107,7 @@ namespace dxvk {
       }
     }
 
-    EmitCsCmd<MtlDrawIndexedArgs>(D3D9CmdType::DrawIndexed, 1u,
+    EmitCsCmdAs<MtlDrawIndexedArgs, DxvkCsCmdKind::Draw>(D3D9CmdType::DrawIndexed, 1u,
       [this] (MtlContext* ctx, MtlDrawIndexedArgs* drawArgs, uint32_t drawCount) {
       if (unlikely(m_iaState.streamsInstanced && !(m_iaState.streamsInstanced & m_iaState.streamsUsed))) {
         for (uint32_t i = 0u; i < drawCount; i++)
@@ -3152,7 +3152,7 @@ namespace dxvk {
     auto upSlice = AllocUPBuffer(bufferSize);
     FillUPVertexBuffer(upSlice.mapPtr, pVertexStreamZeroData, dataSize, bufferSize);
 
-    EmitCs([this,
+    EmitCsAs<DxvkCsCmdKind::Draw>([this,
       cBufferSlice  = std::move(upSlice.slice),
       cPrimType     = PrimitiveType,
       cStride       = VertexStreamZeroStride,
@@ -3218,7 +3218,7 @@ namespace dxvk {
     FillUPVertexBuffer(data, pVertexStreamZeroData, vertexDataSize, vertexBufferSize);
     std::memcpy(data + vertexBufferSize, pIndexData, indicesSize);
 
-    EmitCs([this,
+    EmitCsAs<DxvkCsCmdKind::Draw>([this,
       cVertexSize   = vertexBufferSize,
       cBufferSlice  = std::move(upSlice.slice),
       cPrimType     = PrimitiveType,
@@ -5704,7 +5704,7 @@ namespace dxvk {
         }
 
         auto vboSlice = upSlice.slice.subSlice(copy.dstOffset, copy.copyBufferLength);
-        EmitCs([
+        EmitCsAs<DxvkCsCmdKind::VertexBuffer>([
           cStream      = i,
           cBufferSlice = std::move(vboSlice),
           cStride      = copy.copyElementSize
@@ -5723,7 +5723,7 @@ namespace dxvk {
 
     if (dynamicSysmemIBO) {
       if (unlikely(iboUPBufferSize == 0)) {
-        EmitCs([](MtlContext* ctx) {
+        EmitCsAs<DxvkCsCmdKind::IndexBuffer>([](MtlContext* ctx) {
           ctx->bindIndexBuffer(MtlBufferSlice(), MtlIndexType::Uint32);
         });
         m_dirty.set(D3D9DeviceDirtyFlag::IndexBuffer);
@@ -5737,7 +5737,7 @@ namespace dxvk {
         std::memcpy(data, src, iboUPBufferSize);
 
         auto iboSlice = upSlice.slice.subSlice(iboUPBufferOffset, iboUPBufferSize);
-        EmitCs([
+        EmitCsAs<DxvkCsCmdKind::IndexBuffer>([
           cBufferSlice = std::move(iboSlice),
           cIndexType = indexType
         ](MtlContext* ctx) mutable {
@@ -6560,7 +6560,7 @@ namespace dxvk {
 
   template<typename T>
   void D3D9DeviceEx::UpdatePushDataBlock(const T& Block) {
-    EmitCs([cBlock = Block] (MtlContext* ctx) {
+    EmitCsAs<DxvkCsCmdKind::Constants>([cBlock = Block] (MtlContext* ctx) {
       ctx->pushData(T::Stages, T::Offset, sizeof(T), &cBlock);
     });
   }
@@ -6684,7 +6684,7 @@ namespace dxvk {
     if (m_textureSlotTracking.unresolvableHazardDS != 0)
       feedbackLoopAspects |= MtlAspectDepth;
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cAttachments         = std::move(attachments),
       cFeedbackLoopAspects = feedbackLoopAspects
     ] (MtlContext* ctx) mutable {
@@ -6746,7 +6746,7 @@ namespace dxvk {
       state.scissor = MtlRect{ uint32_t(vp.X), uint32_t(vp.Y), vp.Width, vp.Height };
     }
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cViewport = state
     ] (MtlContext* ctx) {
       ctx->setViewports(1, &cViewport);
@@ -6794,7 +6794,7 @@ namespace dxvk {
       : uint16_t(0xffffu));
     msState.setAlphaToCoverage(m_atocEnabled);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cState = msState
     ] (MtlContext* ctx) {
       ctx->setMultisampleState(cState);
@@ -6839,7 +6839,7 @@ namespace dxvk {
     for (uint32_t i = 0; i < 4; i++)
       writeMasks |= (state[ColorWriteIndex(i)] & 0xfu) << (4u * i);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cMode       = mode,
       cWriteMasks = writeMasks,
       cAlphaMasks = m_rtSlotTracking.hasAlphaSwizzle
@@ -6877,7 +6877,7 @@ namespace dxvk {
       D3DCOLOR(m_state.renderStates[D3DRS_BLENDFACTOR]),
       reinterpret_cast<float*>(&blendConstants));
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cBlendConstants = blendConstants
     ](MtlContext* ctx) {
       ctx->setBlendColor(cBlendConstants);
@@ -6930,7 +6930,7 @@ namespace dxvk {
     state.setStencilOpFront(frontOp);
     state.setStencilOpBack(backOp);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cState = state
     ] (MtlContext* ctx) mutable {
       cState.normalize();
@@ -6956,7 +6956,7 @@ namespace dxvk {
       ? uint32_t(0u)
       : uint32_t(1u));
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cState  = state
     ](MtlContext* ctx) {
       ctx->setRasterizerState(cState);
@@ -6980,7 +6980,7 @@ namespace dxvk {
     biases.slopeFactor    = slopeScaledDepthBias;
     biases.clamp    = 0.0f;
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::State>([
       cBiases = biases
     ](MtlContext* ctx) {
       ctx->setDepthBias(cBiases);
@@ -7044,7 +7044,7 @@ namespace dxvk {
 
     uint32_t ref = uint32_t(rs[D3DRS_STENCILREF]) & 0xff;
 
-    EmitCs([cRef = ref] (MtlContext* ctx) {
+    EmitCsAs<DxvkCsCmdKind::State>([cRef = ref] (MtlContext* ctx) {
       ctx->setStencilReference(cRef);
     });
   }
@@ -7061,7 +7061,7 @@ namespace dxvk {
     if (tex && SamplerUsesBorderColor(Sampler))
       imageView = tex->GetSampleView(srgb);
 
-    EmitCs([this,
+    EmitCsAs<DxvkCsCmdKind::Texture>([this,
       cSlot       = Sampler,
       cState      = D3D9SamplerInfo(m_state.samplerStates[Sampler]),
       cIsCube     = tex && tex->IsCube(),
@@ -7142,7 +7142,7 @@ namespace dxvk {
     bool srgb = m_state.samplerStates[StateSampler][D3DSAMP_SRGBTEXTURE] & 0x1;
     D3D9CommonTexture* commonTex = GetCommonTexture(m_state.textures[StateSampler]);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Texture>([
       cSlot       = StateSampler,
       cImageView  = likely(!commonTex->IsUnwritten())
         ? commonTex->GetSampleView(srgb)
@@ -7155,7 +7155,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UnbindTextures(uint32_t mask) {
-    EmitCs([cMask = mask] (MtlContext* ctx) {
+    EmitCsAs<DxvkCsCmdKind::Texture>([cMask = mask] (MtlContext* ctx) {
       for (uint32_t i : bit::BitMask(cMask)) {
         auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(i);
         ctx->bindTexture(stage, slot, nullptr);
@@ -7401,7 +7401,7 @@ namespace dxvk {
         }
       }
 
-      EmitCs([
+      EmitCsAs<DxvkCsCmdKind::State>([
         cDepthBounds = db
       ] (MtlContext* ctx) {
         ctx->setDepthBounds(cDepthBounds);
@@ -7448,7 +7448,7 @@ namespace dxvk {
     auto shader = pShaderModule->GetShader();
 
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Shader>([
       cShader = std::move(shader)
     ] (MtlContext* ctx) mutable {
       constexpr MtlShaderStage stage = ShaderStage == D3D9ShaderType::VertexShader
@@ -7467,7 +7467,7 @@ namespace dxvk {
     if (ShaderStage == D3D9ShaderType::PixelShader)
       m_boundPs = nullptr;
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Shader>([
       cShader = m_ffModules.GetShader<ShaderStage>()
     ](MtlContext* ctx) mutable {
       ctx->bindShader(Stage, std::move(cShader));
@@ -7497,7 +7497,7 @@ namespace dxvk {
     m_boundPs     = psProgram;
     m_boundPsPrev = vsProgram;
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Shader>([
       cShader = ps->GetShaderForLinkage(vs)
     ] (MtlContext* ctx) mutable {
       ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
@@ -7521,7 +7521,7 @@ namespace dxvk {
         : GetFixedFunctionIsgn();
 
       auto elementCount = vertexElements.size();
-      auto elementBlock = EmitCsCmd<D3DVERTEXELEMENT9>(D3D9CmdType::None, elementCount, [
+      auto elementBlock = EmitCsCmdAs<D3DVERTEXELEMENT9, DxvkCsCmdKind::Shader>(D3D9CmdType::None, elementCount, [
         &cIaState         = m_iaState,
         cInputSignature   = inputSignature,
         cStreamsInstanced = m_vbSlotTracking.instanced,
@@ -7611,7 +7611,7 @@ namespace dxvk {
       for (uint32_t i = 0u; i < elementCount; i++)
         new (elementBlock->at(i)) D3DVERTEXELEMENT9(vertexElements[i]);
     } else {
-      EmitCs([&cIaState = m_iaState] (MtlContext* ctx) {
+      EmitCsAs<DxvkCsCmdKind::Shader>([&cIaState = m_iaState] (MtlContext* ctx) {
         cIaState.streamsUsed = 0;
         ctx->setVertexLayout(0, nullptr, 0, nullptr);
       });
@@ -7628,7 +7628,7 @@ namespace dxvk {
     if (likely(pBuffer)) {
       Offset = std::min(Offset, Length);
 
-      EmitCs([
+      EmitCsAs<DxvkCsCmdKind::VertexBuffer>([
         cSlotId       = Slot,
         cBuffer       = pBuffer->GetCommonBuffer()->GetBuffer<D3D9_COMMON_BUFFER_TYPE_REAL>(),
         cOffset       = Offset,
@@ -7639,7 +7639,7 @@ namespace dxvk {
         ctx->bindVertexBuffer(cSlotId, std::move(slice), cStride);
       });
     } else {
-      EmitCs([cSlotId = Slot] (MtlContext* ctx) mutable {
+      EmitCsAs<DxvkCsCmdKind::VertexBuffer>([cSlotId = Slot] (MtlContext* ctx) mutable {
         ctx->bindVertexBuffer(cSlotId, MtlBufferSlice(), 0);
       });
     }
@@ -7653,7 +7653,7 @@ namespace dxvk {
           UINT                              Stride) {
     Offset = std::min(Offset, Length);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::VertexBuffer>([
       cSlotId       = Slot,
       cOffset       = Offset,
       cLength       = Length - Offset,
@@ -7669,14 +7669,14 @@ namespace dxvk {
       D3D9CommonBuffer* buffer = m_state.indices->GetCommonBuffer();
       MtlIndexType indexType = DecodeIndexType(buffer->Desc()->Format);
 
-      EmitCs([
+      EmitCsAs<DxvkCsCmdKind::IndexBuffer>([
         cBufferSlice = buffer->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_REAL>(),
         cIndexType   = indexType
       ](MtlContext* ctx) mutable {
         ctx->bindIndexBuffer(std::move(cBufferSlice), cIndexType);
       });
     } else {
-      EmitCs([] (MtlContext* ctx) {
+      EmitCsAs<DxvkCsCmdKind::IndexBuffer>([] (MtlContext* ctx) {
         ctx->bindIndexBuffer(MtlBufferSlice(), MtlIndexType::Uint32);
       });
     }
@@ -8320,7 +8320,7 @@ namespace dxvk {
     if (m_iaState.primitiveType != PrimType) {
       m_iaState.primitiveType = PrimType;
 
-      EmitCs([
+      EmitCsAs<DxvkCsCmdKind::State>([
         cPrimType = PrimType
       ] (MtlContext* ctx) {
         auto iaState = DecodeInputAssemblyState(cPrimType);
@@ -8987,7 +8987,7 @@ namespace dxvk {
   void D3D9DeviceEx::BindSpecConstants() {
     m_dirty.clr(D3D9DeviceDirtyFlag::SpecializationEntries);
 
-    EmitCs([
+    EmitCsAs<DxvkCsCmdKind::Constants>([
       cSpecData = m_specData
     ] (MtlContext* ctx) {
       ctx->setFunctionConstants(MtlPipeline::Graphics,
