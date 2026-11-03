@@ -32,7 +32,7 @@ use_patches() { rm -f "$P"/*.patch; for p in "$@"; do cp "$p" "$P/"; done; }
 # the current patches, applied to the pin, with nothing else changed
 check_patched() {
   local want
-  want="$(cd "$T" && rm -rf ref && git clone -q --no-checkout "$SRC" ref && git -C ref checkout -q --detach c5c1a5b9b61773d59592f628faa39be9add26282 \
+  want="$(cd "$T" && rm -rf ref && git clone -q --no-checkout "$SRC" ref && git -C ref checkout -q --detach 76236b827e95381aa1b37bccfb31642896c427f8 \
           && git -C ref apply "$P"/*.patch && git -C ref diff)"
   [ "$(git -C "$D" diff)" = "$want" ] && bash "$T/v2/scripts/check-deps.sh" >/dev/null 2>&1
 }

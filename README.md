@@ -231,7 +231,7 @@ checkout and no Wine engine.
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"   # the scripts fail under /bin/bash 3.2
 
-scripts/fetch-deps.sh             # dxbc-spirv at c5c1a5b9 with patches/dxbc-spirv applied
+scripts/fetch-deps.sh             # dxbc-spirv at 76236b82 with patches/dxbc-spirv applied
 scripts/build-llvm-unixside.sh    # LLVM 15.0.7, static x86_64 libs; once, and slow
 scripts/build-bridge.sh           # winemetal.so with the AIR compiler, winemetal.dll i386 + x86_64
 ARCH=x64 scripts/build-driver.sh  # build/driver-x64/d3d9.dll for 64-bit games
