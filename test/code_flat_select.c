@@ -8,18 +8,23 @@
  *   3 non-indexed triangle fan    1
  *   4 indexed triangle list       1
  *   5 a PS that reads no COLOR    effective 1, Gouraud PS (flat changes only colour inputs)
- *   6 the reorder pair, FLAT      1: a VS whose outputs need semantic reconciliation (another
- *                                    order, an extra TEXCOORD) and a PS reading COLOR0, COLOR1,
- *                                    TEXCOORD0 and TEXCOORD1_centroid
+ *   6 the reorder pair, FLAT      1: a pair that must go through the semantic and mismatched-I/O
+ *                                    reconciliation: the VS writes only TEXCOORD0.xy (and an extra
+ *                                    TEXCOORD2, in another order), the PS reads COLOR0, COLOR1,
+ *                                    all of TEXCOORD0, TEXCOORD1_centroid and an unwritten TEXCOORD3
  *   then SHADEMODE GOURAUD:
  *   7 non-indexed triangle list   0
  *   8 the reorder pair            0
  *
  * D9MT_FLAT_CHECK=1 logs "D9MT-FLAT-DRAW topo=<D3DPT> indexed=<0|1> effective=<0|1> ps=sm
  * psflat=<0|1>" per draw (expected, frame 1: 1/1, 0/0, 1/1, 1/1, 1/0, 1/1, 0/0, 0/0) and one
- * "D9MT-FLAT-CHECK <ps> <flat|gouraud> <prev|standalone> ok (...)" per PS function compiled:
- * the flat function's COLOR inputs exactly flat, the Gouraud one's not, every other input (the
- * centroid TEXCOORD1 included) the same in both, after the reconciliation.
+ * "D9MT-FLAT-CHECK <ps> <flat|gouraud> <prev reconciled=0|1|standalone> ok (...)" per PS
+ * function compiled. Its expectations come from the shader's original IR, not the flat mask:
+ * inputs named by the semantic the original IR declares at their location; COLOR0/COLOR1
+ * exactly flat in the flat IR and not in the Gouraud one; every other semantic (the centroid
+ * TEXCOORD1 included) with its original interpolation in both. The reorder PS's two "prev"
+ * lines must say reconciled=1 (the ordering evidence); its "ok" names the inputs the
+ * reconciliation removed (TEXCOORD3).
  * Shader bytes: scripts/sm3_corpus.py assemble (the source is in each array's comment). */
 #include <windows.h>
 #include <d3d9.h>
@@ -44,25 +49,26 @@ static const DWORD k_ps_nocolor[] = {
   0xffff0300, 0x0200001f, 0x80000005, 0x900f0000, 0x02000001, 0x800f0800,
   0x90e40000, 0x0000ffff,
 };
-/* vs_3_0 | dcl_position v0 | dcl_color0 v1 | dcl_texcoord0 v2 | dcl_position o0 | dcl_texcoord2 o1 | dcl_texcoord1 o2 | dcl_color1 o3 | dcl_texcoord0 o4 | dcl_color0 o5 | mov o0, v0 | mov o1, v2 | mov o2, v2.yxwz | mov o3, v1.zyxw | mov o4, v2 | mov o5, v1 */
+/* vs_3_0 | dcl_position v0 | dcl_color0 v1 | dcl_texcoord0 v2 | dcl_position o0 | dcl_texcoord2 o1 | dcl_texcoord1 o2 | dcl_color1 o3 | dcl_texcoord0 o4.xy | dcl_color0 o5 | mov o0, v0 | mov o1, v2 | mov o2, v2.yxwz | mov o3, v1.zyxw | mov o4.xy, v2 | mov o5, v1 */
 static const DWORD k_vs_reorder[] = {
   0xfffe0300, 0x0200001f, 0x80000000, 0x900f0000, 0x0200001f, 0x8000000a,
   0x900f0001, 0x0200001f, 0x80000005, 0x900f0002, 0x0200001f, 0x80000000,
   0xe00f0000, 0x0200001f, 0x80020005, 0xe00f0001, 0x0200001f, 0x80010005,
   0xe00f0002, 0x0200001f, 0x8001000a, 0xe00f0003, 0x0200001f, 0x80000005,
-  0xe00f0004, 0x0200001f, 0x8000000a, 0xe00f0005, 0x02000001, 0xe00f0000,
+  0xe0030004, 0x0200001f, 0x8000000a, 0xe00f0005, 0x02000001, 0xe00f0000,
   0x90e40000, 0x02000001, 0xe00f0001, 0x90e40002, 0x02000001, 0xe00f0002,
-  0x90b10002, 0x02000001, 0xe00f0003, 0x90c60001, 0x02000001, 0xe00f0004,
+  0x90b10002, 0x02000001, 0xe00f0003, 0x90c60001, 0x02000001, 0xe0030004,
   0x90e40002, 0x02000001, 0xe00f0005, 0x90e40001, 0x0000ffff,
 };
-/* ps_3_0 | def c0, 0.25, 0.25, 0.25, 0 | dcl_color0 v0 | dcl_color1 v1 | dcl_texcoord0 v2 | dcl_texcoord1_centroid v3 | mul r0, v0, v1 | add r0, r0, v2 | mad oC0, v3, c0, r0 */
+/* ps_3_0 | def c0, 0.25, 0.25, 0.25, 0 | dcl_color0 v0 | dcl_color1 v1 | dcl_texcoord0 v2 | dcl_texcoord1_centroid v3 | dcl_texcoord3 v4 | mul r0, v0, v1 | add r0, r0, v2 | add r0, r0, v4 | mad oC0, v3, c0, r0 */
 static const DWORD k_ps_reorder[] = {
   0xffff0300, 0x05000051, 0xa00f0000, 0x3e800000, 0x3e800000, 0x3e800000,
   0x00000000, 0x0200001f, 0x8000000a, 0x900f0000, 0x0200001f, 0x8001000a,
   0x900f0001, 0x0200001f, 0x80000005, 0x900f0002, 0x0200001f, 0x80010005,
-  0x904f0003, 0x03000005, 0x800f0000, 0x90e40000, 0x90e40001, 0x03000002,
-  0x800f0000, 0x80e40000, 0x90e40002, 0x04000004, 0x800f0800, 0x90e40003,
-  0xa0e40000, 0x80e40000, 0x0000ffff,
+  0x904f0003, 0x0200001f, 0x80030005, 0x900f0004, 0x03000005, 0x800f0000,
+  0x90e40000, 0x90e40001, 0x03000002, 0x800f0000, 0x80e40000, 0x90e40002,
+  0x03000002, 0x800f0000, 0x80e40000, 0x90e40004, 0x04000004, 0x800f0800,
+  0x90e40003, 0xa0e40000, 0x80e40000, 0x0000ffff,
 };
 
 struct V { float x, y, z, w; DWORD c; float t[4]; };
