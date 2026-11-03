@@ -937,9 +937,10 @@ namespace dxvk {
     void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs, bool Indexed = false);
 
     /// The draw's effective flat shading: D3DSHADE_FLAT on a topology d9mt
-    /// draws flat (triangle lists and strips, non-indexed fans, line lists and
-    /// strips). Indexed fans, which have no index remap for D3D9's provoking
-    /// vertex, and points stay Gouraud. Logs the session's first FLAT draw.
+    /// draws flat (triangle lists and strips, line lists and strips). Triangle
+    /// fans, whose expansion would give Metal's provoking vertex as the hub
+    /// instead of D3D9's vertex t+1 (until the fan index rotation, #170), and
+    /// points stay Gouraud. Logs the session's first FLAT draw.
     bool EffectiveFlatShading(D3DPRIMITIVETYPE PrimitiveType, bool Indexed);
 
     void EnsureSamplerLimit();
