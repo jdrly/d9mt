@@ -23,6 +23,7 @@
 
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -1105,7 +1106,10 @@ namespace dxvk {
 
   private:
 
-    bool buildFinalIr(const PairedStageIo& paired, dxbc_spv::ir::Builder& builder) const {
+    /// The final IR of getFinalIr; *pReconciled tells whether the paired VS's
+    /// outputs needed the semantic and mismatched-I/O reconciliation.
+    bool buildFinalIr(const PairedStageIo& paired, dxbc_spv::ir::Builder& builder,
+                      bool* pReconciled = nullptr) const {
       using namespace dxbc_spv;
 
       if (m_ir.empty())
@@ -1130,8 +1134,13 @@ namespace dxvk {
           ir::IoMap prevOut = ir::IoMap::forOutputs(prevBuilder, 0u);
           ir::IoMap thisIn  = ir::IoMap::forInputs(builder);
 
-          if (!ir::IoMap::checkCompatibility(prevStage, prevOut,
-                ir::ShaderStage::ePixel, thisIn, paired.matchSemantics)) {
+          const bool compatible = ir::IoMap::checkCompatibility(prevStage, prevOut,
+            ir::ShaderStage::ePixel, thisIn, paired.matchSemantics);
+
+          if (pReconciled)
+            *pReconciled = !compatible;
+
+          if (!compatible) {
             if (paired.matchSemantics)
               ioPass.resolveSemanticIo(prevOut);
 
@@ -1156,73 +1165,114 @@ namespace dxvk {
       return true;
     }
 
-    /// D9MT_FLAT_CHECK=1 (tests): the flat gate, asserted on the final IR.
-    /// The function's final IR is built once more with the other flat, and
-    /// the two must declare the same inputs, differing only in that every
-    /// input on the flat shading mask (the COLOR inputs) is exactly flat in
-    /// the flat IR and not flat in the Gouraud one; every other input keeps
-    /// its interpolation (centroid included). Logs one line per function:
-    /// "D9MT-FLAT-CHECK <name> <flat|gouraud> <prev|standalone> ok|FAIL …".
+    /// D9MT_FLAT_CHECK=1 (tests): the flat gate, asserted on the final IR
+    /// against expectations that don't come from the flat shading mask. The
+    /// function's final IR is built once more with the other flat; in both,
+    /// every input is identified by the semantic the shader's original IR
+    /// (before reconciliation) declares at its location:
+    ///  - COLOR0 and COLOR1: exactly flat in the flat IR, not flat in the
+    ///    Gouraud one;
+    ///  - every other semantic: the interpolation it has in the shader's
+    ///    original IR, before reconciliation (a centroid TEXCOORD stays
+    ///    centroid), in both.
+    /// Logs one line per function: "D9MT-FLAT-CHECK <name> <flat|gouraud>
+    /// <prev reconciled=0|1|standalone> ok|FAIL …", with the inputs the
+    /// reconciliation removed.
     void checkFlatGate(const PairedStageIo& paired, const dxbc_spv::ir::Builder& final) const {
       using namespace dxbc_spv;
 
       PairedStageIo otherIo = paired;
       otherIo.flat = !paired.flat;
 
-      ir::Builder other;
+      ir::Builder other, original;
+      ir::Deserializer origDeser(m_ir.data(), m_ir.size());
+      bool reconciled = false;
       std::string verdict;
 
-      if (!buildFinalIr(otherIo, other)) {
-        verdict = "FAIL: the other IR doesn't build";
+      if (!buildFinalIr(otherIo, other, &reconciled) || !origDeser.deserialize(original)) {
+        verdict = "FAIL: the other or the original IR doesn't build";
       } else {
-        const ir::Builder& flatIr    = paired.flat ? final : other;
-        const ir::Builder& gouraudIr = paired.flat ? other : final;
-        const uint32_t mask = m_analysis.GetFlatShadingMask();
+        // The original IR (before reconciliation) names each input location's
+        // semantic; reconciliation may drop a rewritten input's Semantic op,
+        // so the final IRs' inputs are named through it by location.
+        std::ostringstream bad;
+        std::map<uint32_t, std::string> semAt;   // location -> "color0", "texcoord1", ...
+        std::map<std::string, uint32_t> o;       // semantic -> original interpolation
+        { auto [a, e] = original.getDeclarations();
+          for (auto it = a; it != e; it++) {
+            if (it->getOpCode() != ir::OpCode::eDclInput)
+              continue;
+            const uint32_t loc = uint32_t(it->getOperand(1u));
+            ir::IoSemantic sem = ir::IoMap::getSemanticForOp(original, *it);
+            if (!sem) {
+              bad << " original input v" << loc << " has no semantic;";
+              continue;
+            }
+            std::string name = sem.name;
+            for (auto& c : name)
+              c = char(std::tolower(uint8_t(c)));
+            name += std::to_string(sem.index);
+            semAt[loc] = name;
+            o[name] |= it->getOperandCount() > 3u ? uint32_t(it->getOperand(3u)) : 0u;
+          }
+        }
 
-        // (location << 2 | component) -> interpolation modes
-        auto inputs = [] (const ir::Builder& b) {
-          std::map<uint32_t, uint32_t> m;
+        // semantic -> interpolation modes in a final IR (all its inputs at that location)
+        auto inputs = [&] (const ir::Builder& b) {
+          std::map<std::string, uint32_t> m;
           auto [a, e] = b.getDeclarations();
           for (auto it = a; it != e; it++) {
             if (it->getOpCode() != ir::OpCode::eDclInput)
               continue;
-            const uint32_t loc  = uint32_t(it->getOperand(1u));
-            const uint32_t comp = uint32_t(it->getOperand(2u));
-            m[(loc << 2u) | (comp & 3u)] = it->getOperandCount() > 3u ? uint32_t(it->getOperand(3u)) : 0u;
+            const uint32_t loc = uint32_t(it->getOperand(1u));
+            auto sem = semAt.find(loc);
+            if (sem == semAt.end()) {
+              bad << " final input v" << loc << " is at no original input's location;";
+              continue;
+            }
+            m[sem->second] |= it->getOperandCount() > 3u ? uint32_t(it->getOperand(3u)) : 0u;
           }
           return m;
         };
 
-        const auto f = inputs(flatIr), g = inputs(gouraudIr);
+        const auto f = inputs(paired.flat ? final : other);
+        const auto g = inputs(paired.flat ? other : final);
         const uint32_t flatBit = uint32_t(ir::InterpolationMode::eFlat);
-        std::ostringstream bad;
+        uint32_t colors = 0u, removed = 0u;
 
         if (f.size() != g.size())
-          bad << " input count " << f.size() << " vs " << g.size() << ";";
+          bad << " input count " << f.size() << " (flat) vs " << g.size() << " (Gouraud);";
 
-        for (const auto& [key, gm] : g) {
-          auto it = f.find(key);
-          const uint32_t loc = key >> 2u;
-
-          if (it == f.end()) {
-            bad << " v" << loc << " missing in the flat IR;";
-          } else if (mask & (1u << loc)) {
-            if (gm & flatBit)
-              bad << " COLOR v" << loc << " flat in the Gouraud IR;";
-            if (it->second != flatBit)
-              bad << " COLOR v" << loc << " not exactly flat in the flat IR (0x" << std::hex << it->second << std::dec << ");";
-          } else if (it->second != gm) {
-            bad << " v" << loc << " interpolation 0x" << std::hex << gm << " became 0x" << it->second << std::dec << ";";
+        for (const auto& [sem, orig] : o) {
+          auto fi = f.find(sem), gi = g.find(sem);
+          if (fi == f.end() && gi == g.end()) {
+            removed++;   // the previous stage doesn't write it
+            continue;
+          }
+          if (fi == f.end() || gi == g.end()) {
+            bad << " " << sem << " in only one IR;";
+            continue;
+          }
+          if (sem == "color0" || sem == "color1") {
+            colors++;
+            if (gi->second & flatBit)
+              bad << " " << sem << " flat in the Gouraud IR;";
+            if (fi->second != flatBit)
+              bad << " " << sem << " not exactly flat in the flat IR (0x" << std::hex << fi->second << std::dec << ");";
+          } else if (fi->second != orig || gi->second != orig) {
+            bad << " " << sem << " interpolation 0x" << std::hex << orig << " became 0x" << fi->second
+                << " (flat) / 0x" << gi->second << std::dec << " (Gouraud);";
           }
         }
 
         verdict = bad.str().empty()
-          ? str::format("ok (", g.size(), " inputs, mask 0x", std::hex, mask, std::dec, ")")
+          ? str::format("ok (", g.size(), " inputs, ", colors, " COLOR, ", removed, " removed)")
           : "FAIL:" + bad.str();
       }
 
       Logger::info(str::format("D9MT-FLAT-CHECK ", m_name, paired.flat ? " flat " : " gouraud ",
-        paired.prevStageIr != nullptr ? "prev " : "standalone ", verdict));
+        paired.prevStageIr != nullptr ? (reconciled ? "prev reconciled=1 " : "prev reconciled=0 ") : "standalone ",
+        verdict));
     }
 
   public:
