@@ -168,7 +168,7 @@ namespace dxvk {
     };
 
     /// The journal's file IO (the writer thread's; public for the tests and the Wine append
-    /// test, n013-perf/bench/journal_append.cpp). openJournal never truncates a file with our
+    /// test, out of tree). openJournal never truncates a file with our
     /// header; appendJournalRecords appends to an existing file only (Gone if it's gone), under
     /// the journal lock, waiting at most JournalLockWaitMs (Busy).
     static statecache::JournalOpen openJournal(const std::string& path, uint64_t keySignature);

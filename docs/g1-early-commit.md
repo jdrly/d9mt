@@ -1,6 +1,7 @@
 # G1: commit early, complete late (heuristic flushes without pass splits)
 
-Status: design, revision 2 (2026-10-20), after two reviews of revision 1 (f7e4787):
+Status: implemented (#31, e22be30); `D9MT_EARLY_COMMIT` in docs/configuration.md. This is the design,
+revision 2 (2026-10-20), after two reviews of revision 1 (f7e4787):
 - the internal subagent review;
 - 0a2ecf2d, `review-014/g1-design.md`: FIX FIRST.
 
@@ -179,8 +180,10 @@ What a carry does:
 - The backend publishes `carryOpen` (an atomic on the device: set at a carry, cleared at the
   completing submit). The frontend reads it through `MtlDevice::carryOpen()`.
 - **GetData S_FALSE** (with or without FLUSH):
-  - the query/event status gains `PendingUnsubmitted` (the backend's serial ≥ `nextSerial()`);
-  - the frontend flushes only if `carryOpen()` and the status is `PendingUnsubmitted`. A query
+  - the query/event reports whether it's still unsubmitted (the backend's serial ≥
+    `nextSerial()`; as built: `MtlGpuQuery/MtlGpuEvent::unsubmitted()`, read by
+    `D3D9Query::Unsubmitted()`);
+  - the frontend flushes only if `carryOpen()` and the query is unsubmitted. A query
     from an earlier, submitted serial never forces a flush;
   - otherwise exactly base's behaviour: no flush without FLUSH, `ConsiderFlush(Sync)` with
     FLUSH.

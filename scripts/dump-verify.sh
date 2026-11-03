@@ -10,7 +10,7 @@
 # The driver only probes for the trigger (at most 1/s) with D9MT_DUMP_TRIGGER=1.
 # We then read that file and check the center pixels are non-black.
 #
-# Env: EXPECT=nonblack|r,g,b  WAIT=<launch settle secs>  POLL=<dump wait secs>
+# Env: EXPECT=nonblack|r,g,b  POLL=<dump wait secs>
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 CX="${CX:?set CX to a CrossOver/Wine engine root, e.g. a copy of CrossOver.app/Contents/SharedSupport/CrossOver}"

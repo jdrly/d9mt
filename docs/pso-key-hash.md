@@ -1,8 +1,9 @@
 # The PSO key's hash: word-wise instead of byte-wise (design)
 
-Status: design (n013-perf, 2026-10-21), for review before any code. Branch `perf/pso-key-hash`,
-off `fix/pso-key-normalize` 64f3269, because both change `driver/backend/mtl_pso_key.h` and
-pso-key-normalize merges first.
+Status: implemented (#34). This was the design (n013-perf, 2026-10-21); §1 describes the byte-wise hash
+as it was then. Today `RenderPsoKey::hash()` (`driver/backend/mtl_pso_key.h`) hashes whole 8-byte
+words with `psokey::hashWords`; `test/native/pso_key_hash_test.cpp` and `scripts/test-pso-key-hash.sh`
+test it, and PERFORMANCE.md has the measurement.
 
 ## 1. The cost
 

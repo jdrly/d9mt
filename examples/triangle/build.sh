@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Builds the offscreen triangle milestone (pure C++ / metal-cpp).
+# Needs Apple's metal-cpp headers in third_party/metal-cpp: no script fetches them.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 v2="$here/../.."
