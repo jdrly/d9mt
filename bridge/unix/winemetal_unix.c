@@ -5996,6 +5996,7 @@ NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
 #include <CommonCrypto/CommonDigest.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/param.h>
@@ -6091,9 +6092,17 @@ _MTLDevice_newArgumentTable(void *obj) {
  * flock shared); another partition is removed only under its lease taken
  * exclusively, so live instances with different targets or codegens keep each
  * other's. A build without a valid identity (cunknown) removes none. Below the
- * base, every file operation goes through opened directory fds and never
- * follows a link: a linked partition is refused, a linked stale entry is
- * unlinked itself. The newest
+ * base, d9mt's own file operations go through opened directory fds, never
+ * follow a link and never block on a non-regular entry: a linked partition is
+ * refused, a linked stale entry is unlinked itself, a FIFO is rejected and
+ * removed. Metal's two calls take a pathname, though (the serializer's output
+ * and newArchiveWithURL), resolved again at each call.
+ * Threat model: the cache lives in the user's own private cache folder.
+ * Confinement holds against pre-existing links and stale or malformed
+ * entries. Races against a same-user process actively renaming the cache
+ * folder or swapping files between d9mt's check and Metal's open are out of
+ * scope: such a process can already read and write everything d9mt can, so
+ * it isn't a boundary d9mt defends. The newest
  * D9MT_PSO_KEEP_SESSIONS sessions are kept (a session's files hold every PSO
  * it used, hits included).
  *   D9MT_PSO_ARCHIVE=0             disable (no lookup, no capture)
@@ -6128,14 +6137,18 @@ static pthread_cond_t                    g_pso_gate_cond = PTHREAD_COND_INITIALI
 #define D9MT_PSO_RETRY_NS (50000000ull)
 static uint64_t                          g_pso_force_ns = D9MT_PSO_FORCE_NS;
 
-/* Every file operation in the partition is relative to its directory fd and never follows a
- * symlink (O_NOFOLLOW, unlinkat/renameat of the entry itself): nothing outside the PSO
- * directory is read through, or deleted by, a link planted in it. */
+/* d9mt's own file operations in the partition are relative to its directory fd, never follow
+ * a symlink (O_NOFOLLOW, unlinkat/renameat of the entry itself) and never block on a FIFO or
+ * device (O_NONBLOCK, then a regular file required): nothing outside the PSO directory is read
+ * through, or deleted by, a link planted in it, and a planted FIFO can't hang setup or a flush
+ * (both run under a lock). Metal's pathname calls are outside this: see the threat model above
+ * pso_archive_init's constants. */
 
 /* "<size> <sha256>" of a regular file in the partition; nil if it isn't one. */
 static NSString *
 pso_sum_text(int dirfd, NSString *name) {
-  const int fd = openat(dirfd, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  const int fd = openat(dirfd, name.fileSystemRepresentation,
+                        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0)
     return nil;
   struct stat st;
@@ -6166,7 +6179,8 @@ pso_sum_text(int dirfd, NSString *name) {
 static bool
 pso_archive_valid(int dirfd, NSString *name) {
   NSString *sumName = [name stringByAppendingString:@".sum"];
-  const int fd = openat(dirfd, sumName.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  const int fd = openat(dirfd, sumName.fileSystemRepresentation,
+                        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0)
     return false;
   char buf[160];
@@ -6200,7 +6214,7 @@ pso_remove_tree_at(int parentfd, const char *name, unsigned depth) {
   }
   if (depth > 8u)
     return;
-  const int fd = openat(parentfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  const int fd = openat(parentfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0)
     return;
   const int lfd = dup(fd);
@@ -6236,8 +6250,13 @@ pso_flush_locked(void) {
   NSString *tmp = [name stringByAppendingString:@".tmp"];
   NSString *sumName = [name stringByAppendingString:@".sum"];
   NSString *sumTmp = [name stringByAppendingString:@".sum.tmp"];
-  /* Metal writes by path: the partition's real path, resolved from its no-follow fd at setup.
-   * Everything after that goes through the fd. */
+  /* Metal writes by path: the partition's real path, resolved from its no-follow fd at setup,
+   * and resolved again by Metal now (a same-user rename race is out of scope: see the threat
+   * model above pso_archive_init's constants). Everything after that goes through the fd. A
+   * leftover entry under this session's temporary names (not ours: names carry pid and seq) is
+   * removed first, so neither Metal nor the sum writer opens it. */
+  unlinkat(dfd, tmp.fileSystemRepresentation, 0);
+  unlinkat(dfd, sumTmp.fileSystemRepresentation, 0);
   NSError *err = nil;
   if (![g_pso_serializer serializeAsArchiveAndFlushToURL:
         [NSURL fileURLWithPath:[g_pso_dir stringByAppendingPathComponent:tmp]] error:&err]) {
@@ -6250,7 +6269,7 @@ pso_flush_locked(void) {
   bool ok = false;
   if (sumData) {
     const int sfd = openat(dfd, sumTmp.fileSystemRepresentation,
-                           O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+                           O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (sfd >= 0) {
       ok = write(sfd, sumData.bytes, sumData.length) == (ssize_t)sumData.length;
       ok = !close(sfd) && ok;
@@ -6414,7 +6433,7 @@ pso_archive_init(id<MTLDevice> device) {
    * opened directory fds. */
   NSFileManager *fm = [NSFileManager defaultManager];
   [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
-  const int basefd = open(base.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  const int basefd = open(base.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC);
   if (basefd < 0) {
     fprintf(stderr, "d9mt: PSO archives disabled (cannot open %s)\n", base.UTF8String);
     return;
@@ -6426,15 +6445,24 @@ pso_archive_init(id<MTLDevice> device) {
    * different AIR targets or codegens keep each other's partitions. A bridge from before the
    * leases (0.1.7) takes none, so its partition can't be protected. */
   mkdirat(basefd, ".locks", 0755);
-  const int locksfd = openat(basefd, ".locks", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  const int locksfd = openat(basefd, ".locks", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   const int lease = locksfd >= 0
     ? openat(locksfd, [leaf stringByAppendingString:@".lock"].fileSystemRepresentation,
-             O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644) : -1;
+             O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0644) : -1;
+  struct stat lst;
   bool leased = false;
-  for (unsigned i = 0u; lease >= 0 && i < 300u && !leased; i++) {
-    leased = !flock(lease, LOCK_SH | LOCK_NB);
-    if (!leased)
-      usleep(10000);  /* a sweeper holds it exclusively while it removes a stale copy */
+  if (lease >= 0 && !fstat(lease, &lst) && S_ISREG(lst.st_mode)) {
+    /* only contention is retried: a sweeper holds it exclusively while it removes a stale
+     * copy; any other flock error is permanent */
+    for (unsigned i = 0u; i < 300u; i++) {
+      if (!flock(lease, LOCK_SH | LOCK_NB)) {
+        leased = true;
+        break;
+      }
+      if (errno != EWOULDBLOCK)
+        break;
+      usleep(10000);
+    }
   }
   if (!leased) {
     fprintf(stderr, "d9mt: PSO archives disabled (no lease on %s)\n", leaf.UTF8String);
@@ -6447,7 +6475,8 @@ pso_archive_init(id<MTLDevice> device) {
   }
   /* The partition itself: a plain directory, never a link (O_NOFOLLOW). */
   mkdirat(basefd, leaf.fileSystemRepresentation, 0755);
-  const int dirfd = openat(basefd, leaf.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  const int dirfd = openat(basefd, leaf.fileSystemRepresentation,
+                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   char realdir[MAXPATHLEN];
   if (dirfd < 0 || fcntl(dirfd, F_GETPATH, realdir) == -1) {
     fprintf(stderr, "d9mt: PSO archives disabled (%s is not a plain directory)\n", dir.UTF8String);
@@ -6478,10 +6507,11 @@ pso_archive_init(id<MTLDevice> device) {
       close(lfd);
     for (NSString *name in stale) {
       const int other = openat(locksfd, [name stringByAppendingString:@".lock"].fileSystemRepresentation,
-                               O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+                               O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0644);
       if (other < 0)
         continue;
-      if (!flock(other, LOCK_EX | LOCK_NB))
+      struct stat ost;
+      if (!fstat(other, &ost) && S_ISREG(ost.st_mode) && !flock(other, LOCK_EX | LOCK_NB))
         pso_remove_tree_at(basefd, name.fileSystemRepresentation, 0u);
       close(other);  /* releases the lock; the lock file stays */
     }
@@ -6535,6 +6565,8 @@ pso_archive_init(id<MTLDevice> device) {
       pso_remove_archive(dirfd, name);
       continue;
     }
+    /* Metal reopens it by path (validated just above through the fd; a same-user swap in
+     * between is out of scope: the threat model above pso_archive_init's constants) */
     NSError *err = nil;
     id<MTL4Archive> a = [device newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
     if (a) {
