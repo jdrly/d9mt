@@ -6903,7 +6903,18 @@ _MTL4Compiler_newRenderPipelineState(void *obj) {
     [ffd release];
   }
 
+  /* Only the colour attachments the pipeline has. Reading colorAttachments[i] creates that
+   * slot's descriptor, so writing all eight (Invalid ones included) handed Metal eight existing
+   * attachments where a native app has one. A player's M1 Pro on macOS 26.1 ends the first render
+   * pipeline build (the FF ubershader, colour 0 BGRA8Unorm) in an x86 integer divide by zero in
+   * Metal's adjustPixelFormatForiOSDevice (+66: divq by the pixel format info's per-pixel
+   * divisor), which render pipeline validation reaches through the colour attachments
+   * (_MTLPixelFormatComputeiOSTotalSizeUsed); macOS 27.2's validation skips slots without a
+   * format, 26.1's is the suspect. An absent slot now stays untouched: Metal's default is the
+   * same Invalid format, no blending, which is what we wrote. */
   for (unsigned i = 0; i < 8; i++) {
+    if (info->colors[i].pixel_format == WMTPixelFormatInvalid)
+      continue;
     descriptor.colorAttachments[i].pixelFormat = to_metal_pixel_format(info->colors[i].pixel_format);
     descriptor.colorAttachments[i].blendingState =
         info->colors[i].blending_enabled ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
