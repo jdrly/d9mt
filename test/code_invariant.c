@@ -8,15 +8,19 @@
  *   pass 2: VS B (the same position expression graph, plus unrelated outputs computed from the
  *           same input with independent arithmetic, which changes scheduling and register
  *           pressure; the PS reads them and multiplies them by 0), ZFUNC EQUAL, Z write off, green.
- * The mesh is a 64 x 48 heightfield (no pixel covered twice) under a rotated perspective
- * transform, so the depth values are far from exact. A pixel left red failed the EQUAL test.
+ * The mesh is a 64 x 48 heightfield under a rotated perspective transform, so the depth values
+ * are far from exact. A pixel left red failed the EQUAL test. The left half of the target
+ * (viewport 0-319) is the test. The right half (320-639) is the control that proves the EQUAL
+ * oracle sees a small depth difference: the same two passes, but pass 2's c2 is c2 + 1e-4 * c3,
+ * so its depth is 1e-4 deeper (D24 resolves about 6e-8), and every covered pixel must fail.
  * On frame 3 the backbuffer is read back and the test prints
- *   "code_invariant: <n> failing pixels of <m> covered: PASS|FAIL"
- * (PASS: n == 0 and m > 0). D9MT_AIR_INVARIANT=0 turns the invariance off, as a contrast; if the
- * base (no invariance) also passes on a GPU, the test documents the guarantee there rather than
- * proving a fix. Algebraically different position formulas aren't expected to match and aren't
- * tested. An FF-then-SM3 variant (pass 1 drawn by the fixed function pipeline) comes with the
- * fixed-function batch.
+ *   "code_invariant: <n> failing pixels of <m> covered: PASS|FAIL"           (n == 0, m > 0)
+ *   "code_invariant control: <n> failing pixels of <m> covered: PASS|FAIL"   (n == m, m > 0)
+ * D9MT_AIR_INVARIANT=0 turns the invariance off, as a contrast. If the base (no invariance) also
+ * passes on a GPU, the test documents a sampled guarantee there (this shader pair, this geometry,
+ * this GPU), not a fix of anything seen in a game. Algebraically different position formulas
+ * aren't expected to match and aren't tested. An FF-then-SM3 variant (pass 1 drawn by the fixed
+ * function pipeline) comes with the fixed-function batch.
  * Shader bytes: scripts/sm3_corpus.py asm (the source is in each array's comment). */
 #include <windows.h>
 #include <d3d9.h>
@@ -97,12 +101,13 @@ static void transform(float c[16]) {
       c[i * 4 + j] = (float)m[j][i];
 }
 
-/* frame 3: count red (pass 2 failed EQUAL) and covered pixels in the backbuffer */
-static int count_pixels(IDirect3DDevice9 *dev, unsigned *failing, unsigned *covered) {
+/* frame 3: count red (pass 2 failed EQUAL) and covered pixels in each half of the backbuffer
+ * ([0] the test, [1] the control) */
+static int count_pixels(IDirect3DDevice9 *dev, unsigned failing[2], unsigned covered[2]) {
   IDirect3DSurface9 *rt = NULL, *sys = NULL;
   D3DSURFACE_DESC desc;
   D3DLOCKED_RECT lr;
-  *failing = *covered = 0;
+  failing[0] = failing[1] = covered[0] = covered[1] = 0;
   if (FAILED(IDirect3DDevice9_GetRenderTarget(dev, 0, &rt))) return 0;
   IDirect3DSurface9_GetDesc(rt, &desc);
   if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, desc.Width, desc.Height, desc.Format,
@@ -116,9 +121,10 @@ static int count_pixels(IDirect3DDevice9 *dev, unsigned *failing, unsigned *cove
   for (UINT y = 0; y < desc.Height; y++) {
     const DWORD *row = (const DWORD *)((const BYTE *)lr.pBits + y * lr.Pitch);
     for (UINT x = 0; x < desc.Width; x++) {
-      DWORD p = row[x] & 0x00ffffffu;
-      if (p == 0x00ff0000u) { (*failing)++; (*covered)++; }
-      else if (p == 0x0000ff00u) (*covered)++;
+      const DWORD p = row[x] & 0x00ffffffu;
+      const int h = x >= desc.Width / 2u;
+      if (p == 0x00ff0000u) { failing[h]++; covered[h]++; }
+      else if (p == 0x0000ff00u) covered[h]++;
     }
   }
   IDirect3DSurface9_UnlockRect(sys);
@@ -192,14 +198,16 @@ int main(void) {
   IDirect3DVertexBuffer9_Lock(vb, 0, 0, &p, 0); memcpy(p, verts, sizeof(verts)); IDirect3DVertexBuffer9_Unlock(vb);
   IDirect3DIndexBuffer9_Lock(ib, 0, 0, &p, 0); memcpy(p, idx, sizeof(idx)); IDirect3DIndexBuffer9_Unlock(ib);
 
-  float c[16];
+  float c[16], cc[16];
   transform(c);
+  /* the control's pass 2: z' = z + 1e-4 w, so z'/w is 1e-4 deeper */
+  memcpy(cc, c, sizeof(c));
+  for (int j = 0; j < 4; j++) cc[8 + j] = c[8 + j] + 1e-4f * c[12 + j];
   static const float red[4] = { 1, 0, 0, 1 }, green[4] = { 0, 1, 0, 1 }, zero[4] = { 0, 0, 0, 0 };
 
   IDirect3DDevice9_SetVertexDeclaration(dev, decl);
   IDirect3DDevice9_SetStreamSource(dev, 0, vb, 0, sizeof(struct V));
   IDirect3DDevice9_SetIndices(dev, ib);
-  IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, c, 4);
   IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
   IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, D3DZB_TRUE);
 
@@ -213,29 +221,37 @@ int main(void) {
     }
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(16, 16, 24), 1.0f, 0);
     IDirect3DDevice9_BeginScene(dev);
-    /* pass 1 */
-    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZFUNC, D3DCMP_LESS);
-    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, TRUE);
-    IDirect3DDevice9_SetVertexShader(dev, vsA);
-    IDirect3DDevice9_SetPixelShader(dev, psA);
-    IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, red, 1);
-    IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, (GW + 1) * (GH + 1), 0, GW * GH * 2);
-    /* pass 2 */
-    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZFUNC, D3DCMP_EQUAL);
-    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
-    IDirect3DDevice9_SetVertexShader(dev, vsB);
-    IDirect3DDevice9_SetPixelShader(dev, psB);
-    IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, green, 1);
-    IDirect3DDevice9_SetPixelShaderConstantF(dev, 1, zero, 1);
-    IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, (GW + 1) * (GH + 1), 0, GW * GH * 2);
+    for (int half = 0; half < 2; half++) {   /* 0 the test, 1 the control */
+      D3DVIEWPORT9 vp = { 320u * (DWORD)half, 0u, 320u, 480u, 0.0f, 1.0f };
+      IDirect3DDevice9_SetViewport(dev, &vp);
+      /* pass 1 */
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_ZFUNC, D3DCMP_LESS);
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, TRUE);
+      IDirect3DDevice9_SetVertexShader(dev, vsA);
+      IDirect3DDevice9_SetPixelShader(dev, psA);
+      IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, c, 4);
+      IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, red, 1);
+      IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, (GW + 1) * (GH + 1), 0, GW * GH * 2);
+      /* pass 2 */
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_ZFUNC, D3DCMP_EQUAL);
+      IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
+      IDirect3DDevice9_SetVertexShader(dev, vsB);
+      IDirect3DDevice9_SetPixelShader(dev, psB);
+      IDirect3DDevice9_SetVertexShaderConstantF(dev, 0, half ? cc : c, 4);
+      IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, green, 1);
+      IDirect3DDevice9_SetPixelShaderConstantF(dev, 1, zero, 1);
+      IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, 0, 0, (GW + 1) * (GH + 1), 0, GW * GH * 2);
+    }
     IDirect3DDevice9_EndScene(dev);
     if (++frames == 3) {
-      unsigned failing, covered;
-      if (!count_pixels(dev, &failing, &covered)) {
+      unsigned failing[2], covered[2];
+      if (!count_pixels(dev, failing, covered)) {
         printf("code_invariant: readback failed: FAIL\n");
       } else {
-        printf("code_invariant: %u failing pixels of %u covered: %s\n", failing, covered,
-               failing == 0 && covered > 0 ? "PASS" : "FAIL");
+        printf("code_invariant: %u failing pixels of %u covered: %s\n", failing[0], covered[0],
+               failing[0] == 0 && covered[0] > 0 ? "PASS" : "FAIL");
+        printf("code_invariant control: %u failing pixels of %u covered: %s\n", failing[1], covered[1],
+               failing[1] == covered[1] && covered[1] > 0 ? "PASS" : "FAIL");
       }
       fflush(stdout);
     }
