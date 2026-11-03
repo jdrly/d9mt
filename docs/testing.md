@@ -83,6 +83,15 @@ with a scalar model of the D3D9 semantics; `--strict` uses
 `d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
 every corpus `crs` against a `mul`/`mul`/`add` expansion.
 
+`test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
+d9mt draws flat and the ones it keeps Gouraud (indexed fans), a pixel shader
+without COLOR inputs and a VS/PS pair that needs semantic reconciliation. Its
+frames must hash as base until the AIR compiler honours flat; with
+`D9MT_FLAT_CHECK=1` its log shows each draw's flat choice and the final-IR
+check of every pixel shader function (expected values in the file's header).
+Flat shading is partial: indexed triangle fans stay Gouraud (no index remap
+for D3D9's provoking vertex), and points have nothing to interpolate.
+
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
 `scripts/test-present-ring.sh` runs `present_ring_test` (the bridge's presented-time ring

@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -1080,15 +1081,41 @@ namespace dxvk {
     std::vector<uint8_t> getFinalIr(const PairedStageIo& paired) const override {
       using namespace dxbc_spv;
 
-      if (m_ir.empty())
+      ir::Builder builder;
+
+      if (!buildFinalIr(paired, builder))
         return { };
 
-      ir::Builder builder;
+      static const bool s_flatCheck = env::getEnvVar("D9MT_FLAT_CHECK") == "1";
+
+      if (unlikely(s_flatCheck) && m_stage == MtlShaderStage::Fragment)
+        checkFlatGate(paired, builder);
+
+      ir::Serializer ser(builder);
+      size_t irSize = ser.computeSerializedSize();
+
+      std::vector<uint8_t> irBuf(irSize);
+      if (!ser.serialize(irBuf.data(), irSize)) {
+        Logger::err(str::format("D3D9 AIR: failed to re-serialize IR for ", m_name));
+        return { };
+      }
+
+      return irBuf;
+    }
+
+  private:
+
+    bool buildFinalIr(const PairedStageIo& paired, dxbc_spv::ir::Builder& builder) const {
+      using namespace dxbc_spv;
+
+      if (m_ir.empty())
+        return false;
+
       ir::Deserializer deser(m_ir.data(), m_ir.size());
 
       if (!deser.deserialize(builder)) {
         Logger::err(str::format("D3D9 AIR: failed to deserialize IR for ", m_name));
-        return { };
+        return false;
       }
 
       ir::LowerIoPass ioPass(builder);
@@ -1116,23 +1143,89 @@ namespace dxvk {
         }
       }
 
-      if (m_stage == MtlShaderStage::Fragment) {
+      // Only a flat function (D3DSHADE_FLAT, the draw's effective flat) gets
+      // the flat mask, after the semantic and mismatched-I/O reconciliation
+      // above: the mask's COLOR locations are the fixed-function ones, which
+      // the reconciliation doesn't move.
+      if (m_stage == MtlShaderStage::Fragment && paired.flat) {
         uint32_t flatMask = m_analysis.GetFlatShadingMask();
         if (flatMask)
           ioPass.enableFlatInterpolation(flatMask);
       }
 
-      ir::Serializer ser(builder);
-      size_t irSize = ser.computeSerializedSize();
+      return true;
+    }
 
-      std::vector<uint8_t> irBuf(irSize);
-      if (!ser.serialize(irBuf.data(), irSize)) {
-        Logger::err(str::format("D3D9 AIR: failed to re-serialize IR for ", m_name));
-        return { };
+    /// D9MT_FLAT_CHECK=1 (tests): the flat gate, asserted on the final IR.
+    /// The function's final IR is built once more with the other flat, and
+    /// the two must declare the same inputs, differing only in that every
+    /// input on the flat shading mask (the COLOR inputs) is exactly flat in
+    /// the flat IR and not flat in the Gouraud one; every other input keeps
+    /// its interpolation (centroid included). Logs one line per function:
+    /// "D9MT-FLAT-CHECK <name> <flat|gouraud> <prev|standalone> ok|FAIL …".
+    void checkFlatGate(const PairedStageIo& paired, const dxbc_spv::ir::Builder& final) const {
+      using namespace dxbc_spv;
+
+      PairedStageIo otherIo = paired;
+      otherIo.flat = !paired.flat;
+
+      ir::Builder other;
+      std::string verdict;
+
+      if (!buildFinalIr(otherIo, other)) {
+        verdict = "FAIL: the other IR doesn't build";
+      } else {
+        const ir::Builder& flatIr    = paired.flat ? final : other;
+        const ir::Builder& gouraudIr = paired.flat ? other : final;
+        const uint32_t mask = m_analysis.GetFlatShadingMask();
+
+        // (location << 2 | component) -> interpolation modes
+        auto inputs = [] (const ir::Builder& b) {
+          std::map<uint32_t, uint32_t> m;
+          auto [a, e] = b.getDeclarations();
+          for (auto it = a; it != e; it++) {
+            if (it->getOpCode() != ir::OpCode::eDclInput)
+              continue;
+            const uint32_t loc  = uint32_t(it->getOperand(1u));
+            const uint32_t comp = uint32_t(it->getOperand(2u));
+            m[(loc << 2u) | (comp & 3u)] = it->getOperandCount() > 3u ? uint32_t(it->getOperand(3u)) : 0u;
+          }
+          return m;
+        };
+
+        const auto f = inputs(flatIr), g = inputs(gouraudIr);
+        const uint32_t flatBit = uint32_t(ir::InterpolationMode::eFlat);
+        std::ostringstream bad;
+
+        if (f.size() != g.size())
+          bad << " input count " << f.size() << " vs " << g.size() << ";";
+
+        for (const auto& [key, gm] : g) {
+          auto it = f.find(key);
+          const uint32_t loc = key >> 2u;
+
+          if (it == f.end()) {
+            bad << " v" << loc << " missing in the flat IR;";
+          } else if (mask & (1u << loc)) {
+            if (gm & flatBit)
+              bad << " COLOR v" << loc << " flat in the Gouraud IR;";
+            if (it->second != flatBit)
+              bad << " COLOR v" << loc << " not exactly flat in the flat IR (0x" << std::hex << it->second << std::dec << ");";
+          } else if (it->second != gm) {
+            bad << " v" << loc << " interpolation 0x" << std::hex << gm << " became 0x" << it->second << std::dec << ";";
+          }
+        }
+
+        verdict = bad.str().empty()
+          ? str::format("ok (", g.size(), " inputs, mask 0x", std::hex, mask, std::dec, ")")
+          : "FAIL:" + bad.str();
       }
 
-      return irBuf;
+      Logger::info(str::format("D9MT-FLAT-CHECK ", m_name, paired.flat ? " flat " : " gouraud ",
+        paired.prevStageIr != nullptr ? "prev " : "standalone ", verdict));
     }
+
+  public:
 
     std::vector<uint8_t> compileMetallib(const std::vector<uint8_t>& irBuf,
                                          D3D9CbvSlotMap*             outCbvMap) const override {
