@@ -4,8 +4,8 @@
  *
  * One frame, one VS/PS pair reading COLOR0, SHADEMODE FLAT held, the draws alternating
  *   1 non-indexed triangle list   effective flat 1, flat PS
- *   2 indexed triangle fan        0 (no index remap for D3D9's provoking vertex: Gouraud)
- *   3 non-indexed triangle fan    1
+ *   2 indexed triangle fan        0 (fans stay Gouraud: Metal's provoking vertex would be the hub,
+ *   3 non-indexed triangle fan    0  D3D9's is vertex t+1; until the fan index rotation, #170)
  *   4 indexed triangle list       1
  *   5 a PS that reads no COLOR    effective 1, Gouraud PS (flat changes only colour inputs)
  *   6 the reorder pair, FLAT      1: a pair that must go through the semantic and mismatched-I/O
@@ -17,7 +17,7 @@
  *   8 the reorder pair            0
  *
  * D9MT_FLAT_CHECK=1 logs "D9MT-FLAT-DRAW topo=<D3DPT> indexed=<0|1> effective=<0|1> ps=sm
- * psflat=<0|1>" per draw (expected, frame 1: 1/1, 0/0, 1/1, 1/1, 1/0, 1/1, 0/0, 0/0) and one
+ * psflat=<0|1>" per draw (expected, frame 1: 1/1, 0/0, 0/0, 1/1, 1/0, 1/1, 0/0, 0/0) and one
  * "D9MT-FLAT-CHECK <ps> <flat|gouraud> <prev reconciled=0|1|standalone> ok (...)" per PS
  * function compiled. Its expectations come from the shader's original IR, not the flat mask:
  * inputs named by the semantic the original IR declares at their location; COLOR0/COLOR1
