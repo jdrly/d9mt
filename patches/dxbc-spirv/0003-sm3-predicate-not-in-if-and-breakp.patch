@@ -1,0 +1,60 @@
+From e53edfc74d8bad3a6048b4c0e0c73440b01bbb09 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Drl=C3=BD?= <jd@jandrly.cz>
+Date: Tue, 3 Nov 2026 15:55:47 +0100
+Subject: [PATCH 3/3] sm3: Apply the NOT modifier of if and breakp predicates
+
+8654bc6 made predicate registers loadable, so if p0 and breakp p0 no
+longer fail, but:
+
+- handleIf loads the predicate with loadSrc, which applies no source
+  modifier, and the explicit BNot for !p0 was removed: if !p0.x now
+  compiles silently without the NOT and takes the other branch.
+- breakp loads it with loadSrcModified, whose applySrcModifiers consumes a
+  bool without the NOT modifier as a float; normalizeTypeForConsume then
+  reaches dxbc_spv_unreachable for breakp p0.x (an abort with asserts).
+
+Load the predicate as a bool with loadSrc in both and negate it
+explicitly, as handleCall already does for callnz.
+---
+ sm3/sm3_converter.cpp | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/sm3/sm3_converter.cpp b/sm3/sm3_converter.cpp
+index f47b3d5..12ecb0e 100644
+--- a/sm3/sm3_converter.cpp
++++ b/sm3/sm3_converter.cpp
+@@ -1792,6 +1792,12 @@ bool Converter::handleIf(ir::Builder& builder, const Instruction& op) {
+ 
+   if (op.getOpCode() == OpCode::eIf) {
+     cond = loadSrc(builder, op, op.getSrc(0u), ComponentBit::eX, op.getSrc(0u).getSwizzle(getShaderInfo()), ir::ScalarType::eBool);
++
++    /* loadSrc applies no source modifier: negate the predicate here, as handleCall does for callnz. */
++    if (op.getSrc(0u).getModifier() == OperandModifier::eNot)
++      cond = builder.add(ir::Op::BNot(ir::ScalarType::eBool, cond));
++    else if (op.getSrc(0u).getModifier() != OperandModifier::eNone)
++      return logOpError(op, "Unknown if condition modifier: ", uint32_t(op.getSrc(0u).getModifier()));
+   } else if (op.getOpCode() == OpCode::eIfC) {
+     ir::SsaDef src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, ir::ScalarType::eF32);
+     ir::SsaDef src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX, ir::ScalarType::eF32);
+@@ -1855,8 +1861,16 @@ bool Converter::handleBreak(ir::Builder& builder, const Instruction& op) {
+     dxbc_spv_assert(!op.isPredicated());
+     dxbc_spv_assert(!op.getSrc(0u).isPredicated());
+ 
+-    /* It **must** have a replicate swizzle, so just load X. */
+-    cond = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, ir::ScalarType::eBool);
++    /* It **must** have a replicate swizzle, so just load X. loadSrcModified would consume
++     * the bool as a float (applySrcModifiers), which aborts for a plain predicate: load it
++     * as a bool and negate it explicitly, as handleCall does for callnz. */
++    const auto& predicate = op.getSrc(0u);
++    cond = loadSrc(builder, op, predicate, ComponentBit::eX, predicate.getSwizzle(getShaderInfo()), ir::ScalarType::eBool);
++
++    if (predicate.getModifier() == OperandModifier::eNot)
++      cond = builder.add(ir::Op::BNot(ir::ScalarType::eBool, cond));
++    else if (predicate.getModifier() != OperandModifier::eNone)
++      return logOpError(op, "Unknown breakp condition modifier: ", uint32_t(predicate.getModifier()));
+   } else if (op.getOpCode() == OpCode::eBreakC) {
+     /* Break based on the comparison */
+     auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, ir::ScalarType::eF32);
+-- 
+2.54.0 (Apple Git-157)
+
