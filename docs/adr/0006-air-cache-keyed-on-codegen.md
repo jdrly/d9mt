@@ -104,3 +104,16 @@ Jan's requirement for 0.1.6: players keep their shader caches; a release must no
 check), `bridge/unix/air_cache.c`, `bridge/unix/air_cache_lineage.c`, `bridge/unix/cache.c`
 (`d9mt_cache_prepare`), `scripts/test-air-cache-lineage.sh`. The byte-identity evidence for
 the 0.1.5.1 entry is in the PR that added it.
+
+## Implementation status, 0.1.8 (the recompile bundle)
+
+0.1.8 is a deliberate new AIR codegen (PLAN-0.1.7-codegen, carried into 0.1.8): its id gets no
+lineage entry, so every player's AIR cache recompiles once, announced in the release notes. The
+0.1.5.1 entry stays and is inert: it names only `38243f7b…`, and its adopt target (0x00020009)
+equals no AIR target term `T`. The effective AIR identity is a pure resolver,
+`d9mt_air_effective_identity()` in `bridge/unix/air_cache_lineage.c` (outside the id), used by the
+AIR cache and by the PSO archives, which are partitioned by it and by `T`
+(`os-<build>-<gpu>-c<identity>-t<T>`): 0.1.7's archives are removed on the first 0.1.8 start
+instead of being searched on every miss for up to eight sessions. A retention rule, not a
+correctness one (Metal's lookup matches functions by content). `scripts/test-pso-partition.sh`
+checks it.

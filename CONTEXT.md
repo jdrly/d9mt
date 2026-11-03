@@ -42,6 +42,13 @@ game's SM1–3 bytecode to Apple's AIR (LLVM 15 bitcode) and wraps it in a metal
 toolchain or MSL is involved at runtime (README).
 _Avoid_: “MSL compiler”, “shader translator”.
 
+**AIR target**
+The AIR versions the AIR compiler writes, in the bitcode and the metallib container: Apple's
+toolchain's for the macOS the game runs on (macOS 26: AIR 2.8 / Metal 4.0; 27 and later: AIR 2.9 /
+Metal 4.1), or the legacy fields before 0.1.8 under `D9MT_AIR_LEGACY=1`. Its code `T` is part of
+the AIR cache's table and the PSO archives' partition (`air/air_metallib.h` `AirTarget`;
+[configuration](docs/configuration.md#developer-and-diagnostic-switches)).
+
 **Compat metallib**
 The second build of each embedded metallib (fixed-function shaders, blit), for the minimum macOS
 version: the driver loads the newest Metal language and falls back to Compat where Metal rejects
@@ -147,7 +154,9 @@ build's AIR cache identity, backed by evidence that both write the same bytes; i
 build's table once (ADR-0006).
 
 **PSO archive**
-The Metal 4 pipeline archives in `<user cache>/d9mt/pso/`, one per session, the last eight kept
+The Metal 4 pipeline archives in `<user cache>/d9mt/pso/`, one per session, the last eight kept,
+in one partition per OS build, GPU, effective AIR identity and AIR target
+(`os-<build>-<gpu>-c<identity>-t<T>`); the other partitions are removed
 ([configuration](docs/configuration.md#environment-variables)).
 
 **Pipeline state cache**
