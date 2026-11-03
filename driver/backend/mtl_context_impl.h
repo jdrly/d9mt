@@ -573,6 +573,15 @@ namespace dxvk::backend {
         return m_null2DId;
       return stage == 1u && slot >= kNullCubeFirstSlot ? m_nullCubeId : m_null2DId;
     }
+    /* The kind a table slot's texture must have (#150), as nullTextureId picks the null texture:
+     * the shader's declared one (texkind::k2D, kCube, k3D), else the fixed-function shader's. */
+    uint8_t tableTextureKind(uint32_t stage, uint32_t slot, const MtlShaderFunction* fn) const {
+      const uint8_t dim = fn != nullptr && slot < fn->textureDim.size()
+        ? fn->textureDim[slot] : MtlShaderFunction::NoTextureDim;
+      if (dim <= 2u)
+        return dim;
+      return stage == 1u && slot >= kNullCubeFirstSlot ? 1u : 0u;
+    }
     void selectArgumentTablesForPass();
     void bindArgumentTables();
     void flushVertexBuffers();
