@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # test-air-cache-lineage.sh — the AIR cache's identity (ADR-0006), without Wine, on scratch caches
 # under $WORK only. The corpus: every air/tests/bin/*.bin and the hash suite's test/*_bytecode.inc,
-# six flag sets each, compiled through build/bridge/winemetal.so's AIR thunk (bridge/tests/air_cache_test.cpp).
+# seven flag sets each, compiled through build/bridge/winemetal.so's AIR thunk (bridge/tests/air_cache_test.cpp).
 #  - The AIR codegen id: an object's SDK version stamp doesn't change it, one byte of its code does.
 #  - The cache: the table is the one the identity names, and a second run hits every entry (no row
 #    written).
 #  - A foreign table (another build's) is dropped.
+#  - Position invariance off (D9MT_AIR_FLAG_NO_INVARIANCE, the driver's D9MT_AIR_INVARIANT=0) is in
+#    the key: one cache, the driver's flags with invariance on, then off, then on: each run's outputs
+#    equal a forced compile (no cache) of the same flags, byte for byte, and the third run hits.
+#    Invariance off changes every vertex shader's metallib and no pixel shader's.
 #  - If the id has a lineage that adopts a predecessor table: a cache holding that table (made by
 #    renaming this build's own macOS 27 table, whose keys and values are the predecessor's when the
 #    lineage holds; with OLD_BRIDGE=<0.1.5.1's winemetal.so>, made by that bridge itself and compared
@@ -78,8 +82,8 @@ mkdir -p "$WORK/probe"
 AIR_THUNK=0 "$WORK/air_cache_test" "$SO" "$WORK/probe" "$WORK"/corpus/*.bin > "$WORK/probe.log" 2>&1 || true
 nbin=$(ls "$WORK"/corpus/*.bin | wc -l | tr -d ' ')
 nok=$(grep -c ' ok ' "$WORK/probe/manifest.txt" || true)
-check "corpus: every shader compiles with all six flag sets" \
-  "$([ "$nok" = $((nbin * 6)) ] && echo 1 || echo 0)" "$nbin shaders, $nok compiles"
+check "corpus: every shader compiles with all seven flag sets" \
+  "$([ "$nok" = $((nbin * 7)) ] && echo 1 || echo 0)" "$nbin shaders, $nok compiles"
 
 # 1. the id
 OBJ="$V2/build/airlib/obj/air_air_metallib.cpp.o"
@@ -133,6 +137,48 @@ sqlite3 "$C/old0151/air-cache.sqlite3" "ALTER TABLE $T27 RENAME TO cache_6138817
 run old0151 "$SO" "$C/old0151" host
 check "0.1.5.1's table is dropped, not adopted" \
   "$([ "$(tables old0151)" = "$T27 " ] && ! grep -q 'kept' "$WORK/old0151.log" && echo 1 || echo 0)"
+
+# 2a. position invariance on -> off -> on, one cache (the driver's flags: FOLD_SPEC | ARG_BUFFER = 3;
+# with D9MT_AIR_FLAG_NO_INVARIANCE, 11)
+for f in 3 11; do
+  mkdir -p "$WORK/forced$f"
+  AIR_THUNK=0 AIR_VARIANTS=$f "$WORK/air_cache_test" "$SO" "$WORK/forced$f" "$WORK"/corpus/*.bin > "$WORK/forced$f.log" 2>&1 || true
+done
+inv_run() {  # inv_run <name> <flags>: the corpus through the thunk, on the one cache $C/inv
+  mkdir -p "$WORK/$1"
+  env -u D9MT_AIR_MACOS -u D9MT_AIR_LEGACY AIR_VARIANTS=$2 D9MT_AIR_CACHE="$C/inv/air-cache.sqlite3" \
+    "$WORK/air_cache_test" "$SO" "$WORK/$1" "$WORK"/corpus/*.bin > "$WORK/$1.log" 2>&1
+  dump "$C/inv/air-cache.sqlite3" > "$WORK/$1.rows"
+}
+mkdir -p "$C/inv"
+inv_run inv_on1 3; inv_run inv_off 11; inv_run inv_on2 3
+for r in inv_on1:3 inv_off:11 inv_on2:3; do
+  check "invariance ${r%%:*} (flags ${r#*:}): outputs = a forced compile of the same flags" \
+    "$(cmp -s "$WORK/${r%%:*}/manifest.txt" "$WORK/forced${r#*:}/manifest.txt" && echo 1 || echo 0)"
+done
+check "invariance on and off: distinct keys (off adds as many rows as on wrote)" \
+  "$([ "$(wc -l < "$WORK/inv_off.rows")" -eq $((2 * $(wc -l < "$WORK/inv_on1.rows"))) ] && echo 1 || echo 0)"
+check "invariance on again: every compile a hit (no row written)" \
+  "$(cmp -s "$WORK/inv_off.rows" "$WORK/inv_on2.rows" && echo 1 || echo 0)"
+# vertex shaders (version token 0xfffe....) must all change, pixel shaders none
+read -r vsd vsn psd < <(python3 -I - "$WORK/corpus" "$WORK/forced3/manifest.txt" "$WORK/forced11/manifest.txt" <<'PYEOF'
+import os, struct, sys
+def rows(p):
+    return {l.split()[0].rsplit('.f', 1)[0]: l.split()[6] for l in open(p) if ' ok ' in l}
+on, off = rows(sys.argv[2]), rows(sys.argv[3])
+vsd = vsn = psd = 0
+for name in on:
+    tok = struct.unpack_from('<I', open(os.path.join(sys.argv[1], name), 'rb').read(4))[0]
+    changed = name in off and on[name] != off[name]
+    if tok >> 16 == 0xfffe:
+        vsn += 1; vsd += changed
+    else:
+        psd += changed
+print(vsd, vsn, psd)
+PYEOF
+)
+check "invariance off: every vertex shader's metallib changes, no pixel shader's" \
+  "$([ "$vsn" -gt 0 ] && [ "$vsd" = "$vsn" ] && [ "$psd" = 0 ] && echo 1 || echo 0)" "VS $vsd of $vsn, PS $psd"
 
 # 2b. the AIR target: four targets, four terms, four tables
 if grep -q "\"$ID\"" "$V2/bridge/unix/air_cache_lineage.c"; then
