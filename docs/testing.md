@@ -120,7 +120,8 @@ shader (`ffFsMainFlat`: colour inputs flat; `test/code_ff_flat.c` checks every
 primitive against D3D9's provoking vertex).
 The fixed-function batch's tests read back their own pixels and print
 `PASS`/`FAIL` (each file's header gives the oracle): `code_ff_fog.c` (linear
-fog with start == end, fixed function and SM1/2 emulated fog, an SM3 control),
+fog with start == end: no fog in front of the end, full fog at and behind it, fixed
+function and SM1/2 emulated fog, an SM3 control),
 `code_ff_cliprhw.c` (no user clip planes for pre-transformed vertices),
 `code_ff_dot3.c` (a DOTPRODUCT3 alpha op on a depth-only target),
 `code_ff_cube3d.c` (cube and volume textures in fixed-function stages, #152;
