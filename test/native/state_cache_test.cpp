@@ -705,6 +705,61 @@ static void testRecordLoadPrewarm() {
   }
 }
 
+// D3DSHADE_FLAT: a pipeline whose pixel shader function is flat is never recorded (the session
+// compiles it on first use; replay and prewarm know only Gouraud functions). The Gouraud draws
+// of a session with flat draws record exactly what the same session without them records: the
+// entry count and every identity (origins, link flag, shaders, key); timing and usage fields
+// follow the session clock and aren't compared.
+static void testFlatNotRecorded() {
+  auto session = [] (const std::string& dir, bool withFlat, std::vector<Entry>& onDisk) {
+    const MtlStateCacheConfig cfg = configFor(dir, 1u);
+    Workload w(8u, 60u, 300u, 3u);
+    FakeBackend be;
+    Rc<MtlStateCache> sc = new MtlStateCache(&be, cfg);
+    waitLoaded(sc.ptr());
+    w.announceAll(sc.ptr());
+    for (uint32_t i = 0u; i < w.draws.size(); i++) {
+      const auto& d = w.draws[i];
+      const bool isFlat = i % 3u == 0u;
+      if (isFlat && !withFlat)
+        continue;
+      Rc<MtlShaderFunction> v = w.vs[d.vs]->drawFunction(nullptr);
+      Rc<MtlShaderFunction> p = w.ps[d.ps]->drawFunction(w.vs[d.vs].ptr());
+      if (isFlat) {
+        // the flat variant: same shader identity, its own function
+        Rc<MtlShaderFunction> f = new MtlShaderFunction();
+        f->stage   = p->stage;
+        f->library = p->library;
+        f->stateId = p->stateId;
+        f->flat    = true;
+        p = f;
+      }
+      MtlPsoUse use;
+      Rc<FakePso> pso = be.renderMiss(d.state, v.ptr(), p.ptr(), use);
+      pso->wait();
+      sc->record(d.state, v.ptr(), p.ptr(), pso.ptr(), use);
+    }
+    sc->shutdown();
+    const auto s = sc->stats();
+    CHECK(s.recorded == 200u && s.entries == 200u);
+    CHECK(s.unrecorded == (withFlat ? 100u : 0u));
+    const std::vector<uint8_t> file = readFile(cfg.file);
+    ParseResult r = parse(file.data(), file.size(), Sig, onDisk);
+    CHECK(r.status == ParseStatus::Ok && r.corrupt == 0u && onDisk.size() == 200u);
+  };
+
+  std::vector<Entry> withFlat, without;
+  session(tempDir(), true, withFlat);
+  session(tempDir(), false, without);
+  CHECK(withFlat.size() == without.size());
+  for (const Entry& e : withFlat) {
+    bool found = false;
+    for (const Entry& f : without)
+      found = found || sameIdentity(e, f);
+    CHECK(found);
+  }
+}
+
 static void testFailedAndCorrupt() {
   const std::string dir = tempDir();
   const MtlStateCacheConfig cfg = configFor(dir, 1u);
@@ -2298,6 +2353,7 @@ int main(int argc, char** argv) {
   testIndex();
   testRing();
   testRecordLoadPrewarm();
+  testFlatNotRecorded();
   testFailedAndCorrupt();
   testTwoProcessesMerge();
   testConcurrency();

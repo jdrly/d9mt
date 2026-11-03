@@ -866,7 +866,9 @@ namespace dxvk {
     if (unlikely(m_stopped.load(std::memory_order_relaxed)))
       return;
 
-    if (!pVs || !pVs->stateId.origin || (pFs && !pFs->stateId.origin) || !pPso) {
+    // A flat pixel shader (D3DSHADE_FLAT) is never recorded: replay and
+    // prewarm know only Gouraud functions.
+    if (!pVs || !pVs->stateId.origin || (pFs && (!pFs->stateId.origin || pFs->flat)) || !pPso) {
       m_unrecorded.fetch_add(1u, std::memory_order_relaxed);
       return;
     }
