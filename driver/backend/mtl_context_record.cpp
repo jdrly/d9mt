@@ -134,7 +134,7 @@ namespace dxvk::backend {
 
     WMTArgTableInfo ati = {};
     ati.max_buffers                = 31u;
-    ati.max_textures               = 16u;
+    ati.max_textures               = kTableTextures;
     ati.max_samplers               = 16u;
     ati.initialize_bindings        = 1u;
     ati.support_attribute_strides  = 1u;
@@ -1004,7 +1004,7 @@ namespace dxvk::backend {
   MtlContextImpl::ArgTablePair MtlContextImpl::createArgumentTablePair() const {
     WMTArgTableInfo ati = {};
     ati.max_buffers                = 31u;
-    ati.max_textures               = 16u;
+    ati.max_textures               = kTableTextures;
     ati.max_samplers               = 16u;
     ati.initialize_bindings        = 1u;
     ati.support_attribute_strides  = 1u;

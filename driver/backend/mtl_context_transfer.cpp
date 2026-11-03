@@ -621,23 +621,52 @@ namespace dxvk::backend {
           uint32_t(airSlot));
       }
 
-      for (uint32_t slot : bit::BitMask(texMask)) {
-        const Rc<MtlTextureView>& view = b.textures[slot];
-        if (view == nullptr) {
-          appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
-          continue;
+      if (st == 1u && fn != nullptr && fn->ffStageTextures) {
+        // The fixed-function FS reads stage s's texture as t2d[s], tcube[s] or t3d[s] by the
+        // stage's texture type (#152): the view goes to the slot of its kind (s, 8+s, 16+s),
+        // the null texture of each other kind to the other two. Not a kind mismatch: no warning.
+        b.ffTex3DSlots = 1u;
+        for (uint32_t s : bit::BitMask(texMask & ((1u << kFfTextureStages) - 1u))) {
+          uint64_t ids[3] = { m_null2DId, m_nullCubeId, m_null3DId };
+          const Rc<MtlTextureView>& view = b.textures[s];
+          if (view != nullptr) {
+            auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+            // an array or multisample view is no kind a stage samples: null everywhere
+            if (tv->kind <= texkind::k3D) {
+              ids[tv->kind] = tv->gpuResourceId;
+              lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
+            }
+          }
+          appendTableTexture(shadow, table, ids[texkind::k2D], s);
+          appendTableTexture(shadow, table, ids[texkind::kCube], kNullCubeFirstSlot + s);
+          appendTableTexture(shadow, table, ids[texkind::k3D], kNull3DFirstSlot + s);
         }
-        auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
-        // a view of another kind than the slot's: the null texture of the slot's kind (#150)
-        const uint8_t dim = tableTextureKind(st, slot, fn.ptr());
-        if (unlikely(!texkind::matches(dim, tv->kind))) {
-          if (fn != nullptr)
-            noteTextureKindMismatch(*fn, slot, dim, tv->kind);
-          appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
-          continue;
+      } else {
+        if (unlikely(kindsChanged && b.ffTex3DSlots)) {
+          // the FF FS's t3d slots: no other shader reads them, but keep no texture there
+          for (uint32_t i = 0u; i < kFfTextureStages; i++)
+            appendTableTexture(shadow, table, m_null3DId, kNull3DFirstSlot + i);
+          b.ffTex3DSlots = 0u;
         }
-        lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
-        appendTableTexture(shadow, table, tv->gpuResourceId, slot);
+
+        for (uint32_t slot : bit::BitMask(texMask)) {
+          const Rc<MtlTextureView>& view = b.textures[slot];
+          if (view == nullptr) {
+            appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
+            continue;
+          }
+          auto* tv = static_cast<MtlTextureViewImpl*>(view.ptr());
+          // a view of another kind than the slot's: the null texture of the slot's kind (#150)
+          const uint8_t dim = tableTextureKind(st, slot, fn.ptr());
+          if (unlikely(!texkind::matches(dim, tv->kind))) {
+            if (fn != nullptr)
+              noteTextureKindMismatch(*fn, slot, dim, tv->kind);
+            appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
+            continue;
+          }
+          lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
+          appendTableTexture(shadow, table, tv->gpuResourceId, slot);
+        }
       }
 
       for (uint32_t slot : bit::BitMask(smpMask)) {
