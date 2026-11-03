@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# build-driver.sh — compile the extracted DXVK-3.0 D3D9 state tracker + the
-# Metal-first seam (v2/driver/). Phase A+B gate: every TU that is *expected to
-# compile at this phase* must compile with mingw, and the Vulkan gate must pass.
+# build-driver.sh — compile and link d3d9.dll: the DXVK-3.0-derived D3D9 state
+# tracker plus the Metal backend (v2/driver/), with mingw. Every TU must compile,
+# and the Vulkan gate must pass.
 #
-# What compiles now (CORE, must pass):
+# What compiles (CORE):
 #   util/  (the DXVK support lib, Vulkan-clean)   wsi/ (win32 monitor/window)
 #   cs/    (deferred-recording arena, retargeted to MtlContext)
 #   mtl/   (the MtlContext seam: types, resource, context stub, format stub)
-# The d3d9/ KEEP files are extraction deliverables; most pull ADAPT headers
-# (d3d9_device.h, d3d9_common_texture.h, …) that are Phase-C and so do NOT compile
-# standalone yet — they are attempted in a non-fatal D3D9-LEAF pass that only
-# reports. This mirrors build-air-compiler.sh conventions: per-TU objects, cached
-# by mtime, parallel, c++17, i686 mingw.
+#   d3d9/  (the D3D9 frontend)   backend/ (the Metal 4 backend on the winemetal bridge)
+# This mirrors build-air-compiler.sh conventions: per-TU objects, rebuilt when a
+# source, header or flag changes, parallel, c++17; i686 mingw, or x86_64 with ARCH=x64.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -274,7 +272,7 @@ CORE+=("$DRV"/backend/mtl_context_record.cpp "$DRV"/backend/mtl_context_transfer
 # d3d9 — Phase-C ported ADAPT retypes + Phase-D neutral stubs that compile now.
 #   d3d9_util        : enum-decoder retype (Vk*->Mtl*), ADAPT.
 #   d3d9_names       : enum->string debug tables, KEEP (util_enum include fixed).
-#   d3d9_format      : D3D9_MTL_FORMAT_MAPPING table, ADAPT (was D3D9-LEAF).
+#   d3d9_format      : D3D9_MTL_FORMAT_MAPPING table, ADAPT.
 #   d3d9_shader      : PHASE-D neutral ID3D9MetalShaderBackend (air-free).
 #   d3d9_fixed_function : PHASE-D FF module-set stub (keys kept, lookup stubbed).
 CORE+=("$DRV"/d3d9/d3d9_util.cpp "$DRV"/d3d9/d3d9_names.cpp \
@@ -325,11 +323,6 @@ CORE+=("$DRV"/d3d9/d3d9_state.cpp "$DRV"/d3d9/d3d9_options.cpp \
 [ -f "$DRV"/d3d9/d3d9_swapchain.cpp ] && CORE+=("$DRV"/d3d9/d3d9_swapchain.cpp)
 [ -f "$DRV"/d3d9/d3d9_interface.cpp ] && CORE+=("$DRV"/d3d9/d3d9_interface.cpp)
 [ -f "$DRV"/d3d9/d3d9_main.cpp ] && CORE+=("$DRV"/d3d9/d3d9_main.cpp)
-# Phase C-5 STAGE-1 probe: header-only TU proving the ported device-graph headers
-#   (common_buffer/common_texture/resource/subresource/surface/volume/buffer/query)
-#   form a closed, Vulkan-free compile unit on the Mtl seam. Grows as device.h /
-#   swapchain.h land (see EXTRACTION-LOG PHASE-C5-CHECKPOINT).
-CORE+=("$DRV"/d3d9/phasec_probe.cpp)
 
 echo "=== [driver] CORE compile (${#CORE[@]} TUs) ==="
 OBJS=(); PIDS=(); RC=0
@@ -404,24 +397,6 @@ echo "=== [driver] archive libdriver_core.a ==="
 rm -f "$BUILD/libdriver_core.a"
 "$MINGW_PREFIX-ar" rcsD "$BUILD/libdriver_core.a" "${OBJS[@]}"
 echo "  -> $BUILD/libdriver_core.a ($(wc -c < "$BUILD/libdriver_core.a") bytes)"
-
-# --- D3D9-LEAF attempt (non-fatal; reports Phase-C readiness) --------------
-# The remaining ADAPT graph (device/common_texture/common_buffer/adapter/query/
-# surface/volume/texture/buffer/subresource/swvp/constant_*/shader_analysis) plus
-# swapchain is one interconnected unit that additionally needs a large MtlDevice
-# surface (resource create/allocate) not yet in the seam, and the dxbc_spv include
-# path for the analysis/shader TUs. Those are the remaining Phase-C/D work — see
-# EXTRACTION-LOG.md. They are attempted here only for readiness reporting.
-echo "=== [driver] D3D9-LEAF attempt (non-fatal) ==="
-D3D9_LEAF=()
-for src in "${D3D9_LEAF[@]+"${D3D9_LEAF[@]}"}"; do
-  [ -f "$src" ] || { echo "  [skip] ${src#$DRV/} (not present)"; continue; }
-  if "$MINGW" "${FLAGS[@]}" -c "$src" -o "$OBJ/$(echo "${src#$DRV/}" | tr '/' '_').o" 2>/tmp/driver_leaf_err.txt; then
-    echo "  [ok]   ${src#$DRV/}"
-  else
-    echo "  [phase-c] ${src#$DRV/}: $(head -1 /tmp/driver_leaf_err.txt)"
-  fi
-done
 
 # --- Vulkan gate ------------------------------------------------------------
 # ZERO Vulkan rule: no Vk* types / vulkan headers in real code. Only comment/doc

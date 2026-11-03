@@ -15,7 +15,6 @@ namespace dxvk {
   class MtlBuffer;
   class MtlTexture;
   class MtlTextureView;
-  class MtlTexelBufferView;
   class MtlSamplerState;
   class MtlAllocation;
 
@@ -39,13 +38,6 @@ namespace dxvk {
       return tex == o.tex && generation == o.generation;
     }
     bool operator != (const MtlTextureHandle& o) const { return !(*this == o); }
-  };
-
-  struct MtlSuballocation {
-    MtlBufferHandle backing    = { };
-    MtlDeviceSize   offset     = 0;
-    MtlDeviceSize   size       = 0;
-    uint32_t        generation = 0u;
   };
 
   // Holds an Rc to the logical buffer plus a snapshot of its physical backing
@@ -100,27 +92,15 @@ namespace dxvk {
     MtlTextureUsage    usage      = MtlTextureUsageShaderRead;
     MtlAspectMask      aspects    = MtlAspectColor;
     MtlTextureViewType viewType   = MtlTextureViewType::e2D;
-    uint32_t           packedSwizzle = 0;
-
-    static uint32_t packSwizzle(MtlSwizzleChannels s) {
-      return (uint32_t(s.r) << 0) | (uint32_t(s.g) << 8)
-           | (uint32_t(s.b) << 16) | (uint32_t(s.a) << 24);
-    }
 
     bool operator == (const MtlImageViewKey& o) const {
       return format == o.format && swizzle == o.swizzle
           && baseMip == o.baseMip && mipCount == o.mipCount
           && baseLayer == o.baseLayer && layerCount == o.layerCount
           && usage == o.usage && aspects == o.aspects
-          && viewType == o.viewType && packedSwizzle == o.packedSwizzle;
+          && viewType == o.viewType;
     }
     bool operator != (const MtlImageViewKey& o) const { return !(*this == o); }
-  };
-
-  struct MtlTexelBufferViewKey {
-    MtlFormat     format = MtlFormat::Invalid;
-    MtlDeviceSize offset = 0;
-    MtlDeviceSize length = 0;
   };
 
   class MtlResource : public RcObject {
@@ -230,7 +210,6 @@ namespace dxvk {
     uint32_t           numLayers     = 1u;
     uint32_t           sampleCount   = 1u;
     MtlTextureUsage    usage         = MtlTextureUsageShaderRead;
-    MtlSwizzleChannels unpackSwizzle = { };
   };
 
   class MtlTexture : public MtlResource {
@@ -263,14 +242,6 @@ namespace dxvk {
     MtlTextureHandle view   = { };
     MtlImageViewKey  key    = { };
     Rc<MtlTexture>   image  = nullptr;
-  };
-
-  class MtlTexelBufferView : public MtlResource {
-  public:
-    MtlBufferHandle backing = { };
-    MtlFormat       format  = MtlFormat::Invalid;
-    MtlDeviceSize   offset  = 0;
-    MtlDeviceSize   length  = 0;
   };
 
   class MtlSamplerState : public MtlResource {

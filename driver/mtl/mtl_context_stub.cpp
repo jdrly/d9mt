@@ -53,7 +53,6 @@ namespace dxvk {
   void MtlContext::bindUniformBuffer(MtlStageMask, uint32_t, MtlBufferSlice&&) { MTL_STUB("bindUniformBuffer"); }
   void MtlContext::bindUniformBufferRange(MtlStageMask, uint32_t, MtlDeviceSize, MtlDeviceSize) { MTL_STUB("bindUniformBufferRange"); }
   void MtlContext::bindTexture(MtlStageMask, uint32_t, Rc<MtlTextureView>&&)   { MTL_STUB("bindTexture"); }
-  void MtlContext::bindBufferView(MtlStageMask, uint32_t, Rc<MtlTexelBufferView>&&) { MTL_STUB("bindBufferView"); }
   void MtlContext::bindSampler(MtlStageMask, uint32_t, Rc<MtlSamplerState>&&)  { MTL_STUB("bindSampler"); }
   void MtlContext::pushData(MtlStageMask, uint32_t, uint32_t, const void*)     { MTL_STUB("pushData"); }
 

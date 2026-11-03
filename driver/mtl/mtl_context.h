@@ -131,7 +131,6 @@ namespace dxvk {
     virtual void bindUniformBuffer(MtlStageMask stages, uint32_t slot, MtlBufferSlice&& slice);
     virtual void bindUniformBufferRange(MtlStageMask stages, uint32_t slot, MtlDeviceSize offset, MtlDeviceSize length);
     virtual void bindTexture(MtlStageMask stages, uint32_t slot, Rc<MtlTextureView>&& view);
-    virtual void bindBufferView(MtlStageMask stages, uint32_t slot, Rc<MtlTexelBufferView>&& view);
     virtual void bindSampler(MtlStageMask stages, uint32_t slot, Rc<MtlSamplerState>&& sampler);
     virtual void pushData(MtlStageMask stages, uint32_t offset, uint32_t size, const void* data);
 
