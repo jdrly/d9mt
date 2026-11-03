@@ -137,6 +137,10 @@ Shader identity, which is D3D9-side and stable:
   (`D3D9FFShaderModuleSet`, entry names `ffVsMain`/`ffFsMain`). The identity
   is just "FF".
 - **Not recorded**:
+  - Pipelines with a flat pixel shader function (`D3DSHADE_FLAT`,
+    `MtlShaderFunction::flat`): flat isn't part of the shader identity, so
+    replay and prewarm only ever know Gouraud functions, and a flat pipeline
+    compiles on its first use in each session. The file format is unchanged.
   - Software-VP emulation shaders (`d3d9_swvp_emu.cpp`): SWTOR doesn't use
     them, and they are keyed by vertex elements.
   - Internal clear/blit/depth-clear PSOs (`getSync`): a handful per render

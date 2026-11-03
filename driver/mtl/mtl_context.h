@@ -49,6 +49,12 @@ namespace dxvk {
     // when functions share a library).
     MtlShaderStateId    stateId;
 
+    // D3DSHADE_FLAT: the pixel shader's colour inputs are flat. Set at
+    // creation, never changed. Not part of stateId: the state cache never
+    // records a pipeline with a flat function (the session compiles it on
+    // first use), so its records and file format are unchanged.
+    bool                flat = false;
+
     bool ready() const { return task == nullptr || task->isDone(); }
   };
 
