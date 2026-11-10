@@ -107,7 +107,9 @@ every corpus `crs` against a `mul`/`mul`/`add` expansion. Its `pin_*` cases
 assert paths of unreachable loops, the `if`/`breakp` predicate truth table
 (with and without NOT) and the signed-zero witnesses of ConditionPass.
 `conditions_signed_zero_test` (in `run-native-tests.sh`) checks the same
-signed-zero case on the IR after `legalizeIr`.
+signed-zero case on the IR after `legalizeIr`, and
+`conditions_duplicate_operand_test` that a boolean op of two equal conditions
+stays that one condition (`patches/dxbc-spirv/0004`).
 
 `test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
 d9mt draws flat and the ones it keeps Gouraud (triangle fans), a pixel shader

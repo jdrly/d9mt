@@ -8,11 +8,13 @@
  *   out0 = select(x == +0, select(x == -0, 1, 0), 0)   (nested predication, `cmp`)
  *   out1 = select((x == +0) && (x == -0), 1, 0)          (BAnd)
  *   out2 = select(x == +0, select(x == +0, 1, 0), 0)    (the control: one constant, a valid fold)
- * After legalizeIr no output may be the constant 0: at x = 0 every one is 1. That is the only
- * assertion, for all three; the control (one constant, which the pass may legitimately fold to a
- * single select on x == +0) just shows the check isn't failing on any nested select. ArithmeticPass
+ * After legalizeIr no output may be a constant: at x = 0 every one is 1, at any other x 0. That
+ * is the assertion, for all three; the control (one constant, which the pass may legitimately fold
+ * to a single select on x == +0) shows the check isn't failing on any nested select. ArithmeticPass
  * may canonicalize -0.0 to +0.0 in FEq before ConditionPass runs, in which case all three pass
  * because the pattern never reaches it; the printed final ops record which happened.
+ * (A constant 1 is ConditionPass's other wrong fold, of two equal conditions, which
+ * patches/dxbc-spirv/0004 fixes: conditions_duplicate_operand_test.)
  *
  * Built by scripts/run-native-tests.sh against third_party/dxbc-spirv (host, no GPU). It prints
  * each output's final op and the disassembly of the whole shader for the record. */
@@ -34,16 +36,6 @@ void check(bool ok, const std::string& what) {
     failures++;
 }
 
-bool isConstantZero(const ir::Op& op) {
-  if (op.getOpCode() != ir::OpCode::eConstant)
-    return false;
-  for (uint32_t i = 0u; i < op.getOperandCount(); i++) {
-    if (uint64_t(op.getOperand(i)) & 0x7fffffffu)
-      return false;
-  }
-  return true;
-}
-
 }
 
 int main() {
@@ -55,7 +47,8 @@ int main() {
   for (uint32_t i = 0u; i < 3u; i++)
     out[i] = b.add(ir::Op::DclOutput(ir::ScalarType::eF32, entry, i, 0u));
 
-  b.add(ir::Op::Label());
+  /* Scoped IR, as the sm3 converter emits it: no label (ConvertControlFlowPass adds the blocks;
+   * code after a label of our own would be unreachable to it and removed). */
   auto x = b.add(ir::Op::InputLoad(ir::ScalarType::eF32, in, ir::SsaDef()));
   auto pos = b.makeConstant(0.0f);
   auto neg = b.makeConstant(-0.0f);
@@ -96,7 +89,8 @@ int main() {
       value.getOpCode() == ir::OpCode::eConstant ? "constant" : "live");
     if (loc < 3u) {
       found |= 1u << loc;
-      check(!isConstantZero(value), std::string(names[loc]) + ": not folded to 0 (x = 0 makes it 1)");
+      check(value.getOpCode() != ir::OpCode::eConstant,
+        std::string(names[loc]) + ": not folded to a constant (1 at x = 0, else 0)");
     }
   }
   check(found == 7u, "all three outputs are still stored");

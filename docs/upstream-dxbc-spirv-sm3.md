@@ -5,6 +5,8 @@ mask applied twice in crs and setp (§1), so `0001` keeps only the crs `.w`
 guard: a `.w` mask still asserts upstream. `0002` (§2) has no upstream
 equivalent. New `0003`: 8654bc6 made `if pN`/`breakp pN` loadable but drops
 the NOT of `if !pN` and aborts on `breakp pN`; worth its own short report.
+`0004` is upstream's own f528e1e, one commit after the pin: at 76236b82
+ConditionPass folds `a && b` to true when `a` and `b` are the same condition.
 The text below describes the old pin.
 
 Two bugs in dxbc-spirv's `sm3` front end, found in d9mt (GitHub issue #8),
