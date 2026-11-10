@@ -10,6 +10,7 @@
 #include "d3d9_buffer.h"
 #include "d3d9_vertex_declaration.h"
 #include "d3d9_shader.h"
+#include "d3d9_shader_compiler.h"
 #include "d3d9_query.h"
 #include "d3d9_stateblock.h"
 #include "d3d9_monitor.h"
@@ -6984,20 +6985,6 @@ namespace dxvk {
   }
 
 
-  // D9MT_DEPTH_BIAS_VS=1 (opt-in; off by default): the constant depth bias
-  // in the vertex shader on float depth formats (#163). Read once per process.
-  static bool DepthBiasVsEnabled() {
-    static const bool s_on = [] {
-      const bool on = env::getEnvVar("D9MT_DEPTH_BIAS_VS") == "1";
-      Logger::info(on
-        ? "D9MT: depth bias: the constant term in the vertex shader on float depth formats (D9MT_DEPTH_BIAS_VS=1)"
-        : "D9MT: depth bias: the constant term in hardware (default; D9MT_DEPTH_BIAS_VS=1 moves it into the vertex shader)");
-      return on;
-    } ();
-    return s_on;
-  }
-
-
   uint8_t D3D9DeviceEx::DepthBiasDrawBits(D3DPRIMITIVETYPE PrimitiveType) {
     uint8_t bits = 0u;
 
@@ -7045,7 +7032,7 @@ namespace dxvk {
     // range, |k| > 2^-6 (the arithmetic bound of the shader's domain) or a
     // subnormal k (canonicalised to 0: the hardware path).
     // docs/configuration.md, D9MT_DEPTH_BIAS_VS.
-    const bool eligible = DepthBiasVsEnabled()
+    const bool eligible = D3D9DepthBiasVsEnabled()
       && m_depthBiasDrawBits == DepthBiasAllBits
       && !(m_dbg.flags & d9mtdbg::DepthClamp)
       && apiDepthBias != 0.0f;
@@ -7427,7 +7414,7 @@ namespace dxvk {
 
     // The VS depth-bias path's per-draw conditions (DS kind, VS kind,
     // topology, PS depth writes), compared on every draw while it's on.
-    if (unlikely(DepthBiasVsEnabled())) {
+    if (unlikely(D3D9DepthBiasVsEnabled())) {
       const uint8_t bits = DepthBiasDrawBits(PrimitiveType);
 
       if (bits != m_depthBiasDrawBits) {

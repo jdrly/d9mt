@@ -39,6 +39,17 @@ extern "C" void     D9MTAirFree   (struct d9mt_air_free_params*    params);
 
 namespace dxvk {
 
+  bool D3D9DepthBiasVsEnabled() {
+    static const bool s_on = [] {
+      const bool on = env::getEnvVar("D9MT_DEPTH_BIAS_VS") == "1";
+      Logger::info(on
+        ? "D9MT: depth bias: the constant term in the vertex shader on float depth formats (D9MT_DEPTH_BIAS_VS=1)"
+        : "D9MT: depth bias: the constant term in hardware (default; D9MT_DEPTH_BIAS_VS=1 moves it into the vertex shader)");
+      return on;
+    } ();
+    return s_on;
+  }
+
   class D3D9ShaderLowerLegacyInputPass {
 
   public:
@@ -100,8 +111,15 @@ namespace dxvk {
         }
       }
 
-      if (m_shaderStage == ir::ShaderStage::eVertex)
+      if (m_shaderStage == ir::ShaderStage::eVertex && m_depthBiasRequested)
         m_depthBiasHook = emitDepthBias();
+    }
+
+    /// D9MT_DEPTH_BIAS_VS=1 only: run() applies the depth-bias rewrite to
+    /// this VS. Not requested (the default): run() leaves the IR exactly as
+    /// it is without the feature, and depthBiasHook() stays false.
+    void requestDepthBias() {
+      m_depthBiasRequested = true;
     }
 
     /// The VS: whether phase A biased this shader's position (DESIGN: the
@@ -123,6 +141,7 @@ namespace dxvk {
 
   private:
 
+    bool                      m_depthBiasRequested = false;
     bool                      m_depthBiasEnabled = true;
     bool                      m_depthBiasHook = false;
     std::string               m_depthBiasProblem;
@@ -145,7 +164,8 @@ namespace dxvk {
     /// biased depth clamps per sample. The half scale is the same at every
     /// vertex (the plane and its interpolation are unchanged) and can't
     /// overflow for finite inputs. With k = 0 the stored z is the original
-    /// and d6 = d7 = 0 (never clips): the switch-off A/A.
+    /// and d6 = d7 = 0 (never clips): a hooked shader's unbiased draws are
+    /// unchanged. Only run with D9MT_DEPTH_BIAS_VS=1 (requestDepthBias).
     ///
     /// It runs in phase A before legalizeIr, so it sees the converter's
     /// pre-SSA IR. The position stores are dxbc-spirv's IoMap::flushOutputs:
@@ -1763,6 +1783,16 @@ namespace dxvk {
 
       D3D9ShaderLowerLegacyInputPass lowerLegacyPass(builder, options, m_analysis);
 
+      // The depth-bias rewrite is opt-in (D9MT_DEPTH_BIAS_VS=1). With the
+      // switch off no VS is rewritten: its IR, and so its AIR cache key and
+      // its code, are the same as without the feature. With it on, the
+      // rewritten IR has its own AIR cache entries (the cache keys on the
+      // IR), so switching either way never reuses the other form.
+      const bool depthBiasVs = isVs && D3D9DepthBiasVsEnabled();
+
+      if (depthBiasVs)
+        lowerLegacyPass.requestDepthBias();
+
       // Tests only: D9MT_DEPTH_BIAS_TEST_UNHOOK=1 leaves every VS that
       // declares a TEXCOORD15 output unhooked (test/code_depth_bias.c).
       static const bool s_testUnhook = env::getEnvVar("D9MT_DEPTH_BIAS_TEST_UNHOOK") == "1";
@@ -1772,10 +1802,10 @@ namespace dxvk {
 
       lowerLegacyPass.run();
 
-      // An unhooked VS keeps the hardware constant (the backend checks the
-      // hook bit): the night gate counts these lines (expected 0 for the
-      // corpus, apart from the test's marked shader).
-      if (isVs) {
+      // With the switch on, an unhooked VS keeps the hardware constant (the
+      // backend checks the hook bit): the night gate counts these lines
+      // (expected 0 for the corpus, apart from the test's marked shader).
+      if (depthBiasVs) {
         m_depthBiasHook = lowerLegacyPass.depthBiasHook();
 
         if (!m_depthBiasHook) {
