@@ -1,5 +1,14 @@
 # Draft: upstream report for dxbc-spirv (not sent)
 
+**Status at the 76236b82 pin (0.1.8):** upstream 26f0221 fixed the write
+mask applied twice in crs and setp (§1), so `0001` keeps only the crs `.w`
+guard: a `.w` mask still asserts upstream. `0002` (§2) has no upstream
+equivalent. New `0003`: 8654bc6 made `if pN`/`breakp pN` loadable but drops
+the NOT of `if !pN` and aborts on `breakp pN`; worth its own short report.
+`0004` is upstream's own f528e1e, one commit after the pin: at 76236b82
+ConditionPass folds `a && b` to true when `a` and `b` are the same condition.
+The text below describes the old pin.
+
 Two bugs in dxbc-spirv's `sm3` front end, found in d9mt (GitHub issue #8),
 present at the pin d9mt uses (c5c1a5b9) and at upstream HEAD (64f078d,
 2026-10-16). Patches: `patches/dxbc-spirv/0001-*.patch` and `0002-*.patch`;

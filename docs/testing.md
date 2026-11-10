@@ -102,7 +102,14 @@ environment) renders `crs`/`setp` with every write mask, modifier and
 predicate and packed I/O declarations on the GPU and compares the results
 with a scalar model of the D3D9 semantics; `--strict` uses
 `d3d9.floatEmulation = Strict`, `--corpus <dir>` adds a differential test of
-every corpus `crs` against a `mul`/`mul`/`add` expansion.
+every corpus `crs` against a `mul`/`mul`/`add` expansion. Its `pin_*` cases
+(`--only pin_`) cover the dxbc-spirv pin: unpacked relative input reads, the
+assert paths of unreachable loops, the `if`/`breakp` predicate truth table
+(with and without NOT) and the signed-zero witnesses of ConditionPass.
+`conditions_signed_zero_test` (in `run-native-tests.sh`) checks the same
+signed-zero case on the IR after `legalizeIr`, and
+`conditions_duplicate_operand_test` that a boolean op of two equal conditions
+stays that one condition (`patches/dxbc-spirv/0004`).
 
 `test/code_flat_select.c` draws with `D3DSHADE_FLAT` across the topologies
 d9mt draws flat and the ones it keeps Gouraud (triangle fans), a pixel shader

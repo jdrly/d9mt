@@ -2,6 +2,8 @@ Upstream: DXVK (https://github.com/doitsujin/dxvk), zlib/libpng license
 Version:  DXVK 3.0 tree (extracted by neo773 in July 2026; the exact commit
           was not recorded). d3d9/d3d9.def is identical to DXVK
           v3.0.2-21-g3a4c6fa3.
+Synced:   d3d9/util: v3.0.2 (6b20f622); dxbc-spirv 76236b82 +
+          patches/dxbc-spirv 0001-0004 (scripts/fetch-deps.sh)
 
 This directory is an ALTERED version of DXVK and is not the original
 software. DXVK's license notice is in ../LICENSES/DXVK-LICENSE.txt (verbatim)
