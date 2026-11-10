@@ -134,21 +134,22 @@ int main() {
     s.onSyncWait(1000000u);
     s.onSyncWait(2000000u);
 
-    // consumer: 2 parks, 24 ms in all; 1 sync wake; 2 chunks, 20 KiB; 72 commands
+    // consumer: 2 parks, 24 ms in all; 1 sync wake; 2 chunks, 20 KiB; 72 commands (each kind a
+    // multiple of 2, so every per-frame count is exact at the line's one decimal)
     s.onPark(20000000u);
     s.onPark(4000000u);
     s.onSyncWake();
     s.onRun(16384u);
     s.onRun(4096u);
     commands(s, DxvkCsCmdKind::Draw, 16);
-    commands(s, DxvkCsCmdKind::VertexBuffer, 15);
+    commands(s, DxvkCsCmdKind::VertexBuffer, 14);
     commands(s, DxvkCsCmdKind::IndexBuffer, 4);
     commands(s, DxvkCsCmdKind::Constants, 10);
     commands(s, DxvkCsCmdKind::Texture, 8);
     commands(s, DxvkCsCmdKind::Shader, 4);
     commands(s, DxvkCsCmdKind::State, 12);
     commands(s, DxvkCsCmdKind::Prof, 2);
-    commands(s, DxvkCsCmdKind::Other, 1);
+    commands(s, DxvkCsCmdKind::Other, 2);
 
     const std::string line = s.take(1024u, 4u, ns, 50000000u);
     std::printf("%s\n", line.c_str());
@@ -165,14 +166,14 @@ int main() {
     CHECK(near(val(line, "csSyncWake"), 0.25));
     CHECK(near(val(line, "cmd"), 18.0));      // 72 / 4
     CHECK(near(val(line, "cmdDraw"), 4.0));
-    CHECK(near(val(line, "cmdVb"), 3.75));
+    CHECK(near(val(line, "cmdVb"), 3.5));
     CHECK(near(val(line, "cmdIb"), 1.0));
     CHECK(near(val(line, "cmdConst"), 2.5));
     CHECK(near(val(line, "cmdTex"), 2.0));
     CHECK(near(val(line, "cmdShader"), 1.0));
     CHECK(near(val(line, "cmdState"), 3.0));
     CHECK(near(val(line, "cmdProf"), 0.5));
-    CHECK(near(val(line, "cmdOther"), 0.25));
+    CHECK(near(val(line, "cmdOther"), 0.5));
 
     double sum = 0.0;
     for (const char* k : kKindKeys)
