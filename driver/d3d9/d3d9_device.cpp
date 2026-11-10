@@ -2586,6 +2586,8 @@ namespace dxvk {
 
         case D3DRS_SHADEMODE:
           m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
+          // The PS function is chosen by the draw's effective flat.
+          m_boundPs = nullptr;
           break;
 
         case D3DRS_TWEENFACTOR:
@@ -3086,7 +3088,7 @@ namespace dxvk {
     UploadPerDrawData(MinVertexIndex, NumVertices, StartIndex, indexCount,
       BaseVertexIndex, &dynamicSysmemVBOs, &dynamicSysmemIBO);
 
-    PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO);
+    PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO, true);
 
     if (unlikely(m_dbg.hooks))
       DebugOnDraw(PrimitiveType, PrimitiveCount, "DIP", GetInstanceCount());
@@ -3198,7 +3200,7 @@ namespace dxvk {
     if (unlikely(!PrimitiveCount || !NumVertices))
       return D3D_OK;
 
-    PrepareDraw(PrimitiveType, false, false);
+    PrepareDraw(PrimitiveType, false, false, true);
 
     if (unlikely(m_dbg.hooks))
       DebugOnDraw(PrimitiveType, PrimitiveCount, "DIPUP", GetInstanceCount());
@@ -7237,7 +7239,32 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBO) {
+  bool D3D9DeviceEx::EffectiveFlatShading(D3DPRIMITIVETYPE PrimitiveType, bool Indexed) {
+    if (likely(m_state.renderStates[D3DRS_SHADEMODE] != D3DSHADE_FLAT))
+      return false;
+
+    static std::atomic<bool> s_logged = { false };
+    if (unlikely(!s_logged.load(std::memory_order_relaxed)) && !s_logged.exchange(true))
+      Logger::info("d9mt: D3DSHADE_FLAT draw (first in session)");
+
+    switch (PrimitiveType) {
+      case D3DPT_TRIANGLELIST:
+      case D3DPT_TRIANGLESTRIP:
+      case D3DPT_LINELIST:
+      case D3DPT_LINESTRIP:
+        return true;
+      // Triangle fans stay Gouraud: D3D9 takes fan triangle t's flat values
+      // from vertex t+1, Metal from the first vertex of the expanded
+      // (0, t+1, t+2), the hub. Non-indexed fans join the list with the fan
+      // index rotation (t+1, t+2, 0) (#170); indexed fans have no remap.
+      case D3DPT_TRIANGLEFAN:
+      default:
+        return false;
+    }
+  }
+
+
+  void D3D9DeviceEx::PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBO, bool Indexed) {
     ProfApi(rstore::Api::Draw);
     if (unlikely(!UseProgrammablePS()) && m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader))
       UpdateFixedFunctionPS();
@@ -7349,7 +7376,17 @@ namespace dxvk {
         m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
     }
 
-    BindProgrammablePixelShaderLinkage();
+    const bool drawFlat = EffectiveFlatShading(PrimitiveType, Indexed);
+    BindProgrammablePixelShaderLinkage(drawFlat);
+
+    // D9MT_FLAT_CHECK=1 (tests): the session's first 64 draws' flat choice.
+    static const bool s_flatCheck = env::getEnvVar("D9MT_FLAT_CHECK") == "1";
+    static std::atomic<uint32_t> s_flatDraws = { 0u };
+    if (unlikely(s_flatCheck) && s_flatDraws.fetch_add(1u) < 64u) {
+      Logger::info(str::format("D9MT-FLAT-DRAW topo=", uint32_t(PrimitiveType), " indexed=", Indexed ? 1 : 0,
+        " effective=", drawFlat ? 1 : 0, UseProgrammablePS() ? " ps=sm psflat=" : " ps=ff psflat=",
+        UseProgrammablePS() && m_boundPsFlat ? 1 : 0));
+    }
 
     uint32_t nullOrUnusedMask = ~usedSamplerMask | ~usedTextureMask;
     uint32_t depthTextureMask = m_textureSlotTracking.depth;
@@ -7475,7 +7512,7 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::BindProgrammablePixelShaderLinkage() {
+  void D3D9DeviceEx::BindProgrammablePixelShaderLinkage(bool Flat) {
     // Programmable pixel shaders are bound here, at draw time, linked against
     // the programmable VS (or standalone under fixed-function VS). Binding
     // never blocks: the function is a future the CS thread waits on (or, with
@@ -7490,15 +7527,19 @@ namespace dxvk {
 
     const void* psProgram = ps->GetProgram();
     const void* vsProgram = vs != nullptr ? vs->GetProgram() : nullptr;
+    // D3DSHADE_FLAT changes only colour inputs: a PS that reads none keeps
+    // its Gouraud function.
+    const bool  psFlat    = Flat && ps->ReadsColorInput();
 
-    if (m_boundPs == psProgram && m_boundPsPrev == vsProgram)
+    if (m_boundPs == psProgram && m_boundPsPrev == vsProgram && m_boundPsFlat == psFlat)
       return;
 
     m_boundPs     = psProgram;
     m_boundPsPrev = vsProgram;
+    m_boundPsFlat = psFlat;
 
     EmitCs([
-      cShader = ps->GetShaderForLinkage(vs)
+      cShader = ps->GetShaderForLinkage(vs, psFlat)
     ] (MtlContext* ctx) mutable {
       ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
     });
