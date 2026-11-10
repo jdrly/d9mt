@@ -50,9 +50,11 @@ COMMON_FLAGS=(-arch "$LLVM_ARCH" -std=c++17 -O1 -g -I"$DX" -I"$DX/ir" -I"$SC" -W
 # (air_builder.cpp), and winemetal.so compiles the same files with both on (build-d9mtair.sh).
 # So drop the two flags, like the C++ standard: whole words only, never part of another flag or
 # of a path. llvm-config prints a list of flags: split into words on purpose.
+LLVM_ALL_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags)" \
+  || { echo "FATAL: $LLVM_CONFIG --cxxflags failed" >&2; exit 1; }
 LLVM_CXXFLAGS=""
-# shellcheck disable=SC2046
-for flag in $("$LLVM_CONFIG" --cxxflags); do
+# shellcheck disable=SC2086
+for flag in $LLVM_ALL_CXXFLAGS; do
   case "$flag" in
     -std=c++14|-fno-exceptions|-fno-rtti) ;;
     *) LLVM_CXXFLAGS+=" $flag" ;;
