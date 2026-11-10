@@ -20,6 +20,7 @@
 #   bench_upload   dynamic VB renames and managed texture uploads inside 4K passes
 #   bench_4k       a synthetic 4K multi-pass frame: [frames] [post] [clears] [wait | cpu ms]
 #   bench_fps_cap  frame pacing under a frame rate cap (D9MT_FPS_CAP, d3d9.maxFrameRate, or a game cap)
+#   bench_vs       ~2 M vertices a frame through a 4-bone skinning VS into 640x360: vertex-bound GPU time
 # The state cache's render-thread record() cost is native: scripts/test-state-cache.sh
 # (state_cache_test bench [rounds]).
 set -euo pipefail
@@ -39,11 +40,11 @@ INC=()
 src() {
   case "$1" in
     bench_4k) echo test/bench_4k.c ;;
-    bindbench|churnbench|psobench|perdrawbench|bench_draws|bench_getdata|bench_upload|bench_fps_cap) echo "test/perf/$1.c" ;;
+    bindbench|churnbench|psobench|perdrawbench|bench_draws|bench_getdata|bench_upload|bench_fps_cap|bench_vs) echo "test/perf/$1.c" ;;
     *) return 1 ;;
   esac
 }
-ALL="bindbench churnbench psobench perdrawbench bench_draws bench_getdata bench_upload bench_4k bench_fps_cap"
+ALL="bindbench churnbench psobench perdrawbench bench_draws bench_getdata bench_upload bench_4k bench_fps_cap bench_vs"
 BENCHES="${*:-$ALL}"
 
 for b in $BENCHES; do

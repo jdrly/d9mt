@@ -1288,6 +1288,8 @@ namespace dxvk {
 
       static const bool noAb = env::getEnvVar("D9MT_NO_AB") == "1";
       static const bool fastMath = env::getEnvVar("D9MT_AIR_FASTMATH") == "1";
+      /* diagnostic only: position invariance off (in the AIR cache key) */
+      static const bool noInvariance = env::getEnvVar("D9MT_AIR_INVARIANT") == "0";
 
       d9mt_air_compile_params params = { };
       params.ir_data     = uint64_t(uintptr_t(irBuf.data()));
@@ -1295,7 +1297,8 @@ namespace dxvk {
       params.entry_name  = uint64_t(uintptr_t(entry.c_str()));
       params.flags       = D9MT_AIR_FLAG_FOLD_SPEC
                          | (noAb ? 0u : D9MT_AIR_FLAG_ARG_BUFFER)
-                         | (fastMath ? D9MT_AIR_FLAG_FAST_MATH : 0u);
+                         | (fastMath ? D9MT_AIR_FLAG_FAST_MATH : 0u)
+                         | (noInvariance ? D9MT_AIR_FLAG_NO_INVARIANCE : 0u);
       params.spec_count  = 0u;
       params.spec_data   = 0u;
       params.pe_metallib_buffer     = uint64_t(uintptr_t(metallib.data()));
