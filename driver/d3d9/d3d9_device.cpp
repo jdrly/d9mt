@@ -1845,8 +1845,11 @@ namespace dxvk {
     if (ds != nullptr) {
       const MtlFormat format = ds->GetCommonTexture()->GetFormatMapping().FormatColor;
       const float rValue = GetDepthBufferRValue(format, 0, true, true);
-      const bool  isFloat = format == MtlFormat::Depth32Float
-                         || format == MtlFormat::Depth32Float_Stencil8;
+      // Tracked only with D9MT_DEPTH_BIAS_VS=1: off, it stays false and
+      // this function marks the depth bias exactly as it did before.
+      const bool  isFloat = D3D9DepthBiasVsEnabled()
+                         && (format == MtlFormat::Depth32Float
+                          || format == MtlFormat::Depth32Float_Stencil8);
       if (m_depthBiasScale != rValue || m_depthBiasFloatDs != isFloat) {
         m_depthBiasScale = rValue;
         m_depthBiasFloatDs = isFloat;
@@ -2170,8 +2173,9 @@ namespace dxvk {
     m_state.viewport.MinZ = pViewport->MinZ;
     m_state.viewport.MaxZ = pViewport->MinZ < pViewport->MaxZ ? pViewport->MaxZ : pViewport->MinZ + 0.001f;
 
-    // The VS depth bias is DEPTHBIAS / the depth range.
-    if (oldMinZ != m_state.viewport.MinZ || oldMaxZ != m_state.viewport.MaxZ)
+    // The VS depth bias is DEPTHBIAS / the depth range (D9MT_DEPTH_BIAS_VS=1 only).
+    if (D3D9DepthBiasVsEnabled()
+     && (oldMinZ != m_state.viewport.MinZ || oldMaxZ != m_state.viewport.MaxZ))
       m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
 
     m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
@@ -8901,8 +8905,12 @@ namespace dxvk {
     m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared,
                 D3D9DeviceDirtyFlag::PushDataVs,
                 D3D9DeviceDirtyFlag::PushDataFfvs,
-                D3D9DeviceDirtyFlag::PushDataVsDepthBias,
                 D3D9DeviceDirtyFlag::PushDataFfps);
+
+    // Only rewritten vertex shaders declare the depth-bias push block
+    // (D9MT_DEPTH_BIAS_VS=1): off, nothing reads it and it's never uploaded.
+    if (D3D9DepthBiasVsEnabled())
+      m_dirty.set(D3D9DeviceDirtyFlag::PushDataVsDepthBias);
   }
 
 
