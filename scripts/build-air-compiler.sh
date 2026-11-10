@@ -41,8 +41,15 @@ CXX="${CXX:-clang++}"
 # reference path: git clone https://github.com/KhronosGroup/SPIRV-Cross
 SC="${SPIRV_CROSS_DIR:-$V2/third_party/SPIRV-Cross}"
 [ -f "$SC/spirv_msl.cpp" ] || { echo "FATAL: SPIRV-Cross sources not at $SC (set SPIRV_CROSS_DIR)" >&2; exit 1; }
+# dxbc-spirv's SPIR-V back end (the reference path) includes its SPIRV-Headers submodule, which
+# scripts/fetch-deps.sh doesn't check out (d3d9.dll and winemetal.so don't compile spirv/).
+[ -f "$DX/submodules/spirv_headers/include/spirv/unified1/spirv.hpp" ] \
+  || { echo "FATAL: no SPIR-V headers in $DX (git -C third_party/dxbc-spirv submodule update --init submodules/spirv_headers)" >&2; exit 1; }
 COMMON_FLAGS=(-arch "$LLVM_ARCH" -std=c++17 -O1 -g -I"$DX" -I"$DX/ir" -I"$SC" -Wno-unused-parameter)
-LLVM_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags | sed 's/-std=c++14//')"
+# d9mt's own LLVM is built without exceptions and RTTI, and its llvm-config says so; air/ throws
+# (air_builder.cpp), and winemetal.so compiles the same files with both on (build-d9mtair.sh).
+# So drop the two flags, like the C++ standard.
+LLVM_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags | sed 's/-std=c++14//; s/-fno-exceptions//; s/-fno-rtti//')"
 
 SRCS=(
   "$DX"/ir/*.cpp
