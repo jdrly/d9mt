@@ -2,30 +2,64 @@
 # Build the host-side AIR compiler CLI (SM3 bytecode -> IR -> AIR/metallib).
 #
 # Links the vendored dxbc-spirv front-end (sm3 + ir + util) with the v2 AIR
-# backend (v2/air). Host arm64 dev tool (reference metallibs for the bridge
-# smoke test and scripts/run-air-diff.sh).
+# backend (v2/air). Host dev tool (reference metallibs for the bridge smoke
+# test and scripts/run-air-diff.sh), built for the LLVM libraries'
+# architecture (d9mt's own toolchain: x86_64).
 #
-# Objects cached per-TU in build/air-compiler/obj; stale check is mtime-based.
+# Objects cached per-TU in build/air-compiler/obj-<arch>; stale check is mtime-based.
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 DX="$V2/third_party/dxbc-spirv"
 BUILD="$V2/build/air-compiler"
-OBJ="$BUILD/obj"
+OBJ="$BUILD/obj"   # per LLVM architecture, below
 # D9MT_JOBS: the most compiles running at once; 1 compiles one TU at a time.
 JOBS="${D9MT_JOBS:-10}"
 [[ "$JOBS" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "FATAL: D9MT_JOBS must be a whole number from 1 to 999, not '$JOBS'" >&2; exit 1; }
-mkdir -p "$OBJ"
 
-LLVM_CONFIG="${LLVM_CONFIG:-/opt/homebrew/opt/llvm@15/bin/llvm-config}"
-[ -x "$LLVM_CONFIG" ] || { echo "FATAL: need brew llvm@15" >&2; exit 1; }
+# LLVM 15: $LLVM_CONFIG, else d9mt's own toolchain (toolchains/llvm-build, x86_64:
+# `ninja -C toolchains/llvm-build llvm-config llvm-dis`), else Homebrew's llvm@15.
+if [ -z "${LLVM_CONFIG:-}" ]; then
+  for c in "$V2/toolchains/llvm-build/bin/llvm-config" /opt/homebrew/opt/llvm@15/bin/llvm-config; do
+    [ -x "$c" ] && { LLVM_CONFIG=$c; break; }
+  done
+fi
+[ -n "${LLVM_CONFIG:-}" ] && [ -x "$LLVM_CONFIG" ] \
+  || { echo "FATAL: need LLVM 15's llvm-config (ninja -C toolchains/llvm-build llvm-config, brew llvm@15, or LLVM_CONFIG)" >&2; exit 1; }
+# AIR's LLVM era is exactly 15.0.7: no other version, and no falling back to another candidate.
+LLVM_VERSION="$("$LLVM_CONFIG" --version 2>/dev/null || true)"
+[ "$LLVM_VERSION" = 15.0.7 ] \
+  || { echo "FATAL: $LLVM_CONFIG is LLVM '${LLVM_VERSION:-unknown}', not 15.0.7 (AIR's LLVM)" >&2; exit 1; }
+# Build for the architecture of the LLVM libraries: d9mt's toolchain is x86_64 (the tools then run
+# under Rosetta); Homebrew's is arm64.
+LLVM_ARCH=$(lipo -archs "$("$LLVM_CONFIG" --libdir)/libLLVMCore.a" 2>/dev/null | awk '{print $1}')
+LLVM_ARCH=${LLVM_ARCH:-$(uname -m)}
+OBJ="$OBJ-$LLVM_ARCH"
+mkdir -p "$OBJ"
 
 CXX="${CXX:-clang++}"
 # SPIRV-Cross sources (Apache-2.0), only for this host dev tool's SPIR-V/MSL
 # reference path: git clone https://github.com/KhronosGroup/SPIRV-Cross
 SC="${SPIRV_CROSS_DIR:-$V2/third_party/SPIRV-Cross}"
 [ -f "$SC/spirv_msl.cpp" ] || { echo "FATAL: SPIRV-Cross sources not at $SC (set SPIRV_CROSS_DIR)" >&2; exit 1; }
-COMMON_FLAGS=(-std=c++17 -O1 -g -I"$DX" -I"$DX/ir" -I"$SC" -Wno-unused-parameter)
-LLVM_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags | sed 's/-std=c++14//')"
+# dxbc-spirv's SPIR-V back end (the reference path) includes its SPIRV-Headers submodule, which
+# scripts/fetch-deps.sh doesn't check out (d3d9.dll and winemetal.so don't compile spirv/).
+[ -f "$DX/submodules/spirv_headers/include/spirv/unified1/spirv.hpp" ] \
+  || { echo "FATAL: no SPIR-V headers in $DX (git -C third_party/dxbc-spirv submodule update --init submodules/spirv_headers)" >&2; exit 1; }
+COMMON_FLAGS=(-arch "$LLVM_ARCH" -std=c++17 -O1 -g -I"$DX" -I"$DX/ir" -I"$SC" -Wno-unused-parameter)
+# d9mt's own LLVM is built without exceptions and RTTI, and its llvm-config says so; air/ throws
+# (air_builder.cpp), and winemetal.so compiles the same files with both on (build-d9mtair.sh).
+# So drop the two flags, like the C++ standard: whole words only, never part of another flag or
+# of a path. llvm-config prints a list of flags: split into words on purpose.
+LLVM_ALL_CXXFLAGS="$("$LLVM_CONFIG" --cxxflags)" \
+  || { echo "FATAL: $LLVM_CONFIG --cxxflags failed" >&2; exit 1; }
+LLVM_CXXFLAGS=""
+# shellcheck disable=SC2086
+for flag in $LLVM_ALL_CXXFLAGS; do
+  case "$flag" in
+    -std=c++14|-fno-exceptions|-fno-rtti) ;;
+    *) LLVM_CXXFLAGS+=" $flag" ;;
+  esac
+done
 
 SRCS=(
   "$DX"/ir/*.cpp
