@@ -1001,7 +1001,7 @@ namespace dxvk {
       if (likely(!hitch::g_enabled) || api == m_profApi)
         return;
       m_profApi = api;
-      EmitCs([cApi = uint32_t(api)] (MtlContext* ctx) {
+      EmitCsAs<DxvkCsCmdKind::Prof>([cApi = uint32_t(api)] (MtlContext* ctx) {
         ctx->setApiTag(cApi);
       });
     }
@@ -1166,26 +1166,39 @@ namespace dxvk {
 
     template<bool AllowFlush = true, typename Cmd>
     void EmitCs(Cmd&& command) {
+      EmitCsAs<DxvkCsCmdKind::Other, AllowFlush>(std::forward<Cmd>(command));
+    }
+
+    // EmitCs with the command's kind, for D9MT_PROFILE's PROF-CS line (driver/cs/dxvk_cs_stats.h).
+    // The kind is a template argument of the command class only: the lambda is built, moved and
+    // packed exactly as by EmitCs.
+    template<DxvkCsCmdKind Kind, bool AllowFlush = true, typename Cmd>
+    void EmitCsAs(Cmd&& command) {
       if (unlikely(m_csDataType != D3D9CmdType::None)) {
         m_csData = nullptr;
         m_csDataType = D3D9CmdType::None;
       }
 
-      if (unlikely(!m_csChunk->push(command))) {
+      if (unlikely(!m_csChunk->push<Kind>(command))) {
         EmitCsChunk(std::move(m_csChunk));
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
           ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
-        m_csChunk->push(command);
+        m_csChunk->push<Kind>(command);
       }
     }
 
     template<typename M, bool AllowFlush = true, typename Cmd>
     DxvkCsDataBlock* EmitCsCmd(D3D9CmdType type, size_t count, Cmd&& command) {
+      return EmitCsCmdAs<M, DxvkCsCmdKind::Other, AllowFlush>(type, count, std::forward<Cmd>(command));
+    }
+
+    template<typename M, DxvkCsCmdKind Kind, bool AllowFlush = true, typename Cmd>
+    DxvkCsDataBlock* EmitCsCmdAs(D3D9CmdType type, size_t count, Cmd&& command) {
       m_csDataType = type;
-      m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
+      m_csData = m_csChunk->pushCmd<M, Cmd, Kind>(command, count);
 
       if (unlikely(!m_csData)) {
         EmitCsChunk(std::move(m_csChunk));
@@ -1194,7 +1207,7 @@ namespace dxvk {
         if constexpr (AllowFlush)
           ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
 
-        m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
+        m_csData = m_csChunk->pushCmd<M, Cmd, Kind>(command, count);
       }
 
       return m_csData;
