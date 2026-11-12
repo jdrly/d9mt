@@ -213,6 +213,32 @@ jobs:
           path: ${{ runner.temp }}/codegen-digests.txt
           retention-days: 30
 
+      # The AIR corpus through the driver's compile path (airlib_loopback) for AIR targets 26 and
+      # 27, for the metallib-load job, which loads them on a real macOS 26. Here, on macOS 27,
+      # both targets must load and compile: that shows the loader works where it should.
+      - name: AIR corpus metallibs
+        run: |
+          out="$RUNNER_TEMP/air-metallibs"
+          for os in 26 27; do
+            mkdir -p "$out/t$os"
+            for bin in air/tests/bin/*.bin; do
+              if ! env -u D9MT_AIR_LEGACY "D9MT_AIR_MACOS=$os" build/airlib/airlib_loopback build/airlib/d9mtair.so \
+                     "$bin" "$out/t$os/$(basename "$bin" .bin).metallib" > "$RUNNER_TEMP/loopback.txt" 2>&1; then
+                echo "::error::airlib_loopback failed on $bin for AIR target $os"
+                cat "$RUNNER_TEMP/loopback.txt"
+                exit 1
+              fi
+            done
+          done
+          .github/metallib-load.sh "$out" 26=loads 27=loads
+
+      - name: Keep the AIR corpus metallibs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: air-metallibs
+          path: ${{ runner.temp }}/air-metallibs
+          retention-days: 7
+
       # build-driver.sh keeps a committed metallib header whose sources changed when it lacks the
       # tools to regenerate it, and only warns. Here that fails, and so does a regenerated header:
       # a pull request that changes a shader source commits the new header.
@@ -403,6 +429,31 @@ jobs:
           BUILD: 1
           D9MT_JOBS: 4
         run: scripts/test-build-deps.sh
+
+  # d9mt's AIR metallibs on a real macOS 26. macOS 26 accepts AIR 2.8 at most: a metallib tagged
+  # 2.9 gave every macOS 26 player a black screen (2026-10-28, #110). The build job compiles the
+  # AIR corpus for targets 26 and 27; this job loads both with macOS 26's Metal through the
+  # classic API and builds render pipelines from them (.github/metallib-load.sh and .m). Target 26
+  # must load and compile. Target 27 is the control: macOS 26 must reject it at
+  # newLibraryWithData, or this job couldn't tell a wrong target from a right one.
+  # The device is the Apple Paravirtual device. A pass says macOS 26's Metal takes the
+  # container and the AIR; it says nothing about an Apple GPU's compiler back end or Metal 4.
+  metallib-load:
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: air-metallibs
+          path: ${{ runner.temp }}/air-metallibs
+
+      - name: Load the AIR corpus with macOS 26's Metal
+        run: .github/metallib-load.sh "$RUNNER_TEMP/air-metallibs" 26=loads 27=rejects
 
   # What a hosted runner's Metal device can do, in the job summary. No check depends on it: it
   # says whether the tests that need a GPU (and later the hash suite under Wine) could run here.
