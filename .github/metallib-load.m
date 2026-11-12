@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
     pd.fragmentFunction = ps;
     pd.vertexDescriptor = vd;
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;  // a pixel shader may write depth (oDepth)
     NSError *err = nil;
     id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:pd error:&err];
     if (!pso) {
@@ -109,6 +110,11 @@ int main(int argc, char **argv) {
     rp.colorAttachments[0].texture = target;
     rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    td.pixelFormat = MTLPixelFormatDepth32Float;
+    rp.depthAttachment.texture = [device newTextureWithDescriptor:td];
+    rp.depthAttachment.loadAction = MTLLoadActionClear;
+    rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+    rp.depthAttachment.clearDepth = 1.0;
 
     id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
