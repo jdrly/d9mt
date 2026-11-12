@@ -47,6 +47,10 @@ builds are tested, so a base from before the runner existed works too.
   exit status is 1 when the run itself is unusable and 3 when the GPU was lost or hung
   (`D9MT-GPU-LOST`, `D9MT-GPU-HUNG`): no verdict, run it again. A program's own exit status
   and `FAIL` lines are data for the comparison.
+- A program that Wine kills at exit (`rc=137`, issue #164) after it printed every frame runs
+  once more, and the second run counts. `stats.txt` names it under `exit-kill-reruns`. If the
+  second run draws other frames than the first, the program isn't deterministic: its line
+  gets a `FAIL`, `stats.txt` names it under `rerun-differs`, and the runner exits 1.
 - `scripts/cmp-hash-runs.py` fails when a common program's frames differ (`code_mtlock` aside),
   a program is gone, head isn't clean, or head has a program not named in `--new`.
   `--allow-notclean` excuses a program only where base is unclean in the same way. With
