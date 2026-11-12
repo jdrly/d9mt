@@ -70,6 +70,7 @@ for t in $TARGETS; do
 done
 
 status=0
+PROBE_OK=0
 BASE_TREE=""
 cleanup() { [ -z "$BASE_TREE" ] || { git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; }; }
 trap cleanup EXIT
@@ -106,6 +107,7 @@ set_probe() {
     return 3
   fi
   note "ok: probe: $(sed -n 's/^default device: \(.*\) (registryID.*/\1/p' "$OUT/metal-probe.txt"), $(grep '^supportsFamily' "$OUT/metal-probe.txt")"
+  PROBE_OK=1
 }
 
 # in_tree <tree> <command...>: the command with <tree> as its working directory
@@ -215,7 +217,8 @@ set_hash() {
   return "$rc"
 }
 
-# The system log of the run's interval, for GPU faults the driver's own lines may miss.
+# The system log of the run's interval: the evidence of a GPU fault, and the faults the driver's
+# own lines may miss. Kept whenever the GPU was used, whatever the verdict so far.
 system_log() {
   local n
   if log show --start "@$START" --end "@$(date +%s)" --style compact --predicate \
@@ -249,9 +252,11 @@ case "$SET" in
     fi ;;
   *) echo "unknown set: $SET" >&2; exit 64 ;;
 esac
+# After any set that used the GPU (the probe passed), also when a gate failed or a run ended
+# with no verdict: that is when the log is needed most. worst() keeps a failure a failure.
 case "$SET" in
   probe|build) ;;
-  *) [ "$status" = 3 ] || run_set system_log ;;
+  *) [ "$PROBE_OK" != 1 ] || run_set system_log ;;
 esac
 note "after: $(machine)"
 note "verdict: $(case "$status" in 0) echo pass ;; 3) echo "no verdict" ;; *) echo FAIL ;; esac)"
