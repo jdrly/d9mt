@@ -47,8 +47,8 @@ jobs:
     # checks compare d9mt's output with what Apple's toolchain writes for macOS 26 and 27, and
     # test-air-cache-lineage.sh expects a macOS 27 host, so macos-26 (Xcode 26) can't run them.
     runs-on: xcode-27
-    # About 40 minutes with LLVM in the cache. A cold run builds LLVM first.
-    timeout-minutes: 150
+    # About 25 minutes with LLVM in the cache, about 50 when it has to build LLVM first.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -243,8 +243,10 @@ jobs:
             exit 1
           fi
 
-      # Failed 2 cases in one job environment on my Mac and passed in another: its cases depend
-      # on the caller's environment (OLDPWD, SHLVL). Not blocking until that is settled.
+      # Its cases depend on the caller's environment. On my Mac 2 failed in one job environment
+      # and none in another. On a hosted runner 5 fail: the two "two callers" cases (OLDPWD,
+      # SHLVL) and the three RUN_WRAPPER cases, which expect a caller at nice 0 (the runner's
+      # shell runs at nice -10). Not blocking until the test stops depending on its caller.
       - name: test-perf-abba.sh (not blocking)
         continue-on-error: true
         run: |

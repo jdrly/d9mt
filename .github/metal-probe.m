@@ -79,7 +79,9 @@ static void metal4_part(id<MTLDevice> d) {
 }
 
 static void textures_part(id<MTLDevice> d) {
-  static const NSUInteger widths[] = { 4096, 8192, 16384, 32768 };
+  // Not wider: Metal aborts in the descriptor's validation above the device's maximum (16384 on
+  // the hosted runners' device), also without the debug layer.
+  static const NSUInteger widths[] = { 4096, 8192, 16384 };
   NSUInteger widest = 0;
   for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
     say(@"2D texture %lu x 1: trying", (unsigned long)widths[i]);
@@ -93,7 +95,7 @@ static void textures_part(id<MTLDevice> d) {
       break;
     widest = widths[i];
   }
-  say(@"max texture size: %lu (the widest 2D texture created, of 4096 to 32768)", (unsigned long)widest);
+  say(@"max texture size: at least %lu (the widest 2D texture created, of 4096 to 16384)", (unsigned long)widest);
 }
 
 int main(int argc, char **argv) {
