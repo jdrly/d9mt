@@ -10,7 +10,7 @@
 //   3  newLibraryWithData refused a library (Metal's error text follows)
 //   4  a library has no function "main"
 //   5  newRenderPipelineStateWithDescriptor failed
-//   6  the command buffer ended with an error
+//   6  no command queue, buffer or encoder, or the command buffer didn't complete
 //   2  usage, an unreadable file, or no Metal device: nothing was tested
 // The constant buffers are those air/tools/air_render_test.mm binds for the compiler's shaders;
 // the vertex layout comes from the vertex function's own attributes. No texture is bound and
@@ -116,8 +116,13 @@ int main(int argc, char **argv) {
     rp.depthAttachment.storeAction = MTLStoreActionDontCare;
     rp.depthAttachment.clearDepth = 1.0;
 
-    id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    if (!queue || !cb || !enc) {  // a message to nil would "draw" nothing and report no error
+      printf("no %s: nothing was drawn\n", !queue ? "command queue" : !cb ? "command buffer" : "render encoder");
+      return 6;
+    }
     [enc setRenderPipelineState:pso];
     [enc setVertexBuffer:bVsC offset:0 atIndex:0];
     [enc setVertexBuffer:bClip offset:0 atIndex:1];
@@ -129,8 +134,9 @@ int main(int argc, char **argv) {
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    if (cb.error) {
-      printf("the command buffer failed: %s\n", cb.error.localizedDescription.UTF8String);
+    if (cb.error || cb.status != MTLCommandBufferStatusCompleted) {
+      printf("the command buffer didn't complete (status %lu): %s\n", (unsigned long)cb.status,
+             cb.error ? cb.error.localizedDescription.UTF8String : "no error object");
       return 6;
     }
     printf("loaded, compiled and drawn\n");
