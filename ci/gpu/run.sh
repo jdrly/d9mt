@@ -197,8 +197,9 @@ hash_run() {
   [ "$target" = host ] || tenv=("D9MT_AIR_MACOS=$target")
   # this checkout's runner and harness for both trees: a base from before the runner existed
   # has neither, and two runners would be two harnesses
+  # without the caller's CACHE: base and head each start on empty caches of their own
   queued "hash $label" "$MEM_HASH" --wine "$WORK/hash-$label" \
-    env ${tenv[@]+"${tenv[@]}"} SRC="$tree" VARIANT="$variant" WORK="$WORK/hash-$label" "$V2/scripts/run-hash-tests.sh" \
+    env -u CACHE ${tenv[@]+"${tenv[@]}"} SRC="$tree" VARIANT="$variant" WORK="$WORK/hash-$label" "$V2/scripts/run-hash-tests.sh" \
     > "$OUT/$label.log" 2>&1 || rc=$?
   if [ "$QUEUE_RC" != 0 ]; then
     note "NO VERDICT: the queue ended the $label run (exit $rc): $(grep '^ciq: ' "$OUT/$label.log" | tail -n 1)"

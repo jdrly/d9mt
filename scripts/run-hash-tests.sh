@@ -4,7 +4,7 @@
 # this tree's d3d9.dll and bridge, and writes each program's frame hashes. Two runs are compared
 # with scripts/cmp-hash-runs.py: the Definition of Done's "hash suite equals base".
 #
-#   ENGINE=<wine root> [VARIANT=<name>] [WORK=<dir>] scripts/run-hash-tests.sh [--build-only] [code_xxx...]
+#   ENGINE=<wine root> [VARIANT=<name>] [WORK=<dir>] [CACHE=<dir>] scripts/run-hash-tests.sh [--build-only] [code_xxx...]
 #
 # ENGINE    an x86_64 Wine install (bin/wine, lib/wine/x86_64-unix; it runs under Rosetta).
 #           It is cloned into WORK; the original is never written.
@@ -21,6 +21,11 @@
 # WORK      a scratch folder, removed and made again (default ${TMPDIR:-/tmp}/d9mt-hash). The
 #           engine clone, a new prefix, d9mt's caches and every log live there, nothing else is
 #           written.
+# CACHE     a folder of the caller's for d9mt's three caches (the AIR cache, the PSO archives,
+#           the state cache) instead of WORK/cache. It is used as it is found and left behind,
+#           so a second run starts on what the first one wrote: a run of base, then head on
+#           base's caches. It must lie outside WORK. After the run WORK/cache.txt lists its PSO
+#           folders and the AIR cache's tables with their row counts.
 # VD=1      every window on a temporary virtual display: VD_DIR must name a folder with
 #           with-vd.sh and d9h-vd.h (a tool outside this repository). Without it the windows
 #           open on the main display.
@@ -73,6 +78,15 @@ SRC_ENGINE="${ENGINE:?set ENGINE to a Wine root}"
 [ -d "$SRC_ENGINE/lib/wine/x86_64-unix" ] || { echo "FATAL: $SRC_ENGINE is no x86_64 Wine install" >&2; exit 1; }
 WORK="${WORK:-${TMPDIR:-/tmp}/d9mt-hash}"
 ENG="$WORK/engine"
+KEEP_CACHE=0
+if [ -n "${CACHE:-}" ]; then
+  KEEP_CACHE=1
+  mkdir -p "$CACHE" "$WORK"
+  CACHE="$(cd "$CACHE" && pwd -P)"
+  case "$CACHE/" in "$(cd "$WORK" && pwd -P)"/*) echo "FATAL: CACHE ($CACHE) lies inside WORK, which is removed first" >&2; exit 1 ;; esac
+else
+  CACHE="$WORK/cache"
+fi
 DLL="${DLL:-$SRC/build/driver-x64/d3d9.dll}"
 [ -f "$DLL" ] || { echo "FATAL: $DLL missing (ARCH=x64 scripts/build-driver.sh)" >&2; exit 1; }
 BRIDGE="${BRIDGE:-$([ -f "$SRC/build/bridge/winemetal.so" ] && echo build || echo engine)}"
@@ -111,8 +125,9 @@ wait_for_game() {
 }
 
 echo "[hash] tree $SRC, engine $SRC_ENGINE, dll $DLL, bridge $BRIDGE, variant $VARIANT, work $WORK" >&2
+[ "$KEEP_CACHE" = 0 ] || echo "[hash] caches in $CACHE, kept" >&2
 rm -rf "$WORK"
-mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/cache"
+mkdir -p "$WORK/bin" "$WORK/logs" "$CACHE"
 cp -cR "$SRC_ENGINE" "$ENG" 2>/dev/null || cp -R "$SRC_ENGINE" "$ENG"   # an APFS clone where it can
 if [ "$BRIDGE" = build ]; then
   cp "$SRC/build/bridge/winemetal64.dll" "$ENG/lib/wine/x86_64-windows/winemetal.dll"
@@ -134,7 +149,7 @@ clang -O1 "$WORK/pidpath.c" -o "$WORK/pidpath"
 export WINEPREFIX="$WORK/prefix" WINEDEBUG="${WINEDEBUG:--all}" WINEMSYNC="${WINEMSYNC:-1}"
 export WINEDLLOVERRIDES="mscoree,mshtml=;d3d9=n,b"
 export NEUTRON_MSYNC="${NEUTRON_MSYNC:-0}"
-export D9MT_AIR_CACHE="$WORK/cache/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$WORK/cache/pso" D9MT_STATE_CACHE="$WORK/cache/state"
+export D9MT_AIR_CACHE="$CACHE/air-cache.sqlite3" D9MT_PSO_ARCHIVE_DIR="$CACHE/pso" D9MT_STATE_CACHE="$CACHE/state"
 unset WINELOADER WINESERVER WINEDLLPATH
 # CrossOver 26-style engines carry compatdb: keep its DXMT tree from shadowing our bridge.
 [ -f "$ENG/lib/wine/x86_64-unix/compatdb.so" ] && export WINE_COMPATDB='v=5
@@ -240,6 +255,21 @@ done
 stop_wine
 left_rc=0
 leftovers || left_rc=1
+if [ "$KEEP_CACHE" = 1 ]; then
+  {
+    echo "# PSO folders of $CACHE/pso, with the files in each"
+    for d in "$CACHE"/pso/*/; do
+      [ -d "$d" ] || continue
+      echo "$(basename "$d") files=$(find "$d" -type f | wc -l | tr -d ' ')"
+    done
+    echo "# AIR cache tables"
+    if [ -f "$CACHE/air-cache.sqlite3" ] && command -v sqlite3 >/dev/null; then
+      for tb in $(sqlite3 "$CACHE/air-cache.sqlite3" "select name from sqlite_master where type='table' order by name"); do
+        echo "$tb rows=$(sqlite3 "$CACHE/air-cache.sqlite3" "select count(*) from \"$tb\"")"
+      done
+    fi
+  } > "$WORK/cache.txt" 2>&1 || true
+fi
 
 count() { cat "$WORK"/logs/*.err "$WORK"/logs/*.out 2>/dev/null | grep "$@" || true; }
 validation="$(cat "$WORK"/logs/*.err 2>/dev/null | grep -v 'Validation Enabled' | grep -c -i -E 'validation|failed assertion|MTLDebug' || true)"
