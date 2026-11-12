@@ -49,6 +49,13 @@ scripts/cmp-hash-runs.py <scratch>/base/hashes.txt <scratch>/head/hashes.txt
 - `--build-only` stops before the first program: it is what CI runs, since the hosted runners
   have no Metal 4.
 
+`ci/gpu/run.sh <set> <out dir>` is the entry point for a Mac with a real GPU: `probe` (the Metal
+device must be an Apple GPU with Metal 4, else exit status 3, no verdict), `build`, `gpu-tests`
+(the native tests plus `test-commit-feedback.sh` and `test-compile-mt.sh`), `hash` (builds `BASE`
+in a worktree, runs both for the spec's `variants=` and `targets=`, compares each pair) and
+`merged-main` (`gpu-tests`, then `hash` against the commit's first parent for AIR targets 26 and
+27). It writes one line per step to `<out dir>/summary.md`.
+
 ## Native unit tests
 
 No Wine or GPU needed, from the repo root:
@@ -212,7 +219,8 @@ its own that a later push doesn't cancel. Its jobs:
     `jdrly/wine-engine`, fetched with `gh release download` under the run's read-only token,
     three tries, then checked against its SHA-256), in a prefix `test-fatal-log.sh` makes.
   - `scripts/run-hash-tests.sh --build-only` builds every hash suite program and makes the
-    runner's prefix; no program runs.
+    runner's prefix; no program runs. `ci/gpu/run.sh probe` must end with exit status 3 there:
+    the hosted runner has no Metal 4.
   - `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
   - `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the
     caller's environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the
