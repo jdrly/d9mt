@@ -237,8 +237,21 @@ jobs:
       - name: The builds leave tracked files as committed
         run: git diff --exit-code
 
+      # run-native-tests.sh names a failed test's log file and doesn't print it; the step after
+      # it does, so a failure can be read in the run.
       - name: Native tests
-        run: scripts/run-native-tests.sh
+        run: scripts/run-native-tests.sh 2>&1 | tee "$RUNNER_TEMP/native-tests.txt"
+
+      - name: Logs of the native tests that failed
+        if: failure()
+        run: |
+          [ -f "$RUNNER_TEMP/native-tests.txt" ] || exit 0
+          sed -n 's/^[A-Za-z0-9_]*: FAIL (\(.*\))$/\1/p' "$RUNNER_TEMP/native-tests.txt" | sed 's/^build, //' |
+            while IFS= read -r log; do
+              echo "::group::$log"
+              tail -n 100 "$log" || true
+              echo "::endgroup::"
+            done
 
       # test-state-cache.sh, test-pso-key-hash.sh and test-residency.sh compile driver sources
       # against DXVK's native Windows headers: v3.0.2 (driver/UPSTREAM), with the directx
