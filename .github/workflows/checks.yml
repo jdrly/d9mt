@@ -85,7 +85,7 @@ jobs:
           echo "$brew_bin" >> "$GITHUB_PATH"
           sw_vers
           xcodebuild -version
-          echo "Xcodes on this image: $(ls -d /Applications/Xcode*.app | tr '\n' ' ')"
+          echo "Xcodes on this image:" /Applications/Xcode*.app
           echo "SDK $(xcrun -sdk macosx --show-sdk-version), $(uname -m), $(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) >> 30 )) GB"
           "$brew_bin/bash" --version | head -1
           x86_64-w64-mingw32-g++ --version | head -1
@@ -168,13 +168,28 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # What the id is made of, file by file: the normalized digest scripts/air-codegen-id.py gives
-      # each object and each LLVM archive of build-bridge.sh's CODEGEN_OBJS. Two builds with
-      # different ids differ in the files whose lines differ, which says whether the compiler or
-      # the LLVM build moved the id. The list below repeats CODEGEN_OBJS; the step fails when the
-      # id of its list isn't the build's, so a change to that array has to be made here too.
+      # each object and each LLVM archive of build-bridge.sh's CODEGEN_OBJS, in the build's order.
+      # Two builds with different ids differ in the files whose lines differ, or in the order.
+      # The order comes from the shell's globs, which sort by the locale's collation, so the step
+      # also prints the id for byte order (LC_ALL=C). The list below repeats CODEGEN_OBJS with
+      # the same globs in the same shell; the step fails when its id isn't the build's, so a
+      # change to that array has to be made here too.
       - name: AIR codegen digests
         run: |
-          python3 -I .github/codegen-digests.py > "$RUNNER_TEMP/codegen-digests.txt"
+          shopt -s nullglob
+          obj=build/bridge/obj
+          airlib=build/airlib/obj
+          files=(
+            "$obj/airlib_unix_renamed.o" "$obj/air_cache.c.o" "$obj/cache.c.o"
+            "$airlib"/third_party_dxbc-spirv_ir_*.o
+            "$airlib"/third_party_dxbc-spirv_util_*.o
+            "$airlib/air_air_builder.cpp.o" "$airlib/air_air_metallib.cpp.o"
+            toolchains/llvm-x86_64/lib/libLLVM*.a
+          )
+          {
+            echo "LANG=${LANG-unset} LC_ALL=${LC_ALL-unset} LC_COLLATE=${LC_COLLATE-unset}"
+            python3 -I .github/codegen-digests.py "${files[@]}"
+          } > "$RUNNER_TEMP/codegen-digests.txt" || { cat "$RUNNER_TEMP/codegen-digests.txt"; exit 1; }
           {
             echo "<details><summary>AIR codegen digests, file by file</summary>"
             echo
@@ -183,6 +198,7 @@ jobs:
             echo '```'
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
+          tail -2 "$RUNNER_TEMP/codegen-digests.txt"
 
       - name: Keep the AIR codegen digests
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
