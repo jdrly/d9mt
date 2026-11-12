@@ -23,7 +23,8 @@
  * cross-run, the whole line (px included) must equal the D9MT_DEPTH_BIAS_VS=0 run's (paths that
  * keep the hardware bias); I: informational. A norast line is a sample of a cell whose witness
  * (the same geometry with B = 0) drew nothing: this GPU doesn't rasterize that geometry, so the
- * sample says nothing about the bias and counts as neither ok nor FAIL (rows Q and J). "legacy" is
+ * sample says nothing about the bias and counts as neither ok nor FAIL (rows Q and J), unless the
+ * biased draw put red there, which is coverage the bias added: FAIL. "legacy" is
  * the B*2^(e+1) hardware model (informational). D3D9 pixel centres are at integer coordinates
  * (d9mt offsets the viewport by half a pixel), so pixel (px, py) is sampled at (px, py). A depth
  * sample's want comes from the oracle
@@ -650,8 +651,11 @@ static void check_cell(int ms, const Cell *c) {
     }
 
     if (norast) {
-      report(ms, c, sname, want, got, p, legacy, "norast");
-      nNorast++;
+      /* nothing is drawn without the bias, so nothing may be drawn with it: red here is coverage
+       * the bias added, a driver failure whatever the sample's want */
+      int added = red_present(p);
+      report(ms, c, sname, want, got, p, legacy, added ? "FAIL" : "norast");
+      if (added) nFail++; else nNorast++;
       continue;
     }
 
@@ -953,7 +957,8 @@ static void build(void) {
    * base build too. Seven lines failed there for that reason, and the other Q and J lines passed
    * for it. So every Q and J cell has a witness, the same geometry with B = 0, and gates only
    * when the witness is red. Where it isn't, the rows are norast: on that GPU the boundary can't
-   * be seen by drawing, and this test says nothing about the shader's domain compares. */
+   * be seen by drawing, and this test says nothing about the shader's domain compares. One
+   * check survives a blank witness: the biased draw must stay blank too (red there is a FAIL). */
 
   /* Q: w = 2^126 (in the domain) and 2^127 (out: bias dropped); the witness is Q?a's control */
   for (int q = 0; q < 2; q++) {

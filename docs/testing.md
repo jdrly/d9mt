@@ -226,7 +226,8 @@ the cross-run comparisons compare bytes, not only the colour class. Fixture chec
 report `fixture-FAIL`, never a driver result. The domain rows (Q, J) draw triangles
 with a vertex at w = 2^126 or 2^127, which the M5 Max doesn't rasterize at all: each
 has a witness cell, the same geometry without a bias, and where the witness stays
-empty its lines read `norast` and count as neither ok nor FAIL.
+empty its lines read `norast` and count as neither ok nor FAIL (red in such a cell
+is still a FAIL: the bias added coverage).
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
