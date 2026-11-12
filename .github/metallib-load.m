@@ -12,8 +12,9 @@
 //   5  newRenderPipelineStateWithDescriptor failed
 //   6  the command buffer ended with an error
 //   2  usage, an unreadable file, or no Metal device: nothing was tested
-// The buffers and the vertex layout are those air/tools/air_render_test.mm binds for the
-// compiler's shaders. No texture is bound and no pixel is judged.
+// The constant buffers are those air/tools/air_render_test.mm binds for the compiler's shaders;
+// the vertex layout comes from the vertex function's own attributes. No texture is bound and
+// no pixel is judged.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -57,15 +58,19 @@ int main(int argc, char **argv) {
       return 4;
     }
 
+    // Every attribute the vertex function declares reads the same float4 from one buffer: the
+    // pipeline needs each of them described, and no pixel is judged. Buffer 27 is the index
+    // air/tools/air_diff_test.mm uses for vertices, clear of the shaders' own buffers.
+    enum { kVertexBuffer = 27 };
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
-    vd.attributes[0].format = MTLVertexFormatFloat4;
-    vd.attributes[0].offset = 0;
-    vd.attributes[0].bufferIndex = 3;
-    vd.attributes[1].format = MTLVertexFormatFloat4;
-    vd.attributes[1].offset = 16;
-    vd.attributes[1].bufferIndex = 3;
-    vd.layouts[3].stride = 32;
-    vd.layouts[3].stepFunction = MTLVertexStepFunctionPerVertex;
+    for (MTLVertexAttribute *a in vs.vertexAttributes) {
+      if (!a.active) continue;
+      vd.attributes[a.attributeIndex].format = MTLVertexFormatFloat4;
+      vd.attributes[a.attributeIndex].offset = 0;
+      vd.attributes[a.attributeIndex].bufferIndex = kVertexBuffer;
+    }
+    vd.layouts[kVertexBuffer].stride = 16;
+    vd.layouts[kVertexBuffer].stepFunction = MTLVertexStepFunctionPerVertex;
 
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = vs;
@@ -87,9 +92,9 @@ int main(int argc, char **argv) {
     psConstants[0] = psConstants[1] = psConstants[2] = psConstants[3] = 1.f;
     struct { uint32_t compareOp, precisionBits, alphaRef; } alphaTest = {8u, 8u, 0u};
     float verts[] = {
-      -1.f, -1.f, 0.f, 1.f,  1.f, 0.f, 0.f, 1.f,
-       3.f, -1.f, 0.f, 1.f,  0.f, 1.f, 0.f, 1.f,
-      -1.f,  3.f, 0.f, 1.f,  0.f, 0.f, 1.f, 1.f,
+      -1.f, -1.f, 0.5f, 1.f,
+       3.f, -1.f, 0.5f, 1.f,
+      -1.f,  3.f, 0.5f, 1.f,
     };
 #define BUF(x) [device newBufferWithBytes:&(x) length:sizeof(x) options:MTLResourceStorageModeShared]
     id<MTLBuffer> bVsC = BUF(vsConstants), bClip = BUF(clipPlanes), bPoint = BUF(pointArgs);
@@ -111,7 +116,7 @@ int main(int argc, char **argv) {
     [enc setVertexBuffer:bVsC offset:0 atIndex:0];
     [enc setVertexBuffer:bClip offset:0 atIndex:1];
     [enc setVertexBuffer:bPoint offset:0 atIndex:2];
-    [enc setVertexBuffer:bVerts offset:0 atIndex:3];
+    [enc setVertexBuffer:bVerts offset:0 atIndex:kVertexBuffer];
     [enc setFragmentBuffer:bPsC offset:0 atIndex:0];
     [enc setFragmentBuffer:bAlpha offset:0 atIndex:1];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
