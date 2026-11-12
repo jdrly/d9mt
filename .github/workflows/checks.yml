@@ -462,7 +462,8 @@ jobs:
   # must load and compile. Target 27 is the control: macOS 26 must reject it at
   # newLibraryWithData, or this job couldn't tell a wrong target from a right one.
   # The device is the Apple Paravirtual device. A pass says macOS 26's Metal takes the
-  # container and the AIR; it says nothing about an Apple GPU's compiler back end or Metal 4.
+  # container and the AIR and builds pipelines from it; it says nothing about an Apple GPU's
+  # compiler back end or Metal 4, and no pixel is read, so not that anything was drawn.
   metallib-load:
     needs: build
     runs-on: macos-26
