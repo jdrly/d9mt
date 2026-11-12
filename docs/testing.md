@@ -200,13 +200,20 @@ drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test
 the bridge's smoke test, and the hash suite. Those stay on a Mac, as the Definition of Done's
 evidence in the pull request.
 
-The job summary shows the build's AIR codegen id. It is CI's own, not the release id: the id
-digests the LLVM libraries, and the runner builds its own. The summary and the `codegen-digests`
-artifact also list the id's parts: the digest `scripts/air-codegen-id.py` gives each object and
-each LLVM archive of `CODEGEN_OBJS` (`.github/codegen-digests.py`). Comparing that list between
-two builds says which files moved the id. The step fails when its list no longer gives the
-build's id, which means `CODEGEN_OBJS` in `scripts/build-bridge.sh` changed and the list in
-`.github/codegen-digests.py` has to follow.
+The job summary shows the build's AIR codegen id. The runner builds its own LLVM with
+`scripts/build-llvm-unixside.sh`, and the bridge step runs under `LC_ALL=C`: the id hashes
+`CODEGEN_OBJS` in the order `scripts/build-bridge.sh`'s globs give, and globs sort by the locale's
+collation. The runner's default, `en_US.UTF-8`, sorts those file names differently from byte
+order on macOS 27 and gives another id over the same files. In byte order the runner's id of
+`83abcf1`'s code is `25fc2491…`, the id the 0.1.8 release build recorded on another Mac with
+another Xcode. No step compares the id with a recorded one.
+
+The summary and the `codegen-digests` artifact also list the id's parts: the digest
+`scripts/air-codegen-id.py` gives each object and each LLVM archive of `CODEGEN_OBJS`
+(`.github/codegen-digests.py`), in the build's order. Comparing that list between two builds says
+which files moved the id, or that only the order did. The step fails when its list no longer
+gives the build's id, which means `CODEGEN_OBJS` in `scripts/build-bridge.sh` changed and the
+list in the workflow has to follow.
 
 ## Benchmarks
 
