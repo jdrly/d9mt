@@ -214,8 +214,8 @@ its own that a later push doesn't cancel. Its jobs:
 - `lint` runs actionlint over the workflow. `shellcheck` over `scripts/` isn't part of it yet:
   the tree has 17 warnings under `shellcheck -S warning`.
 - `build` runs on `xcode-27`, GitHub's macOS 27 image with Xcode 27. It builds LLVM 15.0.7 for
-  x86_64 with `scripts/build-llvm-unixside.sh` (kept in the Actions cache, keyed by the recipe's
-  hash), then `scripts/fetch-deps.sh`, `scripts/build-bridge.sh` with `SMOKE=0` and
+  x86_64 with `scripts/build-llvm-unixside.sh` (kept in the Actions cache with `llvm-dis` and
+  `llvm-config`, keyed by the recipe's hash), then `scripts/fetch-deps.sh`, `scripts/build-bridge.sh` with `SMOKE=0` and
   `scripts/build-driver.sh` for x64 and x86, and fails if a build changes a tracked file or keeps
   a metallib header that is older than its shader sources. Then it runs
   `scripts/run-native-tests.sh` and these scripts: `test-air-versions.sh`, `test-air-forms.sh`,
@@ -238,14 +238,30 @@ its own that a later push doesn't cancel. Its jobs:
     `nice -n 3`: the runner's shell runs at nice -10, and the test expects a caller at nice 0.
   - `test-build-deps.sh` with `BUILD=1` (five x64 driver builds) runs only at night and in a run
     by hand with `full=true`.
+  - `scripts/run-air-diff.sh` runs for AIR targets 26 and 27, each with position invariance on
+    and off: every corpus case through d9mt's AIR compiler and through the reference path
+    (SPIRV-Cross to MSL to Apple's compiler), both rendered and compared pixel by pixel. Its
+    renderer uses Metal's classic API, which the runner's GPU has. SPIRV-Cross comes by commit
+    (`vulkan-sdk-1.4.357.0`), and `llvm-config` from the LLVM cache. A control compares d9mt's
+    output of one pixel shader with the reference of another and must fail on pixels, so
+    equal images can't mean that nothing was drawn.
+- `metallib-load` runs on `macos-26`, a real macOS 26. It loads the AIR corpus metallibs the
+  build job compiled for AIR targets 26 and 27 through Metal's classic API
+  (`.github/metallib-load.sh`, `.github/metallib-load.m`): target 26 must load, build its
+  render pipelines and draw; target 27 must be refused at `newLibraryWithData`, which is what
+  a metallib with too new a language version does to a macOS 26 player. On the build runner
+  (macOS 27) both targets must load.
 - `metal-probe` prints what the runner's Metal device can do into the job summary, on `macos-26`
   and `xcode-27`.
 
 The hosted runners' GPU is the Apple Paravirtual device, which doesn't support Metal 4
 (`supportsFamily` is true for Mac2 only, and `newMTL4CommandQueue` returns nil). So nothing that
 drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test-compile-mt.sh`,
-the bridge's smoke test, and the hash suite. Those stay on a Mac, as the Definition of Done's
-evidence in the pull request.
+the bridge's smoke test, and the hash suite. Those need a Mac with a real GPU
+(`ci/gpu/run.sh`), as the Definition of Done's evidence in the pull request. What does run
+there is Metal's classic API: air-diff and the metallib load. Their pixels and their compiles
+are the paravirtual device's, on that macOS; they say nothing about an Apple GPU's own
+compiler back end.
 
 The job summary shows the build's AIR codegen id. The runner builds its own LLVM with
 `scripts/build-llvm-unixside.sh`. The id hashes `CODEGEN_OBJS` in the array's order, and

@@ -383,6 +383,27 @@ jobs:
           done
           [ "$failed" = 0 ]
 
+      # The control for air-diff. Equal images could also mean that both sides drew nothing. So
+      # one comparison must fail on pixels: d9mt's AIR for ps_show against the reference for
+      # ps_sincos, another pixel shader, with the same vertex shader. The test must end FAIL
+      # with a largest difference above its tolerance of 2. A pass, or a failure at another
+      # stage (a library that doesn't load, a pipeline that doesn't build), fails this step.
+      - name: air-diff control
+        run: |
+          d=build/air-compiler/diff/t27-math-relaxed-inv-on-s1
+          rc=0
+          build/air-compiler/air_diff_test control \
+            "$d/vs_base.air.metallib" "$d/vs_base.air.json" "$d/ps_show.air.metallib" "$d/ps_show.air.json" \
+            "$d/vs_base.ref.metallib" "$d/vs_base.ref.json" "$d/ps_sincos.ref.metallib" "$d/ps_sincos.ref.json" \
+            > "$RUNNER_TEMP/air-diff-control.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/air-diff-control.txt"
+          maxdiff="$(sed -n 's/^control  *FAIL  maxdiff=\([0-9]*\) .*/\1/p' "$RUNNER_TEMP/air-diff-control.txt")"
+          if [ "$rc" = 0 ] || [ -z "$maxdiff" ] || [ "$maxdiff" -le 2 ]; then
+            echo "::error::the air-diff control didn't fail on pixels (exit $rc): two different pixel shaders must not compare equal"
+            exit 1
+          fi
+          echo "- control (ps_show against the reference of ps_sincos): FAIL as it must, $(sed -n 's/^control  *FAIL  //p' "$RUNNER_TEMP/air-diff-control.txt")" >> "$GITHUB_STEP_SUMMARY"
+
       # The Wine engine the app installs (swtor-on-mac src/som.sh: ENGINE_URL, ENGINE_SHA256): an
       # x86_64 Wine that runs under Rosetta and needs no library path. Downloaded on every run,
       # not cached, as an asset of the release cx-26.3.0-8 of the public jdrly/wine-engine.
