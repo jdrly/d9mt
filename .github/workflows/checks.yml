@@ -103,9 +103,11 @@ jobs:
           xcrun -sdk macosx metal --version
 
       # The bridge links static LLVM 15.0.7 libraries for x86_64, built by
-      # scripts/build-llvm-unixside.sh. The cache holds the installed libraries and llvm-dis (the
-      # AIR byte checks read bitcode with it). The key names the recipe, so a changed recipe
-      # builds again. Bump v1 when the steps below change what goes into the cache.
+      # scripts/build-llvm-unixside.sh. The cache holds the installed libraries, llvm-dis (the
+      # AIR byte checks read bitcode with it) and llvm-config, copied into the installed prefix
+      # so that it answers for those libraries (the air-diff job's reference compiler asks it).
+      # The key names the recipe, so a changed recipe builds again. Bump v2 when the steps
+      # below change what goes into the cache.
       - name: LLVM 15.0.7 from the cache
         id: llvm
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -113,7 +115,7 @@ jobs:
           path: |
             toolchains/llvm-x86_64
             toolchains/llvm-build/bin/llvm-dis
-          key: llvm-15.0.7-x86_64-xcode-27-v1-${{ hashFiles('scripts/build-llvm-unixside.sh') }}
+          key: llvm-15.0.7-x86_64-xcode-27-v2-${{ hashFiles('scripts/build-llvm-unixside.sh') }}
 
       # The recipe clones the tag llvmorg-15.0.7 unless toolchains/llvm-project exists. Check out
       # the tag's commit by its hash first, so a moved tag can't change what gets built.
@@ -131,7 +133,9 @@ jobs:
             8dfdcc7b7bf66834a761bd8de445840ef68e4d1a
           git -C toolchains/llvm-project -c advice.detachedHead=false checkout -q FETCH_HEAD
           scripts/build-llvm-unixside.sh
-          ninja -C toolchains/llvm-build llvm-dis
+          ninja -C toolchains/llvm-build llvm-dis llvm-config
+          mkdir -p toolchains/llvm-x86_64/bin
+          cp toolchains/llvm-build/bin/llvm-config toolchains/llvm-x86_64/bin/llvm-config
 
       # Saved right after the build, before any other script of the checkout runs.
       - name: Save LLVM 15.0.7 to the cache
@@ -330,6 +334,52 @@ jobs:
             if [ "$rc" = 0 ]; then result=ok; else result="FAILED (exit $rc)"; failed=$((failed + 1)); fi
             echo "$t: $result, $((SECONDS - start)) s"
             echo "| \`$t\` | $result | $((SECONDS - start)) |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          [ "$failed" = 0 ]
+
+      # The reference compiler of scripts/run-air-diff.sh (build-air-compiler.sh) needs
+      # SPIRV-Cross's sources and dxbc-spirv's SPIRV-Headers submodule, which fetch-deps.sh
+      # doesn't check out. SPIRV-Cross by commit (the tag vulkan-sdk-1.4.357.0); SPIRV-Headers at
+      # the commit the pinned dxbc-spirv names.
+      - name: SPIRV-Cross and SPIRV-Headers
+        run: |
+          git init -q "$RUNNER_TEMP/SPIRV-Cross"
+          git -C "$RUNNER_TEMP/SPIRV-Cross" fetch -q --depth 1 https://github.com/KhronosGroup/SPIRV-Cross \
+            6c09849fe88c48eaed08413aa022aaa136a3a057
+          git -C "$RUNNER_TEMP/SPIRV-Cross" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          git -C third_party/dxbc-spirv submodule update -q --init --depth 1 submodules/spirv_headers
+          echo "SPIRV_CROSS_DIR=$RUNNER_TEMP/SPIRV-Cross" >> "$GITHUB_ENV"
+
+      # air-diff: every corpus case through d9mt's AIR compiler and through the reference path
+      # (SPIR-V, SPIRV-Cross, MSL, Apple's compiler). Both are rendered with Metal's classic API
+      # and compared pixel by pixel within the test's own tolerance (air/tools/air_diff_test.mm,
+      # kTolerance). Four modes: AIR targets 26 and 27, position invariance on and off. All four
+      # run, also after a failure. The renderer needs no Metal 4, so the runner's paravirtual
+      # GPU can draw it; what it draws is that device's output, not an Apple GPU's.
+      - name: air-diff
+        env:
+          LLVM_CONFIG: ${{ github.workspace }}/toolchains/llvm-x86_64/bin/llvm-config
+          D9MT_JOBS: 4
+        run: |
+          {
+            echo "### air-diff"
+            echo
+            echo "| AIR target | invariance | result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for mode in "26 on" "27 on" "26 off" "27 off"; do
+            read -r os inv <<< "$mode"
+            menv=("D9MT_AIR_MACOS=$os")
+            [ "$inv" = on ] || menv+=(D9MT_AIR_INVARIANT=0)
+            echo "::group::air-diff, AIR target $os, invariance $inv"
+            rc=0
+            env -u D9MT_AIR_LEGACY "${menv[@]}" scripts/run-air-diff.sh 2>&1 | tee "$RUNNER_TEMP/air-diff-$os-$inv.txt" || rc=$?
+            echo "::endgroup::"
+            result="$(tail -n 1 "$RUNNER_TEMP/air-diff-$os-$inv.txt")"
+            [ "$rc" = 0 ] || { failed=$((failed + 1)); result="FAILED (exit $rc): $result"; grep -E ' FAIL|^FAIL' "$RUNNER_TEMP/air-diff-$os-$inv.txt" | head -n 60 || true; }
+            echo "air-diff, AIR target $os, invariance $inv: $result"
+            echo "| $os | $inv | $result |" >> "$GITHUB_STEP_SUMMARY"
           done
           [ "$failed" = 0 ]
 
