@@ -147,18 +147,16 @@ jobs:
 
       # SMOKE=0: the bridge's smoke test needs a Metal GPU and reference metallibs from
       # build-air-compiler.sh. The runner has 3 CPUs and 7 GB, so 4 compiles at once.
-      # LC_ALL=C: the AIR codegen id hashes CODEGEN_OBJS in the order build-bridge.sh's globs
-      # give, and globs sort by the locale's collation. The runner's default is en_US.UTF-8,
-      # which on macOS 27 puts ir_ir_builder before ir_ir.cpp and BitstreamReader before
-      # BitWriter; byte order doesn't. In byte order this build's id is the one a release build
-      # of the same commit records (run 43190284800: ea71911c… in the runner's order, 25fc2491…,
-      # the 0.1.8 release id, in byte order, over the same 113 files).
+      # The step runs under the runner's own locale, en_US.UTF-8, whose collation sorts the
+      # codegen files differently from byte order. build-bridge.sh lists them in byte order
+      # itself; the digest step below fails if it doesn't.
       - name: Build the bridge
         env:
           SMOKE: 0
           D9MT_JOBS: 4
-          LC_ALL: C
-        run: scripts/build-bridge.sh
+        run: |
+          echo "LANG=${LANG-unset} LC_ALL=${LC_ALL-unset} LC_COLLATE=${LC_COLLATE-unset}"
+          scripts/build-bridge.sh
 
       # The id digests d9mt's codegen objects and the LLVM libraries, both built on this runner.
       - name: AIR codegen id
@@ -166,7 +164,7 @@ jobs:
           {
             echo "### AIR codegen id of this run"
             echo
-            echo "Built on this runner, with its own LLVM build and the file list in byte order (LC_ALL=C). A release build of this commit records the same id as long as its compiler generates the same code. No step compares it with a recorded release id."
+            echo "Built on this runner, with its own LLVM build. A release build of this commit records the same id as long as its compiler generates the same code. No step compares it with a recorded release id."
             echo
             echo '```'
             cat build/bridge/air-codegen-id.txt
@@ -174,11 +172,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # What the id is made of, file by file: the normalized digest scripts/air-codegen-id.py gives
-      # each object and each LLVM archive of build-bridge.sh's CODEGEN_OBJS, in the build's order.
-      # Two builds with different ids differ in the files whose lines differ, or in the order.
-      # The list below repeats CODEGEN_OBJS with the same globs under the same LC_ALL as the
-      # build; the step fails when its id isn't the build's, so a change to that array has to be
-      # made here too.
+      # each object and each LLVM archive of build-bridge.sh's CODEGEN_OBJS. Two builds with
+      # different ids differ in the files whose lines differ. The list below repeats CODEGEN_OBJS
+      # in byte order (LC_ALL=C for the globs). The step fails when its id isn't the build's:
+      # then build-bridge.sh listed the files in another order (the locale's, before it sorted
+      # them itself), or CODEGEN_OBJS changed and the list here has to follow.
       - name: AIR codegen digests
         env:
           LC_ALL: C

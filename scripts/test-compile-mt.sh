@@ -73,9 +73,15 @@ printf '%s\n' ___wine_unix_call_funcs ___wine_unix_call_wow64_funcs _d9mtair_ver
 # AirBuilder/LLVM/dxbc-spirv stay uninstrumented (prebuilt): TSan still sees
 # every lock and shared access in the bridge code that drives them. The AIR codegen
 # id is this build's own (ADR-0006), as build-bridge.sh computes it.
+# The globs in byte order, as build-bridge.sh lists them (a glob sorts by the caller's locale,
+# and the list's order is part of the id).
+byte_order() { compgen -G "$1" | LC_ALL=C sort; }
+mapfile -t TSAN_IR < <(byte_order "$AIRLIB_OBJ/third_party_dxbc-spirv_ir_*.o")
+mapfile -t TSAN_UTIL < <(byte_order "$AIRLIB_OBJ/third_party_dxbc-spirv_util_*.o")
+mapfile -t TSAN_LLVM < <(byte_order "$LLVM/lib/libLLVM*.a")
 TSAN_CODEGEN=("$OUT/airlib_unix.tsan.o" "$OUT"/air_cache.c.tsan.o "$OUT"/cache.c.tsan.o \
-  "$AIRLIB_OBJ"/third_party_dxbc-spirv_ir_*.o "$AIRLIB_OBJ"/third_party_dxbc-spirv_util_*.o \
-  "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" "$LLVM"/lib/libLLVM*.a)
+  "${TSAN_IR[@]}" ${TSAN_UTIL[@]+"${TSAN_UTIL[@]}"} \
+  "$AIRLIB_OBJ/air_air_builder.cpp.o" "$AIRLIB_OBJ/air_air_metallib.cpp.o" "${TSAN_LLVM[@]}")
 python3 -I "$V2/scripts/air-codegen-id.py" --c "$OUT/air_codegen_id.tsan.c" "${TSAN_CODEGEN[@]}" >/dev/null
 clang "${CFLAGS_UNIX[@]}" -c "$OUT/air_codegen_id.tsan.c" -o "$OUT/air_codegen_id.tsan.o"
 clang++ -arch x86_64 -dynamiclib -fsanitize=thread -o "$OUT/winemetal-tsan.so" \
