@@ -238,14 +238,31 @@ its own that a later push doesn't cancel. Its jobs:
     `nice -n 3`: the runner's shell runs at nice -10, and the test expects a caller at nice 0.
   - `test-build-deps.sh` with `BUILD=1` (five x64 driver builds) runs only at night and in a run
     by hand with `full=true`.
+- `metallib-load` runs on `macos-26`, a real macOS 26. It takes the AIR corpus metallibs the
+  build job compiled for AIR targets 26 and 27 through Metal's classic API
+  (`.github/metallib-load.sh`, `.github/metallib-load.m`). Target 26 must load, build its render
+  pipelines, and get a command buffer that uses each through to completion. Target 27 must be
+  refused at `newLibraryWithData`, which is what a metallib with too new a language version
+  does to a macOS 26 player. On the build runner (macOS 27) both targets must load. No pixel
+  is read, so a pass doesn't say that anything was drawn.
 - `metal-probe` prints what the runner's Metal device can do into the job summary, on `macos-26`
   and `xcode-27`.
 
 The hosted runners' GPU is the Apple Paravirtual device, which doesn't support Metal 4
 (`supportsFamily` is true for Mac2 only, and `newMTL4CommandQueue` returns nil). So nothing that
 drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test-compile-mt.sh`,
-the bridge's smoke test, and the hash suite. Those stay on a Mac, as the Definition of Done's
-evidence in the pull request.
+the bridge's smoke test, and the hash suite. Those need a Mac with a real GPU
+(`ci/gpu/run.sh`), as the Definition of Done's evidence in the pull request.
+
+`scripts/run-air-diff.sh` isn't in CI either. It was tried on the hosted runner (pull request
+#185, 2026-11-12): it reported 46 of 46 cases in all four modes with `maxdiff=0`, and it reported
+the same `maxdiff=0` for nine comparisons of deliberately different shaders (`ps_show` against
+the reference of `ps_sincos`, twice, and of `ps_alu_mix`, `ps_cmp`, `ps_pow`, `ps_nrm`,
+`ps_if_else` and `ps_modifiers`, and `vs_base` against `vs_mvp`). A comparison that can't tell
+those apart is no gate, so air-diff stays with a Mac with a real GPU. The cause wasn't looked
+for: these runs don't say whether the device drew nothing or `air_diff_test`'s readback missed
+it. What the hosted device does show is whether a macOS version loads a metallib and builds a
+pipeline from it.
 
 The job summary shows the build's AIR codegen id. The runner builds its own LLVM with
 `scripts/build-llvm-unixside.sh`. The id hashes `CODEGEN_OBJS` in the array's order, and

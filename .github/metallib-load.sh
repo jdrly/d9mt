@@ -7,8 +7,9 @@
 #
 # For every (vertex shader, pixel shader) pair of scripts/run-air-diff.sh's plain cases,
 # .github/metallib-load.m loads both libraries (newLibraryWithData), looks up their entry
-# points, builds a render pipeline from them (Metal compiles the AIR here), draws one triangle
-# and waits for the command buffer. It judges no pixel.
+# points, builds a render pipeline from them (Metal compiles the AIR here), encodes one triangle
+# with it and waits for the command buffer to complete without an error. It reads no pixel, so
+# it doesn't say that anything was drawn.
 #   <target>=loads    every pair must get through all of that (the tool's exit status 0);
 #   <target>=rejects  every pair must be refused at newLibraryWithData with Metal's own error
 #                     (exit status 3). A pair that loads fails the run (this macOS takes that
@@ -18,7 +19,7 @@
 # What a pass says: this macOS version's Metal accepts the container and the AIR of that target
 # and can compile it. On a hosted runner the device is the Apple Paravirtual device, so it says
 # nothing about an Apple GPU's own compiler back end, about Metal 4, or about what a frame
-# looks like.
+# looks like, and not even that a frame was drawn.
 #
 # Runs under macOS's /bin/bash 3.2. Exit status 1 if any pair misses its expectation.
 set -u
@@ -64,7 +65,7 @@ for spec in "$@"; do
       sed 's/^/    /' "$out" | head -n 12
     fi
   done <"$work/pairs.txt"
-  line="AIR target $target, expected '$want': $ok pairs load, compile and draw, $rejected refused by newLibraryWithData, $other ended otherwise"
+  line="AIR target $target, expected '$want': $ok pairs load and build their pipelines (command buffer completed), $rejected refused by newLibraryWithData, $other ended otherwise"
   [ -z "$reason" ] || line="$line. Metal's error: $reason"
   if [ "$missed" = 0 ]; then echo "ok   $line"; summary "- ok: $line"; else echo "FAIL $line"; summary "- **FAIL**: $line"; fails=$((fails + missed)); fi
 done

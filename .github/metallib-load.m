@@ -6,7 +6,10 @@
 //
 // Exit status, with the stage and Metal's error on stdout:
 //   0  both libraries load, both have the entry point "main", a render pipeline builds from
-//      them (Metal compiles the AIR here), one triangle draws and its command buffer completes
+//      them (Metal compiles the AIR here), and a command buffer that encodes one triangle with
+//      it completes without an error. No pixel is read: whether the device drew anything is
+//      not checked, and on a hosted runner's paravirtual device it can't be taken for granted
+//      (scripts/run-air-diff.sh's comparison can't tell two different shaders apart there)
 //   3  newLibraryWithData refused a library (Metal's error text follows)
 //   4  a library has no function "main"
 //   5  newRenderPipelineStateWithDescriptor failed
@@ -119,8 +122,8 @@ int main(int argc, char **argv) {
     id<MTLCommandQueue> queue = [device newCommandQueue];
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-    if (!queue || !cb || !enc) {  // a message to nil would "draw" nothing and report no error
-      printf("no %s: nothing was drawn\n", !queue ? "command queue" : !cb ? "command buffer" : "render encoder");
+    if (!queue || !cb || !enc) {  // a message to nil would encode nothing and report no error
+      printf("no %s: nothing was encoded\n", !queue ? "command queue" : !cb ? "command buffer" : "render encoder");
       return 6;
     }
     [enc setRenderPipelineState:pso];
@@ -139,7 +142,7 @@ int main(int argc, char **argv) {
              cb.error ? cb.error.localizedDescription.UTF8String : "no error object");
       return 6;
     }
-    printf("loaded, compiled and drawn\n");
+    printf("loaded, pipeline built, command buffer completed\n");
   }
   return 0;
 }
