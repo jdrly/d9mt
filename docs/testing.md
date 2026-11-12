@@ -254,13 +254,15 @@ drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test
 the bridge's smoke test, and the hash suite. Those need a Mac with a real GPU
 (`ci/gpu/run.sh`), as the Definition of Done's evidence in the pull request.
 
-Pixels from that device can't be judged either. `scripts/run-air-diff.sh` was tried there
-(pull request #185, 2026-11-12): it reported 46 of 46 cases in all four modes with `maxdiff=0`,
-and so did nine comparisons of deliberately different shaders (`ps_show` against the reference
-of `ps_sincos`, `ps_alu_mix`, `ps_cmp`, `ps_pow`, `ps_nrm`, `ps_if_else`, `ps_modifiers`, and
-`vs_base` against `vs_mvp`). Its readback sees the same image whatever is drawn, so air-diff
-stays a gate for a Mac with a real GPU. What the hosted device does show is whether a macOS
-version loads a metallib and builds a pipeline from it.
+`scripts/run-air-diff.sh` isn't in CI either. It was tried on the hosted runner (pull request
+#185, 2026-11-12): it reported 46 of 46 cases in all four modes with `maxdiff=0`, and it reported
+the same `maxdiff=0` for nine comparisons of deliberately different shaders (`ps_show` against
+the reference of `ps_sincos`, twice, and of `ps_alu_mix`, `ps_cmp`, `ps_pow`, `ps_nrm`,
+`ps_if_else` and `ps_modifiers`, and `vs_base` against `vs_mvp`). A comparison that can't tell
+those apart is no gate, so air-diff stays with a Mac with a real GPU. The cause wasn't looked
+for: these runs don't say whether the device drew nothing or `air_diff_test`'s readback missed
+it. What the hosted device does show is whether a macOS version loads a metallib and builds a
+pipeline from it.
 
 The job summary shows the build's AIR codegen id. The runner builds its own LLVM with
 `scripts/build-llvm-unixside.sh`. The id hashes `CODEGEN_OBJS` in the array's order, and
