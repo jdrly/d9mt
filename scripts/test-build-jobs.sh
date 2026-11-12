@@ -3,7 +3,7 @@
 # build-air-compiler.sh (#85) and build-d9mtair.sh (#90), without a compiler and without a real
 # build: the scripts run in a fixture tree (the real driver/, bridge/, airlib/ and air/ sources, a
 # fake dxbc-spirv, SPIRV-Cross and x86_64 LLVM toolchain, build/ of its own) with stand-ins for
-# mingw, clang, clang++, ar, dlltool, objdump, llvm-config, xcrun and python3 on a PATH of the
+# mingw, clang, clang++, ar, dlltool, objdump, llvm-config, lipo, xcrun and python3 on a PATH of the
 # system directories. Each stand-in compile records how many compiles run at that moment and its
 # argv. Per script:
 #   1. the base ref's scripts, D9MT_JOBS unset: the reference;
@@ -44,8 +44,11 @@ for a in "$@"; do
 done
 case "$name" in
   xcrun) exit 1 ;;  # no Metal toolchain: build-driver.sh keeps the committed metallib headers
+  lipo) echo x86_64; exit 0 ;;  # build-air-compiler.sh asks the LLVM libraries' architecture
   llvm-config)
     case "$1" in
+      --version) echo 15.0.7 ;;  # build-air-compiler.sh refuses any other LLVM
+      --libdir) echo /fake/llvm/lib ;;
       --cxxflags) echo "-I/fake/llvm/include -std=c++14 -fno-exceptions" ;;
       --system-libs) echo "-lz -lcurses" ;;
       *) printf '%s\n' "-L/fake/llvm/lib" "-lLLVMBitWriter -lLLVMCore -lLLVMSupport" ;;  # --ldflags, --libs
@@ -76,7 +79,7 @@ EOF
 chmod +x "$T/bin/stub"
 for t in x86_64-w64-mingw32-g++ x86_64-w64-mingw32-gcc x86_64-w64-mingw32-ar x86_64-w64-mingw32-dlltool \
          x86_64-w64-mingw32-objdump i686-w64-mingw32-gcc i686-w64-mingw32-dlltool clang clang++ xcrun \
-         llvm-config python3; do ln -s stub "$T/bin/$t"; done
+         llvm-config lipo python3; do ln -s stub "$T/bin/$t"; done
 ln -s "$BASH" "$T/bin/bash"  # build-bridge.sh runs build-d9mtair.sh with the bash on PATH (local -n)
 
 # The fixture tree: real sources (read only), fake third-party sources, scripts of the variant.
@@ -91,6 +94,9 @@ for d in sm3:9 ir:8 ir/passes:5 util:6 spirv:3; do
   for i in $(seq "${d#*:}"); do : > "$F/third_party/dxbc-spirv/${d%:*}/f$i.cpp"; done
 done
 : > "$F/third_party/SPIRV-Cross/spirv_msl.cpp"
+# build-air-compiler.sh wants dxbc-spirv's SPIRV-Headers submodule checked out
+mkdir -p "$F/third_party/dxbc-spirv/submodules/spirv_headers/include/spirv/unified1"
+: > "$F/third_party/dxbc-spirv/submodules/spirv_headers/include/spirv/unified1/spirv.hpp"
 cp "$V2/scripts/gen-bridge-def.sh" "$F/scripts/"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$F/scripts/check-deps.sh"  # the fake dxbc-spirv has no patches
 

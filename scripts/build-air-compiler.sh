@@ -31,7 +31,7 @@ LLVM_VERSION="$("$LLVM_CONFIG" --version 2>/dev/null || true)"
   || { echo "FATAL: $LLVM_CONFIG is LLVM '${LLVM_VERSION:-unknown}', not 15.0.7 (AIR's LLVM)" >&2; exit 1; }
 # Build for the architecture of the LLVM libraries: d9mt's toolchain is x86_64 (the tools then run
 # under Rosetta); Homebrew's is arm64.
-LLVM_ARCH=$(lipo -archs "$("$LLVM_CONFIG" --libdir)/libLLVMCore.a" 2>/dev/null | awk '{print $1}')
+LLVM_ARCH=$(lipo -archs "$("$LLVM_CONFIG" --libdir)/libLLVMCore.a" 2>/dev/null | awk '{print $1}' || true)
 LLVM_ARCH=${LLVM_ARCH:-$(uname -m)}
 OBJ="$OBJ-$LLVM_ARCH"
 mkdir -p "$OBJ"
