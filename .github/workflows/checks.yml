@@ -391,6 +391,17 @@ jobs:
       - name: air-diff control
         run: |
           d=build/air-compiler/diff/t27-math-relaxed-inv-on-s1
+          # Diagnostic first, for information: d9mt's AIR for (vs_base, ps_show) against the
+          # reference of other pixel shaders with the same output, and of another vertex shader.
+          # On a GPU that draws, every one of these differs.
+          for other in ps_sincos ps_alu_mix ps_cmp ps_pow ps_nrm ps_if_else ps_modifiers; do
+            build/air-compiler/air_diff_test "show-vs-$other" \
+              "$d/vs_base.air.metallib" "$d/vs_base.air.json" "$d/ps_show.air.metallib" "$d/ps_show.air.json" \
+              "$d/vs_base.ref.metallib" "$d/vs_base.ref.json" "$d/$other.ref.metallib" "$d/$other.ref.json" 2>&1 || true
+          done
+          build/air-compiler/air_diff_test "base-vs-mvp" \
+            "$d/vs_base.air.metallib" "$d/vs_base.air.json" "$d/ps_show.air.metallib" "$d/ps_show.air.json" \
+            "$d/vs_mvp.ref.metallib" "$d/vs_mvp.ref.json" "$d/ps_show.ref.metallib" "$d/ps_show.ref.json" 2>&1 || true
           rc=0
           build/air-compiler/air_diff_test control \
             "$d/vs_base.air.metallib" "$d/vs_base.air.json" "$d/ps_show.air.metallib" "$d/ps_show.air.json" \
