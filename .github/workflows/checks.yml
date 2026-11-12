@@ -429,7 +429,7 @@ jobs:
   # d9mt's AIR metallibs on a real macOS 26. macOS 26 accepts AIR 2.8 at most: a metallib tagged
   # 2.9 gave every macOS 26 player a black screen (2026-10-28, #110). The build job compiles the
   # AIR corpus for targets 26 and 27; this job loads both with macOS 26's Metal through the
-  # classic API and builds render pipelines from them (.github/metallib-load.sh). Target 26
+  # classic API and builds render pipelines from them (.github/metallib-load.sh and .m). Target 26
   # must load and compile. Target 27 is the control: macOS 26 must reject it at
   # newLibraryWithData, or this job couldn't tell a wrong target from a right one.
   # The device is the Apple Paravirtual device. A pass says macOS 26's Metal takes the
