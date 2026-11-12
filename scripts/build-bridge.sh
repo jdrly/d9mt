@@ -41,7 +41,12 @@ CXXFLAGS_UNIX=(-std=c++17 -O2 -arch x86_64 -fvisibility=hidden -ffile-prefix-map
                -I"$DX" -I"$V2" -I"$LLVM/include" -I"$BR" -I"$V2/airlib"
                -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS)
 CFLAGS_UNIX=(-ObjC -O2 -arch x86_64 -ffile-prefix-map="$V2"=. -I"$BR" -I"$BR/unix" -I"$V2/airlib")
-LLVM_LIBS=("$LLVM"/lib/libLLVM*.a)
+# byte_order <glob>: its matches, one per line, sorted by byte value. A glob sorts by the caller's
+# locale, and the order of the lists below is part of the AIR codegen id and of winemetal.so's
+# link line: macOS 27's en_US.UTF-8 puts ir_ir_builder before ir_ir.cpp and BitstreamReader
+# before BitWriter, C doesn't, and the same files then give another id.
+byte_order() { compgen -G "$1" | LC_ALL=C sort; }
+mapfile -t LLVM_LIBS < <(byte_order "$LLVM/lib/libLLVM*.a")
 
 echo "[bridge] airlib compile core for the bridge (table symbols renamed:"
 echo "         airlib/unix.cpp also defines __wine_unix_call_funcs; the bridge"
@@ -75,9 +80,14 @@ EOF
 # AIR codegen id, the AIR cache's identity (ADR-0006): winemetal_unix.c, the
 # lineage table and the id itself are outside it, so a change there keeps every
 # player's AIR cache, and a change inside it gives a cold cache, never a stale one.
+# The array's order is hashed too. Its globs are listed in byte order (byte_order above), so the
+# id doesn't depend on the locale of the shell that starts the build.
+mapfile -t CODEGEN_IR < <(byte_order "$AIRLIB_OUT/obj/third_party_dxbc-spirv_ir_*.o")
+mapfile -t CODEGEN_UTIL < <(byte_order "$AIRLIB_OUT/obj/third_party_dxbc-spirv_util_*.o")
+[ "${#CODEGEN_IR[@]}" -gt 0 ] || { echo "FATAL: no dxbc-spirv ir objects in $AIRLIB_OUT/obj" >&2; exit 1; }
 CODEGEN_OBJS=("$OBJ/airlib_unix_renamed.o" "$OBJ/air_cache.c.o" "$OBJ/cache.c.o" \
-              $(ls "$AIRLIB_OUT"/obj/third_party_dxbc-spirv_ir_*.o) \
-              $(ls "$AIRLIB_OUT"/obj/third_party_dxbc-spirv_util_*.o 2>/dev/null || true) \
+              "${CODEGEN_IR[@]}" \
+              ${CODEGEN_UTIL[@]+"${CODEGEN_UTIL[@]}"} \
               "$AIRLIB_OUT/obj/air_air_builder.cpp.o" "$AIRLIB_OUT/obj/air_air_metallib.cpp.o" \
               "${LLVM_LIBS[@]}")
 AIR_ID=$(python3 -I "$V2/scripts/air-codegen-id.py" --c "$OBJ/air_codegen_id.c" "${CODEGEN_OBJS[@]}")
