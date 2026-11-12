@@ -27,6 +27,15 @@
 # D9MT_JOBS (default 4). toolchains/llvm-x86_64 must exist (scripts/build-llvm-unixside.sh);
 # the base worktree shares it.
 #
+# QUEUE (optional): the client of a job queue, for a Mac that several projects share. Each
+# heavy step (a build, a test script, a suite run) then runs as its own job,
+#   $QUEUE run --who $QUEUE_WHO:<step> --mem <MiB> [--wine <dir>:<dir>] -- <command>
+# and waits its turn there, so another project's job can run between two steps. QUEUE_WHO
+# (default d9mt) names the project. The MiB per kind of step: MEM_BUILD (default 3072, for
+# D9MT_JOBS=2), MEM_TEST (2048), MEM_HASH (2048). --wine names a suite run's scratch folder,
+# which holds its engine copy and its prefix. A step the queue stopped for swap (its exit 75)
+# or never admitted (73) says nothing about the commit: no verdict, exit 3.
+#
 # Every set builds this checkout first, from what is in the tree now: an older build/ is never
 # trusted. <out dir>/summary.md gets one line per step, the swap and memory pressure before
 # and after, and the count of IOGPUMetalError lines in the system log of the run's interval
@@ -69,20 +78,38 @@ for t in $TARGETS; do
   case "$t" in 26|27) ;; *) echo "unknown AIR target: $t (26 or 27)" >&2; exit 64 ;; esac
 done
 
+MEM_BUILD="${MEM_BUILD:-3072}" MEM_TEST="${MEM_TEST:-2048}" MEM_HASH="${MEM_HASH:-2048}"
 status=0
 PROBE_OK=0
+GATE_FAILED=0   # a note that starts with FAILED was written
+QUEUE_LOST=0    # the queue stopped a step or never admitted it
 BASE_TREE=""
 cleanup() { [ -z "$BASE_TREE" ] || { git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; }; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 START=$(date +%s)
 machine() { echo "swap $(sysctl -n vm.swapusage 2>/dev/null | sed 's/  */ /g'), memory pressure level $(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo unknown)"; }
-note() { echo "$*"; echo "- $*" >> "$OUT/summary.md"; }
-# step <name> <log> <command...>: runs it, notes the result, returns its exit status
+note() { case "$*" in FAILED*) GATE_FAILED=1 ;; esac; echo "$*"; echo "- $*" >> "$OUT/summary.md"; }
+# queued <step name> <MiB> [--wine <dir>] <command...>: the command, as a job of $QUEUE when
+# that is set. The command must be a program, not a shell function. Sets QUEUE_RC to 73 or 75
+# when the queue ended the step, to 0 otherwise.
+QUEUE_RC=0
+queued() {
+  local name=$1 mem=$2 wine="" rc=0; shift 2
+  if [ "$1" = --wine ]; then wine=$2; shift 2; fi
+  QUEUE_RC=0
+  if [ -z "${QUEUE:-}" ]; then "$@"; return; fi
+  "$QUEUE" run --who "${QUEUE_WHO:-d9mt}:${name// /-}" --mem "$mem" ${wine:+--wine "$wine:$wine"} -- "$@" || rc=$?
+  case "$rc" in 73|75) QUEUE_RC=$rc; QUEUE_LOST=1 ;; esac
+  return "$rc"
+}
+# step <name> <log> <MiB> <command...>: runs it as a heavy step, notes the result, returns its
+# exit status
 step() {
-  local name=$1 log=$2 rc=0 t0=$SECONDS; shift 2
-  "$@" > "$log" 2>&1 || rc=$?
+  local name=$1 log=$2 mem=$3 rc=0 t0=$SECONDS; shift 3
+  queued "$name" "$mem" "$@" > "$log" 2>&1 || rc=$?
   if [ "$rc" = 0 ]; then note "ok: $name ($((SECONDS - t0)) s)"
+  elif [ "$QUEUE_RC" != 0 ]; then note "NO VERDICT: the queue ended $name (exit $rc, $((SECONDS - t0)) s): $(grep '^ciq: ' "$log" | tail -n 1)"
   else note "FAILED (exit $rc): $name ($((SECONDS - t0)) s), log $(basename "$log")"; tail -15 "$log"
   fi
   return "$rc"
@@ -110,16 +137,21 @@ set_probe() {
   PROBE_OK=1
 }
 
-# in_tree <tree> <command...>: the command with <tree> as its working directory
-in_tree() { ( cd "$1" && shift && "$@" ); }
+# "${IN_TREE[@]}" <tree> <command...>: the command with <tree> as its working directory (a
+# program, so that the queue can start it)
+IN_TREE=(/bin/sh -c 'cd "$1" && shift && exec "$@"' in-tree)
 # build_tree <tree> <tag>: the bridge and the x64 driver in <tree>
 build_tree() {
-  local tree=$1 tag=$2
-  step "$tag fetch-deps" "$OUT/$tag-fetch-deps.log" in_tree "$tree" scripts/fetch-deps.sh || return 1
-  step "$tag bridge" "$OUT/$tag-bridge.log" in_tree "$tree" env SMOKE=0 scripts/build-bridge.sh || return 1
+  local tree=$1 tag=$2 rc=0 t0=$SECONDS
+  # a download, not a heavy step
+  "${IN_TREE[@]}" "$tree" scripts/fetch-deps.sh > "$OUT/$tag-fetch-deps.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then note "ok: $tag fetch-deps ($((SECONDS - t0)) s)"
+  else note "FAILED (exit $rc): $tag fetch-deps ($((SECONDS - t0)) s), log $tag-fetch-deps.log"; tail -15 "$OUT/$tag-fetch-deps.log"; return 1
+  fi
+  step "$tag bridge" "$OUT/$tag-bridge.log" "$MEM_BUILD" "${IN_TREE[@]}" "$tree" env SMOKE=0 scripts/build-bridge.sh || return 1
   cp "$tree/build/bridge/air-codegen-id.txt" "$OUT/$tag-air-codegen-id.txt"
   note "$tag: $(cat "$OUT/$tag-air-codegen-id.txt")"
-  step "$tag driver x64" "$OUT/$tag-driver-x64.log" in_tree "$tree" env ARCH=x64 scripts/build-driver.sh || return 1
+  step "$tag driver x64" "$OUT/$tag-driver-x64.log" "$MEM_BUILD" "${IN_TREE[@]}" "$tree" env ARCH=x64 scripts/build-driver.sh || return 1
 }
 HEAD_BUILT=0
 # This checkout is built once per invocation, always: files in build/ from an earlier commit
@@ -128,7 +160,7 @@ set_build() {
   [ "$HEAD_BUILT" = 1 ] && return 0
   build_tree "$V2" head || return 1
   cp "$OUT/head-air-codegen-id.txt" "$OUT/air-codegen-id.txt"
-  step "head driver x86" "$OUT/head-driver-x86.log" env ARCH=x86 scripts/build-driver.sh || return 1
+  step "head driver x86" "$OUT/head-driver-x86.log" "$MEM_BUILD" env ARCH=x86 scripts/build-driver.sh || return 1
   [ -z "$(git status --porcelain --untracked-files=no)" ] || { note "FAILED: the builds changed tracked files"; git status --short | head; return 1; }
   HEAD_BUILT=1
 }
@@ -149,14 +181,15 @@ set_gpu_tests() {
   local rc=0
   set_build || return 1
   dxvk_native || { note "FAILED: DXVK's native headers"; return 1; }
-  step "run-native-tests.sh" "$OUT/native-tests.log" scripts/run-native-tests.sh || rc=1
-  step "test-commit-feedback.sh" "$OUT/test-commit-feedback.log" scripts/test-commit-feedback.sh || rc=1
-  step "test-compile-mt.sh" "$OUT/test-compile-mt.log" scripts/test-compile-mt.sh || rc=1
+  step "run-native-tests.sh" "$OUT/native-tests.log" "$MEM_TEST" scripts/run-native-tests.sh || rc=1
+  step "test-commit-feedback.sh" "$OUT/test-commit-feedback.log" "$MEM_TEST" scripts/test-commit-feedback.sh || rc=1
+  step "test-compile-mt.sh" "$OUT/test-compile-mt.log" "$MEM_TEST" scripts/test-compile-mt.sh || rc=1
   return "$rc"
 }
 
 # hash_run <tree> <tag> <variant> <target or "host">: one run of the suite; its files go to
-# <out>/<tag>-<target>-<variant>.{hashes,stats}.txt. Returns the runner's exit status.
+# <out>/<tag>-<target>-<variant>.{hashes,stats}.txt. Returns the runner's exit status, or 4
+# when the queue ended the run.
 hash_run() {
   local tree=$1 tag=$2 variant=$3 target=$4 rc=0 label
   local -a tenv=()
@@ -164,8 +197,14 @@ hash_run() {
   [ "$target" = host ] || tenv=("D9MT_AIR_MACOS=$target")
   # this checkout's runner and harness for both trees: a base from before the runner existed
   # has neither, and two runners would be two harnesses
-  env ${tenv[@]+"${tenv[@]}"} SRC="$tree" VARIANT="$variant" WORK="$WORK/hash-$label" "$V2/scripts/run-hash-tests.sh" \
+  queued "hash $label" "$MEM_HASH" --wine "$WORK/hash-$label" \
+    env ${tenv[@]+"${tenv[@]}"} SRC="$tree" VARIANT="$variant" WORK="$WORK/hash-$label" "$V2/scripts/run-hash-tests.sh" \
     > "$OUT/$label.log" 2>&1 || rc=$?
+  if [ "$QUEUE_RC" != 0 ]; then
+    note "NO VERDICT: the queue ended the $label run (exit $rc): $(grep '^ciq: ' "$OUT/$label.log" | tail -n 1)"
+    rm -rf "$WORK/hash-$label"
+    return 4
+  fi
   cp "$WORK/hash-$label/hashes.txt" "$OUT/$label.hashes.txt" 2>/dev/null || true
   cp "$WORK/hash-$label/stats.txt" "$OUT/$label.stats.txt" 2>/dev/null || true
   [ ! -f "$OUT/$label.stats.txt" ] || note "$(cat "$OUT/$label.stats.txt")"
@@ -199,6 +238,10 @@ set_hash() {
         if [ "$tag" = base ]; then hash_run "$BASE_TREE" base "$v" "$t" || r=$?; else hash_run "$V2" head "$v" "$t" || r=$?; fi
         if [ "$r" = 3 ]; then
           note "NO VERDICT: the GPU was lost or hung during the $tag run of target $t, $v (its logs are in $tag-$t-$v-logs)"
+          [ "$rc" = 0 ] && return 3
+          return 1
+        fi
+        if [ "$r" = 4 ]; then   # the queue ended the run: hash_run noted it
           [ "$rc" = 0 ] && return 3
           return 1
         fi
@@ -258,6 +301,9 @@ case "$SET" in
   probe|build) ;;
   *) [ "$PROBE_OK" != 1 ] || run_set system_log ;;
 esac
+# A step the queue ended made its set return a failure. With no failed gate beside it, that is
+# no verdict: the commit wasn't judged.
+if [ "$status" = 1 ] && [ "$QUEUE_LOST" = 1 ] && [ "$GATE_FAILED" = 0 ]; then status=3; fi
 note "after: $(machine)"
 note "verdict: $(case "$status" in 0) echo pass ;; 3) echo "no verdict" ;; *) echo FAIL ;; esac)"
 exit "$status"
