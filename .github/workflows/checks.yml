@@ -222,8 +222,12 @@ jobs:
           for os in 26 27; do
             mkdir -p "$out/t$os"
             for bin in air/tests/bin/*.bin; do
-              env -u D9MT_AIR_LEGACY "D9MT_AIR_MACOS=$os" build/airlib/airlib_loopback build/airlib/d9mtair.so \
-                "$bin" "$out/t$os/$(basename "$bin" .bin).metallib" > /dev/null
+              if ! env -u D9MT_AIR_LEGACY "D9MT_AIR_MACOS=$os" build/airlib/airlib_loopback build/airlib/d9mtair.so \
+                     "$bin" "$out/t$os/$(basename "$bin" .bin).metallib" > "$RUNNER_TEMP/loopback.txt" 2>&1; then
+                echo "::error::airlib_loopback failed on $bin for AIR target $os"
+                cat "$RUNNER_TEMP/loopback.txt"
+                exit 1
+              fi
             done
           done
           .github/metallib-load.sh "$out" 26=loads 27=loads
