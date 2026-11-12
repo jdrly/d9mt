@@ -160,12 +160,14 @@ namespace dxvk {
     /// from the original z and w; inDomain = |z| <= 2^126 && 2^-100 <= |w| <=
     /// 2^126 (z + k*w can't overflow for |k| <= 2^-6), finite = both finite.
     /// d6/d7 are the original near/far planes, so with the device's depth
-    /// clamp (while k != 0) coverage stays the original frustum and the
-    /// biased depth clamps per sample. The half scale is the same at every
-    /// vertex (the plane and its interpolation are unchanged) and can't
-    /// overflow for finite inputs. With k = 0 the stored z is the original
-    /// and d6 = d7 = 0 (never clips): a hooked shader's unbiased draws are
-    /// unchanged. Only run with D9MT_DEPTH_BIAS_VS=1 (requestDepthBias).
+    /// clip mode at clamp (while k != 0) coverage stays the original frustum
+    /// and the bias clips nothing. The biased depth isn't clamped to the
+    /// viewport's range (docs/configuration.md). The half scale is the same
+    /// at every vertex (the plane and its interpolation are unchanged) and
+    /// can't overflow for finite inputs. With k = 0 the stored z is the
+    /// original and d6 = d7 = 0 (never clips): a hooked shader's unbiased
+    /// draws are unchanged. Only run with D9MT_DEPTH_BIAS_VS=1
+    /// (requestDepthBias).
     ///
     /// It runs in phase A before legalizeIr, so it sees the converter's
     /// pre-SSA IR. The position stores are dxbc-spirv's IoMap::flushOutputs:

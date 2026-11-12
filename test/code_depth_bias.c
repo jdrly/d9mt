@@ -4,29 +4,37 @@
  * where Metal's constant bias scales with the depth's exponent: the hardware path gives
  * B * 2^(e+1), right only for z in [0.5,1). With D9MT_DEPTH_BIAS_VS=1 a hooked vertex shader adds
  * k * w to clip-space z (k = B / the viewport's depth range), writes the original near/far planes
- * as clip distances 6/7, and d9mt clamps depth to the viewport range (D3D11.3 15.6, d9mt's policy).
+ * as clip distances 6/7, and d9mt sets Metal's depth clip mode to clamp, so the bias never clips a
+ * fragment. The biased depth is NOT clamped to the viewport's [MinZ, MaxZ] (rows K): D3D9's pages
+ * define no such clamp, Apple documents no range for Metal's clamp mode, and on the M5 Max it isn't
+ * the viewport's (docs/configuration.md, D9MT_DEPTH_BIAS_VS).
  *
  * One frame renders every cell into a 2048x1536 offscreen target (16 x 16 cells of 128x96, each
  * its own viewport), first 1x, then 4x MSAA (resolved by StretchRect) when the device has it, and
  * prints one line per checked sample:
  *
- *   D9MT-DEPTHBIAS x<1|4> <cell> <sample> want=<w> got=<g> px=<rrggbb> legacy=<l> ok|FAIL|cross|info
+ *   D9MT-DEPTHBIAS x<1|4> <cell> <sample> want=<w> got=<g> px=<rrggbb> legacy=<l> ok|FAIL|cross|info|norast
  *
- * then "D9MT-DEPTHBIAS-SUMMARY x<n> gating ok=<n> fail=<n> cross=<n> fixture=<n>". Classes:
- * R red (the probe passed), G green (the reference held), B blue (nothing drawn), M a mix; px is
- * the raw resolved pixel. Wants: R/G/B exact; r: red present (4x line/wireframe partial
+ * then "D9MT-DEPTHBIAS-SUMMARY x<n> gating ok=<n> fail=<n> cross=<n> fixture=<n> norast=<n>".
+ * Classes: R red (the probe passed), G green (the reference held), B blue (nothing drawn), M a
+ * mix; px is the raw resolved pixel. Wants: R/G/B exact; r: red present (4x line/wireframe partial
  * coverage); C: the resolved bytes equal the same draw with B = 0 (the cell's control, coverage);
  * c: the same comparison, informational (a 1x pixel centre exactly on a clipping edge); S:
  * cross-run, the whole line (px included) must equal the D9MT_DEPTH_BIAS_VS=0 run's (paths that
- * keep the hardware bias); I: informational. "legacy" is the B*2^(e+1) hardware model
- * (informational). D3D9 pixel centres are at integer coordinates (d9mt offsets the viewport by
- * half a pixel), so pixel (px, py) is sampled at (px, py). A depth sample's want comes from the oracle
+ * keep the hardware bias); I: informational. A norast line is a sample of a cell whose witness
+ * (the same geometry with B = 0) drew nothing: this GPU doesn't rasterize that geometry, so the
+ * sample says nothing about the bias and counts as neither ok nor FAIL (rows Q and J). "legacy" is
+ * the B*2^(e+1) hardware model (informational). D3D9 pixel centres are at integer coordinates
+ * (d9mt offsets the viewport by half a pixel), so pixel (px, py) is sampled at (px, py). A depth
+ * sample's want comes from the oracle
  *
- *   final = clamp(d_win(p) + B * sum(mu_i a_i) + S * m_e, zn, zf)
+ *   final = clamp(d_win(p) + B * sum(mu_i a_i) + S * m_e, 0, 1)
  *
  * (mu: screen-space barycentrics, a_i: the vertex is in the shader's domain |z| <= 2^126,
- * 2^-100 <= |w| <= 2^126, m_e: the emitted plane's max(|dz/dx|, |dz/dy|) per pixel, [zn, zf]:
- * d9mt's Metal viewport depth range) compared with the reference by the cell's ZFUNC. Every 4x
+ * 2^-100 <= |w| <= 2^126, m_e: the emitted plane's max(|dz/dx|, |dz/dy|) per pixel; d_win uses
+ * d9mt's Metal viewport depth range, the clamp doesn't) compared with the reference by the cell's
+ * ZFUNC. No reference is at 0 or 1, so no want depends on what Metal does with a depth past
+ * those ends: rows K8/K9 print that. Every 4x
  * depth sample (a reference and a want of R, G, r or the oracle, explicit wants included) must
  * also satisfy |final - Ref| > (|dz/dx| + |dz/dy|) / 2 + 2^-22 for the depth its want predicts,
  * checked at start-up (D9MT-DEPTHBIAS-FIXTURE lines) before any draw: a violation is reported as
@@ -36,7 +44,8 @@
  * Runs (GATES.md): D9MT_DEPTH_BIAS_VS=1 (every gating line ok), D9MT_DEPTH_BIAS_VS unset and the
  * base build (S lines compared across runs; the switch-off run equals base line for line),
  * D9MT_DEPTH_BIAS_VS=1 D9MT_DEPTH_BIAS_TEST_UNHOOK=1 (T2's middle draw takes the unhooked path),
- * and DBT_NO_DEPTHBIAS=1 with D9MT_DEBUG_FILE naming a file that says no_depthbias (rows N).
+ * and DBT_NO_DEPTHBIAS=1 with D9MT_DEBUG_FILE naming a file that says no_depthbias (rows N; the
+ * file must exist before the program starts).
  * Shader bytes are hand-encoded SM3 (the source is in each array's comment). */
 #define COBJMACROS
 #include <windows.h>
@@ -135,6 +144,8 @@ typedef struct {
   int legacy;          /* print the hardware model */
   int seq;             /* 1..4: a T sequence (drawn by run_sequences) */
   int isControl;
+  int wit;             /* the witness cell (the same geometry, B = 0), or -1 */
+  int witx, wity;      /* the witness pixel: red when the GPU rasterizes the geometry */
   int x0, y0;
 } Cell;
 
@@ -190,6 +201,7 @@ static Cell *add_cell(const char *name) {
   c->dc = 1.0f;
   c->fill = D3DFILL_SOLID;
   c->ctrl = -1;
+  c->wit = -1;
   c->x0 = (ncells % GRID) * CELL_W;
   c->y0 = (ncells / GRID) * CELL_H;
   ncells++;
@@ -231,8 +243,14 @@ static void add_control(int i) {
   snprintf(c->name, sizeof(c->name), "%s", name);
   c->x0 = x0; c->y0 = y0;
   c->bias = 0.0; c->slope = 0.0;
-  c->ns = 0; c->ctrl = -1; c->mask = MASK_NONE; c->isControl = 1;
+  c->ns = 0; c->ctrl = -1; c->wit = -1; c->mask = MASK_NONE; c->isControl = 1;
   cells[i].ctrl = (int)(c - cells);
+}
+
+/* cell i gates only when pixel (px, py) of cell i's or cell src's B = 0 control is red */
+static void set_witness(int i, int src, int px, int py) {
+  cells[i].wit = cells[src].ctrl;
+  cells[i].witx = px; cells[i].wity = py;
 }
 
 /* ---- the oracle ---- */
@@ -303,7 +321,7 @@ static Oracle oracle(const Cell *c, double px, double py) {
     double me = fmax(fabs(gx), fabs(gy));
     double e = mu[0] * emitted[0] + mu[1] * emitted[1] + mu[2] * emitted[2];
     double f = e + c->slope * me;
-    o.final = f < zn ? zn : f > zf ? zf : f;
+    o.final = f < 0.0 ? 0.0 : f > 1.0 ? 1.0 : f;   /* not [zn, zf]: rows K */
     o.gx = gx; o.gy = gy;
     o.covered = 1;
     /* the hardware model: B * 2^(e+1) with e the exponent of the primitive's max depth */
@@ -546,7 +564,7 @@ static int red_present(DWORD p) { return ((p >> 16) & 0xff) >= 60; }
 
 /* ---- checking ---- */
 
-static int nOk, nFail, nCross, nFixture;
+static int nOk, nFail, nCross, nFixture, nNorast;
 
 static void report(int ms, const Cell *c, const char *sname, char want, char got, DWORD p, char legacy,
                    const char *verdict) {
@@ -595,6 +613,11 @@ static int validate_fixture(void) {
 
 static void check_cell(int ms, const Cell *c) {
   char sname[16];
+  /* The witness is the same geometry drawn with B = 0, where a hooked shader leaves z and the clip
+   * distances as they were. Not red there: this GPU doesn't rasterize the geometry, with or
+   * without the bias, so the cell's samples can't show what the shader did. */
+  int norast = c->wit >= 0
+            && classify(pixel(cells[c->wit].x0 + c->witx, cells[c->wit].y0 + c->wity)) != 'R';
   for (int i = 0; i < c->ns; i++) {
     const Sample *s = &c->s[i];
     int ax = c->x0 + s->px, ay = c->y0 + s->py;
@@ -624,6 +647,12 @@ static void check_cell(int ms, const Cell *c) {
       if (!o.covered) want = s->hasRef ? 'G' : 'B';
       else if (!s->hasRef) want = 'R';
       else want = zpass(c->zfunc, o.final, s->ref) ? 'R' : 'G';
+    }
+
+    if (norast) {
+      report(ms, c, sname, want, got, p, legacy, "norast");
+      nNorast++;
+      continue;
     }
 
     switch (want) {
@@ -760,12 +789,36 @@ static void build(void) {
       }
   }
 
-  /* K: the clamp contract */
-  c = add_cell("K1"); c->minz = 0.25f; c->maxz = 0.75f; quad_flat(c, 1.0 - B); c->bias = B;
-  sample(c, 64, 48, 1, 0.75 + B / 4, 'R', 'R');
-  c = add_cell("K2"); c->minz = 0.25f; c->maxz = 0.75f; quad_flat(c, B); c->bias = -B;
-  c->zfunc = D3DCMP_GREATER; c->dc = 0.0f;
-  sample(c, 64, 48, 1, 0.25 - B / 4, 'R', 'R');
+  /* K: the depth range contract. K1, K2: viewport [0.25, 0.75], a flat probe B/2 inside the far
+   * (near) end, pushed B/2 past it. The biased depth stays at 0.75 + B/2 (0.25 - B/2): it is not
+   * clamped to the viewport's range, where a clamp would give 0.75 (0.25). Three cells each:
+   *   K1 (K2): reference B/4 past the end. G: the probe's depth is past the reference. A clamp
+   *     to the viewport's range would stop short of it (R), which is what this row expected
+   *     until the M5 Max run of 2026-11-10 showed G.
+   *   K1a (K2a): ZFUNC ALWAYS, no reference. R: the fragment exists. K1's G alone can't tell a
+   *     depth past the end from a fragment that was clipped away; this row can (blue = clipped).
+   *   K1b (K2b): reference 3B/4 past the end. R: the depth stops short of that one, so it is the
+   *     biased depth itself (between B/4 and 3B/4 past the end), not one moved on to 0 or 1. */
+  for (int j = 0; j < 3; j++) {
+    snprintf(n, sizeof(n), "K1%s", j == 0 ? "" : j == 1 ? "a" : "b");
+    c = add_cell(n); c->minz = 0.25f; c->maxz = 0.75f; quad_flat(c, 1.0 - B); c->bias = B;
+    if (j == 0) sample(c, 64, 48, 1, 0.75 + B / 4, 'G', 'G');
+    else if (j == 1) { c->zfunc = D3DCMP_ALWAYS; sample(c, 64, 48, 0, 0, 'R', 'R'); }
+    else sample(c, 64, 48, 1, 0.75 + 0.75 * B, 'R', 'R');
+  }
+  for (int j = 0; j < 3; j++) {
+    snprintf(n, sizeof(n), "K2%s", j == 0 ? "" : j == 1 ? "a" : "b");
+    c = add_cell(n); c->minz = 0.25f; c->maxz = 0.75f; quad_flat(c, B); c->bias = -B;
+    c->zfunc = D3DCMP_GREATER; c->dc = 0.0f;
+    if (j == 0) sample(c, 64, 48, 1, 0.25 - B / 4, 'G', 'G');
+    else if (j == 1) { c->zfunc = D3DCMP_ALWAYS; sample(c, 64, 48, 0, 0, 'R', 'R'); }
+    else sample(c, 64, 48, 1, 0.25 - 0.75 * B, 'R', 'R');
+  }
+  /* K3: slope only (the hardware path). K4, K5: constant plus an opposing slope. The constant
+   * takes the depth 1.5B past the end and the slope term brings it back to B/2 past it: R. A
+   * clamp to the viewport's range before the slope term would end B inside the range: G. K6, K7:
+   * two vertices are pushed past the end and the sample isn't. R: nothing limits the depth per
+   * vertex (at 1 in K6, at the viewport's 0.75 in K7), which would lower the sample's depth. */
   {
     /* x-sloped K3/K4 probe: window 0.75 - B/2 + (B/16)(x - 64), NDC in [0.25, 0.75] */
     double w0 = 0.75 - B / 2 + (B / 16) * (0 - 64), w1 = 0.75 - B / 2 + (B / 16) * (CELL_W - 64);
@@ -790,6 +843,13 @@ static void build(void) {
       vp(72, 88, (0.75 - B / 2 - 0.25) / 0.5, 1));
   c->bias = B; c->zfunc = D3DCMP_GREATER; c->dc = 0.0f;
   sample(c, 40, 48, 1, 0.75 - 1.375 * B, 'R', 'R');
+  /* K8, K9: what Metal does with a depth past 1 (0), informational. Viewport [0, 1], the probe
+   * B/2 inside the end, pushed B/2 past it, ZFUNC EQUAL against the cleared 1 (0). R: the depth is
+   * exactly 1 (0), a clamp to the depth buffer's range. B: it isn't. No other row depends on it. */
+  c = add_cell("K8"); quad_flat(c, 1.0 - B / 2); c->bias = B; c->zfunc = D3DCMP_EQUAL;
+  sample(c, 64, 48, 0, 0, 'I', 'I');
+  c = add_cell("K9"); quad_flat(c, B / 2); c->bias = -B; c->zfunc = D3DCMP_EQUAL; c->dc = 0.0f;
+  sample(c, 64, 48, 0, 0, 'I', 'I');
 
   /* C: coverage at the planes, ALWAYS */
   {
@@ -887,8 +947,17 @@ static void build(void) {
   c->bias = B; c->zfunc = D3DCMP_ALWAYS; c->mask = MASK_AUTO;
   add_control((int)(c - cells));
 
-  /* Q: the domain boundary, w = 2^126 (in) and 2^127 (out: bias dropped) */
-  for (int q = 0; q < 2; q++)
+  /* Q, J: the shader's domain boundary. These rows need a triangle with a vertex at w = 2^126 or
+   * 2^127 on screen, and the M5 Max draws none of them: in the run of 2026-11-10 Q1a and Q2a
+   * (ZFUNC ALWAYS) stayed blue and J's references stayed green, with the switch off and on the
+   * base build too. Seven lines failed there for that reason, and the other Q and J lines passed
+   * for it. So every Q and J cell has a witness, the same geometry with B = 0, and gates only
+   * when the witness is red. Where it isn't, the rows are norast: on that GPU the boundary can't
+   * be seen by drawing, and this test says nothing about the shader's domain compares. */
+
+  /* Q: w = 2^126 (in the domain) and 2^127 (out: bias dropped); the witness is Q?a's control */
+  for (int q = 0; q < 2; q++) {
+    int first = ncells;
     for (int j = 0; j < 3; j++) {
       double w = q ? 0x1p127 : 0x1p126;
       double d = j == 2 ? 0.5 : 0.5 + (j ? 1.25 : 0.75) * B;
@@ -900,20 +969,29 @@ static void build(void) {
       if (j == 2) { c->zfunc = D3DCMP_ALWAYS; sample(c, 64, 48, 0, 0, 'R', 'R'); }
       else sample(c, 64, 48, 1, 0.5, 0, 0);
     }
+    add_control(first + 2);
+    for (int j = 0; j < 3; j++) set_witness(first + j, first + 2, 64, 48);
+  }
 
-  /* J: mixed domain (P0 w = 2^127) */
-  for (int s2 = 0; s2 < 2; s2++)
-    for (int side = 0; side < 2; side++) {
-      snprintf(n, sizeof(n), "J%d%c", s2 + 1, side ? 'g' : 'r');
-      c = add_cell(n);
-      tri(c, vp(8, 48, 0.5, 0x1p127), vp(120, 8, 0.5, 1), vp(120, 88, 0.5, 1));
-      c->bias = -B; c->slope = s2 ? 16.0 : 0.0;
-      for (int k = 0; k < 2; k++) {
-        int px = k ? 100 : 40;
-        Oracle o = oracle(c, px, 48);
-        sample(c, px, 48, 1, o.final + (side ? -B / 8 : B / 8), 0, 0);
+  /* J: mixed domain (P0 w = 2^127); the witness is J1r's control (no reference in it: the
+   * triangle's depth 0.5 passes LESS against the cleared 1) */
+  {
+    int first = ncells;
+    for (int s2 = 0; s2 < 2; s2++)
+      for (int side = 0; side < 2; side++) {
+        snprintf(n, sizeof(n), "J%d%c", s2 + 1, side ? 'g' : 'r');
+        c = add_cell(n);
+        tri(c, vp(8, 48, 0.5, 0x1p127), vp(120, 8, 0.5, 1), vp(120, 88, 0.5, 1));
+        c->bias = -B; c->slope = s2 ? 16.0 : 0.0;
+        for (int k = 0; k < 2; k++) {
+          int px = k ? 100 : 40;
+          Oracle o = oracle(c, px, 48);
+          sample(c, px, 48, 1, o.final + (side ? -B / 8 : B / 8), 0, 0);
+        }
       }
-    }
+    add_control(first);
+    for (int j = 0; j < 4; j++) set_witness(first + j, first, 100, 48);
+  }
   c = add_cell("J3");
   tri(c, vraw((float)(ndcx(8) * 0x1p127), 0.0f, -0x1p127f, 0x1p127f), vp(120, 8, 0.5, 1), vp(120, 88, 0.5, 1));
   c->bias = B; c->zfunc = D3DCMP_ALWAYS;
@@ -929,6 +1007,7 @@ static void build(void) {
   sample(c, 83, 40, 0, 0, 'C', 'C');
   sample(c, 83, 56, 0, 0, 'C', 'C');
   add_control((int)(c - cells));
+  set_witness((int)(c - cells), (int)(c - cells), 100, 40);   /* blue = blue proves nothing */
 
   /* D: degenerate viewports */
   {
@@ -1082,13 +1161,13 @@ static void render_pass(int ms) {
 }
 
 static void check_pass(int ms) {
-  nOk = nFail = nCross = nFixture = 0;
+  nOk = nFail = nCross = nFixture = nNorast = 0;
   read_back(ms);
   for (int i = 0; i < ncells; i++)
     if (!cells[i].isControl) check_cell(ms, &cells[i]);
   IDirect3DSurface9_UnlockRect(sysmem);
-  printf("D9MT-DEPTHBIAS-SUMMARY x%d gating ok=%d fail=%d cross=%d fixture=%d\n",
-         ms ? 4 : 1, nOk, nFail, nCross, nFixture);
+  printf("D9MT-DEPTHBIAS-SUMMARY x%d gating ok=%d fail=%d cross=%d fixture=%d norast=%d\n",
+         ms ? 4 : 1, nOk, nFail, nCross, nFixture, nNorast);
   fflush(stdout);
 }
 
@@ -1159,8 +1238,11 @@ int main(void) {
          unhookActive, noDepthBiasRun);
   validate_fixture();
 
-  /* D9MT_DEBUG_FILE is polled once a second: the no_depthbias run renders after ~2 s */
-  const int renderFrame = noDepthBiasRun ? 120 : 0;
+  /* The no_depthbias run renders at frame 2. d9mt reads D9MT_DEBUG_FILE during the first Present
+   * (D3D9DeviceEx::DebugOnPresent polls at once while the path isn't resolved, then once a
+   * second), so the flag is on from the second frame, and the hash harness ends the process
+   * after five. Rows N are G only with the flag on, so a late flag shows as their FAIL. */
+  const int renderFrame = noDepthBiasRun ? 2 : 0;
   int frames = 0;
   MSG msg;
   for (;;) {

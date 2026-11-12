@@ -63,8 +63,9 @@ namespace dxvk {
     // A D3D9 vertex shader with the constant depth bias in its IR (#163):
     // z += k * w from the VS depth-bias push block, plus the original
     // near/far planes as clip distances 6 and 7. The backend then sends the
-    // hardware constant as 0 and clamps depth while k != 0. Only valid once
-    // task->isDone(); false for the fixed-function and blit shaders.
+    // hardware constant as 0 and sets the depth clip mode to clamp while
+    // k != 0. Only valid once task->isDone(); false for the fixed-function
+    // and blit shaders.
     bool                depthBiasHook = false;
 
     bool ready() const { return task == nullptr || task->isDone(); }

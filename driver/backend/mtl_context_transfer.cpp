@@ -793,8 +793,10 @@ namespace dxvk::backend {
       // The constant depth bias in the vertex shader (#163): with a hooked
       // VS and k != 0 the shader adds the constant in clip space and keeps
       // the original frustum in clip distances 6/7, so the hardware
-      // constant is 0 and depth clamps (the D3D11 rule d9mt adopts: the
-      // biased depth clamps to the viewport range). Any other VS keeps the
+      // constant is 0 and the depth clip mode is clamp: a fragment the
+      // bias moves past the near or far plane is kept. Metal's clamp
+      // doesn't limit the depth to the viewport's range, and d9mt doesn't
+      // either (docs/configuration.md). Any other VS keeps the
       // hardware constant (fail-closed). The resolved PSO's VS is ready
       // here, so its hook bit is valid. What's cached and compared is the
       // state actually sent, so a hooked <-> unhooked switch at the same

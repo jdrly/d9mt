@@ -7030,11 +7030,11 @@ namespace dxvk {
     // and a PS that doesn't write depth, a hooked VS adds the constant in
     // clip space instead (z += k * w, k = DEPTHBIAS / the Metal viewport's
     // depth range), with the original near/far planes as clip distances and
-    // depth clamped (the backend: it also keeps the hardware constant for an
-    // unhooked VS, so the hardware value is always sent). Not with the
-    // depth_clamp debug flag (it keeps its meaning), a zero or non-finite
-    // range, |k| > 2^-6 (the arithmetic bound of the shader's domain) or a
-    // subnormal k (canonicalised to 0: the hardware path).
+    // the depth clip mode at clamp (the backend: it also keeps the hardware
+    // constant for an unhooked VS, so the hardware value is always sent).
+    // Not with the depth_clamp debug flag (it keeps its meaning), a zero or
+    // non-finite range, |k| > 2^-6 (the arithmetic bound of the shader's
+    // domain) or a subnormal k (canonicalised to 0: the hardware path).
     // docs/configuration.md, D9MT_DEPTH_BIAS_VS.
     const bool eligible = D3D9DepthBiasVsEnabled()
       && m_depthBiasDrawBits == DepthBiasAllBits

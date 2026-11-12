@@ -211,7 +211,8 @@ target, 1x and then 4x MSAA, and prints a `D9MT-DEPTHBIAS` line per checked
 pixel and a summary per pass. The cells cover:
 - the bias at several depths, both signs, mixed w, slope plus constant;
 - reduced and degenerate viewports, the k guard;
-- the clamp policy (viewport clamp, late clamp, per-sample clamp);
+- the depth range contract: the biased depth isn't clamped to a reduced viewport
+  range, before or after the slope term, per sample or per vertex;
 - coverage at the near and far planes, the six user clip planes, wireframe,
   the guard band, negative and near-zero w;
 - the shader's arithmetic domain;
@@ -222,7 +223,10 @@ line ok; switch off, equal to the base build; `D9MT_DEPTH_BIAS_TEST_UNHOOK=1`;
 and the `no_depthbias` run. Every line carries the raw resolved pixel (`px=`), so
 the cross-run comparisons compare bytes, not only the colour class. Fixture checks
 (the 4x depth margin, asserted at start-up, and the automatic coverage samples)
-report `fixture-FAIL`, never a driver result.
+report `fixture-FAIL`, never a driver result. The domain rows (Q, J) draw triangles
+with a vertex at w = 2^126 or 2^127, which the M5 Max doesn't rasterize at all: each
+has a witness cell, the same geometry without a bias, and where the witness stays
+empty its lines read `norast` and count as neither ok nor FAIL.
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
