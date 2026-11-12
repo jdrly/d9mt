@@ -378,7 +378,7 @@ jobs:
       # build compiles nothing, a changed flag rebuilds every object). Too slow for every push.
       # It runs last because it rebuilds build/driver-x64.
       - name: test-build-deps.sh with real builds (nightly)
-        if: github.event_name == 'schedule' || inputs.full
+        if: true
         env:
           BUILD: 1
           D9MT_JOBS: 4
