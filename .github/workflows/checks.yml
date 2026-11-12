@@ -1,7 +1,8 @@
 # Checks every pull request and every push to main on GitHub's hosted runners: the workflow
 # lints clean, the bridge and the driver (x64 and x86) build from scratch, and every test that
 # needs no GPU passes, the two Wine console tests included. docs/testing.md § CI lists which
-# scripts run here and which can't. No secrets and read-only access.
+# scripts run here and which can't. No secrets and read-only access (the run's own token is
+# used once, to download a public release asset).
 #
 # It also runs every night on main, so a changed runner image shows up as a red run of an
 # unchanged commit, and by hand on any branch (Actions -> Checks -> Run workflow, or
@@ -306,13 +307,34 @@ jobs:
           [ "$failed" = 0 ]
 
       # The Wine engine the app installs (swtor-on-mac src/som.sh: ENGINE_URL, ENGINE_SHA256): an
-      # x86_64 Wine that runs under Rosetta and needs no library path. Downloaded on every run and
-      # checked against its hash; it isn't cached.
+      # x86_64 Wine that runs under Rosetta and needs no library path. Downloaded on every run,
+      # not cached, as an asset of the release cx-26.3.0-8 of the public jdrly/wine-engine.
+      # gh fetches it with this run's read-only token: an anonymous download from a shared runner
+      # is the first thing GitHub throttles, and one answered with HTTP 500 on main (run
+      # 43196575934). Three tries, 20 s apart; each failure prints gh's error with its HTTP
+      # status. The SHA-256 check comes after the loop and decides alone whether the file is
+      # the engine: a retry can fetch the file again, it can't make another file pass.
       - name: Wine engine
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          url=https://github.com/jdrly/wine-engine/releases/download/cx-26.3.0-8/wine-cx-26.3.0-8-macos-x86_64.tar.xz
+          tag=cx-26.3.0-8
+          file=wine-cx-26.3.0-8-macos-x86_64.tar.xz
           sha=1976c3310a1f8be2f8e9a46fcb524f77b4316df3d281d94af2c8542bef60456d
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/engine.tar.xz" "$url"
+          got=0
+          for try in 1 2 3; do
+            if gh release download "$tag" --repo jdrly/wine-engine --pattern "$file" \
+                 --output "$RUNNER_TEMP/engine.tar.xz" --clobber; then
+              got=1
+              break
+            fi
+            echo "::warning::the engine download failed, try $try of 3 (gh's error is the line above)"
+            [ "$try" = 3 ] || sleep 20
+          done
+          if [ "$got" != 1 ]; then
+            echo "::error::no engine after 3 tries: GitHub didn't deliver the release asset. This says nothing about the commit."
+            exit 1
+          fi
           echo "$sha  $RUNNER_TEMP/engine.tar.xz" | shasum -a 256 -c -
           mkdir "$RUNNER_TEMP/engine"
           tar -xJf "$RUNNER_TEMP/engine.tar.xz" -C "$RUNNER_TEMP/engine" --strip-components 1 wine

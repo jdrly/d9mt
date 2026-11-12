@@ -183,7 +183,8 @@ its own that a later push doesn't cancel. Its jobs:
   `test-upload-copy.sh` and `test-perf-compare.py`. DXVK's native headers come from DXVK v3.0.2.
   - The two Wine scripts, `test-fatal-log.sh` and `test-cs-sync.sh`, run console programs with no
     window and no GPU. Their Wine is the engine the app installs (`cx-26.3.0-8` from
-    `jdrly/wine-engine`, checked against its SHA-256), in a prefix `test-fatal-log.sh` makes.
+    `jdrly/wine-engine`, fetched with `gh release download` under the run's read-only token,
+    three tries, then checked against its SHA-256), in a prefix `test-fatal-log.sh` makes.
   - `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
   - `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the
     caller's environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the
