@@ -168,10 +168,10 @@ A change is done only when all of these hold:
       its verdict is in the PR.
 - [ ] The issue's UAT scenario has been played through and ticked off in the issue.
 
-_Open:_ the hash suite's runner (`scripts/run-hash-tests.sh`, `test/expected-failures.txt`) is on
-the branch `chore/test-runner` and not on `main` yet; until it lands, the suite runs from the
-maintainer's workspace. The native tests' runner (`scripts/run-native-tests.sh`) and the
-benchmarks (`test/perf/`, `test/bench_4k.c`, PERFORMANCE.md §3) are on `main`.
+The hash suite's runner is `scripts/run-hash-tests.sh`, with `scripts/cmp-hash-runs.py` for base
+against head ([docs/testing.md](docs/testing.md#hash-suite)). The native tests' runner
+(`scripts/run-native-tests.sh`) and the benchmarks (`test/perf/`, `test/bench_4k.c`,
+PERFORMANCE.md §3) are on `main` too.
 
 ## Never do these things
 

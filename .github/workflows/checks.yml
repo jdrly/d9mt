@@ -309,6 +309,7 @@ jobs:
             scripts/test-state-cache.sh
             scripts/test-upload-copy.sh
             scripts/test-perf-compare.py
+            scripts/test-cmp-hash-runs.py
           )
           {
             echo "### Test scripts"
@@ -397,6 +398,16 @@ jobs:
             echo "- \`scripts/$t\` (Wine): $result, $((SECONDS - start)) s" >> "$GITHUB_STEP_SUMMARY"
           done
           [ "$failed" = 0 ]
+
+      # The hash suite can't draw here (no Metal 4), but everything before the first frame can
+      # run: every test program builds with the hash harness, the crash guard builds, and the
+      # runner makes its prefix and checks that no crash dialog can open in it. The drawing
+      # itself runs on a Mac with a real GPU (docs/testing.md § Hash suite).
+      - name: Hash suite, up to the first frame
+        timeout-minutes: 15
+        env:
+          WORK: ${{ runner.temp }}/hash-suite
+        run: ENGINE="$WINE_ENGINE" scripts/run-hash-tests.sh --build-only
 
       # The script compares this tree's build scripts with main's, so it needs main's tip.
       - name: test-build-jobs.sh
