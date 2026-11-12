@@ -74,7 +74,8 @@ class Compare(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout)
             self.assertIn(shown, r.stdout)
             self.assertIn('exit status or FAIL lines changed: code_alpha: rc=0 fails=0 -> ', r.stdout)
-            self.assertEqual(self.run_cmp(BASE, head, '--allow-notclean', 'code_alpha').returncode, 0)
+            # the flag never excuses a program this change broke: base was clean
+            self.assertEqual(self.run_cmp(BASE, head, '--allow-notclean', 'code_alpha').returncode, 1)
 
     def test_no_frames_at_all_is_not_clean(self):
         both = BASE.replace('code_readback rc=0 fails=0 aaaaaaaaaaaaaaaa', 'code_readback rc=0 fails=0')
@@ -89,6 +90,17 @@ class Compare(unittest.TestCase):
         self.assertIn('exit status or FAIL lines changed: none', r.stdout)
         self.assertEqual(self.run_cmp(both, both, '--allow-notclean', 'code_alpha').returncode, 0)
 
+    def test_the_flag_needs_the_same_uncleanness_on_base(self):
+        base = BASE.replace('code_alpha rc=0 fails=0', 'code_alpha rc=77 fails=0')
+        head = BASE.replace('code_alpha rc=0 fails=0', 'code_alpha rc=137 fails=1')
+        self.assertEqual(self.run_cmp(base, head, '--allow-notclean', 'code_alpha').returncode, 1)
+
+    def test_an_unclean_new_program_is_never_excused(self):
+        head = BASE + 'code_new rc=1 fails=3 bbbbbbbbbbbbbbbb\n'
+        r = self.run_cmp(BASE, head, '--new', 'code_new', '--allow-notclean', 'code_new')
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('not allowed to be: code_new', r.stdout)
+
     def test_nothing_in_common_fails(self):
         r = self.run_cmp('code_a rc=0 fails=0 aa\n', 'code_b rc=0 fails=0 aa\n', '--new', 'code_b')
         self.assertEqual(r.returncode, 1)
@@ -101,6 +113,55 @@ class Compare(unittest.TestCase):
     def test_usage(self):
         self.assertNotEqual(subprocess.run([sys.executable, '-I', str(SCRIPT), 'one'], capture_output=True).returncode, 0)
         self.assertNotEqual(subprocess.run([sys.executable, '-I', str(SCRIPT), 'a', 'b', '--nope'], capture_output=True).returncode, 0)
+        self.assertNotEqual(subprocess.run([sys.executable, '-I', str(SCRIPT), 'a', 'b', '--stats', 'x'], capture_output=True).returncode, 0)
+
+
+STATS = ('STATS variant=debug programs=5 notclean=none validation=%d invalid-usage=%d lifetime=%d '
+         'no-d9mt-proof=%s gpu-lost=%d tree=abc1234\n')
+
+
+class Stats(unittest.TestCase):
+    def run_stats(self, base, head):
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for name, text in (('base.txt', BASE), ('head.txt', BASE), ('base.stats', base), ('head.stats', head)):
+                p = Path(d) / name
+                p.write_text(text)
+                paths.append(str(p))
+            return subprocess.run([sys.executable, '-I', str(SCRIPT), paths[0], paths[1], '--stats', paths[2], paths[3]],
+                                  text=True, capture_output=True)
+
+    def test_clean_diagnostics_pass(self):
+        r = self.run_stats(STATS % (0, 0, 0, 'none', 0), STATS % (0, 0, 0, 'none', 0))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('diagnostics (variant debug): validation 0 (base 0), invalid usage 0 (base 0), lifetime 0: nothing new', r.stdout)
+
+    def test_a_new_validation_line_fails(self):
+        r = self.run_stats(STATS % (2, 0, 0, 'none', 0), STATS % (3, 0, 0, 'none', 0))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('Metal validation lines: 3 on head, 2 on base', r.stdout)
+
+    def test_as_many_validation_lines_as_base_pass(self):
+        self.assertEqual(self.run_stats(STATS % (2, 1, 0, 'none', 0), STATS % (2, 1, 0, 'none', 0)).returncode, 0)
+
+    def test_new_invalid_usage_fails(self):
+        r = self.run_stats(STATS % (0, 0, 0, 'none', 0), STATS % (0, 1, 0, 'none', 0))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('"Invalid Metal usage" lines: 1 on head, 0 on base', r.stdout)
+
+    def test_any_lifetime_violation_on_head_fails(self):
+        r = self.run_stats(STATS % (0, 0, 1, 'none', 0), STATS % (0, 0, 1, 'none', 0))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('lifetime violations on head: 1', r.stdout)
+
+    def test_no_proof_and_gpu_lost_fail(self):
+        self.assertEqual(self.run_stats(STATS % (0, 0, 0, 'none', 0), STATS % (0, 0, 0, 'code_alpha', 0)).returncode, 1)
+        self.assertEqual(self.run_stats(STATS % (0, 0, 0, 'none', 0), STATS % (0, 0, 0, 'none', 2)).returncode, 1)
+
+    def test_a_missing_stats_line_fails(self):
+        r = self.run_stats('', STATS % (0, 0, 0, 'none', 0))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('no STATS line in the base file', r.stdout)
 
 
 if __name__ == '__main__':

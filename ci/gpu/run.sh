@@ -12,9 +12,9 @@
 #                AIR codegen id goes into <out>/air-codegen-id.txt
 #   gpu-tests    build, then scripts/run-native-tests.sh and the two tests that drive Metal 4:
 #                scripts/test-commit-feedback.sh and scripts/test-compile-mt.sh
-#   hash         the hash suite of BASE against this checkout: both are built, both run for
-#                every variant and AIR target of the spec, and scripts/cmp-hash-runs.py
-#                compares each pair of runs
+#   hash         the hash suite of BASE against this checkout: both are built, both run through
+#                this checkout's runner for every variant and AIR target of the spec, and
+#                scripts/cmp-hash-runs.py compares each pair of runs, frames and diagnostics
 #   merged-main  gpu-tests, then hash against this commit's first parent (default variant,
 #                AIR targets 26 and 27)
 #
@@ -27,9 +27,13 @@
 # D9MT_JOBS (default 4). toolchains/llvm-x86_64 must exist (scripts/build-llvm-unixside.sh);
 # the base worktree shares it.
 #
-# <out dir>/summary.md gets one line per step. Exit status: 0 every step passed; 1 a gate
-# failed; 3 no verdict (the GPU was lost or hung during a hash run, or the probe found no
-# usable Metal 4: nothing here says anything about the commit).
+# Every set builds this checkout first, from what is in the tree now: an older build/ is never
+# trusted. <out dir>/summary.md gets one line per step, the swap and memory pressure before
+# and after, and the count of IOGPUMetalError lines in the system log of the run's interval
+# (<out dir>/system-log.txt, when the log can be read).
+# Exit status: 0 every step passed; 1 a gate failed; 3 no verdict (the probe found no usable
+# Metal 4, or the GPU was lost or hung, with no gate failed before: nothing then says anything
+# about the commit). A failed gate stays a failure whatever happens after it.
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$V2" || exit 70
@@ -54,9 +58,24 @@ for w in "$@"; do
     esac
   done
 done
-
 VARIANTS=${VARIANTS//,/ } TARGETS=${TARGETS//,/ }
+# shellcheck disable=SC2086 # split into words on purpose
+set -- $VARIANTS
+[ $# -gt 0 ] || { echo "variants= names no variant" >&2; exit 64; }
+for v in "$@"; do
+  case "$v" in default|debug|noattach|repro|lifetime|shaderval|early) ;; *) echo "unknown variant: $v" >&2; exit 64 ;; esac
+done
+for t in $TARGETS; do
+  case "$t" in 26|27) ;; *) echo "unknown AIR target: $t (26 or 27)" >&2; exit 64 ;; esac
+done
+
 status=0
+BASE_TREE=""
+cleanup() { [ -z "$BASE_TREE" ] || { git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; }; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+START=$(date +%s)
+machine() { echo "swap $(sysctl -n vm.swapusage 2>/dev/null | sed 's/  */ /g'), memory pressure level $(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo unknown)"; }
 note() { echo "$*"; echo "- $*" >> "$OUT/summary.md"; }
 # step <name> <log> <command...>: runs it, notes the result, returns its exit status
 step() {
@@ -100,11 +119,16 @@ build_tree() {
   note "$tag: $(cat "$OUT/$tag-air-codegen-id.txt")"
   step "$tag driver x64" "$OUT/$tag-driver-x64.log" in_tree "$tree" env ARCH=x64 scripts/build-driver.sh || return 1
 }
+HEAD_BUILT=0
+# This checkout is built once per invocation, always: files in build/ from an earlier commit
+# would otherwise be tested under this commit's name.
 set_build() {
+  [ "$HEAD_BUILT" = 1 ] && return 0
   build_tree "$V2" head || return 1
   cp "$OUT/head-air-codegen-id.txt" "$OUT/air-codegen-id.txt"
   step "head driver x86" "$OUT/head-driver-x86.log" env ARCH=x86 scripts/build-driver.sh || return 1
   [ -z "$(git status --porcelain --untracked-files=no)" ] || { note "FAILED: the builds changed tracked files"; git status --short | head; return 1; }
+  HEAD_BUILT=1
 }
 
 dxvk_native() {
@@ -121,7 +145,7 @@ dxvk_native() {
 }
 set_gpu_tests() {
   local rc=0
-  [ -f build/bridge/winemetal.so ] && [ -f build/driver-x64/d3d9.dll ] || set_build || return 1
+  set_build || return 1
   dxvk_native || { note "FAILED: DXVK's native headers"; return 1; }
   step "run-native-tests.sh" "$OUT/native-tests.log" scripts/run-native-tests.sh || rc=1
   step "test-commit-feedback.sh" "$OUT/test-commit-feedback.log" scripts/test-commit-feedback.sh || rc=1
@@ -136,7 +160,9 @@ hash_run() {
   local -a tenv=()
   label="$tag-$target-$variant"
   [ "$target" = host ] || tenv=("D9MT_AIR_MACOS=$target")
-  in_tree "$tree" env ${tenv[@]+"${tenv[@]}"} VARIANT="$variant" WORK="$WORK/hash-$label" scripts/run-hash-tests.sh \
+  # this checkout's runner and harness for both trees: a base from before the runner existed
+  # has neither, and two runners would be two harnesses
+  env ${tenv[@]+"${tenv[@]}"} SRC="$tree" VARIANT="$variant" WORK="$WORK/hash-$label" "$V2/scripts/run-hash-tests.sh" \
     > "$OUT/$label.log" 2>&1 || rc=$?
   cp "$WORK/hash-$label/hashes.txt" "$OUT/$label.hashes.txt" 2>/dev/null || true
   cp "$WORK/hash-$label/stats.txt" "$OUT/$label.stats.txt" 2>/dev/null || true
@@ -151,14 +177,15 @@ set_hash() {
   : "${ENGINE:?hash needs ENGINE (an x86_64 Wine root)}"
   : "${BASE:?hash needs BASE (the base commit)}"
   export ENGINE
-  local base="$WORK/base" rc=0 v t r tag
+  local rc=0 v t r tag compared=0
   local -a args=()
-  [ -f build/bridge/winemetal.so ] && [ -f build/driver-x64/d3d9.dll ] || set_build || return 1
-  git worktree remove --force "$base" 2>/dev/null; rm -rf "$base"
-  git worktree add -q --detach "$base" "$BASE" || { note "FAILED: no worktree of BASE $BASE"; return 1; }
-  ln -s "$V2/toolchains" "$base/toolchains"
-  build_tree "$base" base || return 1
-  note "hash suite: base $(git -C "$base" rev-parse --short HEAD) against head $(git rev-parse --short HEAD), variants $VARIANTS, targets ${TARGETS:-host}"
+  set_build || return 1
+  BASE_TREE="$WORK/base"
+  git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; git worktree prune
+  git worktree add -q --detach "$BASE_TREE" "$BASE" || { note "FAILED: no worktree of BASE $BASE"; return 1; }
+  ln -s "$V2/toolchains" "$BASE_TREE/toolchains"
+  build_tree "$BASE_TREE" base || return 1
+  note "hash suite: base $(git -C "$BASE_TREE" rev-parse --short HEAD) against head $(git rev-parse --short HEAD), variants $VARIANTS, targets ${TARGETS:-host}"
   [ -z "$NEW" ] || args+=(--new "$NEW")
   [ -z "$ALLOW" ] || args+=(--allow "$ALLOW")
   [ -z "$ALLOW_NOTCLEAN" ] || args+=(--allow-notclean "$ALLOW_NOTCLEAN")
@@ -167,38 +194,65 @@ set_hash() {
     for v in $VARIANTS; do
       for tag in base head; do
         r=0
-        if [ "$tag" = base ]; then hash_run "$base" base "$v" "$t" || r=$?; else hash_run "$V2" head "$v" "$t" || r=$?; fi
-        if [ "$r" = 3 ]; then note "NO VERDICT: the GPU was lost during the $tag run of target $t, $v"; git worktree remove --force "$base" 2>/dev/null; return 3; fi
+        if [ "$tag" = base ]; then hash_run "$BASE_TREE" base "$v" "$t" || r=$?; else hash_run "$V2" head "$v" "$t" || r=$?; fi
+        if [ "$r" = 3 ]; then
+          note "NO VERDICT: the GPU was lost or hung during the $tag run of target $t, $v (its logs are in $tag-$t-$v-logs)"
+          [ "$rc" = 0 ] && return 3
+          return 1
+        fi
         [ "$r" = 0 ] || { note "FAILED: the $tag run of target $t, $v is unusable (exit $r)"; rc=1; }
       done
       if python3 -I scripts/cmp-hash-runs.py "$OUT/base-$t-$v.hashes.txt" "$OUT/head-$t-$v.hashes.txt" ${args[@]+"${args[@]}"} \
-           > "$OUT/cmp-$t-$v.txt" 2>&1; then
-        note "ok: target $t, $v: $(head -n 1 "$OUT/cmp-$t-$v.txt")"
+           --stats "$OUT/base-$t-$v.stats.txt" "$OUT/head-$t-$v.stats.txt" > "$OUT/cmp-$t-$v.txt" 2>&1; then
+        note "ok: target $t, $v: $(head -n 1 "$OUT/cmp-$t-$v.txt"); $(tail -n 1 "$OUT/cmp-$t-$v.txt")"
       else
         note "FAILED: target $t, $v:"; sed 's/^/    /' "$OUT/cmp-$t-$v.txt" | tee -a "$OUT/summary.md"; rc=1
       fi
+      compared=$((compared + 1))
     done
   done
-  git worktree remove --force "$base" 2>/dev/null
+  [ "$compared" -gt 0 ] || { note "FAILED: no pair of runs was compared"; rc=1; }
   return "$rc"
+}
+
+# The system log of the run's interval, for GPU faults the driver's own lines may miss.
+system_log() {
+  local n
+  if log show --start "@$START" --end "@$(date +%s)" --style compact --predicate \
+       'process == "kernel" OR process == "WindowServer" OR subsystem CONTAINS[c] "GPU" OR subsystem CONTAINS[c] "IOAccel" OR senderImagePath CONTAINS[c] "GPU" OR senderImagePath CONTAINS[c] "IOAccel"' \
+       > "$OUT/system-log.txt" 2> "$OUT/system-log.err"; then
+    n=$(grep -c 'IOGPUMetalError' "$OUT/system-log.txt" || true)
+    note "system log: $n IOGPUMetalError lines in the run's interval"
+    [ "$n" = 0 ] || return 3
+  else
+    note "system log: not readable here ($(head -n 1 "$OUT/system-log.err"))"
+  fi
 }
 
 : > "$OUT/summary.md"
 note "$SET at $(git rev-parse HEAD) on $(sysctl -n hw.model 2>/dev/null), macOS $(sw_vers -productVersion 2>/dev/null)"
+note "before: $(machine)"
+# worst <status>: a failed gate (1) stays; "no verdict" (3) only replaces a pass
+worst() { case "$status:$1" in 0:*) status=$1 ;; 3:1) status=1 ;; esac; }
+run_set() { local r=0; "$@" || r=$?; worst "$r"; }
 case "$SET" in
-  probe) set_probe || status=$? ;;
-  build) set_build || status=$? ;;
-  gpu-tests) set_probe || status=$?; [ "$status" != 0 ] || set_gpu_tests || status=$? ;;
-  hash) set_probe || status=$?; [ "$status" != 0 ] || set_hash || status=$? ;;
+  probe) run_set set_probe ;;
+  build) run_set set_build ;;
+  gpu-tests) run_set set_probe; [ "$status" != 0 ] || run_set set_gpu_tests ;;
+  hash) run_set set_probe; [ "$status" != 0 ] || run_set set_hash ;;
   merged-main)
-    set_probe || status=$?
+    run_set set_probe
     if [ "$status" = 0 ]; then
-      set_gpu_tests || status=$?
       BASE="${BASE:-$(git rev-parse HEAD^)}" TARGETS="${TARGETS:-26 27}"
-      r=0; set_hash || r=$?
-      [ "$r" = 0 ] || { [ "$r" = 3 ] && status=3; [ "$status" != 0 ] || status=$r; }
+      run_set set_gpu_tests
+      run_set set_hash
     fi ;;
   *) echo "unknown set: $SET" >&2; exit 64 ;;
 esac
-note "verdict: $([ "$status" = 0 ] && echo pass || { [ "$status" = 3 ] && echo "no verdict" || echo FAIL; })"
+case "$SET" in
+  probe|build) ;;
+  *) [ "$status" = 3 ] || run_set system_log ;;
+esac
+note "after: $(machine)"
+note "verdict: $(case "$status" in 0) echo pass ;; 3) echo "no verdict" ;; *) echo FAIL ;; esac)"
 exit "$status"

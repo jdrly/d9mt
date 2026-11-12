@@ -8,8 +8,11 @@
 #
 # ENGINE    an x86_64 Wine install (bin/wine, lib/wine/x86_64-unix; it runs under Rosetta).
 #           It is cloned into WORK; the original is never written.
-# DLL       the d3d9.dll under test (default build/driver-x64/d3d9.dll)
-# BRIDGE    build (the default when build/bridge/winemetal.so exists): this tree's bridge goes
+# SRC       the tree under test (default: the tree this script is in): its test/code_*.c and
+#           its builds. The harness (test/harness) is always this script's own, so a base
+#           commit from before the runner existed runs through the same runner as head.
+# DLL       the d3d9.dll under test (default SRC/build/driver-x64/d3d9.dll)
+# BRIDGE    build (the default when SRC/build/bridge/winemetal.so exists): that bridge goes
 #           into the engine clone. engine: keep the engine's own winemetal.
 # VARIANT   default | debug (MTL_DEBUG_LAYER=1) | noattach (D9MT_NO_ATTACHMENT_OPT=1) |
 #           repro (d3d9.reproducibleCommandStream = True) | lifetime (D9MT_LIFETIME_CHECK=1) |
@@ -32,16 +35,18 @@
 #                (the input of scripts/cmp-hash-runs.py)
 #   stats.txt    one line: programs, programs that aren't rc=0 fails=0, Metal validation lines,
 #                "Invalid Metal usage" lines, lifetime violations, programs without proof that
-#                d9mt drew them, GPU-lost lines
+#                d9mt drew them, GPU-lost and GPU-hung lines (scripts/cmp-hash-runs.py --stats
+#                judges the counts of head against base)
 #   logs/        per program .out, .err, and .exc when a process crashed
 #
 # A program's own exit status and FAIL lines are data: the comparison with base judges them.
 # This script's exit status is about the run itself:
 #   0  every program was built, ran, and its log proves d9mt was the driver ("D9MT: compile
 #      workers"), and no Wine process was left behind
-#   1  a program didn't build or has no such proof, the prefix setup wasn't verified, or
-#      processes were left over (they are killed): the hashes don't count
-#   3  no verdict: a log has D9MT-GPU-LOST. The GPU was lost or hung; run it again
+#   1  a program didn't build or has no such proof, the prefix wasn't made or its setup wasn't
+#      verified, or processes were left over (they are killed): the hashes don't count
+#   3  no verdict: a log has D9MT-GPU-LOST or D9MT-GPU-HUNG. The GPU was lost or hung; run it
+#      again
 # rc=137 after a complete set of frames and "D9H done" is the exit kill of issue #164, not the
 # program's doing: run that program again.
 #
@@ -54,15 +59,16 @@ if [ "${VD:-0}" = 1 ] && [ "${VD_ACTIVE:-0}" != 1 ]; then
 fi
 BUILD_ONLY=0
 if [ "${1:-}" = --build-only ]; then BUILD_ONLY=1; shift; fi
+SRC="$(cd "${SRC:-$V2}" && pwd)"
 HARNESS=(-include "$V2/test/harness/d9h.h")
 [ "${VD:-0}" = 1 ] && HARNESS=(-include "$VD_DIR/d9h-vd.h" -I "$V2/test/harness")
 SRC_ENGINE="${ENGINE:?set ENGINE to a Wine root}"
 [ -d "$SRC_ENGINE/lib/wine/x86_64-unix" ] || { echo "FATAL: $SRC_ENGINE is no x86_64 Wine install" >&2; exit 1; }
 WORK="${WORK:-${TMPDIR:-/tmp}/d9mt-hash}"
 ENG="$WORK/engine"
-DLL="${DLL:-$V2/build/driver-x64/d3d9.dll}"
+DLL="${DLL:-$SRC/build/driver-x64/d3d9.dll}"
 [ -f "$DLL" ] || { echo "FATAL: $DLL missing (ARCH=x64 scripts/build-driver.sh)" >&2; exit 1; }
-BRIDGE="${BRIDGE:-$([ -f "$V2/build/bridge/winemetal.so" ] && echo build || echo engine)}"
+BRIDGE="${BRIDGE:-$([ -f "$SRC/build/bridge/winemetal.so" ] && echo build || echo engine)}"
 VARIANT="${VARIANT:-default}"
 VARIANT_ENV=()
 case "$VARIANT" in
@@ -78,7 +84,7 @@ esac
 
 TESTS=("$@")
 if [ ${#TESTS[@]} -eq 0 ]; then
-  for f in "$V2"/test/code_*.c; do
+  for f in "$SRC"/test/code_*.c; do
     t="$(basename "$f" .c)"
     case "$t" in code_sm3_ref|code_statecache) continue ;; esac
     TESTS+=("$t")
@@ -97,18 +103,18 @@ wait_for_game() {
   while swtor_running; do echo "[hash] SWTOR is running, waiting" >&2; sleep 30; done
 }
 
-echo "[hash] engine $SRC_ENGINE, dll $DLL, bridge $BRIDGE, variant $VARIANT, work $WORK" >&2
+echo "[hash] tree $SRC, engine $SRC_ENGINE, dll $DLL, bridge $BRIDGE, variant $VARIANT, work $WORK" >&2
 rm -rf "$WORK"
 mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/cache"
 cp -cR "$SRC_ENGINE" "$ENG" 2>/dev/null || cp -R "$SRC_ENGINE" "$ENG"   # an APFS clone where it can
 if [ "$BRIDGE" = build ]; then
-  cp "$V2/build/bridge/winemetal64.dll" "$ENG/lib/wine/x86_64-windows/winemetal.dll"
-  cp "$V2/build/bridge/winemetal.so" "$ENG/lib/wine/x86_64-unix/winemetal.so"
+  cp "$SRC/build/bridge/winemetal64.dll" "$ENG/lib/wine/x86_64-windows/winemetal.dll"
+  cp "$SRC/build/bridge/winemetal.so" "$ENG/lib/wine/x86_64-unix/winemetal.so"
 fi
 
 for t in "${TESTS[@]}"; do
-  [ -f "$V2/test/$t.c" ] || { echo "FATAL: no test/$t.c" >&2; exit 1; }
-  x86_64-w64-mingw32-gcc -O1 "${HARNESS[@]}" -I "$V2/test" "$V2/test/$t.c" \
+  [ -f "$SRC/test/$t.c" ] || { echo "FATAL: no test/$t.c in $SRC" >&2; exit 1; }
+  x86_64-w64-mingw32-gcc -O1 "${HARNESS[@]}" -I "$SRC/test" "$SRC/test/$t.c" \
     -o "$WORK/bin/$t.exe" -ld3d9 -lgdi32 -luser32 2> "$WORK/logs/$t.build.log" \
     || { echo "FATAL: $t does not build, see $WORK/logs/$t.build.log" >&2; tail -5 "$WORK/logs/$t.build.log" >&2; exit 1; }
 done
@@ -147,7 +153,12 @@ stop_wine() {
 # without asking, read back from the registry files before any program runs.
 wait_for_game
 echo "[hash] new prefix" >&2
-WINEDLLOVERRIDES="$WINEDLLOVERRIDES;winemac.drv=d" run 300 wineboot wineboot -i > "$WORK/logs/wineboot.log" 2>&1 || true
+if ! WINEDLLOVERRIDES="$WINEDLLOVERRIDES;winemac.drv=d" run 300 wineboot wineboot -i > "$WORK/logs/wineboot.log" 2>&1; then
+  echo "FATAL: wineboot failed, no prefix: see $WORK/logs/wineboot.log" >&2
+  tail -20 "$WORK/logs/wineboot.log" >&2 || true
+  stop_wine
+  exit 1
+fi
 {
   run 60 reg-dialog reg add 'HKCU\Software\Wine\WineDbg' /v ShowCrashDialog /t REG_DWORD /d 0 /f
   for k in 'HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug' 'HKLM\Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug'; do
@@ -194,7 +205,8 @@ for t in "${TESTS[@]}"; do
   ( cd "$WORK/bin" && env ${VARIANT_ENV[@]+"${VARIANT_ENV[@]}"} "$WORK/exc_guard" 60 "$WORK/logs/$t.exc" "$WINE" "$WORK/bin/$t.exe" \
       > "$WORK/logs/$t.out" 2> "$WORK/logs/$t.err" ) || rc=$?
   hashes="$(tr -d '\r' < "$WORK/logs/$t.out" | sed -n 's/^D9H frame=.*hash=\([0-9a-f]*\).*/\1/p' | tr '\n' ' ')"
-  fails="$(tr -d '\r' < "$WORK/logs/$t.out" | grep -c -E '\bFAIL\b|^D9H TIMEOUT' || true)"
+  # the program's own FAIL lines, the harness' timeout, and a frame the harness couldn't read back
+  fails="$(tr -d '\r' < "$WORK/logs/$t.out" | grep -c -E '\bFAIL\b|^D9H TIMEOUT|^D9H frame=[0-9]+ (GetBackBuffer|readback) hr=' || true)"
   echo "$t rc=$rc fails=$fails $hashes" | tee -a "$WORK/hashes.txt"
   grep -q 'D9MT: compile workers' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null || noproof+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
@@ -207,13 +219,13 @@ count() { cat "$WORK"/logs/*.err "$WORK"/logs/*.out 2>/dev/null | grep "$@" || t
 validation="$(cat "$WORK"/logs/*.err 2>/dev/null | grep -v 'Validation Enabled' | grep -c -i -E 'validation|failed assertion|MTLDebug' || true)"
 invalid="$(count -c 'Invalid Metal usage')"
 lifetime="$(count 'D9MT-LIFETIME' | grep -c -v 'D9MT-LIFETIME: check on' || true)"
-gpulost="$(count -c 'D9MT-GPU-LOST')"
+gpulost="$(count -c -E 'D9MT-GPU-(LOST|HUNG)')"
 printf 'STATS variant=%s programs=%s notclean=%s validation=%s invalid-usage=%s lifetime=%s no-d9mt-proof=%s gpu-lost=%s tree=%s\n' \
-  "$VARIANT" "${#TESTS[@]}" "${notclean:-none}" "$validation" "$invalid" "$lifetime" "${noproof:-none}" "$gpulost" \
-  "$(git -C "$V2" rev-parse --short HEAD 2>/dev/null || echo unknown)" | tee "$WORK/stats.txt"
+  "$VARIANT" "${#TESTS[@]}" "${notclean// /,}" "$validation" "$invalid" "$lifetime" "${noproof// /,}" "$gpulost" \
+  "$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)" | sed 's/=,*\( \)/=none\1/g; s/,\( \)/\1/g' | tee "$WORK/stats.txt"
 
 if [ "$gpulost" != 0 ]; then
-  echo "[hash] NO VERDICT: $gpulost D9MT-GPU-LOST lines. The GPU was lost or hung; run it again." >&2
+  echo "[hash] NO VERDICT: $gpulost D9MT-GPU-LOST or D9MT-GPU-HUNG lines. The GPU was lost or hung; run it again." >&2
   exit 3
 fi
 if [ -n "$noproof" ]; then
