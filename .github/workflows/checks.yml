@@ -1,0 +1,290 @@
+# Checks every pull request and every push to main on GitHub's hosted runners: the workflow
+# lints clean, the bridge and the driver (x64 and x86) build from scratch, and every test that
+# needs no Wine and no GPU passes. docs/testing.md § CI lists which scripts run here and which
+# can't. No secrets and read-only access.
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No shellcheck over scripts/ yet: the tree has 17 warnings under `shellcheck -S warning`
+      # (0.11.0, 2026-11-12). actionlint runs shellcheck on the run blocks below.
+      - name: actionlint
+        run: |
+          v=1.7.12
+          sha=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v$v/actionlint_${v}_linux_amd64.tar.gz"
+          echo "$sha  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c --quiet
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+  build:
+    # GitHub has no macos-27 label; its macOS 27 image with Xcode 27 is xcode-27, a public
+    # preview (actions/runner-images#14404; .github/actionlint.yaml lists it). The AIR byte
+    # checks compare d9mt's output with what Apple's toolchain writes for macOS 26 and 27, and
+    # test-air-cache-lineage.sh expects a macOS 27 host, so macos-26 (Xcode 26) can't run them.
+    runs-on: xcode-27
+    # About 40 minutes with LLVM in the cache. A cold run builds LLVM first.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # winemetal.so, the LLVM tools and one native test are x86_64 and run under Rosetta. The
+      # scripts need bash >= 4.3 (/bin/bash is 3.2) and mingw-w64 for the PE side.
+      - name: Tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: |
+          arch -x86_64 /usr/bin/true || softwareupdate --install-rosetta --agree-to-license
+          brew install bash mingw-w64
+          brew_bin="$(brew --prefix)/bin"
+          "$brew_bin/bash" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) ))'
+          echo "$brew_bin" >> "$GITHUB_PATH"
+          sw_vers
+          xcodebuild -version
+          echo "SDK $(xcrun -sdk macosx --show-sdk-version), $(uname -m), $(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) >> 30 )) GB"
+          "$brew_bin/bash" --version | head -1
+          x86_64-w64-mingw32-g++ --version | head -1
+          clang --version | head -1
+          python3 --version
+
+      # Xcode 26 and later ship the Metal toolchain as a separate download. The AIR byte checks
+      # need it, and build-driver.sh needs it when a shader source changed.
+      - name: Metal toolchain
+        run: |
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # The bridge links static LLVM 15.0.7 libraries for x86_64, built by
+      # scripts/build-llvm-unixside.sh. The cache holds the installed libraries and llvm-dis (the
+      # AIR byte checks read bitcode with it). The key names the recipe, so a changed recipe
+      # builds again. Bump v1 when the steps below change what goes into the cache.
+      - name: LLVM 15.0.7 from the cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            toolchains/llvm-x86_64
+            toolchains/llvm-build/bin/llvm-dis
+          key: llvm-15.0.7-x86_64-xcode-27-v1-${{ hashFiles('scripts/build-llvm-unixside.sh') }}
+
+      # The recipe clones the tag llvmorg-15.0.7 unless toolchains/llvm-project exists. Check out
+      # the tag's commit by its hash first, so a moved tag can't change what gets built.
+      - name: Build LLVM 15.0.7 (cache miss)
+        if: steps.llvm.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          command -v ninja >/dev/null || brew install ninja
+          git init -q toolchains/llvm-project
+          git -C toolchains/llvm-project fetch -q --depth 1 https://github.com/llvm/llvm-project \
+            8dfdcc7b7bf66834a761bd8de445840ef68e4d1a
+          git -C toolchains/llvm-project -c advice.detachedHead=false checkout -q FETCH_HEAD
+          scripts/build-llvm-unixside.sh
+          ninja -C toolchains/llvm-build llvm-dis
+
+      # Saved right after the build, before any other script of the checkout runs.
+      - name: Save LLVM 15.0.7 to the cache
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            toolchains/llvm-x86_64
+            toolchains/llvm-build/bin/llvm-dis
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+
+      - name: Fetch dxbc-spirv
+        run: scripts/fetch-deps.sh
+
+      # SMOKE=0: the bridge's smoke test needs a Metal GPU and reference metallibs from
+      # build-air-compiler.sh. The runner has 3 CPUs and 7 GB, so 4 compiles at once.
+      - name: Build the bridge
+        env:
+          SMOKE: 0
+          D9MT_JOBS: 4
+        run: scripts/build-bridge.sh
+
+      # The id digests the LLVM libraries. This runner builds its own, so its id differs from the
+      # release's, and no step compares the two.
+      - name: AIR codegen id
+        run: |
+          {
+            echo "### AIR codegen id of this run"
+            echo
+            echo "This is CI's build, not the release id. The id digests the LLVM libraries, and this runner builds its own."
+            echo
+            echo '```'
+            cat build/bridge/air-codegen-id.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # build-driver.sh keeps a committed metallib header whose sources changed when it lacks the
+      # tools to regenerate it, and only warns. Here that fails, and so does a regenerated header:
+      # a pull request that changes a shader source commits the new header.
+      - name: Build the driver (x64)
+        env:
+          ARCH: x64
+          D9MT_JOBS: 4
+        run: |
+          scripts/build-driver.sh 2>&1 | tee "$RUNNER_TEMP/driver-x64.log"
+          if grep 'keeping existing' "$RUNNER_TEMP/driver-x64.log"; then
+            echo "::error::a committed metallib header is older than its shader sources"
+            exit 1
+          fi
+
+      - name: Build the driver (x86)
+        env:
+          ARCH: x86
+          D9MT_JOBS: 4
+        run: scripts/build-driver.sh
+
+      - name: The builds leave tracked files as committed
+        run: git diff --exit-code
+
+      - name: Native tests
+        run: scripts/run-native-tests.sh
+
+      # test-state-cache.sh, test-pso-key-hash.sh and test-residency.sh compile driver sources
+      # against DXVK's native Windows headers: v3.0.2 (driver/UPSTREAM), with the directx
+      # submodule at the commit that tree pins.
+      - name: DXVK's native headers
+        run: |
+          git init -q "$RUNNER_TEMP/dxvk"
+          git -C "$RUNNER_TEMP/dxvk" fetch -q --depth 1 https://github.com/doitsujin/dxvk \
+            6b20f622a77b87b2921fe5d2c1774d2f2ba3e9b7
+          git -C "$RUNNER_TEMP/dxvk" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          git -C "$RUNNER_TEMP/dxvk" submodule update -q --init --depth 1 include/native/directx
+          echo "DXVK_NATIVE=$RUNNER_TEMP/dxvk/include/native" >> "$GITHUB_ENV"
+
+      # Every test script that needs no Wine and no GPU. All of them run, also after a failure;
+      # the step fails if any did.
+      - name: Test scripts
+        run: |
+          tests=(
+            scripts/test-air-versions.sh
+            scripts/test-air-forms.sh
+            scripts/test-air-invariance.sh
+            scripts/test-air-cache-lineage.sh
+            scripts/test-build-deps.sh
+            scripts/test-fetch-deps.sh
+            scripts/test-null-kind.sh
+            scripts/test-pass-barrier.sh
+            scripts/test-present-ring.sh
+            scripts/test-pso-key-hash.sh
+            scripts/test-residency.sh
+            scripts/test-state-cache.sh
+            scripts/test-upload-copy.sh
+            scripts/test-perf-compare.py
+          )
+          {
+            echo "### Test scripts"
+            echo
+            echo "| Script | Result | Seconds |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for t in "${tests[@]}"; do
+            start=$SECONDS
+            echo "::group::$t"
+            rc=0
+            case "$t" in
+              *.py) python3 -I "$t" || rc=$? ;;
+              *) "$t" || rc=$? ;;
+            esac
+            echo "::endgroup::"
+            if [ "$rc" = 0 ]; then result=ok; else result="FAILED (exit $rc)"; failed=$((failed + 1)); fi
+            echo "$t: $result, $((SECONDS - start)) s"
+            echo "| \`$t\` | $result | $((SECONDS - start)) |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          [ "$failed" = 0 ]
+
+      # Red on main since #167; #176 fixes it. Not blocking until #176 merges: then remove
+      # continue-on-error. The script compares this tree's build scripts with main's.
+      - name: test-build-jobs.sh (known red until #176)
+        continue-on-error: true
+        run: |
+          git fetch -q --no-tags --depth 1 origin +main:refs/remotes/origin/main
+          if scripts/test-build-jobs.sh; then
+            echo "- \`scripts/test-build-jobs.sh\`: passed. Remove continue-on-error from its step." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- \`scripts/test-build-jobs.sh\`: FAILED (known red until #176 merges, not blocking)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      # Failed 2 cases in one job environment on my Mac and passed in another: its cases depend
+      # on the caller's environment (OLDPWD, SHLVL). Not blocking until that is settled.
+      - name: test-perf-abba.sh (not blocking)
+        continue-on-error: true
+        run: |
+          if scripts/test-perf-abba.sh; then
+            echo "- \`scripts/test-perf-abba.sh\`: passed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- \`scripts/test-perf-abba.sh\`: FAILED (not blocking, depends on the caller's environment)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  # What a hosted runner's Metal device can do, in the job summary. No check depends on it: it
+  # says whether the tests that need a GPU (and later the hash suite under Wine) could run here.
+  # A part of the probe that crashes is reported with its exit status and doesn't fail the job.
+  metal-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-26, xcode-27]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Probe
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          clang -Wall -O1 -framework Foundation -framework Metal .github/metal-probe.m -o "$RUNNER_TEMP/metal-probe"
+          {
+            echo "### Metal probe on $IMAGE"
+            echo
+            echo '```'
+            echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(xcodebuild -version | tr '\n' ' ')"
+            echo "SDK $(xcrun -sdk macosx --show-sdk-version), $(uname -m), $(sysctl -n hw.model), $(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) >> 30 )) GB"
+            for part in device metal4 textures; do
+              rc=0
+              "$RUNNER_TEMP/metal-probe" "$part" 2>&1 || rc=$?
+              [ "$rc" = 0 ] || echo "$part: the probe ended with exit status $rc"
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
