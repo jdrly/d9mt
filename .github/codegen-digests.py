@@ -6,14 +6,13 @@
 Prints one line per file: the normalized digest scripts/air-codegen-id.py gives it (the same
 function, imported from that script), then the path. Two builds whose ids differ differ in the
 files whose lines differ, or in the order of the lines: the id is a hash over the list in the
-order scripts/build-bridge.sh puts it, and that order comes from the shell's globs, which sort by
-the locale's collation.
+order scripts/build-bridge.sh puts it, which is byte order for its globs.
 
 Then two ids:
 - of the files in the order given. It must be the id in build/bridge/air-codegen-id.txt; if it
   isn't, CODEGEN_OBJS changed and the caller's list has to follow (exit 1);
-- of the same files with each of CODEGEN_OBJS's globs sorted by byte value, which is what the
-  build computes under LC_ALL=C.
+- of the same files with each of CODEGEN_OBJS's globs sorted by byte value. The build lists
+  them that way itself, so a caller under LC_ALL=C gets the same id twice.
 """
 import glob
 import hashlib
@@ -65,9 +64,9 @@ def main(argv):
     as_given = codegen_id(given)
     print('%s  AIR codegen id of the %d files in this order' % (as_given, len(given)))
     if as_given != built:
-        sys.exit('codegen-digests: these files give %s, the build says %s: CODEGEN_OBJS in '
-                 'scripts/build-bridge.sh changed, and the list in the workflow has to follow'
-                 % (as_given, built))
+        sys.exit('codegen-digests: these files give %s, the build says %s: scripts/build-bridge.sh '
+                 'listed CODEGEN_OBJS in another order, or the array changed and the list in the '
+                 'workflow has to follow' % (as_given, built))
     sorted_list = byte_order()
     if sorted(sorted_list) != sorted(given):
         sys.exit('codegen-digests: the files given are not the files of CODEGEN_OBJS that '
