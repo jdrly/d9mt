@@ -177,7 +177,11 @@ to `main`, on GitHub's hosted runners, with a read-only token and no secrets. It
   `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
   `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
   `test-upload-copy.sh` and `test-perf-compare.py`. DXVK's native headers come from DXVK v3.0.2.
-  `test-build-jobs.sh` and `test-perf-abba.sh` run too, as steps that don't block yet.
+  `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
+  `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the caller's
+  environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the caller's
+  `OLDPWD` or `SHLVL` reaches the run). Three are the `RUN_WRAPPER` cases with `nice -n 3`: the
+  runner's shell runs at nice -10, and the test expects a caller at nice 0.
 - `metal-probe` prints what the runner's Metal device can do into the job summary, on `macos-26`
   and `xcode-27`.
 
