@@ -160,6 +160,36 @@ finish within the timeout:
 ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
 ```
 
+## CI
+
+The `Checks` workflow (`.github/workflows/checks.yml`) runs on every pull request and every push
+to `main`, on GitHub's hosted runners, with a read-only token and no secrets. Its jobs:
+
+- `lint` runs actionlint over the workflow. `shellcheck` over `scripts/` isn't part of it yet:
+  the tree has 17 warnings under `shellcheck -S warning`.
+- `build` runs on `xcode-27`, GitHub's macOS 27 image with Xcode 27. It builds LLVM 15.0.7 for
+  x86_64 with `scripts/build-llvm-unixside.sh` (kept in the Actions cache, keyed by the recipe's
+  hash), then `scripts/fetch-deps.sh`, `scripts/build-bridge.sh` with `SMOKE=0` and
+  `scripts/build-driver.sh` for x64 and x86, and fails if a build changes a tracked file or keeps
+  a metallib header that is older than its shader sources. Then it runs
+  `scripts/run-native-tests.sh` and these scripts: `test-air-versions.sh`, `test-air-forms.sh`,
+  `test-air-invariance.sh`, `test-air-cache-lineage.sh`, `test-build-deps.sh` (without
+  `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
+  `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
+  `test-upload-copy.sh` and `test-perf-compare.py`. DXVK's native headers come from DXVK v3.0.2.
+  `test-build-jobs.sh` and `test-perf-abba.sh` run too, as steps that don't block yet.
+- `metal-probe` prints what the runner's Metal device can do into the job summary, on `macos-26`
+  and `xcode-27`.
+
+The hosted runners' GPU is the Apple Paravirtual device, which doesn't support Metal 4
+(`supportsFamily` is true for Mac2 only, and `newMTL4CommandQueue` returns nil). So nothing that
+drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test-compile-mt.sh`,
+the bridge's smoke test, and the hash suite. `test-cs-sync.sh` and `test-fatal-log.sh` need Wine.
+Those stay on a Mac, as the Definition of Done's evidence in the pull request.
+
+The job summary shows the build's AIR codegen id. It is CI's own, not the release id: the id
+digests the LLVM libraries, and the runner builds its own.
+
 ## Benchmarks
 
 The benchmarks are in `test/perf/` (bindbench, perdrawbench, churnbench,
