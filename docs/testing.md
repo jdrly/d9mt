@@ -21,8 +21,50 @@ exceptions:
 The suite also runs with `MTL_DEBUG_LAYER=1`,
 `D9MT_NO_ATTACHMENT_OPT=1` and `d3d9.reproducibleCommandStream=True`, with
 `D9MT_EARLY_COMMIT=always` for a change to the submission path, and `D9MT_LIFETIME_CHECK=1`
-must find no violation. Its runner, `scripts/run-hash-tests.sh`, is on the branch
-`chore/test-runner` and not on `main` yet.
+must find no violation.
+
+Its runner is `scripts/run-hash-tests.sh`. It needs a Mac with Metal 4 and an x86_64 Wine
+engine (the one the app installs, `cx-26.3.0-8` from `jdrly/wine-engine`):
+
+```bash
+ENGINE=<engine> SRC=<a built checkout of base> WORK=<scratch>/base scripts/run-hash-tests.sh
+ENGINE=<engine> WORK=<scratch>/head scripts/run-hash-tests.sh    # this tree, after its builds
+scripts/cmp-hash-runs.py <scratch>/base/hashes.txt <scratch>/head/hashes.txt \
+  --stats <scratch>/base/stats.txt <scratch>/head/stats.txt
+```
+
+Both runs go through this tree's runner and harness; `SRC` names the tree whose programs and
+builds are tested, so a base from before the runner existed works too.
+
+- `VARIANT=debug|noattach|repro|lifetime|shaderval|early` sets one of the variants above;
+  `D9MT_AIR_MACOS=26` or `27` reaches the programs for the AIR target.
+- The runner clones the engine into `WORK`, installs this tree's bridge and `d3d9.dll`, makes a
+  new prefix in which no crash dialog can open (and checks that before any program runs), and
+  runs each program under `test/harness/exc_guard.c`, which turns a crash into a log file.
+  `test/harness/d9h.h` is force-included into every program and prints a hash of each frame.
+- `hashes.txt` has one line per program, `stats.txt` the counts of Metal validation lines,
+  lifetime violations and programs whose log doesn't prove that d9mt drew them. The runner's
+  exit status is 1 when the run itself is unusable and 3 when the GPU was lost or hung
+  (`D9MT-GPU-LOST`, `D9MT-GPU-HUNG`): no verdict, run it again. A program's own exit status
+  and `FAIL` lines are data for the comparison.
+- `scripts/cmp-hash-runs.py` fails when a common program's frames differ (`code_mtlock` aside),
+  a program is gone, head isn't clean, or head has a program not named in `--new`.
+  `--allow-notclean` excuses a program only where base is unclean in the same way. With
+  `--stats` it also fails on a lifetime violation on head and on more validation or
+  "Invalid Metal usage" lines than base has. Its own checks are
+  `scripts/test-cmp-hash-runs.py`.
+- `--build-only` stops before the first program: it is what CI runs, since the hosted runners
+  have no Metal 4.
+
+`ci/gpu/run.sh <set> <out dir>` is the entry point for a Mac with a real GPU: `probe` (the Metal
+device must be an Apple GPU with Metal 4, else exit status 3, no verdict), `build`, `gpu-tests`
+(the native tests plus `test-commit-feedback.sh` and `test-compile-mt.sh`), `hash` (builds `BASE`
+in a worktree, runs both for the spec's `variants=` and `targets=`, compares each pair's frames
+and diagnostics) and `merged-main` (`gpu-tests`, then `hash` against the commit's first parent
+for AIR targets 26 and 27). Every set builds the checkout first. It writes one line per step to
+`<out dir>/summary.md`, with the swap and memory pressure before and after and the count of
+`IOGPUMetalError` lines in the system log of the run's interval. Exit status 3 is "no verdict"
+(no usable Metal 4, or the GPU was lost or hung); a gate that failed stays a failure.
 
 ## Native unit tests
 
@@ -180,11 +222,15 @@ its own that a later push doesn't cancel. Its jobs:
   `test-air-invariance.sh`, `test-air-cache-lineage.sh`, `test-build-deps.sh` (without
   `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
   `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
-  `test-upload-copy.sh` and `test-perf-compare.py`. DXVK's native headers come from DXVK v3.0.2.
+  `test-upload-copy.sh`, `test-perf-compare.py` and `test-cmp-hash-runs.py`. DXVK's native headers
+  come from DXVK v3.0.2.
   - The two Wine scripts, `test-fatal-log.sh` and `test-cs-sync.sh`, run console programs with no
     window and no GPU. Their Wine is the engine the app installs (`cx-26.3.0-8` from
     `jdrly/wine-engine`, fetched with `gh release download` under the run's read-only token,
     three tries, then checked against its SHA-256), in a prefix `test-fatal-log.sh` makes.
+  - `scripts/run-hash-tests.sh --build-only` builds every hash suite program and makes the
+    runner's prefix; no program runs. `ci/gpu/run.sh probe` must end with exit status 3 there:
+    the hosted runner has no Metal 4.
   - `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
   - `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the
     caller's environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the

@@ -299,8 +299,8 @@ The hash suite is the correctness gate of every pull request. It runs the D3D9 t
 in `test/code_*.c`, five frames each for most of them, and compares their frame hashes with the
 base commit's, also under the Metal API validation layer and `D9MT_LIFETIME_CHECK=1`.
 [docs/testing.md](docs/testing.md#hash-suite) names the programs that run elsewhere, end early
-or differ from run to run. The suite's runner is on the branch `chore/test-runner` and not on
-`main` yet.
+or differ from run to run. Its runner is `scripts/run-hash-tests.sh`; it needs a Mac with
+Metal 4 and a Wine engine.
 
 The native unit tests need no Wine and no GPU:
 

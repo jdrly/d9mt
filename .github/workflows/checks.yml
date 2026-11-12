@@ -309,6 +309,7 @@ jobs:
             scripts/test-state-cache.sh
             scripts/test-upload-copy.sh
             scripts/test-perf-compare.py
+            scripts/test-cmp-hash-runs.py
           )
           {
             echo "### Test scripts"
@@ -397,6 +398,30 @@ jobs:
             echo "- \`scripts/$t\` (Wine): $result, $((SECONDS - start)) s" >> "$GITHUB_STEP_SUMMARY"
           done
           [ "$failed" = 0 ]
+
+      # The hash suite can't draw here (no Metal 4), but everything before the first frame can
+      # run: every test program builds with the hash harness, the crash guard builds, and the
+      # runner makes its prefix and checks that no crash dialog can open in it. The drawing
+      # itself runs on a Mac with a real GPU (docs/testing.md § Hash suite).
+      - name: Hash suite, up to the first frame
+        timeout-minutes: 15
+        env:
+          WORK: ${{ runner.temp }}/hash-suite
+        run: ENGINE="$WINE_ENGINE" scripts/run-hash-tests.sh --build-only
+
+      # ci/gpu/run.sh is the entry point of the gates that need a real Apple GPU. Its first act
+      # is the Metal probe, and on this runner the probe must say no: exit status 3, "no
+      # verdict", with the device's name. A pass here would mean the hosted runners gained
+      # Metal 4, or the script stopped telling the difference.
+      - name: The GPU gates refuse this runner
+        run: |
+          rc=0
+          ci/gpu/run.sh probe "$RUNNER_TEMP/gpu-probe" || rc=$?
+          cat "$RUNNER_TEMP/gpu-probe/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 3 ] || ! grep -q '^- NO VERDICT: ' "$RUNNER_TEMP/gpu-probe/summary.md"; then
+            echo "::error::ci/gpu/run.sh probe ended with exit status $rc on a runner without Metal 4 (expected 3, no verdict)"
+            exit 1
+          fi
 
       # The script compares this tree's build scripts with main's, so it needs main's tip.
       - name: test-build-jobs.sh
