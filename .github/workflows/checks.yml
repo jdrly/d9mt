@@ -230,23 +230,18 @@ jobs:
           done
           [ "$failed" = 0 ]
 
-      # Red on main since #167; #176 fixes it. Not blocking until #176 merges: then remove
-      # continue-on-error. The script compares this tree's build scripts with main's.
-      - name: test-build-jobs.sh (known red until #176)
-        continue-on-error: true
+      # The script compares this tree's build scripts with main's, so it needs main's tip.
+      - name: test-build-jobs.sh
         run: |
           git fetch -q --no-tags --depth 1 origin +main:refs/remotes/origin/main
-          if scripts/test-build-jobs.sh; then
-            echo "- \`scripts/test-build-jobs.sh\`: passed. Remove continue-on-error from its step." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- \`scripts/test-build-jobs.sh\`: FAILED (known red until #176 merges, not blocking)" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          scripts/test-build-jobs.sh
 
       # Its cases depend on the caller's environment. On my Mac 2 failed in one job environment
-      # and none in another. On a hosted runner 5 fail: the two "two callers" cases (OLDPWD,
-      # SHLVL) and the three RUN_WRAPPER cases, which expect a caller at nice 0 (the runner's
-      # shell runs at nice -10). Not blocking until the test stops depending on its caller.
+      # and none in another. On a hosted runner 5 fail. Two are the "two callers" cases (native
+      # and wine): the caller's OLDPWD or SHLVL reaches the run. Three are the RUN_WRAPPER cases
+      # with `nice -n 3`: the runner's shell runs at nice -10, so the runs show nice -10 without
+      # the wrapper and -7 with it, and the test expects 0 and 3. The wrapper works there; the
+      # expectation doesn't. Not blocking until the test stops depending on its caller.
       - name: test-perf-abba.sh (not blocking)
         continue-on-error: true
         run: |
