@@ -163,7 +163,11 @@ ENGINE=<Wine engine root> scripts/run-hang-test.sh --arch x64   # or --arch x86
 ## CI
 
 The `Checks` workflow (`.github/workflows/checks.yml`) runs on every pull request and every push
-to `main`, on GitHub's hosted runners, with a read-only token and no secrets. Its jobs:
+to `main`, on GitHub's hosted runners, with a read-only token and no secrets. It also runs every
+night on `main` (a changed runner image then shows as a red run of an unchanged commit), and by
+hand on any branch: `gh workflow run checks.yml --ref <branch>`, with `-f full=true` for the
+nightly-only step. A pull request keeps one run per branch; every commit on `main` gets a run of
+its own that a later push doesn't cancel. Its jobs:
 
 - `lint` runs actionlint over the workflow. `shellcheck` over `scripts/` isn't part of it yet:
   the tree has 17 warnings under `shellcheck -S warning`.
@@ -177,22 +181,39 @@ to `main`, on GitHub's hosted runners, with a read-only token and no secrets. It
   `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
   `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
   `test-upload-copy.sh` and `test-perf-compare.py`. DXVK's native headers come from DXVK v3.0.2.
-  `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
-  `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the caller's
-  environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the caller's
-  `OLDPWD` or `SHLVL` reaches the run). Three are the `RUN_WRAPPER` cases with `nice -n 3`: the
-  runner's shell runs at nice -10, and the test expects a caller at nice 0.
+  - The two Wine scripts, `test-fatal-log.sh` and `test-cs-sync.sh`, run console programs with no
+    window and no GPU. Their Wine is the engine the app installs (`cx-26.3.0-8` from
+    `jdrly/wine-engine`, checked against its SHA-256), in a prefix `test-fatal-log.sh` makes.
+  - `test-build-jobs.sh` runs as a step of its own, against `main`'s build scripts.
+  - `test-perf-abba.sh` runs too, as a step that doesn't block yet: its cases depend on the
+    caller's environment, and 5 fail on a hosted runner. Two are the "two callers" cases (the
+    caller's `OLDPWD` or `SHLVL` reaches the run). Three are the `RUN_WRAPPER` cases with
+    `nice -n 3`: the runner's shell runs at nice -10, and the test expects a caller at nice 0.
+  - `test-build-deps.sh` with `BUILD=1` (five x64 driver builds) runs only at night and in a run
+    by hand with `full=true`.
 - `metal-probe` prints what the runner's Metal device can do into the job summary, on `macos-26`
   and `xcode-27`.
 
 The hosted runners' GPU is the Apple Paravirtual device, which doesn't support Metal 4
 (`supportsFamily` is true for Mac2 only, and `newMTL4CommandQueue` returns nil). So nothing that
 drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test-compile-mt.sh`,
-the bridge's smoke test, and the hash suite. `test-cs-sync.sh` and `test-fatal-log.sh` need Wine.
-Those stay on a Mac, as the Definition of Done's evidence in the pull request.
+the bridge's smoke test, and the hash suite. Those stay on a Mac, as the Definition of Done's
+evidence in the pull request.
 
-The job summary shows the build's AIR codegen id. It is CI's own, not the release id: the id
-digests the LLVM libraries, and the runner builds its own.
+The job summary shows the build's AIR codegen id. The runner builds its own LLVM with
+`scripts/build-llvm-unixside.sh`, and the bridge step runs under `LC_ALL=C`: the id hashes
+`CODEGEN_OBJS` in the order `scripts/build-bridge.sh`'s globs give, and globs sort by the locale's
+collation. The runner's default, `en_US.UTF-8`, sorts those file names differently from byte
+order on macOS 27 and gives another id over the same files. In byte order the runner's id of
+`83abcf1`'s code is `25fc2491…`, the id the 0.1.8 release build recorded on another Mac with
+another Xcode. No step compares the id with a recorded one.
+
+The summary and the `codegen-digests` artifact also list the id's parts: the digest
+`scripts/air-codegen-id.py` gives each object and each LLVM archive of `CODEGEN_OBJS`
+(`.github/codegen-digests.py`), in the build's order. Comparing that list between two builds says
+which files moved the id, or that only the order did. The step fails when its list no longer
+gives the build's id, which means `CODEGEN_OBJS` in `scripts/build-bridge.sh` changed and the
+list in the workflow has to follow.
 
 ## Benchmarks
 

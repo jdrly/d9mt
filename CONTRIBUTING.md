@@ -89,7 +89,7 @@ If two sources conflict, report the conflict instead of silently choosing one.
   description. The PR is **squash-merged**, with the PR title as the commit subject and the PR's
   description as its body, once that verdict has no open `Blocker` or `High` **and** the
   repository's checks are green: the `Checks` workflow, which builds d9mt and runs the tests that
-  need no Wine and no GPU ([docs/testing.md](docs/testing.md#ci)), and for everything it can't
+  need no GPU ([docs/testing.md](docs/testing.md#ci)), and for everything it can't
   run, the Definition of Done's evidence in the PR. The maintainer doesn't review code by hand. A
   rebase onto a changed `main` says how conflicts were resolved.
 

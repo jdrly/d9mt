@@ -1,20 +1,36 @@
 # Checks every pull request and every push to main on GitHub's hosted runners: the workflow
 # lints clean, the bridge and the driver (x64 and x86) build from scratch, and every test that
-# needs no Wine and no GPU passes. docs/testing.md § CI lists which scripts run here and which
-# can't. No secrets and read-only access.
+# needs no GPU passes, the two Wine console tests included. docs/testing.md § CI lists which
+# scripts run here and which can't. No secrets and read-only access.
+#
+# It also runs every night on main, so a changed runner image shows up as a red run of an
+# unchanged commit, and by hand on any branch (Actions -> Checks -> Run workflow, or
+# `gh workflow run checks.yml --ref <branch>`). The nightly run adds the steps that are too slow
+# for every push; a run by hand adds them with `-f full=true`.
 name: Checks
 
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Also run the nightly-only steps (test-build-deps.sh with BUILD=1).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# A pull request keeps one run per branch: a new push cancels the older run. Every other run
+# has a group of its own (the event and the commit), so a push to main never cancels the run of
+# the commit before it, and each commit on main ends with a verdict.
 concurrency:
-  group: checks-${{ github.ref }}
-  cancel-in-progress: true
+  group: checks-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -69,6 +85,7 @@ jobs:
           echo "$brew_bin" >> "$GITHUB_PATH"
           sw_vers
           xcodebuild -version
+          echo "Xcodes on this image:" /Applications/Xcode*.app
           echo "SDK $(xcrun -sdk macosx --show-sdk-version), $(uname -m), $(sysctl -n hw.ncpu) CPUs, $(( $(sysctl -n hw.memsize) >> 30 )) GB"
           "$brew_bin/bash" --version | head -1
           x86_64-w64-mingw32-g++ --version | head -1
@@ -130,25 +147,72 @@ jobs:
 
       # SMOKE=0: the bridge's smoke test needs a Metal GPU and reference metallibs from
       # build-air-compiler.sh. The runner has 3 CPUs and 7 GB, so 4 compiles at once.
+      # LC_ALL=C: the AIR codegen id hashes CODEGEN_OBJS in the order build-bridge.sh's globs
+      # give, and globs sort by the locale's collation. The runner's default is en_US.UTF-8,
+      # which on macOS 27 puts ir_ir_builder before ir_ir.cpp and BitstreamReader before
+      # BitWriter; byte order doesn't. In byte order this build's id is the one a release build
+      # of the same commit records (run 43190284800: ea71911c… in the runner's order, 25fc2491…,
+      # the 0.1.8 release id, in byte order, over the same 113 files).
       - name: Build the bridge
         env:
           SMOKE: 0
           D9MT_JOBS: 4
+          LC_ALL: C
         run: scripts/build-bridge.sh
 
-      # The id digests the LLVM libraries. This runner builds its own, so its id differs from the
-      # release's, and no step compares the two.
+      # The id digests d9mt's codegen objects and the LLVM libraries, both built on this runner.
       - name: AIR codegen id
         run: |
           {
             echo "### AIR codegen id of this run"
             echo
-            echo "This is CI's build, not the release id. The id digests the LLVM libraries, and this runner builds its own."
+            echo "Built on this runner, with its own LLVM build and the file list in byte order (LC_ALL=C). A release build of this commit records the same id as long as its compiler generates the same code. No step compares it with a recorded release id."
             echo
             echo '```'
             cat build/bridge/air-codegen-id.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # What the id is made of, file by file: the normalized digest scripts/air-codegen-id.py gives
+      # each object and each LLVM archive of build-bridge.sh's CODEGEN_OBJS, in the build's order.
+      # Two builds with different ids differ in the files whose lines differ, or in the order.
+      # The list below repeats CODEGEN_OBJS with the same globs under the same LC_ALL as the
+      # build; the step fails when its id isn't the build's, so a change to that array has to be
+      # made here too.
+      - name: AIR codegen digests
+        env:
+          LC_ALL: C
+        run: |
+          shopt -s nullglob
+          obj=build/bridge/obj
+          airlib=build/airlib/obj
+          files=(
+            "$obj/airlib_unix_renamed.o" "$obj/air_cache.c.o" "$obj/cache.c.o"
+            "$airlib"/third_party_dxbc-spirv_ir_*.o
+            "$airlib"/third_party_dxbc-spirv_util_*.o
+            "$airlib/air_air_builder.cpp.o" "$airlib/air_air_metallib.cpp.o"
+            toolchains/llvm-x86_64/lib/libLLVM*.a
+          )
+          {
+            echo "LANG=${LANG-unset} LC_ALL=${LC_ALL-unset} LC_COLLATE=${LC_COLLATE-unset}"
+            python3 -I .github/codegen-digests.py "${files[@]}"
+          } > "$RUNNER_TEMP/codegen-digests.txt" || { cat "$RUNNER_TEMP/codegen-digests.txt"; exit 1; }
+          {
+            echo "<details><summary>AIR codegen digests, file by file</summary>"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/codegen-digests.txt"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+          tail -2 "$RUNNER_TEMP/codegen-digests.txt"
+
+      - name: Keep the AIR codegen digests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codegen-digests
+          path: ${{ runner.temp }}/codegen-digests.txt
+          retention-days: 30
 
       # build-driver.sh keeps a committed metallib header whose sources changed when it lacks the
       # tools to regenerate it, and only warns. Here that fails, and so does a regenerated header:
@@ -173,8 +237,21 @@ jobs:
       - name: The builds leave tracked files as committed
         run: git diff --exit-code
 
+      # run-native-tests.sh names a failed test's log file and doesn't print it; the step after
+      # it does, so a failure can be read in the run.
       - name: Native tests
-        run: scripts/run-native-tests.sh
+        run: scripts/run-native-tests.sh 2>&1 | tee "$RUNNER_TEMP/native-tests.txt"
+
+      - name: Logs of the native tests that failed
+        if: failure()
+        run: |
+          [ -f "$RUNNER_TEMP/native-tests.txt" ] || exit 0
+          sed -n 's/^[A-Za-z0-9_]*: FAIL (\(.*\))$/\1/p' "$RUNNER_TEMP/native-tests.txt" | sed 's/^build, //' |
+            while IFS= read -r log; do
+              echo "::group::$log"
+              tail -n 100 "$log" || true
+              echo "::endgroup::"
+            done
 
       # test-state-cache.sh, test-pso-key-hash.sh and test-residency.sh compile driver sources
       # against DXVK's native Windows headers: v3.0.2 (driver/UPSTREAM), with the directx
@@ -230,6 +307,51 @@ jobs:
           done
           [ "$failed" = 0 ]
 
+      # The Wine engine the app installs (swtor-on-mac src/som.sh: ENGINE_URL, ENGINE_SHA256): an
+      # x86_64 Wine that runs under Rosetta and needs no library path. Downloaded on every run and
+      # checked against its hash; it isn't cached.
+      - name: Wine engine
+        run: |
+          url=https://github.com/jdrly/wine-engine/releases/download/cx-26.3.0-8/wine-cx-26.3.0-8-macos-x86_64.tar.xz
+          sha=1976c3310a1f8be2f8e9a46fcb524f77b4316df3d281d94af2c8542bef60456d
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/engine.tar.xz" "$url"
+          echo "$sha  $RUNNER_TEMP/engine.tar.xz" | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/engine"
+          tar -xJf "$RUNNER_TEMP/engine.tar.xz" -C "$RUNNER_TEMP/engine" --strip-components 1 wine
+          rm "$RUNNER_TEMP/engine.tar.xz"
+          echo "WINE_ENGINE=$RUNNER_TEMP/engine" >> "$GITHUB_ENV"
+
+      # The two test scripts that need Wine and nothing else: console programs, no window and no
+      # GPU. test-fatal-log.sh makes the prefix (wineboot, then ShowCrashDialog=0) and
+      # test-cs-sync.sh runs in it; it needs the x64 driver build's libdriver_core.a. Both run,
+      # also after a failure; the step fails if either did. The time limit is for a Wine process
+      # that never ends: it fails the step.
+      - name: Wine test scripts
+        timeout-minutes: 15
+        env:
+          WINEDLLOVERRIDES: mscoree,mshtml=
+        run: |
+          work="$RUNNER_TEMP/wine-tests"
+          failed=0
+          for t in test-fatal-log.sh test-cs-sync.sh; do
+            start=$SECONDS
+            echo "::group::scripts/$t"
+            rc=0
+            case "$t" in
+              test-fatal-log.sh)
+                ENGINE="$WINE_ENGINE" WORK="$work" scripts/test-fatal-log.sh || rc=$? ;;
+              test-cs-sync.sh)
+                WINEPREFIX="$work/prefix" WINEDEBUG=-all WINEMSYNC=1 WINE="$WINE_ENGINE/bin/wine" \
+                  scripts/test-cs-sync.sh || rc=$?
+                WINEPREFIX="$work/prefix" "$WINE_ENGINE/bin/wineserver" -k || true ;;
+            esac
+            echo "::endgroup::"
+            if [ "$rc" = 0 ]; then result=ok; else result="FAILED (exit $rc)"; failed=$((failed + 1)); fi
+            echo "scripts/$t: $result, $((SECONDS - start)) s"
+            echo "- \`scripts/$t\` (Wine): $result, $((SECONDS - start)) s" >> "$GITHUB_STEP_SUMMARY"
+          done
+          [ "$failed" = 0 ]
+
       # The script compares this tree's build scripts with main's, so it needs main's tip.
       - name: test-build-jobs.sh
         run: |
@@ -251,6 +373,16 @@ jobs:
             echo "- \`scripts/test-perf-abba.sh\`: FAILED (not blocking, depends on the caller's environment)" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+      # Part 2 of test-build-deps.sh: five x64 driver builds, two of them from scratch (a no-op
+      # build compiles nothing, a changed flag rebuilds every object). Too slow for every push.
+      # It runs last because it rebuilds build/driver-x64.
+      - name: test-build-deps.sh with real builds (nightly)
+        if: github.event_name == 'schedule' || inputs.full
+        env:
+          BUILD: 1
+          D9MT_JOBS: 4
+        run: scripts/test-build-deps.sh
 
   # What a hosted runner's Metal device can do, in the job summary. No check depends on it: it
   # says whether the tests that need a GPU (and later the hash suite under Wine) could run here.
