@@ -7664,6 +7664,11 @@ _MTL4RenderCommandEncoder_encodeCommands(void *obj) {
       [encoder setDepthClipMode:(MTLDepthClipMode)body->mode];
       break;
     }
+    case WMTMtl4RenderCommandSetTriangleFillMode: {
+      struct wmtcmd_mtl4_settrianglefillmode *body = (struct wmtcmd_mtl4_settrianglefillmode *)next;
+      [encoder setTriangleFillMode:(MTLTriangleFillMode)body->mode];
+      break;
+    }
     case WMTMtl4RenderCommandBarrier: {
       struct wmtcmd_mtl4_barrier *body = (struct wmtcmd_mtl4_barrier *)next;
       [encoder barrierAfterStages:(MTLStages)body->after_stages

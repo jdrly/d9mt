@@ -10,6 +10,7 @@
 
 #include "mtl_profiler.h"
 #include "mtl_texture_kind.h"
+#include "mtl_fill_mode.h"
 
 #include "mtl_blit_metallib.h"
 
@@ -829,6 +830,18 @@ namespace dxvk::backend {
         dc->mode = uint64_t(clamp ? WMTDepthClipModeClamp : WMTDepthClipModeClip);
       }
       m_lastDepthClamp = clamp;
+
+      // D3DRS_FILLMODE (#161): the same rule as the depth clip mode (mtl_fill_mode.h)
+      static_assert(uint32_t(MtlTriangleFillMode::Fill)  == uint32_t(WMTTriangleFillModeFill)
+                 && uint32_t(MtlTriangleFillMode::Lines) == uint32_t(WMTTriangleFillModeLines),
+                    "MtlTriangleFillMode must match WMTTriangleFillMode");
+      const bool lines = m_rasterizer.fillMode == MtlTriangleFillMode::Lines;
+      if (fillModeNeedsCommand(first, lines, m_lastFillLines, deferredPassesEnabled())) {
+        auto* fm = m_cmdChunk.append<wmtcmd_mtl4_settrianglefillmode>(
+          uint16_t(WMTMtl4RenderCommandSetTriangleFillMode));
+        fm->mode = uint64_t(lines ? WMTTriangleFillModeLines : WMTTriangleFillModeFill);
+      }
+      m_lastFillLines = lines;
     }
   }
 

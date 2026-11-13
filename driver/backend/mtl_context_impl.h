@@ -435,6 +435,7 @@ namespace dxvk::backend {
     std::vector<Rc<MtlQuery>> m_activeOcclusion;
     uint64_t  m_visSegment = 0u;
     bool      m_lastDepthClamp = false;
+    bool      m_lastFillLines  = false;
 
     Rc<MtlShaderFunction>      m_blitVs, m_blitFs;
     Rc<MtlShaderFunction>      m_fillFs;
