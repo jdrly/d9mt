@@ -790,19 +790,39 @@ namespace dxvk::backend {
           uint16_t(WMTMtl4RenderCommandSetFrontFacingWinding));
         wind->winding = winding;
       }
-      if (first || std::memcmp(&m_lastDepthBias, &m_depthBias, sizeof(MtlDepthBias)) != 0) {
-        m_lastDepthBias = m_depthBias;
+      // The constant depth bias in the vertex shader (#163): with a hooked
+      // VS and k != 0 the shader adds the constant in clip space and keeps
+      // the original frustum in clip distances 6/7, so the hardware
+      // constant is 0 and the depth clip mode is clamp: a fragment the
+      // bias moves past the near or far plane is kept. Metal's clamp
+      // doesn't limit the depth to the viewport's range, and d9mt doesn't
+      // either (docs/configuration.md). Any other VS keeps the
+      // hardware constant (fail-closed). The resolved PSO's VS is ready
+      // here, so its hook bit is valid. What's cached and compared is the
+      // state actually sent, so a hooked <-> unhooked switch at the same
+      // input re-sends both.
+      const bool vsBias = m_depthBias.vsConstant != 0.0f
+        && m_vs != nullptr && m_vs->depthBiasHook;
+
+      MtlDepthBias sent = m_depthBias;
+      sent.vsConstant = 0.0f;
+
+      if (vsBias)
+        sent.constantFactor = 0.0f;
+
+      if (first || std::memcmp(&m_lastDepthBias, &sent, sizeof(MtlDepthBias)) != 0) {
+        m_lastDepthBias = sent;
         auto* bias = m_cmdChunk.append<wmtcmd_mtl4_setdepthbias>(
           uint16_t(WMTMtl4RenderCommandSetDepthBias));
-        bias->bias        = m_depthBias.constantFactor;
-        bias->slope_scale = m_depthBias.slopeFactor;
-        bias->clamp       = m_depthBias.clamp;
+        bias->bias        = sent.constantFactor;
+        bias->slope_scale = sent.slopeFactor;
+        bias->clamp       = sent.clamp;
       }
 
       // Encoders start in Clip mode; only a change (or a clamp on a fresh
       // encoder) needs a command. Deferred passes may merge encoders, so
       // they always state it on the first flush.
-      const bool clamp = !m_rasterizer.depthClip;
+      const bool clamp = !m_rasterizer.depthClip || vsBias;
       if (first ? (clamp || deferredPassesEnabled()) : clamp != m_lastDepthClamp) {
         auto* dc = m_cmdChunk.append<wmtcmd_mtl4_setdepthclipmode>(
           uint16_t(WMTMtl4RenderCommandSetDepthClipMode));

@@ -29,6 +29,7 @@ namespace dxvk {
     dst->abTableIndex = src->abTableIndex;
     dst->textureDim   = src->textureDim;
     dst->abWords      = src->abWords;
+    dst->depthBiasHook = src->depthBiasHook;
   }
 
 
@@ -136,6 +137,9 @@ namespace dxvk {
 
       m_fn->library = lib->library;
       ApplyCbvSlotMap(m_fn.ptr(), cbvMap);
+      // The IR just compiled came from this backend's phase A, so it has the
+      // depth-bias rewrite exactly when the backend says so.
+      m_fn->depthBiasHook = backend->depthBiasHook();
     }
 
     // A failed linked PS falls back to the standalone PS with the same

@@ -208,6 +208,18 @@ public:
     return m_flatShadingMask;
   }
 
+  /// A pixel shader that writes depth (oDepth, texdepth, texm3x2depth):
+  /// its draws keep the hardware constant depth bias (#163).
+  bool WritesDepth() const {
+    return m_writesDepth;
+  }
+
+  /// Tests: a vertex shader declaring a TEXCOORD15 output, which
+  /// D9MT_DEPTH_BIAS_TEST_UNHOOK=1 leaves without the depth-bias rewrite.
+  bool HasDepthBiasTestMarker() const {
+    return m_depthBiasTestMarker;
+  }
+
   /**
    * \brief Patterns dxbc-spirv's sm3 converter mishandles
    *
@@ -282,6 +294,8 @@ private:
   std::array<MtlTextureViewType, 16u> m_imageViewTypes = {};
 
   uint32_t m_flatShadingMask = 0u;
+  bool m_writesDepth = false;
+  bool m_depthBiasTestMarker = false;
 
   D3D9InputSignature m_inputSignature = {};
 

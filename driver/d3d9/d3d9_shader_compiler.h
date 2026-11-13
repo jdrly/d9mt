@@ -15,4 +15,11 @@ namespace dxvk {
     const D3D9ShaderAnalysis& analysis,
     const void*               bytecode);
 
+  /// D9MT_DEPTH_BIAS_VS=1 (opt-in; off by default): the constant depth bias
+  /// in the vertex shader on float depth formats (#163). Read once per
+  /// process and logged once. Off: no vertex shader gets the depth-bias
+  /// rewrite, so every shader's IR (and its AIR cache key) is what it is
+  /// without this feature.
+  bool D3D9DepthBiasVsEnabled();
+
 }
