@@ -36,19 +36,26 @@
 #   stats.txt    one line: programs, programs that aren't rc=0 fails=0, Metal validation lines,
 #                "Invalid Metal usage" lines, lifetime violations, programs without proof that
 #                d9mt drew them, GPU-lost and GPU-hung lines (scripts/cmp-hash-runs.py --stats
-#                judges the counts of head against base)
-#   logs/        per program .out, .err, and .exc when a process crashed
+#                judges the counts of head against base), the programs that ran a second time
+#                after an exit kill, and those whose second run drew other frames
+#   logs/        per program .out, .err, and .exc when a process crashed; logs/killed/ has the
+#                logs of a run that was killed at exit and run again
 #
 # A program's own exit status and FAIL lines are data: the comparison with base judges them.
 # This script's exit status is about the run itself:
 #   0  every program was built, ran, and its log proves d9mt was the driver ("D9MT: compile
 #      workers"), and no Wine process was left behind
 #   1  a program didn't build or has no such proof, the prefix wasn't made or its setup wasn't
-#      verified, or processes were left over (they are killed): the hashes don't count
+#      verified, processes were left over (they are killed), or a program's second run after an
+#      exit kill drew other frames than its first: the hashes don't count
 #   3  no verdict: a log has D9MT-GPU-LOST or D9MT-GPU-HUNG. The GPU was lost or hung; run it
 #      again
-# rc=137 after a complete set of frames and "D9H done" is the exit kill of issue #164, not the
-# program's doing: run that program again.
+# The exit kill of issue #164: Wine sometimes ends a process with SIGKILL (rc=137) during its
+# teardown, after the program printed every frame and "D9H done". That is not the program's
+# doing, so such a program runs once more, and the second run is the one that counts. Its frames
+# must equal the killed run's: if they differ, the program isn't deterministic, its line gets
+# a FAIL and the run's exit status is 1. (code_mtlock's frames never repeat, docs/testing.md.)
+# A second kill in a row stays rc=137.
 #
 # Before each Wine run it waits while SWTOR or its launcher runs on this Mac.
 set -euo pipefail
@@ -198,8 +205,10 @@ if [ "$BUILD_ONLY" = 1 ]; then
 fi
 
 : > "$WORK/hashes.txt"
-noproof="" notclean=""
-for t in "${TESTS[@]}"; do
+noproof="" notclean="" reruns="" rerundiffers=""
+# run_program <name>: one run of it; sets rc, hashes and fails
+run_program() {
+  local t=$1
   wait_for_game
   rc=0
   ( cd "$WORK/bin" && env ${VARIANT_ENV[@]+"${VARIANT_ENV[@]}"} "$WORK/exc_guard" 60 "$WORK/logs/$t.exc" "$WINE" "$WORK/bin/$t.exe" \
@@ -207,6 +216,23 @@ for t in "${TESTS[@]}"; do
   hashes="$(tr -d '\r' < "$WORK/logs/$t.out" | sed -n 's/^D9H frame=.*hash=\([0-9a-f]*\).*/\1/p' | tr '\n' ' ')"
   # the program's own FAIL lines, the harness' timeout, and a frame the harness couldn't read back
   fails="$(tr -d '\r' < "$WORK/logs/$t.out" | grep -c -E '\bFAIL\b|^D9H TIMEOUT|^D9H frame=[0-9]+ (GetBackBuffer|readback) hr=' || true)"
+}
+for t in "${TESTS[@]}"; do
+  run_program "$t"
+  # the exit kill (issue #164): everything was drawn, then Wine killed the process
+  if [ "$rc" = 137 ] && [ "$fails" = 0 ] && [ -n "$hashes" ] && tr -d '\r' < "$WORK/logs/$t.out" | grep -q '^D9H done'; then
+    killed="$hashes"
+    mkdir -p "$WORK/logs/killed"
+    for f in out err exc; do mv "$WORK/logs/$t.$f" "$WORK/logs/killed/" 2>/dev/null || true; done
+    echo "[hash] $t: killed at exit (rc=137) after all its frames, running it again" >&2
+    run_program "$t"
+    reruns+="$t "
+    if [ "$hashes" != "$killed" ] && [ "$t" != code_mtlock ]; then
+      echo "FAIL: this run's frames differ from the frames of the run that was killed at exit: $killed" >> "$WORK/logs/$t.out"
+      fails=$((fails + 1))
+      rerundiffers+="$t "
+    fi
+  fi
   echo "$t rc=$rc fails=$fails $hashes" | tee -a "$WORK/hashes.txt"
   grep -q 'D9MT: compile workers' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null || noproof+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
@@ -220,8 +246,9 @@ validation="$(cat "$WORK"/logs/*.err 2>/dev/null | grep -v 'Validation Enabled' 
 invalid="$(count -c 'Invalid Metal usage')"
 lifetime="$(count 'D9MT-LIFETIME' | grep -c -v 'D9MT-LIFETIME: check on' || true)"
 gpulost="$(count -c -E 'D9MT-GPU-(LOST|HUNG)')"
-printf 'STATS variant=%s programs=%s notclean=%s validation=%s invalid-usage=%s lifetime=%s no-d9mt-proof=%s gpu-lost=%s tree=%s\n' \
+printf 'STATS variant=%s programs=%s notclean=%s validation=%s invalid-usage=%s lifetime=%s no-d9mt-proof=%s gpu-lost=%s exit-kill-reruns=%s rerun-differs=%s tree=%s\n' \
   "$VARIANT" "${#TESTS[@]}" "${notclean// /,}" "$validation" "$invalid" "$lifetime" "${noproof// /,}" "$gpulost" \
+  "${reruns// /,}" "${rerundiffers// /,}" \
   "$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)" | sed 's/=,*\( \)/=none\1/g; s/,\( \)/\1/g' | tee "$WORK/stats.txt"
 
 if [ "$gpulost" != 0 ]; then
@@ -230,6 +257,10 @@ if [ "$gpulost" != 0 ]; then
 fi
 if [ -n "$noproof" ]; then
   echo "[hash] INVALID: no 'D9MT: compile workers' line for: $noproof(d9mt didn't draw them, so their hashes say nothing)" >&2
+  exit 1
+fi
+if [ -n "$rerundiffers" ]; then
+  echo "[hash] FAIL: after an exit kill the second run drew other frames than the first: $rerundiffers(not deterministic, so its hashes say nothing)" >&2
   exit 1
 fi
 [ "$left_rc" = 0 ] || exit 1

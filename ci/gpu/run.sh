@@ -202,6 +202,7 @@ hash_run() {
     > "$OUT/$label.log" 2>&1 || rc=$?
   if [ "$QUEUE_RC" != 0 ]; then
     note "NO VERDICT: the queue ended the $label run (exit $rc): $(grep '^ciq: ' "$OUT/$label.log" | tail -n 1)"
+    keep_killed_logs "$label"
     rm -rf "$WORK/hash-$label"
     return 4
   fi
@@ -211,8 +212,16 @@ hash_run() {
   if [ "$rc" != 0 ]; then
     mkdir -p "$OUT/$label-logs" && cp "$WORK/hash-$label/logs/"*.err "$WORK/hash-$label/logs/"*.out "$WORK/hash-$label/logs/"*.exc "$OUT/$label-logs/" 2>/dev/null || true
   fi
+  keep_killed_logs "$label"
   rm -rf "$WORK/hash-$label"
   return "$rc"
+}
+# keep_killed_logs <label>: the first logs of a program that was killed at exit and run again
+# (issue #164) go to <out>/<label>-killed/. Call it before a suite run's scratch folder is removed.
+keep_killed_logs() {
+  if [ -d "$WORK/hash-$1/logs/killed" ]; then
+    mkdir -p "$OUT/$1-killed" && cp "$WORK/hash-$1/logs/killed/"* "$OUT/$1-killed/" 2>/dev/null || true
+  fi
 }
 set_hash() {
   : "${ENGINE:?hash needs ENGINE (an x86_64 Wine root)}"
