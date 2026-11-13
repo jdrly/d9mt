@@ -6540,7 +6540,7 @@ namespace dxvk {
       m_pushData.shared.fogColor[2] = uint8_t(fogColor >> 16u);
       m_pushData.shared.fogDensity = fogDensity;
       m_pushData.shared.fogDistanceEnd = fogEnd;
-      m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
+      m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : std::numeric_limits<float>::max();
 
       m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
     }
@@ -7385,7 +7385,7 @@ namespace dxvk {
     if (unlikely(s_flatCheck) && s_flatDraws.fetch_add(1u) < 64u) {
       Logger::info(str::format("D9MT-FLAT-DRAW topo=", uint32_t(PrimitiveType), " indexed=", Indexed ? 1 : 0,
         " effective=", drawFlat ? 1 : 0, UseProgrammablePS() ? " ps=sm psflat=" : " ps=ff psflat=",
-        UseProgrammablePS() && m_boundPsFlat ? 1 : 0));
+        UseProgrammablePS() ? (m_boundPsFlat ? 1 : 0) : (m_boundFfFsFlat ? 1 : 0)));
     }
 
     uint32_t nullOrUnusedMask = ~usedSamplerMask | ~usedTextureMask;
@@ -7501,8 +7501,10 @@ namespace dxvk {
       ? MtlShaderStage::Vertex
       : MtlShaderStage::Fragment;
 
-    if (ShaderStage == D3D9ShaderType::PixelShader)
+    if (ShaderStage == D3D9ShaderType::PixelShader) {
       m_boundPs = nullptr;
+      m_boundFfFsFlat = false;
+    }
 
     EmitCs([
       cShader = m_ffModules.GetShader<ShaderStage>()
@@ -7518,8 +7520,19 @@ namespace dxvk {
     // never blocks: the function is a future the CS thread waits on (or, with
     // D9MT_ASYNC_SKIP or a spent wait budget, skips draws for) only if it is
     // still compiling.
-    if (!UseProgrammablePS())
+    if (!UseProgrammablePS()) {
+      // The fixed-function FS: its flat variant for a draw whose effective
+      // flat is set (BindFFUbershader binds the Gouraud one).
+      if (unlikely(m_boundFfFsFlat != Flat)) {
+        m_boundFfFsFlat = Flat;
+        EmitCs([
+          cShader = m_ffModules.GetPixelShader(Flat)
+        ] (MtlContext* ctx) mutable {
+          ctx->bindShader(MtlShaderStage::Fragment, std::move(cShader));
+        });
+      }
       return;
+    }
 
     const D3D9CommonShader* ps = GetCommonShader(m_state.pixelShader);
     const D3D9CommonShader* vs = UseProgrammableVS()
@@ -8229,6 +8242,7 @@ namespace dxvk {
       auto& data = m_state.textureStages[i];
 
       auto colorOp = D3DTEXTUREOP(data[DXVK_TSS_COLOROP]);
+      auto alphaOp = D3DTEXTUREOP(data[DXVK_TSS_ALPHAOP]);
 
       if (colorOp == D3DTOP_DISABLE)
         break;
@@ -8246,6 +8260,11 @@ namespace dxvk {
 
       if (colorOp == D3DTOP_BUMPENVMAP || colorOp == D3DTOP_BUMPENVMAPLUMINANCE)
         preserveColorStageMask |= 1u << i;
+
+      // Dot product can be used as an alpha op, but consumes color. Might need
+      // to preserve all previous color stages (DXVK 8d252af1).
+      if (alphaOp == D3DTOP_DOTPRODUCT3)
+        preserveColorStageMask |= (1u << i) - 1u;
 
       activeTextureStageCount += 1u;
     }

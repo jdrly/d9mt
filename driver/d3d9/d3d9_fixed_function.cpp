@@ -42,6 +42,23 @@ namespace dxvk {
       m_fs->cbvSlotMap[CbvIndex::SpecData] = 0;
       m_fs->cbvSlotMap[CbvIndex::PSShared] = 1;
       m_fs->stateId.origin = uint8_t(statecache::Origin::FixedFunction);
+      m_fs->ffStageTextures = true;
+    }
+
+    // D3DSHADE_FLAT: the same fragment shader with flat colour inputs. Same
+    // bindings and stateId as the Gouraud one; flat keeps it out of the
+    // state cache (the recorder skips it, prewarm never sees it).
+    m_fsFlat = device->createShaderFunction(
+      MtlShaderStage::Fragment, g_ffFsFlatMetallib, size_t(g_ffFsFlatMetallibSize),
+      g_ffFsFlatMetallibCompat, size_t(g_ffFsFlatMetallibCompatSize));
+    if (m_fsFlat != nullptr) {
+      m_fsFlat->entryName = "ffFsMainFlat";
+      m_fsFlat->cbvSlotMap = { { -1, -1, -1, -1, -1, -1, -1, -1 } };
+      m_fsFlat->cbvSlotMap[CbvIndex::SpecData] = 0;
+      m_fsFlat->cbvSlotMap[CbvIndex::PSShared] = 1;
+      m_fsFlat->stateId.origin = uint8_t(statecache::Origin::FixedFunction);
+      m_fsFlat->flat = true;
+      m_fsFlat->ffStageTextures = true;
     }
 
     m_vsPrewarm.fn = m_vs;

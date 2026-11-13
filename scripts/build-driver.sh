@@ -38,12 +38,14 @@ mkdir -p "$OBJ"
 # newest and falls back to Compat (MtlDeviceImpl::createShaderFunction).
 MACOS_MIN="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
 METAL_TARGET=(-mmacosx-version-min="$MACOS_MIN")
-# metal_pair <src.metal> <out>: <out>.metallib (newest) and <out>-compat.metallib (MACOS_MIN).
+# metal_pair <src.metal> <out> [metal flags...]: <out>.metallib (newest) and
+# <out>-compat.metallib (MACOS_MIN).
 metal_pair() {
-  xcrun -sdk macosx metal -O2 -c "$1" -o "$2.air"
-  xcrun -sdk macosx metallib "$2.air" -o "$2.metallib"
-  xcrun -sdk macosx metal -O2 -c "${METAL_TARGET[@]}" "$1" -o "$2-compat.air"
-  xcrun -sdk macosx metallib "$2-compat.air" -o "$2-compat.metallib"
+  local src=$1 out=$2; shift 2
+  xcrun -sdk macosx metal -O2 "$@" -c "$src" -o "$out.air"
+  xcrun -sdk macosx metallib "$out.air" -o "$out.metallib"
+  xcrun -sdk macosx metal -O2 "$@" -c "${METAL_TARGET[@]}" "$src" -o "$out-compat.air"
+  xcrun -sdk macosx metallib "$out-compat.air" -o "$out-compat.metallib"
 }
 # metallib_array <name> <file>: a byte array <name> and <name>Size for the header.
 metallib_array() {
@@ -72,9 +74,13 @@ fi
 #                       VS: SpecConsts=0 ShaderData=1 ClipPlanes=2 VertexBlend=22
 #                           RenderStates=20 (kPushConstantIndex)
 #                       FS: SpecConsts=0 SharedData=1 RenderStates=20
-#                           t2d=texture(0) tcube=8 t3d=16 (+shadow arrays 24/32)
+#                           t2d=texture(0) tcube=8 t3d=16 (+shadow arrays 24/32, unused):
+#                           stage s's texture at the slot of its kind (#152,
+#                           MtlShaderFunction::ffStageTextures)
 #                           samplers=sampler(0)
 #   xcrun metal+metallib  MSL -> .metallib, embedded as g_ffVsMetallib/g_ffFsMetallib.
+#   A second fragment shader, d3d9_fixed_function_frag_flat.frag (FF_FLAT: flat colour
+#   inputs, D3DSHADE_FLAT), the same way: entry ffFsMainFlat, g_ffFsFlatMetallib.
 # The committed headers record a SHA-256 of their sources; they are regenerated
 # only when the sources change (not by mtime, which is arbitrary in a fresh
 # clone), so a build never swaps a committed metallib for toolchain-dependent
@@ -86,7 +92,12 @@ FFSHADERS="$DRV/d3d9/shaders"
 FFHDR="$DRV/d3d9/d3d9_ff_metallib.h"
 FFVSRC="$FFSHADERS/d3d9_fixed_function_vert.vert"
 FFFSRC="$FFSHADERS/d3d9_fixed_function_frag.frag"
-FFHASH="$(src_sha256 "$FFVSRC" "$FFFSRC" \
+FFFLATSRC="$FFSHADERS/d3d9_fixed_function_frag_flat.frag"
+# The FF VS is compiled with -fpreserve-invariance (its `invariant gl_Position`, as SM3
+# vertex shaders' position, so FF and SM3 passes over the same geometry get the same
+# depth); the flag is part of the recipe, so it's in the hash.
+FFVSFLAGS=(-fpreserve-invariance)
+FFHASH="$(src_sha256 "$FFVSRC" "$FFFSRC" "$FFFLATSRC" <(echo "ff vs ${FFVSFLAGS[*]}") \
            "$FFSHADERS/d3d9_fixed_function_frag.glsl" \
            "$FFSHADERS/d3d9_fixed_function_common.glsl")"
 ff_stale=0
@@ -99,11 +110,14 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
 
     glslangValidator --target-env vulkan1.3 -I"$FFSHADERS" -V "$FFVSRC" -o "$FFTMP/vs.spv"
     glslangValidator --target-env vulkan1.3 -I"$FFSHADERS" -V "$FFFSRC" -o "$FFTMP/fs.spv"
+    glslangValidator --target-env vulkan1.3 -I"$FFSHADERS" -V "$FFFLATSRC" -o "$FFTMP/fs_flat.spv"
 
     spirv-cross --msl --msl-version 30000 --rename-entry-point main ffVsMain vert \
       "$FFTMP/vs.spv" --output "$FFTMP/vs.metal"
     spirv-cross --msl --msl-version 30000 --rename-entry-point main ffFsMain frag \
       "$FFTMP/fs.spv" --output "$FFTMP/fs.metal"
+    spirv-cross --msl --msl-version 30000 --rename-entry-point main ffFsMainFlat frag \
+      "$FFTMP/fs_flat.spv" --output "$FFTMP/fs_flat.metal"
 
     # Pin resource slots. spirv-cross only emits [[buffer/texture/sampler(n)]] on
     # the entry-point signature; internal helpers take by-ref params (no attrs), so
@@ -127,10 +141,20 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
       s/(> t2dShadow )\[\[texture\(\d+\)\]\]/${1}[[texture(24)]]/;
       s/(> tcubeShadow )\[\[texture\(\d+\)\]\]/${1}[[texture(32)]]/;
       s/(> samplers )\[\[sampler\(\d+\)\]\]/${1}[[sampler(0)]]/;
-    ' "$FFTMP/fs.metal"
+    ' "$FFTMP/fs.metal" "$FFTMP/fs_flat.metal"
+    for f in "$FFTMP/fs.metal" "$FFTMP/fs_flat.metal"; do
+      for pin in 't2d \[\[texture(0)\]\]' 'tcube \[\[texture(8)\]\]' 't3d \[\[texture(16)\]\]'; do
+        grep -q "$pin" "$f" || { echo "FATAL: FF FS texture slot pin ($pin) did not apply in $f" >&2; exit 1; }
+      done
+    done
+    grep -q '\[\[user(locn9), flat\]\]' "$FFTMP/fs_flat.metal" && grep -q '\[\[user(locn10), flat\]\]' "$FFTMP/fs_flat.metal" \
+      || { echo "FATAL: FF flat FS: the colour inputs (locn9, locn10) aren't flat" >&2; exit 1; }
 
-    metal_pair "$FFTMP/vs.metal" "$FFTMP/vs"
+    grep -q '\[\[position, invariant\]\]' "$FFTMP/vs.metal" \
+      || { echo "FATAL: FF VS: spirv-cross's MSL has no [[position, invariant]]" >&2; exit 1; }
+    metal_pair "$FFTMP/vs.metal" "$FFTMP/vs" "${FFVSFLAGS[@]}"
     metal_pair "$FFTMP/fs.metal" "$FFTMP/fs"
+    metal_pair "$FFTMP/fs_flat.metal" "$FFTMP/fs_flat"
     {
       echo '// GENERATED by scripts/build-driver.sh: DXVK FF GLSL -> spirv-cross MSL -> metallib. DO NOT EDIT.'
       echo "// sources-sha256: $FFHASH"
@@ -140,6 +164,8 @@ if [ -f "$FFVSRC" ] && [ "$ff_stale" = 1 ]; then
       metallib_array g_ffVsMetallibCompat "$FFTMP/vs-compat.metallib"
       metallib_array g_ffFsMetallib "$FFTMP/fs.metallib"
       metallib_array g_ffFsMetallibCompat "$FFTMP/fs-compat.metallib"
+      metallib_array g_ffFsFlatMetallib "$FFTMP/fs_flat.metallib"
+      metallib_array g_ffFsFlatMetallibCompat "$FFTMP/fs_flat-compat.metallib"
       echo '}'
     } > "$FFHDR"
     echo "  -> $FFHDR ($(wc -c < "$FFHDR") bytes)"
