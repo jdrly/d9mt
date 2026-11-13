@@ -192,6 +192,9 @@ set_gpu_tests() {
 # when the queue ended the run.
 hash_run() {
   local tree=$1 tag=$2 variant=$3 target=$4 rc=0 label
+  # without the caller's CACHE (the runner reads an empty one as unset): base and head each
+  # start on empty caches of their own
+  local -x CACHE=""
   local -a tenv=()
   label="$tag-$target-$variant"
   [ "$target" = host ] || tenv=("D9MT_AIR_MACOS=$target")
