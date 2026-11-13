@@ -39,7 +39,7 @@ builds are tested, so a base from before the runner existed works too.
 - `VARIANT=debug|noattach|repro|lifetime|shaderval|early` sets one of the variants above;
   `D9MT_AIR_MACOS=26` or `27` reaches the programs for the AIR target.
 - `CACHE=<dir>` puts d9mt's three caches (AIR cache, PSO archives, state cache) into a folder
-  of the caller's, outside `WORK`, used as found and left behind. Without it every run starts
+  of the caller's, used as found and left behind (neither it nor `WORK` may lie inside the other). Without it every run starts
   on empty caches inside `WORK`. Two runs on one `CACHE` are how a change to a cache's key or
   folder is tested: base fills it, head runs on it, and `WORK/cache.txt` of each run lists the
   PSO folders and the AIR cache's tables with their row counts.

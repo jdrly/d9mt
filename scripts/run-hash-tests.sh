@@ -24,8 +24,9 @@
 # CACHE     a folder of the caller's for d9mt's three caches (the AIR cache, the PSO archives,
 #           the state cache) instead of WORK/cache. It is used as it is found and left behind,
 #           so a second run starts on what the first one wrote: a run of base, then head on
-#           base's caches. It must lie outside WORK. After the run WORK/cache.txt lists its PSO
-#           folders and the AIR cache's tables with their row counts.
+#           base's caches. Neither CACHE nor WORK may lie inside the other. After the run
+#           WORK/cache.txt lists its PSO folders and the AIR cache's tables with their row
+#           counts.
 # VD=1      every window on a temporary virtual display: VD_DIR must name a folder with
 #           with-vd.sh and d9h-vd.h (a tool outside this repository). Without it the windows
 #           open on the main display.
@@ -83,7 +84,10 @@ if [ -n "${CACHE:-}" ]; then
   KEEP_CACHE=1
   mkdir -p "$CACHE" "$WORK"
   CACHE="$(cd "$CACHE" && pwd -P)"
-  case "$CACHE/" in "$(cd "$WORK" && pwd -P)"/*) echo "FATAL: CACHE ($CACHE) lies inside WORK, which is removed first" >&2; exit 1 ;; esac
+  WORK_REAL="$(cd "$WORK" && pwd -P)"
+  # neither folder may hold the other: WORK is removed first, and that must not touch CACHE
+  case "$CACHE/" in "$WORK_REAL"/*) echo "FATAL: CACHE ($CACHE) lies inside WORK, which is removed first" >&2; exit 1 ;; esac
+  case "$WORK_REAL/" in "$CACHE"/*) echo "FATAL: WORK ($WORK_REAL) lies inside CACHE ($CACHE): removing WORK would remove part of the cache" >&2; exit 1 ;; esac
 else
   CACHE="$WORK/cache"
 fi
