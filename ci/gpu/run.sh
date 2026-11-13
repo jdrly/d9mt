@@ -202,6 +202,7 @@ hash_run() {
     > "$OUT/$label.log" 2>&1 || rc=$?
   if [ "$QUEUE_RC" != 0 ]; then
     note "NO VERDICT: the queue ended the $label run (exit $rc): $(grep '^ciq: ' "$OUT/$label.log" | tail -n 1)"
+    keep_killed_logs "$label"
     rm -rf "$WORK/hash-$label"
     return 4
   fi
