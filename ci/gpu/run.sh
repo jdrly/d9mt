@@ -211,13 +211,16 @@ hash_run() {
   if [ "$rc" != 0 ]; then
     mkdir -p "$OUT/$label-logs" && cp "$WORK/hash-$label/logs/"*.err "$WORK/hash-$label/logs/"*.out "$WORK/hash-$label/logs/"*.exc "$OUT/$label-logs/" 2>/dev/null || true
   fi
-  # the first logs of a program that was killed at exit and run again (issue #164) go to
-  # <out>/<tag>-<target>-<variant>-killed/, whatever the run's result
-  if [ -d "$WORK/hash-$label/logs/killed" ]; then
-    mkdir -p "$OUT/$label-killed" && cp "$WORK/hash-$label/logs/killed/"* "$OUT/$label-killed/" 2>/dev/null || true
-  fi
+  keep_killed_logs "$label"
   rm -rf "$WORK/hash-$label"
   return "$rc"
+}
+# keep_killed_logs <label>: the first logs of a program that was killed at exit and run again
+# (issue #164) go to <out>/<label>-killed/. Call it before a suite run's scratch folder is removed.
+keep_killed_logs() {
+  if [ -d "$WORK/hash-$1/logs/killed" ]; then
+    mkdir -p "$OUT/$1-killed" && cp "$WORK/hash-$1/logs/killed/"* "$OUT/$1-killed/" 2>/dev/null || true
+  fi
 }
 set_hash() {
   : "${ENGINE:?hash needs ENGINE (an x86_64 Wine root)}"
