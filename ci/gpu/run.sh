@@ -212,7 +212,7 @@ hash_run() {
   cp "$WORK/hash-$label/hashes.txt" "$OUT/$label.hashes.txt" 2>/dev/null || true
   cp "$WORK/hash-$label/stats.txt" "$OUT/$label.stats.txt" 2>/dev/null || true
   [ ! -f "$OUT/$label.stats.txt" ] || note "$(cat "$OUT/$label.stats.txt")"
-  # a failed run's logs, and every profile run's: its HITCH/STATS/PROF lines are the point
+  # a failed run's logs, and every finished profile run's: its HITCH/STATS/PROF lines are the point
   if [ "$rc" != 0 ] || [ "$variant" = profile ]; then
     mkdir -p "$OUT/$label-logs" && cp "$WORK/hash-$label/logs/"*.err "$WORK/hash-$label/logs/"*.out "$WORK/hash-$label/logs/"*.exc "$OUT/$label-logs/" 2>/dev/null || true
   fi
