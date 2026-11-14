@@ -15,12 +15,15 @@ PROF_OLD = ('info:  PROF frame={frame} win=256 ms(avg/f): beginRecording=1.527(0
             'clear=1.54688 xfer=0 | framePasses=0/f storeDontCare=0/f vtxFence=0/f evRead=1917(7.48828/f) '
             'unsubWait=0(0/f) unsubWaitUs=12(max 7)')
 CS = (' | csExec=812.345(3.173) csChunks=2048(8.00/f) csInject=0(0.00/f) csCmds={cmds}({cmds_f:.1f}/f) '
-      'csKiB=9216.0(36.0/f) csSleep=3(0.01/f) | allocWait=1(0.00/f) allocWaitMs=0.512(0.002)')
+      'csKiB=9216.0(36.0/f) csSleep=3(0.01/f) | allocWait=1(0.00/f) allocWaitMs=0.512(0.002)'
+      ' | abVs=1.00/2.00/3.00/4.00 abPs=0.50/0.25/0.00/7.00 tableVs=6.00/12.00 tablePs=1.00/2.00')
 STATS = ('warn:  STATS t={t} fps=58.3 ms=17.1/20.2/25.0 slow33=0 slow50=0 | rp=1.0 skip=0.0 cb=2.0 draws={draws} '
          '| ld=0.0 clr=1.0 ldDc=0.0 st=1.0 stDc=0.0 rsv=0.0 restore=0.0 savedMiB=0.0 attMs=0.12 clrFold=0.0 '
          'clrPass=0.0 | sh=0 pso=0 wait=2/3.5ms | allocMiB=96 att={att} | split=0.0 splitSubmit=0.0 splitXfer=0.0 '
          'splitClear=0.0 splitMiB=0.0 carried=0.0 carryRefused=0.0 carryCap=0.0 | flushChunk=1.0/0.0 '
-         'flushRt=0.0/0.0 flushPresent=1.0/0.5 flushCapped=0.0 | at=12:00:01.250')
+         'flushRt=0.0/0.0 flushPresent=1.0/0.5 flushCapped=0.0 | constVs=120.0/80.0 constPs=40.0/10.0 upVs=3.0 '
+         'upVsKiB=12.0 upVsPadKiB=0.5 | splitMiBSubmit=0.0 splitMiBOther=1.5 | clrOpen=1.0 clrRect=0.0 '
+         'oddPair=3.0/4.0 | at=12:00:01.250')
 
 
 def prof(frame=512, draws=1536000, cmds=3072000, cs=True):
@@ -75,6 +78,15 @@ class Counters(unittest.TestCase):
         self.assertEqual(rows[('STATS', 'wait')][:2], ['2', '2'])
         self.assertEqual(rows[('STATS', 'flushPresent.refused')][:2], ['0.5', '0.5'])
         self.assertEqual(rows[('STATS', 'att')], ['on', 'on', ''])
+        # the a/b/... fields of later d9mt lines, part by part
+        self.assertEqual(rows[('PROF', 'abVs.resources')][:2], ['2', '2'])
+        self.assertEqual(rows[('PROF', 'abPs.keep')][:2], ['7', '7'])
+        self.assertEqual(rows[('PROF', 'tableVs.slots')][:2], ['12', '12'])
+        self.assertEqual(rows[('STATS', 'constVs.changed')][:2], ['80', '80'])
+        self.assertEqual(rows[('STATS', 'upVsKiB')][:2], ['12', '12'])
+        self.assertEqual(rows[('STATS', 'splitMiBOther')][:2], ['1.5', '1.5'])
+        self.assertEqual(rows[('STATS', 'oddPair.2')][:2], ['4', '4'])
+        self.assertNotIn(('STATS', 'constVs'), rows)
 
     def test_repeat_and_text(self):
         b = self.log('b', prof(), STATS.format(t=2, draws=6000, att='on'))

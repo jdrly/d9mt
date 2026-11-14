@@ -10,9 +10,12 @@ counter, never a time:
 - PROF: the fields after the first "|". A field printed as <total>(<per frame>/f) gives
   total / win, which is exact; <x>/f gives x; a bare number is the window's total. Left out: the
   bucket times before the first "|", unsubWaitUs, csExec and allocWaitMs. The fields after
-  "passClose/f:" are named passClose.<cause>.
+  "passClose/f:" are named passClose.<cause>. A field of several numbers a/b/... gets one counter
+  per part: abVs/abPs (.layout .resources .cbv .keep), tableVs/tablePs (.flushes .slots), any
+  other one numbered (.1, .2, ...).
 - STATS: the fields after the first "|", as printed (per frame of the render thread, the flush
-  requests per Present as <name>.flushed and <name>.refused). Left out: t, fps, ms, slow33 and
+  requests per Present as <name>.flushed and <name>.refused, constVs/constPs as .writes and
+  .changed, any other a/b/... field numbered). Left out: t, fps, ms, slow33 and
   slow50 before the first "|", attMs, the ms of wait=<count>/<ms>ms, and at=.
 
 Output on stdout, tab-separated, a header first: line, counter, base, head, diff (head - base,
@@ -27,6 +30,10 @@ import re
 import sys
 
 PROF_TIMES = {'unsubWaitUs', 'csExec', 'allocWaitMs'}
+# Fields printed as a/b/...: the names of their parts, by the field's name without its stage
+# (Vs, Ps). Any other such field gets its parts numbered from 1.
+PARTS = {'flush': ('flushed', 'refused'), 'ab': ('layout', 'resources', 'cbv', 'keep'),
+         'table': ('flushes', 'slots'), 'const': ('writes', 'changed')}
 STATS_SKIP = {'attMs', 'at'}
 NUM = r'-?\d+(?:\.\d+)?(?:e[-+]?\d+)?'
 
@@ -44,6 +51,20 @@ def last_line(path, tag):
 def number(text):
     v = float(text)
     return int(v) if v == int(v) and 'e' not in text and '.' not in text else v
+
+
+def parts(key, val, out):
+    """key=a/b/... as key.<part> each; False when val isn't numbers separated by /."""
+    nums = val.split('/')
+    if len(nums) < 2 or not all(re.fullmatch(NUM, n) for n in nums):
+        return False
+    base = re.sub(r'(Vs|Ps)$', '', key)
+    names = next((v for k, v in PARTS.items() if base == k or (k == 'flush' and base.startswith(k))), None)
+    if names is None or len(names) != len(nums):
+        names = [str(i) for i in range(1, len(nums) + 1)]
+    for name, n in zip(names, nums):
+        out[f'{key}.{name}'] = number(n)
+    return True
 
 
 def prof(line):
@@ -70,7 +91,7 @@ def prof(line):
                 out[key + '/f'] = number(m.group(1))
             elif re.fullmatch(NUM, val):
                 out[key] = number(val)
-            else:
+            elif not parts(key, val, out):
                 out[key] = val
     return out
 
@@ -87,12 +108,9 @@ def stats(line):
                 continue
             if m := re.fullmatch(f'(\\d+)/{NUM}ms', val):
                 out[key] = number(m.group(1))
-            elif key.startswith('flush') and (m := re.fullmatch(f'({NUM})/({NUM})', val)):
-                out[key + '.flushed'] = number(m.group(1))
-                out[key + '.refused'] = number(m.group(2))
             elif re.fullmatch(NUM, val):
                 out[key] = number(val)
-            else:
+            elif not parts(key, val, out):
                 out[key] = val
     return out
 
