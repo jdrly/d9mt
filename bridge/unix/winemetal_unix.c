@@ -6061,10 +6061,11 @@ _MTLDevice_newArgumentTable(void *obj) {
  *  - flushing while another thread compiles through the same compiler
  *    crashes, so compiles hold g_pso_lock shared and flushes hold it
  *    exclusively. By default flushes run on the compiling (render) thread
- *    every D9MT_PSO_FLUSH_EVERY new PSOs and once at exit (only if
- *    uncontended). A flush of 256 PSOs takes 0.5-0.7 s, which stalls the
- *    render thread waiting for that PSO (#11). With D9MT_PSO_ASYNC_FLUSH=1
- *    flushes run on their own thread instead, at a quiet moment:
+ *    every D9MT_PSO_FLUSH_EVERY new PSOs and once at exit, at DLL detach
+ *    (only if uncontended: see _D9MT_processDetach). A flush of 256 PSOs
+ *    takes 0.5-0.7 s, which stalls the render thread waiting for that PSO
+ *    (#11). With D9MT_PSO_ASYNC_FLUSH=1 flushes run on their own thread
+ *    instead, at a quiet moment:
  *    D9MT_PSO_FLUSH_EVERY PSOs are pending and no build ran for 2 s, or
  *    anything is pending and no build ran for 10 s (the end of a session:
  *    there is no flush at exit, which crashed or hung there when exiting
@@ -6076,6 +6077,10 @@ _MTLDevice_newArgumentTable(void *obj) {
  *  - newArchiveWithURL segfaults on a non-archive file and accepts a
  *    truncated one, so every archive carries a .sum (size + SHA-256) written
  *    after it and is only loaded when that matches; anything else is deleted.
+ *  - a process killed inside serializeAsArchiveAndFlushToURL leaves a
+ *    <UUID>.metallib next to the URL (macOS 27, #191; Metal's own temporary
+ *    by its name, not traced), so a start removes .metallib files older than
+ *    600 s with d9mt's own .tmp files.
  * Archives live under <user cache dir>/d9mt/pso/os-<build>-<gpu>-c<identity>-t<T>/:
  * the OS build, the GPU, the effective AIR identity's first 8 bytes
  * (d9mt_air_effective_identity: the codegen id or its lineage's identity) and
@@ -6288,7 +6293,8 @@ pso_flush_locked(void) {
 static void
 pso_flush_atexit(void) {
   /* Another thread may still be compiling (or died holding the lock while
-   * the process tears down): never block exit on it. */
+   * the process tears down), or the exit flush below still runs: never
+   * block exit on it. */
   if (pthread_rwlock_trywrlock(&g_pso_lock))
     return;
   @autoreleasepool {
@@ -6519,7 +6525,8 @@ pso_archive_init(id<MTLDevice> device) {
   close(locksfd);
   close(basefd);
 
-  /* Collect archives, drop leftovers of interrupted writes and orphans. */
+  /* Collect archives, drop leftovers of interrupted writes (d9mt's .tmp, Metal's .metallib) and
+   * orphans. */
   NSMutableArray<NSString *> *names = [NSMutableArray array];
   const time_t now = time(NULL);
   {
@@ -6540,7 +6547,7 @@ pso_archive_init(id<MTLDevice> device) {
       struct stat st;
       if ([name hasSuffix:@".mtl4archive"]) {
         [names addObject:name];
-      } else if ([name hasSuffix:@".tmp"]) {
+      } else if ([name hasSuffix:@".tmp"] || [name hasSuffix:@".metallib"]) {
         if (!fstatat(dirfd, name.fileSystemRepresentation, &st, AT_SYMLINK_NOFOLLOW) && now - st.st_mtime > 600)
           unlinkat(dirfd, name.fileSystemRepresentation, 0);
       } else if ([name hasSuffix:@".mtl4archive.sum"]) {
@@ -6663,10 +6670,57 @@ pso_note_compiled(void) {
   }
 }
 
-/* bridge/main.c's DLL_PROCESS_DETACH (#191). */
+/* The exit flush (#191, #164): bridge/main.c calls it at DLL_PROCESS_DETACH of the process's
+ * exit. In Wine's ExitProcess that comes after the process's other Windows threads were
+ * terminated and before its last one ends; about 0.5 s after that, wineserver kills the process
+ * (SIGKILL) while its atexit handlers run, so an archive flushed only from atexit was lost and
+ * left Metal's temporary file behind. The flush runs on a thread of its own, and the detach waits
+ * for it at most D9MT_PSO_EXIT_WAIT_NS: a thread terminated inside Metal may hold a lock the
+ * flush needs, and the process must still exit. A flush still running then ends with the
+ * process, and the next start removes what it left. Not with the flush thread (it has no exit
+ * flush). The atexit flush stays for a process that ends without DLL detach (TerminateProcess of
+ * itself, or no Wine): after this flush nothing is pending, and while it runs it holds g_pso_lock,
+ * so atexit's trywrlock skips. */
+#define D9MT_PSO_EXIT_WAIT_NS (5000000000ull)
+static pthread_mutex_t g_pso_exit_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_pso_exit_cond = PTHREAD_COND_INITIALIZER;
+static bool            g_pso_exit_done;
+
+static void *
+pso_exit_flush_thread(void *arg) {
+  (void)arg;
+  pthread_setname_np("d9mt-pso-exit");
+  pso_flush_atexit();
+  pthread_mutex_lock(&g_pso_exit_mutex);
+  g_pso_exit_done = true;
+  pthread_cond_signal(&g_pso_exit_cond);
+  pthread_mutex_unlock(&g_pso_exit_mutex);
+  return NULL;
+}
+
 static NTSTATUS
 _D9MT_processDetach(void *obj) {
   (void)obj;
+  if (!g_pso_serializer || g_pso_async_flush || !atomic_load(&g_pso_pending))
+    return STATUS_SUCCESS;
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, pso_exit_flush_thread, NULL))
+    return STATUS_SUCCESS;
+  pthread_detach(thread);
+  const uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + D9MT_PSO_EXIT_WAIT_NS;
+  pthread_mutex_lock(&g_pso_exit_mutex);
+  while (!g_pso_exit_done) {
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (now >= end)
+      break;
+    const struct timespec ts = { (time_t)((end - now) / 1000000000ull), (long)((end - now) % 1000000000ull) };
+    pthread_cond_timedwait_relative_np(&g_pso_exit_cond, &g_pso_exit_mutex, &ts);
+  }
+  const bool done = g_pso_exit_done;
+  pthread_mutex_unlock(&g_pso_exit_mutex);
+  if (!done)
+    fprintf(stderr, "d9mt: PSO archive flush at exit not done after %llu s: exiting without it\n",
+            D9MT_PSO_EXIT_WAIT_NS / 1000000000ull);
   return STATUS_SUCCESS;
 }
 
