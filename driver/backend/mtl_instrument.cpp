@@ -35,6 +35,7 @@ namespace {
     uint32_t   overflow;
     uint64_t   droppedSlots;
     uint32_t   zeroEvents;
+    uint32_t   exits;
     LARGE_INTEGER lastDumpQpc;
     DWORD      tid;
     char       name[128];  /* its description, read while it runs: Wine drops it when the thread ends */
@@ -208,6 +209,12 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
   if (!ts->depth)
     return;
 
+  /* The name at the thread's first and every 2^20th return, at any depth: a thread that ExitProcess
+   * ends inside its outermost instrumented call (the CS thread's loop) still names itself. The
+   * call (a few us under Wine) counts in the returning function's time. */
+  if (uint32_t e = ++ts->exits; e == 1u || (e & 0xFFFFFu) == 0u)
+    threadName(ts->name, int(sizeof(ts->name)));
+
   uint64_t now = rdtscNow();
 
   /* Exceptions/longjmp can skip exit hooks, desyncing the top frame from
@@ -239,12 +246,7 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
 
   if (ts->depth) {
     ts->stack[ts->depth - 1u].childTicks += incl;
-  } else if (uint32_t z = ++ts->zeroEvents; z == 1u || (z & 0x1FFFu) == 0u) {
-    /* the name at the first and every 8192nd return to depth 0: a thread whose outermost
-     * instrumented call returns only when it ends still names itself */
-    threadName(ts->name, int(sizeof(ts->name)));
-    if (z == 1u)
-      return;
+  } else if ((++ts->zeroEvents & 0x1FFFu) == 0u) {
     LARGE_INTEGER qpcNow;
     QueryPerformanceCounter(&qpcNow);
     if (double(qpcNow.QuadPart - ts->lastDumpQpc.QuadPart)
