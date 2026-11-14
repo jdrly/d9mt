@@ -9,8 +9,9 @@
 // same check and must fail it: one that returns at once, and one that sleeps for n (right wall
 // time, no CPU time).
 //
-// Process CPU, not the thread's: under Rosetta on GitHub's virtual M1, CLOCK_THREAD_CPUTIME_ID
-// reads 2 % of a pure ALU loop, while process CPU (and getrusage) reads all of it (#199's probe).
+// Process CPU, not the thread's: under Rosetta CLOCK_THREAD_CPUTIME_ID reads 3/125 of the real
+// time (Mach ticks of the 24 MHz timebase returned as ns), on GitHub's virtual M1 (#199's probe:
+// 2 % of a pure ALU loop) and on the bare M1 (GUARD2). Process CPU and getrusage are right.
 // The test has one thread, and process CPU is what the speed guard reads. Medians, because the
 // hosted VM's CPU time jumps now and then (a mean read 167 us for a 100 us burn on arm64), and
 // 10 untimed burns first, because process CPU counts Rosetta's one-time translation.
