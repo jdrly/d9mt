@@ -26,8 +26,10 @@
 # - every other address inside the image (a call target, a RIP-relative or absolute operand, an
 #   address constant) written as the nearest symbol at or below it, plus the offset from it; when
 #   that symbol is only a data section's own (.rdata, .gcc_except_table: unnamed data, whose
-#   offset moves when anything before it grows), as the section and what the address holds: the
-#   string (up to 256 bytes), or the 16 bytes from there, each pointer-sized word that is an address of the image
+#   offset moves when anything before it grows), as the section and what lies there: for an
+#   operand the instruction reads, the bytes it reads (the width from its mnemonic or register,
+#   else 16); for an address it takes (lea, $), the string that starts there (up to 256 bytes),
+#   else 16 bytes. A pointer-sized word among those bytes that is an address of the image is
 #   written as its symbol. A section symbol with a $ suffix (.rdata$.refptr.<name>) names its
 #   contents and counts as a named symbol.
 # Raw addresses and displacements are gone; which symbol, at which offset, is kept, so a function
@@ -88,6 +90,45 @@ HEX = re.compile(r'(\$?)0x([0-9a-f]+)\b')
 TARGET = re.compile(r'\b([0-9a-f]+) <[^>]*>')
 
 
+REG_WIDTH = {**{r: 8 for r in 'rax rbx rcx rdx rsi rdi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15'.split()},
+             **{r: 4 for r in 'eax ebx ecx edx esi edi ebp esp r8d r9d r10d r11d r12d r13d r14d r15d'.split()},
+             **{r: 2 for r in 'ax bx cx dx si di bp sp r8w r9w r10w r11w r12w r13w r14w r15w'.split()},
+             **{r: 1 for r in 'al ah bl bh cl ch dl dh sil dil bpl spl r8b r9b r10b r11b r12b r13b r14b r15b'.split()}}
+SUFFIXED = {'mov', 'cmp', 'add', 'sub', 'and', 'or', 'xor', 'test', 'inc', 'dec', 'neg', 'not', 'adc', 'sbb',
+            'push', 'pop', 'lock', 'xchg', 'cmpxchg', 'xadd', 'imul', 'shl', 'shr', 'sar', 'sal'}
+
+
+def access_width(insn):
+    """The bytes an instruction with one memory operand reads there, as far as the mnemonic or a
+    register operand tells; 16 when it doesn't (more than it reads: a false `changed` at worst)."""
+    words = insn.split(' ')
+    while len(words) > 1 and words[0] in ('lock', 'rep', 'repz', 'repnz', 'repe', 'repne', 'notrack', 'bnd', 'data16', 'cs', 'ds'):
+        words = words[1:]
+    mn, ops = words[0], ' '.join(words[1:])
+    if m := re.match(r'mov[sz]([bwl])[wlq]$', mn):   # movzbl, movswl, movslq: the source's width
+        return {'b': 1, 'w': 2, 'l': 4}[m.group(1)]
+    if m := re.match(r'cvt(t?)(ss|sd|si|dq|ps|pd|pi)2', mn):
+        return {'ss': 4, 'sd': 8, 'ps': 16, 'pd': 16, 'dq': 16, 'pi': 8}.get(m.group(2)) or (8 if mn.endswith('q') else 4)
+    if re.search(r'sd$', mn) and '%xmm' in ops:
+        return 8
+    if re.search(r'ss$', mn) and '%xmm' in ops:
+        return 4
+    if mn in ('movq',):
+        return 8
+    if mn in ('movd',):
+        return 4
+    if '%xmm' in ops:
+        return 16
+    if mn.startswith('fi'):     # x87 integer: fild[s|l|ll], fiadd[s|l], ...
+        return 8 if mn.endswith(('ll', 'q')) else 2 if mn.endswith('s') else 4
+    if mn.startswith('f'):      # x87: s 4, l 8, t 10
+        return {'s': 4, 'l': 8, 't': 10}.get(mn[-1], 16)
+    if mn[-1:] in 'bwlq' and mn[:-1] in SUFFIXED:
+        return {'b': 1, 'w': 2, 'l': 4, 'q': 8}[mn[-1]]
+    widths = [REG_WIDTH[r] for r in re.findall(r'%([a-z0-9]+)', re.sub(r'\([^)]*\)', '', ops)) if r in REG_WIDTH]
+    return widths[0] if widths else 16
+
+
 def is_function(demangled, name):
     """name(parameters) with nothing after the list but qualifiers: not a lambda or a static
     variable inside that function, whose names start the same way."""
@@ -145,7 +186,7 @@ class Image:
     def inside(self, v):
         return any(lo <= v < hi for lo, hi in self.ranges)
 
-    def symbolize(self, v, contents=True):
+    def symbolize(self, v, contents=True, width=None):
         i = bisect.bisect_right(self.addrs, v) - 1
         if i < 0:
             return f'?{v:#x}'
@@ -159,8 +200,11 @@ class Image:
             return f'<{min(named or names)}+{v - a:#x}>'
         # Only a section's own symbol below it: unnamed data (a string literal, a constant, an
         # exception table), whose offset moves whenever anything before it in the section grows.
-        # What it is, is what it holds: the string, or the 16 bytes from there, each word of them
-        # that is an address of the image written as its symbol (i686 keeps pointers in constants).
+        # What it is, is what it holds. Read by the instruction (width: the bytes it loads):
+        # those bytes. Its address taken (width None): the string when it starts one (up to 256
+        # bytes), else 16 bytes. Bytes beyond what is read would be a neighbour's, which moves.
+        # A pointer-sized word that is an address of the image is written as its symbol (i686
+        # keeps pointers in constants).
         for lo, hi, off, code in self.sections:
             if lo <= v < hi and not code:
                 if off is None:
@@ -169,9 +213,9 @@ class Image:
                 text = self.data[start:start + min(hi - v, 256)]
                 nul = text.find(0)
                 text = text[:nul] if nul >= 0 else text
-                if len(text) >= 2 and all(32 <= c < 127 or c in (9, 10, 13) for c in text):
+                if width is None and len(text) >= 2 and all(32 <= c < 127 or c in (9, 10, 13) for c in text):
                     return f'<{min(names)}:{text.decode()!r}{"" if nul >= 0 else "..."}>'
-                raw = self.data[start:start + min(hi - v, 16)]
+                raw = self.data[start:start + min(hi - v, width or 16)]
                 w = 8 if self.mach == 'x86_64' else 4
                 words = [raw[k:k + w] for k in range(0, len(raw), w)]
                 return f'<{min(names)}:' + ' '.join(
@@ -212,24 +256,36 @@ class Image:
                 k += 1
         last_end = insns[-1][0] + len(insns[-1][1])
 
-        def addr(v):
+        def addr(v, width=None):
             if start <= v < last_end:
                 return f'@{index.get(v, "mid+" + hex(v - start))}'
-            return self.symbolize(v)
+            return self.symbolize(v, width=width)
 
         lines = []
         for a, raw, text in real:
+            # Each replacement waits in a placeholder until all three passes are done, so that no
+            # pass rewrites what an earlier one put in (a string that reads like an address).
+            subs = []
+
+            def keep(rep):
+                subs.append(rep)
+                return f'\x01{len(subs) - 1}\x02'
+
             # objdump's comment for a RIP-relative operand gives its target: put that in place of
             # the displacement
             m = re.search(r'\s#\s*([0-9a-f]+)(?: <[^>]*>)?$', text)
             if m:
                 text = text[:m.start()]
-                text = re.sub(r'-?0x[0-9a-f]+\(%rip\)', addr(int(m.group(1), 16)) + '(%rip)', text)
+                # a lea takes the address; anything else reads what lies there
+                target = keep(addr(int(m.group(1), 16), None if text.startswith('lea') else access_width(text)))
+                text = re.sub(r'-?0x[0-9a-f]+\(%rip\)', lambda _: target + '(%rip)', text)
             # a branch or call target, printed as "<hex> <symbol+off>"
-            text = TARGET.sub(lambda t: addr(int(t.group(1), 16)), text)
-            # any other number that is an address of the image (i686 absolute operands, address constants)
-            text = HEX.sub(lambda h: h.group(1) + addr(int(h.group(2), 16)) if self.inside(int(h.group(2), 16)) else h.group(0), text)
-            lines.append(text)
+            text = TARGET.sub(lambda t: keep(addr(int(t.group(1), 16))), text)
+            # any other number that is an address of the image (i686 absolute operands, address
+            # constants): with $ an address taken, without it a memory operand read
+            text = HEX.sub(lambda h: h.group(1) + keep(addr(int(h.group(2), 16), None if h.group(1) or text.startswith('lea') else access_width(text)))
+                           if self.inside(int(h.group(2), 16)) else h.group(0), text)
+            lines.append(re.sub('\x01(\\d+)\x02', lambda k: subs[int(k.group(1))], text))
         code = b''.join(r for _, r, t in insns)
         return code, lines, last_end - start
 
