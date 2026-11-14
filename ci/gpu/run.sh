@@ -111,7 +111,11 @@ PROBE_OK=0
 GATE_FAILED=0   # a note that starts with FAILED was written
 QUEUE_LOST=0    # the queue stopped a step or never admitted it
 BASE_TREE=""
-cleanup() { [ -z "$BASE_TREE" ] || { git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; }; }
+ABBA_DIR=""     # the bench call running now: its engine copy and its prefix (see abba_step)
+cleanup() {
+  [ -z "$BASE_TREE" ] || { git worktree remove --force "$BASE_TREE" 2>/dev/null; rm -rf "$BASE_TREE"; }
+  [ -z "$ABBA_DIR" ] || rm -rf "$ABBA_DIR"
+}
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 START=$(date +%s)
@@ -317,7 +321,9 @@ bench_args() { case "$1" in bench_draws) echo "6000 600" ;; bindbench) echo 1060
 # abba_step <label> <bridge tree> [VAR=value...] -- <perf-abba.sh arguments>: one perf-abba.sh call
 # in $WORK/<label> (a copy of ENGINE with <bridge tree>'s bridge, as scripts/run-hash-tests.sh
 # makes it, and perf-abba.sh's WORK), uncapped, D9MT_PROFILE only from the VAR=value words. Its
-# output goes to <out>/<label>.log, its results file to <out>/<label>.results.txt. Returns 0 when
+# output goes to <out>/<label>.log, its results file to <out>/<label>.results.txt, its runs' stderr
+# logs to <out>/<label>-logs/. Then the folder goes: a prefix's z: drive is /, and the workflow's
+# upload walks <out> (work/ included) before it leaves work/ out. Returns 0 when
 # every run ran (perf-abba.sh's exit 0, or 3: a comparison that is incomplete, e.g. a DIRTY run),
 # 1 when a run failed or perf-abba.sh refused, 3 when a log says the GPU was lost or hung, 4 when
 # the queue ended the step; it notes each.
@@ -325,11 +331,12 @@ abba_step() {
   local label=$1 tree=$2 dir="$WORK/$1" eng="$WORK/$1/engine" rc=0 t0=$SECONDS; shift 2
   local -a vars=()
   while [ "$1" != -- ]; do vars+=("$1"); shift; done; shift
-  rm -rf "$dir"; mkdir -p "$dir"
+  rm -rf "$dir" "$OUT/$label-logs"; mkdir -p "$dir" "$OUT/$label-logs"
+  ABBA_DIR=$dir
   { cp -cR "$ENGINE" "$eng" 2>/dev/null || cp -R "$ENGINE" "$eng"; } \
     && cp "$tree/build/bridge/winemetal64.dll" "$eng/lib/wine/x86_64-windows/winemetal.dll" \
     && cp "$tree/build/bridge/winemetal.so" "$eng/lib/wine/x86_64-unix/winemetal.so" \
-    || { note "FAILED: $label: no copy of ENGINE with the bridge of $tree"; return 1; }
+    || { note "FAILED: $label: no copy of ENGINE with the bridge of $tree"; rm -rf "$dir"; ABBA_DIR=""; return 1; }
   # wineboot (perf-abba.sh makes the prefix) sees the caller's environment: no Mono or Gecko
   # setup, no window; the runs set their own overrides
   queued "$label" "$MEM_BENCH" --wine "$dir" \
@@ -337,21 +344,21 @@ abba_step() {
       ${FRAMEWORKS_OF_ENGINE:+FRAMEWORKS="$eng/lib/external"} WINEDLLOVERRIDES="mscoree,mshtml=;winemac.drv=d" \
       WINE_COMPATDB="$COMPATDB" "$V2/scripts/perf-abba.sh" "$@" > "$OUT/$label.log" 2>&1 || rc=$?
   cp "$dir"/w/results/*.txt "$OUT/$label.results.txt" 2>/dev/null || true
+  cp "$dir"/w/abba/logs/*.err "$OUT/$label-logs/" 2>/dev/null || true
+  rm -rf "$dir"; ABBA_DIR=""
   if [ "$QUEUE_RC" != 0 ]; then
     note "NO VERDICT: the queue ended $label (exit $rc): $(grep '^ciq: ' "$OUT/$label.log" | tail -n 1)"
     return 4
   fi
-  if grep -l -E 'D9MT-GPU-(LOST|HUNG)' "$dir"/w/abba/logs/*.err > /dev/null 2>&1; then
+  if grep -l -E 'D9MT-GPU-(LOST|HUNG)' "$OUT/$label-logs"/*.err > /dev/null 2>&1; then
     note "NO VERDICT: the GPU was lost or hung during $label"
-    mkdir -p "$OUT/$label-logs" && cp "$dir"/w/abba/logs/*.err "$OUT/$label-logs/" 2>/dev/null
     return 3
   fi
   # every run's log proves that d9mt drew it (the hash suite's proof): else the engine's own
   # driver may have run, and nothing here is about d9mt
   if [ "$rc" = 0 ] || [ "$rc" = 3 ]; then
-    if grep -L 'D9MT: compile workers' "$dir"/w/abba/logs/*.err | grep -q .; then
-      note "FAILED: $label: a run's log has no 'D9MT: compile workers' line, so d9mt didn't draw it"
-      mkdir -p "$OUT/$label-logs" && cp "$dir"/w/abba/logs/*.err "$OUT/$label-logs/" 2>/dev/null
+    if ! ls "$OUT/$label-logs"/*.err > /dev/null 2>&1 || grep -L 'D9MT: compile workers' "$OUT/$label-logs"/*.err | grep -q .; then
+      note "FAILED: $label: a run's log is missing or has no 'D9MT: compile workers' line, so d9mt didn't draw it"
       return 1
     fi
   fi
@@ -360,7 +367,6 @@ abba_step() {
     3) note "ok: $label ran ($((SECONDS - t0)) s); perf-abba.sh's comparison is incomplete (exit 3, see $label.log)" ;;
     *) note "FAILED (exit $rc): $label: a run failed or perf-abba.sh refused ($((SECONDS - t0)) s), log $label.log"
        tail -15 "$OUT/$label.log"
-       mkdir -p "$OUT/$label-logs" && cp "$dir"/w/abba/logs/*.err "$OUT/$label-logs/" 2>/dev/null
        return 1 ;;
   esac
 }
@@ -392,7 +398,7 @@ bench_counters() {
       --env "r1:WINE_COMPATDB=$COMPATDB" --env "r2:WINE_COMPATDB=$COMPATDB" --rounds 1 --tag counters \
       bench_draws 6000 600 present || return $?
     for r in r1 r2; do
-      cp "$WORK/a-$side"/w/abba/logs/*-"$(cid "$r")"-1.err "$OUT/a-$side-$r.err" 2>/dev/null \
+      cp "$OUT/a-$side-logs"/*-"$(cid "$r")"-1.err "$OUT/a-$side-$r.err" 2>/dev/null \
         || { note "FAILED: counters (A): no stderr log of the $side run $r"; return 1; }
     done
   done
@@ -432,7 +438,7 @@ bench_timings() {
         --env "base:WINE_COMPATDB=$COMPATDB" --env "basecopy:WINE_COMPATDB=$COMPATDB" --env "head:WINE_COMPATDB=$COMPATDB" \
         "$b" $(bench_args "$b") || r=$?
       case "$r" in 0) ;; 1) rc=1; continue ;; *) return "$r" ;; esac
-      if [ "$m" = on ] && grep -L 'D9MT: profiler clock:' "$WORK/$label"/w/abba/logs/*.err | grep -q .; then
+      if [ "$m" = on ] && grep -L 'D9MT: profiler clock:' "$OUT/$label-logs"/*.err | grep -q .; then
         note "FAILED: $label: D9MT_PROFILE=1, but a run's log has no 'D9MT: profiler clock:' line, so it wasn't profiled"
         rc=1; continue
       fi
