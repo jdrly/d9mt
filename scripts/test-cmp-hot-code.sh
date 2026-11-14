@@ -16,6 +16,11 @@
 #   strmoved  a string literal of a function in front pushes hot::step's string further into
 #             .rdata: `moved only` (unnamed data is compared by what it holds, not by its offset)
 #   strchange hot::step's string literal changes, at the same length: `changed`
+#   double    hot::step multiplies by another unnamed double whose first bytes ("AA", NUL)
+#             read like the first one's as a string: `changed`
+#   addrstr   built at another image base, hot::step's string names an address at the same
+#             place in the image ("0x10001000" against "0x20001000"): `changed` (the string
+#             is data, never rewritten as an address)
 # CXX64 and CXX32 name the compilers (default x86_64-w64-mingw32-g++, i686-w64-mingw32-g++).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,6 +70,16 @@ NI int step(int x) {
   sink("hellp");
 #else
   sink("hello");
+#endif
+#if VARIANT == 12
+  x += (int)(g_a * 0x1.0000000004141p+1);   // 0x4000000000004141
+#else
+  x += (int)(g_a * 0x1.0000000004141p+0);   // 0x3ff0000000004141
+#endif
+#if VARIANT == 13
+  sink("0x20001000");
+#else
+  sink("0x10001000");
 #endif
 #if VARIANT == 6
   asm volatile("int3");
@@ -120,8 +135,10 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
 }
 for arch in x64 i686; do
   if [ "$arch" = x64 ]; then cxx=${CXX64:-x86_64-w64-mingw32-g++}; else cxx=${CXX32:-i686-w64-mingw32-g++}; fi
-  for v in 0 1 2 3 4 5 6 7 8 9 10 11; do
-    "$cxx" -O2 -g -shared -DVARIANT=$v "$T/hot.cpp" -o "$T/$arch-$v.dll"
+  for v in 0 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+    # a fixed image base, which addrstr's strings name
+    if [ "$v" = 13 ]; then ib=0x20000000; else ib=0x10000000; fi
+    "$cxx" -O2 -g -shared -DVARIANT=$v -Wl,--image-base,$ib "$T/hot.cpp" -o "$T/$arch-$v.dll"
   done
   check "$arch" 0 hot::step=same hot::caller=same leaf=same
   check "$arch" 1 hot::step="moved only" hot::caller="same|moved only" leaf="same|moved only"
@@ -135,6 +152,8 @@ for arch in x64 i686; do
   check "$arch" 9 tailfn=changed hot::step="same|moved only"
   check "$arch" 10 hot::step="moved only" hot::caller="same|moved only"
   check "$arch" 11 hot::step=changed
+  check "$arch" 12 hot::step=changed
+  check "$arch" 13 hot::step=changed hot::caller="same|moved only"
 done
 # a name that matches nothing is an error, not an empty table
 printf '%s\n' hot::nothing > "$T/none.txt"
