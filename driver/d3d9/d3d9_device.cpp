@@ -9151,13 +9151,6 @@ namespace dxvk {
   void D3D9DeviceEx::BindSpecConstants() {
     m_dirty.clr(D3D9DeviceDirtyFlag::SpecializationEntries);
 
-    EmitCs([
-      cSpecData = m_specData
-    ] (MtlContext* ctx) {
-      ctx->setFunctionConstants(MtlPipeline::Graphics,
-        0u, sizeof(cSpecData) / sizeof(uint32_t), &cSpecData);
-    });
-
     auto specCbv = GetConstantBuffer(CbvIndex::SpecData).AllocTyped<D3D9SpecData>(1u);
     *specCbv = m_specData;
   }
