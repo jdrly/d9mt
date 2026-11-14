@@ -205,8 +205,10 @@ class Image:
         # bytes), else 16 bytes. Bytes beyond what is read would be a neighbour's, which moves.
         # A pointer-sized word that is an address of the image is written as its symbol (i686
         # keeps pointers in constants).
+        # (By the symbol, not the output section: i686's linker puts .gcc_except_table into .text.
+        # Only .text's own symbol stands for code.)
         for lo, hi, off, code in self.sections:
-            if lo <= v < hi and not code:
+            if lo <= v < hi and not min(names).startswith('.text'):
                 if off is None:
                     return f'<{min(names)}:zero>'
                 start = off + v - lo
