@@ -1000,6 +1000,9 @@ namespace dxvk {
     // D9MT_PROFILE: the game entered Present (PACE, d3d9_pace.h).
     void PaceEntry() { m_paceWindow.presentEntry(hitch::nowNs()); }
 
+    // D9MT_DIAG_BURN_US (d3d9_diag_burn.h): cheap-clock ticks to spin at Present's entry, 0 = none.
+    uint64_t DiagBurnTicks() const { return m_diagBurnTicks; }
+
     // D9MT_PROFILE: end of a Present (all swapchains); logs a HITCH line for
     // a long frame, and a STATS line (plus RESTORE when there were restores)
     // once a second.
@@ -1676,6 +1679,11 @@ namespace dxvk {
     bool m_unlockAdditionalFormats = false;
 
     D3D9DebugState                  m_dbg;
+
+    // D9MT_DIAG_BURN_US, D9MT_DIAG_BURN_CS_US (d3d9_diag_burn.h): ticks, 0 = none. Last, so no
+    // other member moves.
+    uint64_t                        m_diagBurnTicks   = 0u;
+    uint64_t                        m_diagBurnCsTicks = 0u;
   };
 
 }
