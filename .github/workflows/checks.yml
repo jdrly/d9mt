@@ -310,6 +310,8 @@ jobs:
             scripts/test-upload-copy.sh
             scripts/test-perf-compare.py
             scripts/test-cmp-hash-runs.py
+            scripts/test-bench-counters.py
+            scripts/test-cmp-hot-code.sh
           )
           {
             echo "### Test scripts"
