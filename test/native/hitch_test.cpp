@@ -148,12 +148,15 @@ int main(int argc, char** argv) {
     p.endFrame(hitch::nowNs(), compile, 0u, 1e9, frame, s);
     std::atomic<int> step = { 0 };
     auto waitFor = [&step] (int n) { while (step.load() < n) { } };
+    double aMs = 0.0;                 // A's entry as A measured it (scheduling delays included)
     std::thread a([&] {
+      const uint64_t t0 = hitch::nowNs();
       { hitch::Scope e(p, hitch::Query, true);
         step = 1;
         waitFor(2);                   // B is inside too
         spinMs(10.0);
       }
+      aMs = double(hitch::nowNs() - t0) * 1e-6;
       step = 3;
     });
     std::thread b([&] {
@@ -166,10 +169,10 @@ int main(int argc, char** argv) {
     });
     a.join(); b.join();
     CHECK(p.endFrame(hitch::nowNs(), compile, 0u, 0.001, frame, s));
-    std::printf("overlap: inD9mtMs=%.1f query=%.1fms csSync=%.1fms\n",
-      s.inMs, s.cat[hitch::Query].ms, s.cat[hitch::CsSync].ms);
+    std::printf("overlap: inD9mtMs=%.1f a=%.1fms query=%.1fms csSync=%.1fms\n",
+      s.inMs, aMs, s.cat[hitch::Query].ms, s.cat[hitch::CsSync].ms);
     CHECK(s.cat[hitch::Query].n == 2u);
-    CHECK(s.inMs >= 9.5 && s.inMs < 25.0);           // A's 10 ms, not B's 30 after it
+    CHECK(s.inMs >= 9.5 && s.inMs <= aMs + 1.0);     // A's time, not B's 30 ms after it
     CHECK(s.cat[hitch::CsSync].ms >= 29.5);          // B's wait still counts as a category
     CHECK(s.cat[hitch::Query].ms >= 39.5);           // and so does B's whole entry
   }
