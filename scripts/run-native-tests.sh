@@ -57,7 +57,7 @@ host pso_buffer_layouts_test -I driver/backend test/native/pso_buffer_layouts_te
 host stats_test -I driver/d3d9 test/native/stats_test.cpp
 host upload_ring_test -I test/native/stubs -I driver/backend test/native/upload_ring_test.cpp driver/backend/mtl_ring.cpp
 host texture_kind_test -I driver/backend test/native/texture_kind_test.cpp
-host xfer_stats_test -I driver/d3d9 test/native/xfer_stats_test.cpp
+host xfer_stats_test -g -O1 -fsanitize=thread -I driver/d3d9 test/native/xfer_stats_test.cpp
 
 skip fatal_log_test "scripts/test-fatal-log.sh (a mingw exe under Wine)"
 skip lifetime_check_test "hand under Wine (a mingw exe; build line in its source)"

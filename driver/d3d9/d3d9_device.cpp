@@ -5985,7 +5985,8 @@ namespace dxvk {
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
         Logger::warn(restores);
-      std::string xfers = m_xferStats.take(t);
+      // ProfXfer adds under the device lock: take the window under it too (#194).
+      std::string xfers = m_xferStats.take(t, [this] { return m_multithread.AcquireLock(); });
       if (!xfers.empty())
         Logger::warn(xfers);
     }

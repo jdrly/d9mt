@@ -2,8 +2,9 @@
 
 // D9MT_PROFILE: how often a game uses StretchRect and ColorFill, by path,
 // for test sessions (#14: these paths did nothing before). The app thread
-// counts under the device lock; after the STATS line, an XFER line reports
-// the window's counts when there were any:
+// counts under the device lock, and the window is taken under it too (#194);
+// after the STATS line, an XFER line reports the window's counts when there
+// were any:
 //
 //   XFER t=63 | stretch copy=2 resolve=0 blit=5 (scaled=5 linear=4 convert=1 msaa=0) skip=0
 //     | fill rt=1 rect=1 bc=0 skip=0
@@ -72,15 +73,27 @@ namespace dxvk::xfer {
       m_total.v[c]++;
     }
 
-    // The XFER line for the window since the last one; empty when nothing happened.
-    std::string take(double t) {
+    // The counts since the last call; the next window starts. acquire() returns the lock that
+    // add() is called under (the device lock), held for the read and the reset: another
+    // thread's StretchRect or ColorFill then lands in exactly one window (#194).
+    template<typename Acquire>
+    Counts takeCounts(Acquire&& acquire) {
+      auto lock = acquire();
       Counts d;
-      bool any = false;
-      for (uint32_t i = 0u; i < Count; i++) {
+      for (uint32_t i = 0u; i < Count; i++)
         d.v[i] = m_total.v[i] - m_reported.v[i];
-        any = any || d.v[i] != 0u;
-      }
       m_reported = m_total;
+      return d;
+    }
+
+    // The XFER line for the window since the last one (taken as takeCounts does, formatted
+    // after the lock is released); empty when nothing happened.
+    template<typename Acquire>
+    std::string take(double t, Acquire&& acquire) {
+      const Counts d = takeCounts(acquire);
+      bool any = false;
+      for (uint32_t i = 0u; i < Count; i++)
+        any = any || d.v[i] != 0u;
       if (!any)
         return std::string();
       char head[32];
