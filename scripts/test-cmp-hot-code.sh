@@ -9,6 +9,9 @@
 #   callee    hot::step calls another function of the same shape: `changed`
 #   lambda    a lambda inside hot::step changes: hot::step isn't `changed`, and the lambda (a
 #             symbol whose name starts with hot::step's) isn't taken for it
+#   trap      a nop inside hot::step becomes int3: `changed` (padding is dropped, a trap isn't)
+#   lea       a lea of a register into itself (padding) writes another register: `changed`
+#   lea32     (x64) that lea at 32 bits, which clears the upper half: `changed`
 # CXX64 and CXX32 name the compilers (default x86_64-w64-mingw32-g++, i686-w64-mingw32-g++).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,6 +19,18 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 cat > "$T/hot.cpp" <<'EOF'
 #define NI __attribute__((noinline))
+// as bytes: the assembler would drop the zero displacement, which the padding form has
+#ifdef __x86_64__
+#define LEA_SAME ".byte 0x48, 0x8d, 0x76, 0x00"   // lea 0x0(%rsi),%rsi
+#define LEA_OTHER ".byte 0x48, 0x8d, 0x7e, 0x00"  // lea 0x0(%rsi),%rdi
+#define LEA_32 ".byte 0x8d, 0x76, 0x00"           // lea 0x0(%esi),%esi
+#define CLOBBER "rsi", "rdi"
+#else
+#define LEA_SAME ".byte 0x8d, 0x76, 0x00"         // lea 0x0(%esi),%esi
+#define LEA_OTHER ".byte 0x8d, 0x7e, 0x00"        // lea 0x0(%esi),%edi
+#define LEA_32 LEA_SAME
+#define CLOBBER "esi", "edi"
+#endif
 extern "C" __declspec(dllexport) int leaf(int x) { return x ^ 0x5a; }   // first: never moves
 #if VARIANT == 1
 NI int pad_fn(int x) { return x * 7 + 1; }
@@ -36,6 +51,18 @@ NI int step(int x) {
   x ^= g_arr[2];
 #else
   x ^= g_arr[1];
+#endif
+#if VARIANT == 6
+  asm volatile("int3");
+#else
+  asm volatile("nop");
+#endif
+#if VARIANT == 7
+  asm volatile(LEA_OTHER ::: CLOBBER);
+#elif VARIANT == 8
+  asm volatile(LEA_32 ::: CLOBBER);
+#else
+  asm volatile(LEA_SAME ::: CLOBBER);
 #endif
 #if VARIANT == 4
   x = thrice(x);
@@ -72,7 +99,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
 }
 for arch in x64 i686; do
   if [ "$arch" = x64 ]; then cxx=${CXX64:-x86_64-w64-mingw32-g++}; else cxx=${CXX32:-i686-w64-mingw32-g++}; fi
-  for v in 0 1 2 3 4 5; do
+  for v in 0 1 2 3 4 5 6 7 8; do
     "$cxx" -O2 -g -shared -DVARIANT=$v "$T/hot.cpp" -o "$T/$arch-$v.dll"
   done
   check "$arch" 0 hot::step=same hot::caller=same leaf=same
@@ -81,6 +108,9 @@ for arch in x64 i686; do
   check "$arch" 3 hot::step=changed
   check "$arch" 4 hot::step=changed
   check "$arch" 5 hot::step="same|moved only" hot::caller="same|moved only" leaf=same
+  check "$arch" 6 hot::step=changed
+  check "$arch" 7 hot::step=changed
+  if [ "$arch" = x64 ]; then check "$arch" 8 hot::step=changed; fi
 done
 # a name that matches nothing is an error, not an empty table
 printf '%s\n' hot::nothing > "$T/none.txt"
