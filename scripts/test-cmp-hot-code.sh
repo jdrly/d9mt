@@ -21,6 +21,9 @@
 #   addrstr   built at another image base, hot::step's string names an address at the same
 #             place in the image ("0x10001000" against "0x20001000"): `changed` (the string
 #             is data, never rewritten as an address)
+#   ehmoved   lsdafn's unnamed data in .gcc_except_table (which the linker puts into .text) moves
+#             behind a longer block: `moved only`
+#   ehchange  that data changes: `changed`
 # CXX64 and CXX32 name the compilers (default x86_64-w64-mingw32-g++, i686-w64-mingw32-g++).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -113,9 +116,22 @@ extern "C" __declspec(dllexport) int entry(int x) { return hot::caller(x) + leaf
 #else
 #define TAIL "nop"
 #endif
+// unnamed data (a local label) in .gcc_except_table, whose address lsdafn takes
+#if VARIANT == 14
+#define EH_FRONT "8"
+#else
+#define EH_FRONT "4"
+#endif
+#if VARIANT == 15
+#define EH_LAST "0x0d0c0b0a"
+#else
+#define EH_LAST "0x0c0b0a09"
+#endif
+asm(".section .gcc_except_table,\"dr\"\n .space " EH_FRONT "\n.Lmine:\n .long 0x04030201, 0x08070605, 0x0c0b0a09, " EH_LAST "\n"
+    ".text\n.globl lsdafn\nlsdafn:\n mov $.Lmine,%eax\n ret\n");
 asm(".text\n.globl tailfn\ntailfn:\n test %ecx,%ecx\n jz 1f\n ret\n1:\n " TAIL "\n.globl tailnext\ntailnext:\n ret\n");
 EOF
-printf '%s\n' '# the functions under test' hot::step hot::caller leaf tailfn > "$T/list.txt"
+printf '%s\n' '# the functions under test' hot::step hot::caller leaf tailfn lsdafn > "$T/list.txt"
 
 fails=0
 check() {  # <arch> <variant> <expected: function=result[|result] ...>
@@ -123,7 +139,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
   out=$("$V2/scripts/cmp-hot-code.sh" "$T/list.txt" "$T/$arch-0.dll" "$T/$arch-$variant.dll") \
     || { echo "FAIL $arch $variant: cmp-hot-code.sh failed"; fails=$((fails + 1)); return; }
   # one line per listed function: the lambda inside hot::step has no line of its own
-  if [ "$(wc -l <<< "$out")" -ne 5 ]; then   # a number: macOS pads wc's output
+  if [ "$(wc -l <<< "$out")" -ne 6 ]; then   # a number: macOS pads wc's output
     echo "FAIL $arch $variant: not one line per function"; echo "$out"; fails=$((fails + 1))
   fi
   for e in "$@"; do
@@ -135,7 +151,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
 }
 for arch in x64 i686; do
   if [ "$arch" = x64 ]; then cxx=${CXX64:-x86_64-w64-mingw32-g++}; else cxx=${CXX32:-i686-w64-mingw32-g++}; fi
-  for v in 0 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+  for v in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     # a fixed image base, which addrstr's strings name
     if [ "$v" = 13 ]; then ib=0x20000000; else ib=0x10000000; fi
     "$cxx" -O2 -g -shared -DVARIANT=$v -Wl,--image-base,$ib "$T/hot.cpp" -o "$T/$arch-$v.dll"
@@ -154,6 +170,8 @@ for arch in x64 i686; do
   check "$arch" 11 hot::step=changed
   check "$arch" 12 hot::step=changed
   check "$arch" 13 hot::step=changed hot::caller="same|moved only"
+  check "$arch" 14 lsdafn="moved only"
+  check "$arch" 15 lsdafn=changed
 done
 # a name that matches nothing is an error, not an empty table
 printf '%s\n' hot::nothing > "$T/none.txt"
