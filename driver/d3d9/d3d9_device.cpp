@@ -17,6 +17,7 @@
 #include "d3d9_names.h"
 #include "d3d9_format_helpers.h"
 #include "d3d9_fan_indices.h"
+#include "d3d9_diag_burn.h"
 
 #include "../mtl/mtl_device.h"
 #include "../mtl/mtl_pfv.h"
@@ -98,6 +99,26 @@ namespace dxvk {
     m_availableMemory = DetermineInitialTextureMemory();
     m_memStats = m_dxvkDevice->memoryProfile().statsInterval != 0u;
     m_hitchMs  = hitch::thresholdFromEnv();
+
+    // D9MT_DIAG_BURN_US, D9MT_DIAG_BURN_CS_US (d3d9_diag_burn.h): read once, one line when set.
+    { const std::string rawUs = env::getEnvVar("D9MT_DIAG_BURN_US");
+      const std::string rawCs = env::getEnvVar("D9MT_DIAG_BURN_CS_US");
+      bool badUs = false, badCs = false;
+      const uint32_t us   = diagburn::usFromEnv(rawUs.c_str(), &badUs);
+      const uint32_t csUs = diagburn::usFromEnv(rawCs.c_str(), &badCs);
+      m_diagBurnTicks   = diagburn::ticksFromUs(us);
+      m_diagBurnCsTicks = diagburn::ticksFromUs(csUs);
+      if (!rawUs.empty() || !rawCs.empty()) {
+        auto value = [] (const std::string& raw, uint32_t n, bool bad) {
+          return bad ? str::format("\"", raw, "\" ignored (whole us, 0 to ", diagburn::kMaxUs, "), 0 us")
+                     : str::format(n, " us");
+        };
+        Logger::warn(str::format("D9MT: diagnostic CPU burn per Present (not for play): ",
+          value(rawUs, us, badUs), " on the Present thread (D9MT_DIAG_BURN_US), ",
+          value(rawCs, csUs, badCs), " on the CS thread (D9MT_DIAG_BURN_CS_US), on the ",
+          cheap_clock::process().tsc ? "TSC" : "steady clock"));
+      }
+    }
     m_stagingPool.setCapacity(m_dxvkDevice->memoryProfile().stagingBlocks);
     m_stagingMaxInFlight = MtlDeviceSize(env::is32BitHostPlatform()
       ? std::min(m_dxvkDevice->memoryProfile().stagingInFlightMB, 30u)
@@ -6231,13 +6252,28 @@ namespace dxvk {
   void D3D9DeviceEx::EndFrame(Rc<MtlLatencyTracker> LatencyTracker) {
     D3D9DeviceLock lock = LockDevice();
 
-    EmitCs<false>([
+    auto endFrame = [
       cTracker = std::move(LatencyTracker)
     ] (MtlContext* ctx) {
       ctx->endFrame();
 
       if (cTracker && cTracker->needsAutoMarkers())
         ctx->endLatencyTracking(cTracker);
+    };
+
+    // D9MT_DIAG_BURN_CS_US (d3d9_diag_burn.h): the same command with a spin on the CS thread in
+    // front of it. Unset, the command is the one above, unchanged.
+    if (likely(!m_diagBurnCsTicks)) {
+      EmitCs<false>(std::move(endFrame));
+      return;
+    }
+
+    EmitCs<false>([
+      cEndFrame = std::move(endFrame),
+      cTicks    = m_diagBurnCsTicks
+    ] (MtlContext* ctx) {
+      diagburn::spin(cTicks);
+      cEndFrame(ctx);
     });
   }
 

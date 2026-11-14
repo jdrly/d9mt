@@ -3,6 +3,7 @@
 #include "d3d9_monitor.h"
 
 #include "d3d9_window.h"
+#include "d3d9_diag_burn.h"
 
 #include "../util/util_sleep.h"
 #include "../util/util_time.h"
@@ -230,6 +231,10 @@ namespace dxvk {
       m_parent->PaceEntry();
 
     { hitch::Scope hs(m_parent->Hitch(), hitch::Present, true);
+
+      // D9MT_DIAG_BURN_US (d3d9_diag_burn.h): a spin on this thread before the frame is handed over
+      if (unlikely(m_parent->DiagBurnTicks()))
+        diagburn::spin(m_parent->DiagBurnTicks());
 
       { D3D9DeviceLock lock = m_parent->LockDevice();
         hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);
