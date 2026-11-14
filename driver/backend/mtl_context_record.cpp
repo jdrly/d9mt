@@ -1200,20 +1200,8 @@ namespace dxvk::backend {
        || m_split.sub[i] != (v != nullptr ? (v->key.baseMip << 16u) | v->key.baseLayer : 0u))
         return;
     }
-    m_rs[rstats::Splits]++;
-    m_rs[rstats::SplitBytes] += loadBytes;
-    if (m_split.serial != m_pass.openSerial) {
-      m_rs[rstats::SplitsSubmit]++;
-      m_rs[rstats::SplitBytesSubmit] += loadBytes;
-    } else if (m_split.xfers != m_pass.openXfers) {
-      m_rs[rstats::SplitsXfer]++;
-      m_rs[rstats::SplitBytesXfer] += loadBytes;
-    } else if (m_split.clears != m_pass.openClears) {
-      m_rs[rstats::SplitsClear]++;
-      m_rs[rstats::SplitBytesClear] += loadBytes;
-    } else {
-      m_rs[rstats::SplitBytesOther] += loadBytes;
-    }
+    rstats::countSplit(m_rs, m_split.serial != m_pass.openSerial, m_split.xfers != m_pass.openXfers,
+      m_split.clears != m_pass.openClears, loadBytes);
   }
 
 

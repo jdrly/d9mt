@@ -1478,8 +1478,6 @@ namespace dxvk::backend {
     uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
     if (offset.x >= x1 || offset.y >= y1)
       return;
-    if (unlikely(prof::g_profEnabled))
-      m_rs[rstats::ClearsRect]++;
 
     RenderPsoKey key = {};
     key.vsCookie              = uint64_t(m_blitVs->library);
@@ -1492,6 +1490,8 @@ namespace dxvk::backend {
       m_blitVs->entryName, m_fillFs->entryName);
     if (!pso)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRect]++;
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
     if (m_attOpt)
@@ -1568,8 +1568,6 @@ namespace dxvk::backend {
     uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
     if (offset.x >= x1 || offset.y >= y1)
       return;
-    if (unlikely(prof::g_profEnabled))
-      m_rs[rstats::ClearsRectDs]++;
 
     RenderPsoKey key = {};
     key.vsCookie      = uint64_t(m_depthClearVs->library);
@@ -1580,6 +1578,8 @@ namespace dxvk::backend {
       key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
     if (!pso)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRectDs]++;
 
     MtlDepthStencilState ds = {};
     ds.depthTest      = true;

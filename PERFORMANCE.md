@@ -386,10 +386,10 @@ them in `<game>_d3d9.log`.
   padding in them;
 - `splitMiBSubmit`, `splitMiBXfer`, `splitMiBClear`, `splitMiBOther`: `splitMiB` by the reason the
   split's previous pass ended, as `split=` is classified (the four add up to `splitMiB`; #80);
-- the clear paths per frame (#127): `clrOpen` (full-surface clears that ended their target's open
-  pass), `clrPending` (folded clears that got a pass of their own because nothing drew there; also in
-  `clrPass`), `clrViewFull` (color clears sent down the part-surface path that cover the surface: a
-  pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
+- the clear paths per frame (#127): `clrOpen` (full-surface clears that ended an open pass, the
+  target's or not), `clrPending` (folded clears that got a pass of their own because nothing drew there; also in
+  `clrPass`), `clrViewFull` (color clears through the part-surface path whose rect covers the whole mip
+  level: a pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
   (part-surface depth/stencil clears: a draw).
 - **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
   (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for

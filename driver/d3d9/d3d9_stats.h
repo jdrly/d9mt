@@ -75,12 +75,12 @@
 //               previous pass ended, as split= is classified (splitSubmit, splitXfer,
 //               splitClear, else Other: a view change or a vertex fence). The four add up to
 //               splitMiB (each rounded on its own).
-//   clrOpen     per frame (#127): full-surface clears (D3D9 Clear, ColorFill) that ended their
-//               target's open pass; the pass stores, the clear then folds or gets its own pass
+//   clrOpen     per frame (#127): full-surface clears (D3D9 Clear, ColorFill) that ended an open
+//               pass (any pass, the target's or not); the clear then folds or gets its own pass
 //   clrPending  ... clears folded into a pending pass that got a pass of their own because
 //               nothing drew there before it was flushed (counted in clrPass too)
-//   clrViewFull ... color clears sent down the part-surface path that cover the surface after
-//               all (alignment): a pass of their own, never folded into the next one
+//   clrViewFull ... color clears through the part-surface path (clearImageView) whose rect covers
+//               the whole mip level: a pass of their own, never folded into the next one
 //   clrRect     ... part-surface color clears (D3D9 Clear with rects or a smaller viewport, a
 //               part-surface ColorFill): a scissored draw
 //   clrRectDs   ... part-surface depth/stencil clears: a draw

@@ -101,11 +101,21 @@ int main() {
   CHECK(has(line, " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"
                   " | splitMiBSubmit=315.0 splitMiBXfer=0.0 splitMiBClear=105.0 splitMiBOther=0.0"
                   " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0"));
-  { // The reasons' bytes add up to splitMiB (#80).
-    uint64_t sum = 0u;
-    for (uint32_t c : { rstats::SplitBytesSubmit, rstats::SplitBytesXfer, rstats::SplitBytesClear, rstats::SplitBytesOther })
-      sum += rs.v[c];
-    CHECK(sum == rs.v[rstats::SplitBytes]);
+  { // #80: countSplit (splitCheck's classification) picks the first reason that holds, and the
+    // reasons' bytes add up to SplitBytes.
+    uint64_t c[rstats::Count] = { };
+    rstats::countSplit(c, true,  true,  true,  100u);    // a submit wins
+    rstats::countSplit(c, false, true,  true,  20u);     // then a transfer
+    rstats::countSplit(c, false, false, true,  3u);      // then a clear
+    rstats::countSplit(c, false, false, false, 4000u);   // the rest
+    rstats::countSplit(c, true,  false, false, 1u);
+    CHECK(c[rstats::Splits] == 5u && c[rstats::SplitsSubmit] == 2u);
+    CHECK(c[rstats::SplitsXfer] == 1u && c[rstats::SplitsClear] == 1u);
+    CHECK(c[rstats::SplitBytesSubmit] == 101u && c[rstats::SplitBytesXfer] == 20u);
+    CHECK(c[rstats::SplitBytesClear] == 3u && c[rstats::SplitBytesOther] == 4000u);
+    CHECK(c[rstats::SplitBytesSubmit] + c[rstats::SplitBytesXfer] + c[rstats::SplitBytesClear]
+          + c[rstats::SplitBytesOther] == c[rstats::SplitBytes]);
+    CHECK(c[rstats::SplitBytes] == 4124u && c[rstats::Draws] == 0u);
   }
   const std::string tail = " clrRect=0.5 clrRectDs=3.0";
   CHECK(line.compare(line.size() - tail.size(), tail.size(), tail) == 0);   // the end of the line

@@ -44,9 +44,9 @@ namespace dxvk::rstats {
     // The clear paths (#127). A D3D9 Clear or ColorFill of the whole surface goes to
     // clearRenderTarget (folded into the target's next pass, or ClearPasses); of part of it, to
     // clearImageView.
-    ClearsOpen,      // clears that ended their target's open pass (either path, full surface)
+    ClearsOpen,      // full-surface clears that ended an open pass (any pass, the target's or not)
     ClearsPending,   // clears folded into a pending pass that got a pass of their own, nothing drew there (of ClearPasses)
-    ClearsViewFull,  // color clears through clearImageView that cover the surface after all: a pass of their own
+    ClearsViewFull,  // color clears through clearImageView whose rect covers the whole mip level: a pass of their own
     ClearsRect,      // part-surface color clears: a scissored draw
     ClearsRectDs,    // part-surface depth/stencil clears: a draw
     Count
@@ -55,6 +55,27 @@ namespace dxvk::rstats {
   struct Snapshot {
     uint64_t v[Count] = { };
   };
+
+  // One pass split (splitCheck), by the reason its previous pass ended, first match wins: a
+  // command buffer submit in between, else a copy/blit/resolve encoder, else a clear, else the
+  // rest (a view change or a vertex fence). Counts it and adds its load bytes to SplitBytes and
+  // to the reason's bytes (#80).
+  inline void countSplit(uint64_t (&rs)[Count], bool submitted, bool transferred, bool cleared, uint64_t loadBytes) {
+    rs[Splits]++;
+    rs[SplitBytes] += loadBytes;
+    if (submitted) {
+      rs[SplitsSubmit]++;
+      rs[SplitBytesSubmit] += loadBytes;
+    } else if (transferred) {
+      rs[SplitsXfer]++;
+      rs[SplitBytesXfer] += loadBytes;
+    } else if (cleared) {
+      rs[SplitsClear]++;
+      rs[SplitBytesClear] += loadBytes;
+    } else {
+      rs[SplitBytesOther] += loadBytes;
+    }
+  }
 
   class Totals {
 
