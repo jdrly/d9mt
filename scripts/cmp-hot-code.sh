@@ -24,11 +24,16 @@
 #   is code, a trap, wherever it is);
 # - a branch or address inside the function written as the index of the instruction it lands on;
 # - every other address inside the image (a call target, a RIP-relative or absolute operand, an
-#   address constant) written as the nearest symbol at or below it, plus the offset from it.
+#   address constant) written as the nearest symbol at or below it, plus the offset from it; when
+#   that symbol is only a data section's own (.rdata, .gcc_except_table: unnamed data, whose
+#   offset moves when anything before it grows), as the section and what the address holds: the
+#   string (up to 256 bytes), or the 16 bytes from there, each pointer-sized word that is an address of the image
+#   written as its symbol. A section symbol with a $ suffix (.rdata$.refptr.<name>) names its
+#   contents and counts as a named symbol.
 # Raw addresses and displacements are gone; which symbol, at which offset, is kept, so a function
-# that reaches other code or data than before is `changed`. What isn't compared: the contents of
-# the data it reads (a constant in .rdata, a jump table), only where they are; and anything
-# inlined into it shows up in it, while code it calls is a function of its own.
+# that reaches other code or named data than before is `changed`. What isn't compared: the
+# contents of named data it reads (a variable's value, a jump table), only where they are; and
+# anything inlined into it shows up in it, while code it calls is a function of its own.
 # With <listing dir>, each function's normalized code goes to <dir>/base/<n>.s and <dir>/head/<n>.s
 # (n: its line in the output, from 1), so `diff -r` shows what changed.
 #
@@ -104,13 +109,18 @@ class Image:
         self.mach = machine(path)
         env = os.environ.get('BINUTILS_PREFIX')
         self.prefix = env if env is not None else f'{self.mach}-w64-mingw32-'
-        # the loaded sections: an address inside one of them is an address, anything else a number
-        self.ranges = []
-        for line in tool(self.prefix, 'objdump', '-h', path).splitlines():
+        # the loaded sections: an address inside one of them is an address, anything else a number.
+        # sections: (start, end, file offset or None, executable), for reading unnamed data
+        self.ranges, self.sections = [], []
+        lines = tool(self.prefix, 'objdump', '-h', path).splitlines()
+        for line, flags in zip(lines, lines[1:] + ['']):
             p = line.split()
-            if len(p) >= 4 and p[0].isdigit() and not p[1].startswith('.debug'):
+            if len(p) >= 6 and p[0].isdigit() and not p[1].startswith('.debug'):
                 vma, size = int(p[3], 16), int(p[2], 16)
                 self.ranges.append((vma, vma + size))
+                self.sections.append((vma, vma + size, int(p[5], 16) if 'CONTENTS' in flags else None, 'CODE' in flags))
+        with open(path, 'rb') as f:
+            self.data = f.read()
         syms = []
         for line in tool(self.prefix, 'nm', '-n', path).splitlines():
             p = line.split()
@@ -135,14 +145,39 @@ class Image:
     def inside(self, v):
         return any(lo <= v < hi for lo, hi in self.ranges)
 
-    def symbolize(self, v):
+    def symbolize(self, v, contents=True):
         i = bisect.bisect_right(self.addrs, v) - 1
         if i < 0:
             return f'?{v:#x}'
-        # among symbols at one address (aliases), the first by name: the same choice in both builds
+        # Among symbols at one address (aliases), a named one first, then the first by name: the
+        # same choice in both builds. A section symbol with a $ suffix names its contents
+        # (.text$<function>, .rdata$.refptr.<variable>), so it counts as named.
         a = self.addrs[i]
-        name = min(n for s, _, n in self.syms if s == a)
-        return f'<{name}+{v - a:#x}>'
+        names = [n for s, _, n in self.syms if s == a]
+        named = [n for n in names if not n.startswith('.') or '$' in n]
+        if named or not contents:
+            return f'<{min(named or names)}+{v - a:#x}>'
+        # Only a section's own symbol below it: unnamed data (a string literal, a constant, an
+        # exception table), whose offset moves whenever anything before it in the section grows.
+        # What it is, is what it holds: the string, or the 16 bytes from there, each word of them
+        # that is an address of the image written as its symbol (i686 keeps pointers in constants).
+        for lo, hi, off, code in self.sections:
+            if lo <= v < hi and not code:
+                if off is None:
+                    return f'<{min(names)}:zero>'
+                start = off + v - lo
+                text = self.data[start:start + min(hi - v, 256)]
+                nul = text.find(0)
+                text = text[:nul] if nul >= 0 else text
+                if len(text) >= 2 and all(32 <= c < 127 or c in (9, 10, 13) for c in text):
+                    return f'<{min(names)}:{text.decode()!r}{"" if nul >= 0 else "..."}>'
+                raw = self.data[start:start + min(hi - v, 16)]
+                w = 8 if self.mach == 'x86_64' else 4
+                words = [raw[k:k + w] for k in range(0, len(raw), w)]
+                return f'<{min(names)}:' + ' '.join(
+                    self.symbolize(int.from_bytes(x, 'little'), False) if len(x) == w and self.inside(int.from_bytes(x, 'little'))
+                    else x.hex() for x in words) + '>'
+        return f'<{min(names)}+{v - a:#x}>'
 
     def functions(self, wanted):
         """{signature: (start, end)} of the text symbols that are one of the wanted functions."""
