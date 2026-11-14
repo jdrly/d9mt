@@ -6291,16 +6291,23 @@ pso_flush_locked(void) {
 }
 
 static void
-pso_flush_atexit(void) {
+pso_flush_uncontended(void) {
   /* Another thread may still be compiling (or died holding the lock while
-   * the process tears down), or the exit flush below still runs: never
-   * block exit on it. */
+   * the process tears down): never block exit on it. */
   if (pthread_rwlock_trywrlock(&g_pso_lock))
     return;
   @autoreleasepool {
     pso_flush_locked();
   }
   pthread_rwlock_unlock(&g_pso_lock);
+}
+
+static _Atomic bool g_pso_exit_tried;  /* _D9MT_processDetach ran: no flush from atexit */
+
+static void
+pso_flush_atexit(void) {
+  if (!atomic_load(&g_pso_exit_tried))
+    pso_flush_uncontended();
 }
 
 static void *
@@ -6679,8 +6686,9 @@ pso_note_compiled(void) {
  * flush needs, and the process must still exit. A flush still running then ends with the
  * process, and the next start removes what it left. Not with the flush thread (it has no exit
  * flush). The atexit flush stays for a process that ends without DLL detach (TerminateProcess of
- * itself, or no Wine): after this flush nothing is pending, and while it runs it holds g_pso_lock,
- * so atexit's trywrlock skips. */
+ * itself, or no Wine); once this one was tried it does nothing, so the exit stays bounded even
+ * when this flush didn't start or didn't finish. Nothing is printed on a timeout: a terminated
+ * thread may hold stderr's lock. */
 #define D9MT_PSO_EXIT_WAIT_NS (5000000000ull)
 static pthread_mutex_t g_pso_exit_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_pso_exit_cond = PTHREAD_COND_INITIALIZER;
@@ -6690,7 +6698,7 @@ static void *
 pso_exit_flush_thread(void *arg) {
   (void)arg;
   pthread_setname_np("d9mt-pso-exit");
-  pso_flush_atexit();
+  pso_flush_uncontended();
   pthread_mutex_lock(&g_pso_exit_mutex);
   g_pso_exit_done = true;
   pthread_cond_signal(&g_pso_exit_cond);
@@ -6701,7 +6709,10 @@ pso_exit_flush_thread(void *arg) {
 static NTSTATUS
 _D9MT_processDetach(void *obj) {
   (void)obj;
-  if (!g_pso_serializer || g_pso_async_flush || !atomic_load(&g_pso_pending))
+  if (!g_pso_serializer || g_pso_async_flush)
+    return STATUS_SUCCESS;
+  atomic_store(&g_pso_exit_tried, true);
+  if (!atomic_load(&g_pso_pending))
     return STATUS_SUCCESS;
   pthread_t thread;
   if (pthread_create(&thread, NULL, pso_exit_flush_thread, NULL))
@@ -6716,11 +6727,7 @@ _D9MT_processDetach(void *obj) {
     const struct timespec ts = { (time_t)((end - now) / 1000000000ull), (long)((end - now) % 1000000000ull) };
     pthread_cond_timedwait_relative_np(&g_pso_exit_cond, &g_pso_exit_mutex, &ts);
   }
-  const bool done = g_pso_exit_done;
   pthread_mutex_unlock(&g_pso_exit_mutex);
-  if (!done)
-    fprintf(stderr, "d9mt: PSO archive flush at exit not done after %llu s: exiting without it\n",
-            D9MT_PSO_EXIT_WAIT_NS / 1000000000ull);
   return STATUS_SUCCESS;
 }
 
