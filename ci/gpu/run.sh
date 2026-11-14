@@ -10,8 +10,9 @@
 #                the Metal 4 objects the bridge creates at start-up
 #   build        scripts/fetch-deps.sh, the bridge (SMOKE=0), the driver for x64 and x86; the
 #                AIR codegen id goes into <out>/air-codegen-id.txt
-#   gpu-tests    build, then scripts/run-native-tests.sh and the two tests that drive Metal 4:
-#                scripts/test-commit-feedback.sh and scripts/test-compile-mt.sh
+#   gpu-tests    build, then scripts/run-native-tests.sh and the three tests that drive Metal 4:
+#                scripts/test-commit-feedback.sh, scripts/test-compile-mt.sh and
+#                scripts/test-pso-partition.sh
 #   hash         the hash suite of BASE against this checkout: both are built, both run through
 #                this checkout's runner for every variant and AIR target of the spec, and
 #                scripts/cmp-hash-runs.py compares each pair of runs, frames and diagnostics
@@ -184,6 +185,7 @@ set_gpu_tests() {
   step "run-native-tests.sh" "$OUT/native-tests.log" "$MEM_TEST" scripts/run-native-tests.sh || rc=1
   step "test-commit-feedback.sh" "$OUT/test-commit-feedback.log" "$MEM_TEST" scripts/test-commit-feedback.sh || rc=1
   step "test-compile-mt.sh" "$OUT/test-compile-mt.log" "$MEM_TEST" scripts/test-compile-mt.sh || rc=1
+  step "test-pso-partition.sh" "$OUT/test-pso-partition.log" "$MEM_TEST" scripts/test-pso-partition.sh || rc=1
   return "$rc"
 }
 

@@ -6663,6 +6663,13 @@ pso_note_compiled(void) {
   }
 }
 
+/* bridge/main.c's DLL_PROCESS_DETACH (#191). */
+static NTSTATUS
+_D9MT_processDetach(void *obj) {
+  (void)obj;
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTLDevice_newMTL4Compiler(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
@@ -8142,6 +8149,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MetalView_presentInfo_pooled,
     &_MetalPresentStream_create_pooled,
     &_MetalPresentStream_release_pooled,
+    &_D9MT_processDetach,
 
 };
 
@@ -8367,6 +8375,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalView_presentInfo_pooled,
     &_MetalPresentStream_create_pooled,
     &_MetalPresentStream_release_pooled,
+    &_D9MT_processDetach,
 
 };
 #endif

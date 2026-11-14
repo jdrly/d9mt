@@ -27,6 +27,14 @@
 #     writer) are rejected and removed; a stale partition whose lock file is a FIFO is left alone;
 #     the partition's own lock file a FIFO turns archives off for that start. Every start runs
 #     under a 60 s alarm, so a hang fails the run instead of stalling it.
+# 10. A killed exit keeps the session's archive (#191): compile_mt_test (MT_EXIT=kill) builds
+#     pipelines with no flush due, makes the call of bridge/main.c's DLL_PROCESS_DETACH and is
+#     killed (SIGKILL), as wineserver kills a Wine process at exit (#164); the next start loads
+#     an archive.
+# 11. Metal's temporaries (#191): an interrupted serializeAsArchiveAndFlushToURL leaves Metal's own
+#     <UUID>.metallib in the partition. At the next start one older than 600 s is removed, a newer
+#     one (a live process's flush) is kept, and an old link of that name is unlinked itself, its
+#     target kept.
 # Needs build/bridge from scripts/build-bridge.sh (and build/airlib's objects for step 5).
 set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -118,11 +126,12 @@ check "one base, target 26 -> legacy 26 -> 27: only 27's directory left" \
   "$([ -n "$last" ] && [ "$(osdirs "$B")" = "$last " ] && [ "$last" = "${T[27]}" ] && echo 1 || echo 0)" "$(osdirs "$B")"
 
 # 5. two live processes on one base
-CM=$WORK/compile_mt_test
+CM=$WORK/compile_mt_test CM_OK=0
 DX="$V2/third_party/dxbc-spirv" LLVM="$V2/toolchains/llvm-x86_64"
 if clang++ -std=c++17 -O1 -g -arch x86_64 -I"$DX" -I"$V2" -I"$LLVM/include" -I"$V2/bridge" -I"$V2/airlib" \
      -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS \
      "$V2/bridge/tests/compile_mt_test.cpp" "$V2"/build/airlib/obj/third_party_dxbc-spirv_*.o -lpthread -o "$CM"; then
+  CM_OK=1
   A=$WORK/live-a   # compile_mt_test's archives go to $A/pso
   mkdir -p "$A"
   D9MT_AIR_MACOS=26 D9MT_PSO_ASYNC_FLUSH=0 "$CM" "$SO" "$A" "$V2"/air/tests/bin/*.bin > "$WORK/live-a.log" 2>&1 &
@@ -234,6 +243,47 @@ if [ -n "$L9" ]; then
     "$(grep -q 'no lease on' "$WORK/fifolock.log" && [ -z "$L10" ] && echo 1 || echo 0)"
 else
   check "FIFOs: (no partition: the first start failed)" 0
+fi
+
+# 10. a killed exit (#191)
+if [ "$CM_OK" = 1 ]; then
+  K=$WORK/kill
+  mkdir -p "$K"
+  perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' 300 \
+    env -u D9MT_AIR_MACOS -u D9MT_AIR_LEGACY -u D9MT_PSO_ARCHIVE D9MT_PSO_ASYNC_FLUSH=0 MT_EXIT=kill \
+    "$CM" "$SO" "$K" "$V2"/air/tests/bin/{vs_base,vs_mvp,ps_show,ps_texld}.bin > "$WORK/kill-run.log" 2>&1
+  krc=$?
+  nb=$(sed -n 's/^psos: \([0-9]*\) ok.*/\1/p' "$WORK/kill-run.log")
+  check "killed exit: the run built pipelines, then was killed (SIGKILL)" \
+    "$([ "$krc" = 137 ] && [ "${nb:-0}" -gt 0 ] && echo 1 || echo 0)" "rc $krc, ${nb:-0} pipelines"
+  start killnext "$SO" "$K/pso" > /dev/null
+  nl=$(sed -n 's/.*d9mt: PSO archives: \([0-9]*\) loaded from.*/\1/p' "$WORK/killnext.log" | head -1)
+  check "killed exit: the next start loads the session's archive" \
+    "$([ "${nl:-0}" -gt 0 ] && echo 1 || echo 0)" "${nl:-no log line}: $(ls "$K/pso"/os-*/ 2>/dev/null | tr '\n' ' ')"
+else
+  check "killed exit: compile_mt_test builds (needs build/airlib objects)" 0
+fi
+
+# 11. Metal's temporaries in the partition (#191)
+B=$WORK/base11
+L11=$(start metal0 "$SO" "$B")
+if [ -n "$L11" ]; then
+  P=$B/$L11
+  OLD=8F0C2A4E-6B1D-4C7A-9E35-0D2B7A1C4E58.metallib
+  NEW=1A2B3C4D-5E6F-4A1B-8C2D-3E4F5A6B7C8D.metallib
+  LNK=5C6D7E8F-9A0B-4C1D-8E2F-3A4B5C6D7E8F.metallib
+  head -c 65536 /dev/zero > "$P/$OLD"; touch -t 202001010000 "$P/$OLD"
+  head -c 65536 /dev/zero > "$P/$NEW"
+  echo sentinel > "$WORK/external.metallib"; touch -t 202001010000 "$WORK/external.metallib"
+  ln -s "$WORK/external.metallib" "$P/$LNK"; touch -h -t 202001010000 "$P/$LNK"
+  start metal1 "$SO" "$B" > /dev/null
+  check "Metal's temporaries: a <UUID>.metallib older than 600 s removed" \
+    "$([ ! -e "$P/$OLD" ] && echo 1 || echo 0)" "$(ls "$P" | tr '\n' ' ')"
+  check "Metal's temporaries: a newer one kept" "$([ -f "$P/$NEW" ] && echo 1 || echo 0)"
+  check "Metal's temporaries: an old link of that name unlinked itself, its target kept" \
+    "$([ ! -L "$P/$LNK" ] && [ -f "$WORK/external.metallib" ] && echo 1 || echo 0)"
+else
+  check "Metal's temporaries: (no partition: the first start failed)" 0
 fi
 
 # every start's harness exited 0
