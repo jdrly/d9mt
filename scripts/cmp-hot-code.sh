@@ -20,8 +20,8 @@
 #   changed     the normalized code differs; insn_diff is head's instruction count minus base's
 #   only base, only head   the function exists in one build only
 # The normalized code is the disassembly (GNU objdump), each instruction with
-# - padding left out: the nop forms, a lea of a register into itself at full width, and int3
-#   after the last other instruction (an int3 inside the function is code: a trap);
+# - padding left out: the nop forms and a lea of a register into itself at full width (an int3
+#   is code, a trap, wherever it is);
 # - a branch or address inside the function written as the index of the instruction it lands on;
 # - every other address inside the image (a call target, a RIP-relative or absolute operand, an
 #   address constant) written as the nearest symbol at or below it, plus the offset from it.
@@ -71,9 +71,9 @@ def tool(prefix, name, *args, stdin=None):
     return r.stdout
 
 
-# Padding: only what can't change anything when it runs. The nop forms; a lea of a register into
-# itself at the mode's full width (a 32-bit lea on x64 clears the upper half, so it isn't one);
-# int3 only after the function's last other instruction, where nothing reaches it.
+# Padding: only what can't change anything when it runs. The nop forms, and a lea of a register
+# into itself at the mode's full width (a 32-bit lea on x64 clears the upper half, so it isn't
+# one). int3 is never padding, not even at the end: a branch can land on it.
 NOP = re.compile(r'^(?:(?:data16|cs|ds)\s+)*(?:nop[wl]?\b|xchg\s+%ax,%ax$)')
 LEA_NOP = {'x86_64': re.compile(r'^lea\s+(?:%cs:)?0x0\(%(r[sd]i)(?:,%riz,1)?\),%\1$'),
            'i686': re.compile(r'^lea\s+(?:%cs:)?0x0\(%(e[sd]i)(?:,%eiz,1)?\),%\1$')}
@@ -163,7 +163,7 @@ class Image:
                 text = re.sub(r'\s+', ' ', m.group(3).strip())
                 insns.append((int(m.group(1), 16), bytes.fromhex(m.group(2).replace(' ', '')), text))
         pad = lambda text: NOP.match(text) or LEA_NOP[self.mach].match(text)
-        while insns and (pad(insns[-1][2]) or insns[-1][2] == 'int3'):
+        while insns and pad(insns[-1][2]):
             insns.pop()
         if not insns:
             fail(f'{self.path}: no instructions at {start:#x}')
