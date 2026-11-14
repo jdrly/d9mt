@@ -66,7 +66,16 @@ int main() {
   CHECK(fc.flushed[uint32_t(stats::FlushOrigin::Buffer)] == 0u);
   CHECK(fc.capped == 59u * 2u);            // only the refusals above the cap
 
-  std::string line = w.take(t, rs, ct, extra, fc);
+  // Shader constants (d9mt #127): per stage, writes/changed and uploads with bytes and padding.
+  stats::ConstCounts cc;
+  for (int i = 0; i < 59 * 4; i++) cc.noteWrite(0u, (i % 4) != 0);       // VS: 4 writes, 3 changed
+  for (int i = 0; i < 59 * 2; i++) cc.noteWrite(1u, true);                // PS: 2 writes, both changed
+  for (int i = 0; i < 59 * 2; i++) cc.noteUpload(0u, 3584u, 4096u);       // VS: 2 uploads, 4 KiB each, 0.5 KiB padding
+  for (int i = 0; i < 59; i++)     cc.noteUpload(1u, 256u, 256u);         // PS: 1 upload, 0.25 KiB, no padding
+  CHECK(cc.writes[0] == 59u * 4u && cc.changed[0] == 59u * 3u && cc.changed[1] == 59u * 2u);
+  CHECK(cc.uploadBytes[0] == 59u * 8192u && cc.padBytes[0] == 59u * 1024u && cc.padBytes[1] == 0u);
+
+  std::string line = w.take(t, rs, ct, extra, fc, cc);
   std::printf("%s\n", line.c_str());
   CHECK(has(line, "STATS t=1 fps=58.3 "));
   CHECK(has(line, " ms=17.2/60.0/60.0 slow33=2 slow50=1 "));
@@ -78,8 +87,11 @@ int main() {
   CHECK(has(line, " splitMiB=420.0 carried=0.0 carryRefused=0.0 carryCap=0.0"
                   " | flushChunk=3.0/21.0 flushRt=0.0/0.0 flushDs=0.0/0.0 flushEndScene=0.0/0.0"
                   " flushTex=0.0/0.0 flushBuf=0.0/2.0 flushThrottle=0.0/0.0 flushWait=0.0/0.0"
-                  " flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=2.0"));
-  CHECK(line.compare(line.size() - 16u, 16u, " flushCapped=2.0") == 0);
+                  " flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=2.0"
+                  " | constVs=4.0/3.0 constPs=2.0/2.0 upVs=2.0 upVsKiB=8.0 upVsPadKiB=1.0"
+                  " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"));
+  const std::string tail = " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0";
+  CHECK(line.compare(line.size() - tail.size(), tail.size(), tail) == 0);   // the end of the line
 
   // The next window reports deltas only, and a negative saving (restores).
   for (int i = 0; i < 63; i++) {
@@ -91,12 +103,14 @@ int main() {
   rs.v[rstats::BytesSaved] -= 61u * (1u << 20);
   extra.att = "live-off";
   for (int i = 0; i < 63 * 2; i++) fc.noteFlushed(stats::FlushOrigin::Wait);
-  line = w.take(t, rs, ct, extra, fc);
+  for (int i = 0; i < 63; i++) cc.noteWrite(1u, false);
+  line = w.take(t, rs, ct, extra, fc, cc);
   std::printf("%s\n", line.c_str());
   // The flush fields are this window's only: 63 Presents, nothing carried over.
   CHECK(has(line, " | flushChunk=0.0/0.0 flushRt=0.0/0.0 "));
   CHECK(has(line, " flushBuf=0.0/0.0 flushThrottle=0.0/0.0 flushWait=2.0/0.0 "));
   CHECK(has(line, " flushPresent=0.0/0.0 flushOther=0.0/0.0 flushCapped=0.0"));
+  CHECK(has(line, " | constVs=0.0/0.0 constPs=1.0/0.0 upVs=0.0 upVsKiB=0.0 upVsPadKiB=0.0 upPs=0.0 "));
   CHECK(has(line, " ms=16.0/16.0/16.0 slow33=0 slow50=0 "));
   CHECK(has(line, " rp=0.0 "));
   CHECK(has(line, " restore=1.0 savedMiB=-1.0 attMs=0.00 clrFold=0.0 clrPass=0.0 "));
