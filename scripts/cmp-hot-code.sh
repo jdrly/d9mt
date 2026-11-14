@@ -20,7 +20,8 @@
 #   changed     the normalized code differs; insn_diff is head's instruction count minus base's
 #   only base, only head   the function exists in one build only
 # The normalized code is the disassembly (GNU objdump), each instruction with
-# - padding instructions (nop forms, int3) left out;
+# - padding left out: the nop forms, a lea of a register into itself at full width, and int3
+#   after the last other instruction (an int3 inside the function is code: a trap);
 # - a branch or address inside the function written as the index of the instruction it lands on;
 # - every other address inside the image (a call target, a RIP-relative or absolute operand, an
 #   address constant) written as the nearest symbol at or below it, plus the offset from it.
@@ -70,8 +71,13 @@ def tool(prefix, name, *args, stdin=None):
     return r.stdout
 
 
-PAD = re.compile(r'^(?:(?:data16|cs|ds)\s+)*(?:nop[wl]?\b|xchg\s+%ax,%ax$|int3$|'
-                 r'lea\s+(?:%cs:)?0x0\(%[er]?[sd]i(?:,%[er]iz,1)?\),%[er]?[sd]i$)')
+# Padding: only what can't change anything when it runs. The nop forms; a lea of a register into
+# itself at the mode's full width (a 32-bit lea on x64 clears the upper half, so it isn't one);
+# int3 only after the function's last other instruction, where nothing reaches it.
+NOP = re.compile(r'^(?:(?:data16|cs|ds)\s+)*(?:nop[wl]?\b|xchg\s+%ax,%ax$)')
+LEA_NOP = {'x86_64': re.compile(r'^lea\s+(?:%cs:)?0x0\(%(r[sd]i)(?:,%riz,1)?\),%\1$'),
+           'i686': re.compile(r'^lea\s+(?:%cs:)?0x0\(%(e[sd]i)(?:,%eiz,1)?\),%\1$')}
+
 INSN = re.compile(r'^\s*([0-9a-f]+):\t([0-9a-f ]*?)\s*\t(.*)$')
 HEX = re.compile(r'(\$?)0x([0-9a-f]+)\b')
 TARGET = re.compile(r'\b([0-9a-f]+) <[^>]*>')
@@ -156,17 +162,18 @@ class Image:
             if m:
                 text = re.sub(r'\s+', ' ', m.group(3).strip())
                 insns.append((int(m.group(1), 16), bytes.fromhex(m.group(2).replace(' ', '')), text))
-        while insns and PAD.match(insns[-1][2]):
+        pad = lambda text: NOP.match(text) or LEA_NOP[self.mach].match(text)
+        while insns and (pad(insns[-1][2]) or insns[-1][2] == 'int3'):
             insns.pop()
         if not insns:
             fail(f'{self.path}: no instructions at {start:#x}')
-        real = [i for i in insns if not PAD.match(i[2])]
+        real = [i for i in insns if not pad(i[2])]
         # an address inside the function: the index of the first real instruction at or after it
         index = {}
         k = 0
         for a, _, text in insns:
             index[a] = k
-            if not PAD.match(text):
+            if not pad(text):
                 k += 1
         last_end = insns[-1][0] + len(insns[-1][1])
 
