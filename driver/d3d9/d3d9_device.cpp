@@ -16,6 +16,7 @@
 #include "d3d9_monitor.h"
 #include "d3d9_names.h"
 #include "d3d9_format_helpers.h"
+#include "d3d9_fan_indices.h"
 
 #include "../mtl/mtl_device.h"
 #include "../mtl/mtl_pfv.h"
@@ -3104,11 +3105,22 @@ namespace dxvk {
     bool dynamicSysmemIBO = false;
 
     uint32_t indexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
+    const UINT apiStartIndex = StartIndex;
 
     UploadPerDrawData(MinVertexIndex, NumVertices, StartIndex, indexCount,
       BaseVertexIndex, &dynamicSysmemVBOs, &dynamicSysmemIBO);
 
-    PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO, true);
+    // Metal has no fan: the draw reads the expanded list, the bound index buffer
+    // comes back with the next draw (#187).
+    const bool isFan = PrimitiveType == D3DPT_TRIANGLEFAN;
+    if (unlikely(isFan)) {
+      indexCount = BindIndexedFanAsList(apiStartIndex, PrimitiveCount);
+      if (!indexCount)
+        return D3D_OK;
+      StartIndex = 0u;
+    }
+
+    PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO && !isFan, true);
 
     if (unlikely(m_dbg.hooks))
       DebugOnDraw(PrimitiveType, PrimitiveCount, "DIP", GetInstanceCount());
@@ -3124,7 +3136,7 @@ namespace dxvk {
 
       if (likely(drawArgs)) {
         new (drawArgs) MtlDrawIndexedArgs(draw);
-        TrackDirectBufferUses(true);
+        TrackDirectBufferUses(!isFan);   // a fan's GPU reads the UP copy
         return D3D_OK;
       }
     }
@@ -3140,7 +3152,7 @@ namespace dxvk {
     });
 
     new (m_csData->first()) MtlDrawIndexedArgs(draw);
-    TrackDirectBufferUses(true);
+    TrackDirectBufferUses(!isFan);   // a fan's GPU reads the UP copy
     return D3D_OK;
   }
 
@@ -3230,21 +3242,29 @@ namespace dxvk {
     const uint32_t vertexDataSize = GetUPDataSize(MinVertexIndex + NumVertices, VertexStreamZeroStride);
     const uint32_t vertexBufferSize = GetUPBufferSize(MinVertexIndex + NumVertices, VertexStreamZeroStride);
 
+    // Metal has no fan: the UP buffer holds the expanded list (#187).
+    const bool isFan = PrimitiveType == D3DPT_TRIANGLEFAN;
+    const uint32_t indexCount = isFan ? 3u * PrimitiveCount : vertexCount;
+
     const uint32_t indexSize = IndexDataFormat == D3DFMT_INDEX16 ? 2 : 4;
-    const uint32_t indicesSize = vertexCount * indexSize;
+    const uint32_t indicesSize = indexCount * indexSize;
 
     const uint32_t upSize = vertexBufferSize + indicesSize;
 
     auto upSlice = AllocUPBuffer(upSize);
     uint8_t* data = reinterpret_cast<uint8_t*>(upSlice.mapPtr);
     FillUPVertexBuffer(data, pVertexStreamZeroData, vertexDataSize, vertexBufferSize);
-    std::memcpy(data + vertexBufferSize, pIndexData, indicesSize);
+    if (unlikely(isFan))
+      fan::expand(data + vertexBufferSize, pIndexData, PrimitiveCount, indexSize);
+    else
+      std::memcpy(data + vertexBufferSize, pIndexData, indicesSize);
 
     EmitCs([this,
       cVertexSize   = vertexBufferSize,
       cBufferSlice  = std::move(upSlice.slice),
       cPrimType     = PrimitiveType,
       cPrimCount    = PrimitiveCount,
+      cIndexCount   = indexCount,
       cStride       = VertexStreamZeroStride,
       cInstanceCount = GetInstanceCount(),
       cIndexType    = DecodeIndexType(
@@ -3253,7 +3273,7 @@ namespace dxvk {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
       MtlDrawIndexedArgs draw = { };
-      draw.indexCount    = drawInfo.vertexCount;
+      draw.indexCount    = cIndexCount;
       draw.instanceCount = drawInfo.instanceCount;
 
       ctx->bindVertexBuffer(0, cBufferSlice.subSlice(0, cVertexSize), cStride);
@@ -5773,6 +5793,41 @@ namespace dxvk {
   }
 
 
+  uint32_t D3D9DeviceEx::BindIndexedFanAsList(
+          UINT                    StartIndex,
+          UINT                    PrimitiveCount) {
+    D3D9CommonBuffer* ibo = GetCommonBuffer(m_state.indices);
+    if (unlikely(ibo == nullptr))
+      return 0u;
+
+    // The CPU copy holds what the app wrote by now; index buffers have no GPU writes.
+    const Rc<MtlAllocation> mapped = ibo->GetMappedSlice();
+    if (unlikely(mapped == nullptr || mapped->mapPtr == nullptr))
+      return 0u;
+
+    const uint32_t indexSize = ibo->Desc()->Format == D3D9Format::INDEX16 ? 2u : 4u;
+    const uint64_t offset    = uint64_t(StartIndex) * indexSize;
+    const uint64_t size      = ibo->Desc()->Size;
+    const uint32_t count     = fan::triangles(PrimitiveCount,
+      offset < size ? (size - offset) / indexSize : 0u);
+    if (unlikely(!count))
+      return 0u;
+
+    auto upSlice = AllocUPBuffer(MtlDeviceSize(count) * 3u * indexSize);
+    fan::expand(upSlice.mapPtr,
+      reinterpret_cast<const uint8_t*>(mapped->mapPtr) + offset, count, indexSize);
+
+    EmitCs([
+      cBufferSlice = std::move(upSlice.slice),
+      cIndexType   = DecodeIndexType(ibo->Desc()->Format)
+    ](MtlContext* ctx) mutable {
+      ctx->bindIndexBuffer(std::move(cBufferSlice), cIndexType);
+    });
+    m_dirty.set(D3D9DeviceDirtyFlag::IndexBuffer);
+    return 3u * count;
+  }
+
+
   const D3D9ConstantBufferCopy* D3D9DeviceEx::GetOrCreateConstantLayout(
           D3D9ConstantBufferLayout  FloatLayout,
           D3D9ConstantBufferLayout  IntLayout,
@@ -7343,7 +7398,8 @@ namespace dxvk {
       // Triangle fans stay Gouraud: D3D9 takes fan triangle t's flat values
       // from vertex t+1, Metal from the first vertex of the expanded
       // (0, t+1, t+2), the hub. Non-indexed fans join the list with the fan
-      // index rotation (t+1, t+2, 0) (#170); indexed fans have no remap.
+      // index rotation (t+1, t+2, 0) (#170); indexed fans would need it in their
+      // expansion (d3d9_fan_indices.h).
       case D3DPT_TRIANGLEFAN:
       default:
         return false;

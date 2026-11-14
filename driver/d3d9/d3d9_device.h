@@ -810,6 +810,12 @@ namespace dxvk {
             bool*                   pDynamicVBOs,
             bool*                   pDynamicIBO);
 
+    // An indexed fan's triangle list in an UP buffer, bound as the index buffer
+    // (d3d9_fan_indices.h, #187). Returns its index count, 0 when nothing draws.
+    uint32_t BindIndexedFanAsList(
+            UINT                    StartIndex,
+            UINT                    PrimitiveCount);
+
 
     void SetupFPU();
 

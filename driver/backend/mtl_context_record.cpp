@@ -2163,13 +2163,8 @@ namespace dxvk::backend {
   void MtlContextImpl::drawIndexed(uint32_t count, const MtlDrawIndexedArgs* args) {
     if (!prepareDraw())
       return;
-    if (unlikely(m_topology == MtlPrimitiveTopology::TriangleFan)) {
-      static bool warned = false;
-      if (!warned) {
-        warned = true;
-        Logger::warn("MtlContextImpl: indexed triangle fan drawn as list (index remap unimplemented)");
-      }
-    }
+    // An indexed fan's indices arrive as its triangle list (d3d9_fan_indices.h, #187), and
+    // wmtPrimitive() draws TriangleFan as a list.
     if (m_indexBuffer.storage() == nullptr)
       return;
     prof::Scope profScope(prof::EncodeDraw);
