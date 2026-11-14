@@ -60,7 +60,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
   out=$("$V2/scripts/cmp-hot-code.sh" "$T/list.txt" "$T/$arch-0.dll" "$T/$arch-$variant.dll") \
     || { echo "FAIL $arch $variant: cmp-hot-code.sh failed"; fails=$((fails + 1)); return; }
   # one line per listed function: the lambda inside hot::step has no line of its own
-  if [ "$(wc -l <<< "$out")" != 4 ]; then
+  if [ "$(wc -l <<< "$out")" -ne 4 ]; then   # a number: macOS pads wc's output
     echo "FAIL $arch $variant: not one line per function"; echo "$out"; fails=$((fails + 1))
   fi
   for e in "$@"; do
