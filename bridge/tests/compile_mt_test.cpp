@@ -18,6 +18,12 @@
 // rebuilds the PSOs that built, back to back, so g_pso_lock is held shared
 // without a gap; the overdue flush must still write an archive while they
 // build.
+//
+// MT_EXIT=kill (scripts/test-pso-partition.sh, #191): no archive is flushed
+// while it builds (the flush threshold is out of reach), and after the builds
+// it ends as a Wine process whose exit wineserver kills: the call bridge/main.c
+// makes at DLL_PROCESS_DETACH (218), then SIGKILL, so nothing of the bridge's
+// runs after the detach call. Its archive must be there for the next start.
 
 #include <algorithm>
 #include <atomic>
@@ -29,6 +35,7 @@
 #include <deque>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -245,7 +252,8 @@ int main(int argc, char** argv) {
   // Bridge reads these on first use.
   setenv("D9MT_AIR_CACHE", (work + "/air-cache.sqlite3").c_str(), 1);
   setenv("D9MT_PSO_ARCHIVE_DIR", (work + "/pso").c_str(), 1);
-  setenv("D9MT_PSO_FLUSH_EVERY", "5", 1);
+  const bool exitKill = getenv("MT_EXIT") && !strcmp(getenv("MT_EXIT"), "kill");
+  setenv("D9MT_PSO_FLUSH_EVERY", exitKill ? "100000" : "5", 1);
   const int forceMs = getenv("MT_FORCE_MS") ? atoi(getenv("MT_FORCE_MS")) : 0;
   if (forceMs > 0)
     setenv("D9MT_PSO_FLUSH_FORCE_MS", std::to_string(forceMs).c_str(), 1);
@@ -368,6 +376,13 @@ int main(int argc, char** argv) {
   const double ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - t0).count();
   printf("elapsed: %.1f ms (%u threads)\n", ms, nThreads);
+
+  if (exitKill) {
+    printf("exit: the process detach call, then SIGKILL\n");
+    fflush(stdout);
+    g_funcs[218](nullptr);
+    kill(getpid(), SIGKILL);
+  }
 
   // With D9MT_PSO_ASYNC_FLUSH=1 the bridge flushes the archive on its own
   // thread once builds pause (2 s); this process must still run then. Wait

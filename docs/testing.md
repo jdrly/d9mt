@@ -67,7 +67,8 @@ builds are tested, so a base from before the runner existed works too.
 
 `ci/gpu/run.sh <set> <out dir>` is the entry point for a Mac with a real GPU: `probe` (the Metal
 device must be an Apple GPU with Metal 4, else exit status 3, no verdict), `build`, `gpu-tests`
-(the native tests plus `test-commit-feedback.sh` and `test-compile-mt.sh`), `hash` (builds `BASE`
+(the native tests plus `test-commit-feedback.sh`, `test-compile-mt.sh` and
+`test-pso-partition.sh`), `hash` (builds `BASE`
 in a worktree, runs both for the spec's `variants=` and `targets=`, compares each pair's frames
 and diagnostics) and `merged-main` (`gpu-tests`, then `hash` against the commit's first parent
 for AIR targets 26 and 27). Every set builds the checkout first. It writes one line per step to
@@ -164,8 +165,10 @@ four targets in four directories, two live processes on one base keeping each
 other's partitions (leases in `<base>/.locks`), a lineaged codegen id (a copy
 of the bridge carrying 0.1.5.1's) keeping its predecessor's directory, a
 malformed id removing nothing, and links (a linked partition refused, a linked
-stale one unlinked itself, nothing behind a link touched). Every start's
-harness must exit 0.
+stale one unlinked itself, nothing behind a link touched), a session killed
+at exit after the call of the bridge's `DLL_PROCESS_DETACH` keeping its
+archive, and Metal's own temporaries (`<UUID>.metallib`) removed once older
+than 600 s (#191). Every start's harness must exit 0.
 
 `scripts/run-air-diff.sh` follows `D9MT_AIR_MACOS`, `D9MT_AIR_LEGACY` and
 `D9MT_AIR_INVARIANT` (`0`: `air_compiler --no-invariance`): its
@@ -308,7 +311,7 @@ its own that a later push doesn't cancel. Its jobs:
 The hosted runners' GPU is the Apple Paravirtual device, which doesn't support Metal 4
 (`supportsFamily` is true for Mac2 only, and `newMTL4CommandQueue` returns nil). So nothing that
 drives the bridge's Metal 4 objects runs in CI: `test-commit-feedback.sh`, `test-compile-mt.sh`,
-the bridge's smoke test, and the hash suite. Those need a Mac with a real GPU
+`test-pso-partition.sh`, the bridge's smoke test, and the hash suite. Those need a Mac with a real GPU
 (`ci/gpu/run.sh`), as the Definition of Done's evidence in the pull request.
 
 `scripts/run-air-diff.sh` isn't in CI either. It was tried on the hosted runner (pull request

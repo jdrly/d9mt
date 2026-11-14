@@ -72,14 +72,21 @@ static void apply_fh4_bad_fiber_data_bypass(void) {
 }
 
 
+static BOOL unix_ready;
+
 BOOL WINAPI
 DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+  /* the process exits (reserved non-NULL): the PSO archive's exit flush, before wineserver's
+   * exit kill can start (unix call 218, _D9MT_processDetach; #191) */
+  if (reason == DLL_PROCESS_DETACH && reserved && unix_ready)
+    WINE_UNIX_CALL(218, NULL);
   if (reason != DLL_PROCESS_ATTACH)
     return TRUE;
 
   apply_fh4_bad_fiber_data_bypass();
   DisableThreadLibraryCalls(instance);
-  return !__wine_init_unix_call();
+  unix_ready = !__wine_init_unix_call();
+  return unix_ready;
 }
 
 extern BOOL WINAPI DllMainCRTStartup(HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved);
