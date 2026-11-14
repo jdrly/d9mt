@@ -227,14 +227,16 @@ namespace dxvk {
     high_resolution_clock::time_point until = { };
     uint64_t capUntilNs = 0u;
 
+    // D9MT_DIAG_BURN_US (d3d9_diag_burn.h): a spin on this thread before the frame is handed over.
+    // First, before any test of hitch::g_enabled: after the call, GCC can no longer fold
+    // LockDevice's test into the one below and reads the flag a second time (x64 objdump, #199).
+    if (unlikely(m_parent->DiagBurnTicks()))
+      diagburn::spin(m_parent->DiagBurnTicks());
+
     if (unlikely(hitch::g_enabled))
       m_parent->PaceEntry();
 
     { hitch::Scope hs(m_parent->Hitch(), hitch::Present, true);
-
-      // D9MT_DIAG_BURN_US (d3d9_diag_burn.h): a spin on this thread before the frame is handed over
-      if (unlikely(m_parent->DiagBurnTicks()))
-        diagburn::spin(m_parent->DiagBurnTicks());
 
       { D3D9DeviceLock lock = m_parent->LockDevice();
         hr = PresentLocked(pSourceRect, pDestRect, hDestWindowOverride, dwFlags, throttle);

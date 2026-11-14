@@ -4,9 +4,13 @@
 // -arch x86_64 (Rosetta: the TSC). It re-runs itself with D9MT_PROFILE=1, which calibrates the
 // TSC on x86, so the tick conversion is tested with a real calibration too.
 //
-// The burn's length is a median over many runs, by wall clock and by the thread's CPU time, each
-// within 10 % of n. Two stubs run through the same check and must fail it: one that returns at
-// once, and one that sleeps for n (right wall time, no CPU time).
+// The burn's length must be within 10 % of n twice: the median wall time of 101 runs, and the
+// process CPU time over those runs divided by 101. Two stubs run through the same check and must
+// fail it: one that returns at once, and one that sleeps for n (right wall time, no CPU time).
+//
+// Process CPU, not the thread's: under Rosetta on GitHub's virtual M1, CLOCK_THREAD_CPUTIME_ID
+// reads 2 % of a pure ALU loop, while process CPU (and getrusage) reads all of it (#199's probe).
+// The test has one thread, and process CPU is what the speed guard reads.
 #include "d3d9_diag_burn.h"
 
 #include <algorithm>
@@ -30,7 +34,7 @@ static double wallUs() {
 
 static double cpuUs() {
   timespec ts;
-  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
   return double(ts.tv_sec) * 1e6 + double(ts.tv_nsec) * 1e-3;
 }
 
@@ -38,24 +42,25 @@ static bool within10(double v, double n) {
   return v >= n * 0.9 && v <= n * 1.1;
 }
 
-// The median wall and CPU time of `burn(ticksFromUs(us))`, and whether both are within 10 % of us.
+// The median wall time of `burn(ticksFromUs(us))` and its mean process CPU time, and whether both
+// are within 10 % of us. Only the wall clock is read between runs: a CPU clock read can cost
+// microseconds (Rosetta), which a per-run CPU time would count.
 template<typename Burn>
 static bool burnsUs(const char* name, Burn burn, uint32_t us) {
   const uint64_t ticks = diagburn::ticksFromUs(us);
   constexpr int kRuns = 101;
-  std::vector<double> wall, cpu;
+  std::vector<double> wall(kRuns);
+  const double c0 = cpuUs();
   for (int i = 0; i < kRuns; i++) {
-    const double w0 = wallUs(), c0 = cpuUs();
+    const double w0 = wallUs();
     burn(ticks);
-    const double c1 = cpuUs(), w1 = wallUs();
-    wall.push_back(w1 - w0);
-    cpu.push_back(c1 - c0);
+    wall[i] = wallUs() - w0;
   }
+  const double c = (cpuUs() - c0) / kRuns;
   std::sort(wall.begin(), wall.end());
-  std::sort(cpu.begin(), cpu.end());
-  const double w = wall[kRuns / 2], c = cpu[kRuns / 2];
+  const double w = wall[kRuns / 2];
   const bool ok = within10(w, us) && within10(c, us);
-  std::printf("%-6s n=%4u us: median wall %8.1f us, cpu %8.1f us (%llu ticks): %s\n", name, us, w, c,
+  std::printf("%-6s n=%4u us: median wall %8.1f us, mean cpu %8.1f us (%llu ticks): %s\n", name, us, w, c,
     (unsigned long long) ticks, ok ? "within 10 %" : "outside 10 %");
   return ok;
 }
