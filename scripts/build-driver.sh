@@ -223,22 +223,34 @@ FLAGS=(-std=c++17 -O2 -fno-strict-aliasing -g "-ffile-prefix-map=$V2=." -DDXVK_W
 [ "${STATE_CACHE_TESTING:-0}" = 1 ] && FLAGS+=(-DD9MT_STATE_CACHE_TESTING) && echo "=== [driver] STATE_CACHE_TESTING=1: test build ==="
 
 # --- PROFILE_INSTRUMENT=1 — per-function CPU profiler build mode -------------
-# Compiles ONLY the backend hot-path TUs (the CS-thread draw loop) with GCC
-# -finstrument-functions (mingw-GCC has no clang -after-inlining variant) and
-# adds the hook TU backend/mtl_instrument.cpp (itself NEVER instrumented).
-# Instrumented objects get a distinct .prof.o name so the normal build's cached
+# Compiles the TUs named in INSTRUMENT_TUS with GCC -finstrument-functions
+# (mingw-GCC has no clang -after-inlining variant) and adds the hook TU
+# backend/mtl_instrument.cpp (itself NEVER instrumented).
+# Instrumented objects get a distinct .prof-<hash>.o name so the normal build's cached
 # objects — and its link input list — are byte-for-byte unaffected when the
 # flag is unset. Runtime is additionally gated on D9MT_PROFILE_INSTRUMENT=1 in
 # the environment (hooks return immediately otherwise).
 PROFILE_INSTRUMENT="${PROFILE_INSTRUMENT:-0}"
-INSTRUMENT_TUS=" mtl_context_record.cpp mtl_context_transfer.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp "
+# INSTRUMENT_TUS: file names (no path) of the TUs to instrument, separated by spaces. The default
+# is the backend's CS-thread draw loop; a front-end build names e.g. d3d9_device.cpp
+# d3d9_constant_buffer.cpp d3d9_stateblock.cpp dxvk_cs.cpp (docs/configuration.md).
+INSTRUMENT_TUS=" ${INSTRUMENT_TUS:-mtl_context_record.cpp mtl_context_transfer.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp} "
 # GCC instruments pre-inline, so trivial getters (std::array::operator[],
 # Rc<>::operator->, MtlBufferSlice::defined, ...) each cost two hook calls that
-# land in their CALLER's self time (400k+ calls/10s observed in GTA IV). The
-# exclude list (substring match, mangled + demangled) is GCC's stand-in for
-# clang's -finstrument-functions-after-inlining.
-INSTRUMENT_EXCLUDE="std::,dxvk::Rc,_ZNSt,_ZNKSt,definedEv,MtlBufferSlice"
-[ "$PROFILE_INSTRUMENT" = 1 ] && echo "=== [driver] PROFILE_INSTRUMENT=1: instrumenting backend hot TUs ==="
+# land in their CALLER's self time (400k+ calls/10s observed in GTA IV; on the front end about
+# 20 ns a call under Rosetta on an M1 with macOS 27, and 168 calls per bench_draws draw on the
+# game thread before the list below grew, 2026-11-14). The exclude list is GCC's stand-in for
+# clang's -finstrument-functions-after-inlining: comma-separated substrings of the qualified name
+# without parameters
+# (dxvk::Rc<dxvk::Foo>::operator->); mangled names never match. The first line is the backend's,
+# the second the front end's and the CS chunk's trivial helpers. INSTRUMENT_EXCLUDE replaces the
+# whole list.
+INSTRUMENT_EXCLUDE_DEFAULT="std::,__gnu_cxx::,dxvk::Rc,MtlBufferSlice,operator->,operator new"
+INSTRUMENT_EXCLUDE_DEFAULT+=",dxvk::Com<,dxvk::bit::,dxvk::Flags<,dxvk::align<,dxvk::static_item<,D3D9DeviceLock,::LockDevice,D3D9Multithread::AcquireLock,D3D9SpecData::set<,MtlRasterizerState::set,computeConstantCount,DxvkCsCmd::,DxvkCsDataBlock::,DxvkCsChunk::append,DxvkCsChunk::alloc<"
+INSTRUMENT_EXCLUDE="${INSTRUMENT_EXCLUDE:-$INSTRUMENT_EXCLUDE_DEFAULT}"
+# The exclude list is part of an instrumented object's name: a changed list rebuilds those objects.
+PROF_SUFFIX=".prof-$(printf '%s' "$INSTRUMENT_EXCLUDE" | shasum -a 256 | cut -c1-8)"
+[ "$PROFILE_INSTRUMENT" = 1 ] && echo "=== [driver] PROFILE_INSTRUMENT=1: instrumenting$INSTRUMENT_TUS(excluding $INSTRUMENT_EXCLUDE) ==="
 # dxbc-spirv (sm3 IR parser) include root — the SM3->IR analysis passes
 # (d3d9_shader_analysis / real d3d9_shader) include <sm3/...> and <util/...> from
 # it. These are -I includes (third-party headers), exempt from the driver Vulkan
@@ -391,18 +403,24 @@ stale() {
   done
   return 1
 }
+# A name in INSTRUMENT_TUS that is no TU of this build would leave a profile without it.
+if [ "$PROFILE_INSTRUMENT" = 1 ]; then
+  for tu in $INSTRUMENT_TUS; do
+    printf '%s\n' "${CORE[@]##*/}" | grep -qxF "$tu" || { echo "FATAL: INSTRUMENT_TUS: $tu is no TU of d3d9.dll" >&2; exit 1; }
+  done
+fi
 for src in "${CORE[@]}"; do
-  psuffix=""; pflag=""
+  psuffix=""; pflags=()
   if [ "$PROFILE_INSTRUMENT" = 1 ]; then
     case "$INSTRUMENT_TUS" in
-      *" $(basename "$src") "*) psuffix=".prof"; pflag="-finstrument-functions -finstrument-functions-exclude-function-list=$INSTRUMENT_EXCLUDE" ;;
+      *" $(basename "$src") "*) psuffix="$PROF_SUFFIX"; pflags=(-finstrument-functions "-finstrument-functions-exclude-function-list=$INSTRUMENT_EXCLUDE") ;;
     esac
   fi
   obj="$OBJ/$(echo "${src#$DRV/}" | tr '/' '_')$psuffix.o"
   OBJS+=("$obj")
   if stale "$obj" "$src"; then
-    echo "[cc] ${src#$DRV/}${pflag:+ ($pflag)}"
-    compile_one "$src" "$obj" $pflag & PIDS+=($!)
+    echo "[cc] ${src#$DRV/}${pflags[*]:+ (${pflags[*]})}"
+    compile_one "$src" "$obj" ${pflags[@]+"${pflags[@]}"} & PIDS+=($!)
     if [ "${#PIDS[@]}" -ge "$JOBS" ]; then wait_batch "${PIDS[@]}" || RC=1; PIDS=(); fi
   fi
 done

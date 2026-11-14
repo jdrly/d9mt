@@ -12,6 +12,7 @@ namespace {
 
   constexpr uint32_t kMaxDepth   = 512u;
   constexpr uint32_t kTableSize  = 1u << 15;
+  constexpr uint32_t kMaxThreads = 256u;
   constexpr double   kDumpPeriodSec = 10.0;
 
   struct StackFrame {
@@ -34,8 +35,10 @@ namespace {
     uint32_t   overflow;
     uint64_t   droppedSlots;
     uint32_t   zeroEvents;
+    uint32_t   exits;
     LARGE_INTEGER lastDumpQpc;
     DWORD      tid;
+    char       name[128];  /* its description, read while it runs: Wine drops it when the thread ends */
   };
 
   /* -1 = not probed, 0 = off, 1 = on; racy init is benign since it's idempotent. */
@@ -47,6 +50,10 @@ namespace {
   LARGE_INTEGER g_qpcHz = {};
 
   thread_local ThreadState* t_state = nullptr;
+
+  /* Every thread's state, for the dump at exit. */
+  ThreadState*  g_threads[kMaxThreads] = {};
+  volatile LONG g_threadCount = 0;
 
   NOINSTR static inline uint64_t rdtscNow() {
     return __builtin_ia32_rdtsc();
@@ -73,6 +80,9 @@ namespace {
       g_tsc0 = rdtscNow();
     }
     QueryPerformanceCounter(&ts->lastDumpQpc);
+    LONG n = InterlockedIncrement(&g_threadCount) - 1;
+    if (n < LONG(kMaxThreads))
+      g_threads[n] = ts;
     t_state = ts;
     return ts;
   }
@@ -104,18 +114,36 @@ namespace {
     return elapsedTicks > 0.0 ? elapsedNs / elapsedTicks : 0.0;
   }
 
-  NOINSTR static void dump(ThreadState* ts) {
+  /* The calling thread's description (SetThreadDescription, e.g. dxvk-cs) in UTF-8, or "-". */
+  NOINSTR static void threadName(char* out, int size) {
+    using GetThreadDescriptionProc = HRESULT (WINAPI *) (HANDLE, PWSTR*);
+    static auto getDescription = reinterpret_cast<GetThreadDescriptionProc>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+    PWSTR wide = nullptr;
+    out[0] = '\0';
+    if (getDescription && SUCCEEDED(getDescription(GetCurrentThread(), &wide)) && wide) {
+      if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, size, nullptr, nullptr))
+        out[0] = '\0';
+      LocalFree(wide);
+    }
+    if (!out[0])
+      std::snprintf(out, size, "-");
+  }
+
+  NOINSTR static void dump(ThreadState* ts, const char* when) {
     double npt = nsPerTick();
     if (npt <= 0.0)
       return;
     uintptr_t base = reinterpret_cast<uintptr_t>(&__ImageBase);
     std::fprintf(stderr,
-      "D9MTINST BEGIN tid=%lu base=0x%08lx ns_per_tick=%.6f dropped=%llu overflow=%lu\n",
+      "D9MTINST BEGIN tid=%lu base=0x%08llx ns_per_tick=%.6f dropped=%llu overflow=%lu at=%s name=%s\n",
       static_cast<unsigned long>(ts->tid),
-      static_cast<unsigned long>(base),
+      static_cast<unsigned long long>(base),  /* unsigned long is 32 bits on Windows */
       npt,
       static_cast<unsigned long long>(ts->droppedSlots),
-      static_cast<unsigned long>(ts->overflow));
+      static_cast<unsigned long>(ts->overflow),
+      when,
+      ts->name[0] ? ts->name : "-");
     for (uint32_t i = 0u; i < kTableSize; i++) {
       const Slot& s = ts->table[i];
       if (!s.fn)
@@ -131,6 +159,22 @@ namespace {
     std::fflush(stderr);
     QueryPerformanceCounter(&ts->lastDumpQpc);
   }
+
+  /* At process exit (the DLL's static destructors run at DLL_PROCESS_DETACH, after the process's
+   * other threads ended): every thread's table, also a run shorter than kDumpPeriodSec and a
+   * thread whose instrumented outermost frame never returns (the CS thread's loop). A process
+   * that is killed gets only the periodic dumps. */
+  struct ExitDump {
+    NOINSTR ~ExitDump() {
+      if (g_enabledState != 1)
+        return;
+      LONG n = g_threadCount;
+      for (LONG i = 0; i < n && i < LONG(kMaxThreads); i++) {
+        if (g_threads[i])
+          dump(g_threads[i], "exit");
+      }
+    }
+  } g_exitDump;
 
 }
 
@@ -164,6 +208,12 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
   }
   if (!ts->depth)
     return;
+
+  /* The name at the thread's first and every 2^20th return, at any depth: a thread that ExitProcess
+   * ends inside its outermost instrumented call (the CS thread's loop) still names itself. The
+   * call (a few us under Wine) counts in the returning function's time. */
+  if (uint32_t e = ++ts->exits; e == 1u || (e & 0xFFFFFu) == 0u)
+    threadName(ts->name, int(sizeof(ts->name)));
 
   uint64_t now = rdtscNow();
 
@@ -201,6 +251,6 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
     QueryPerformanceCounter(&qpcNow);
     if (double(qpcNow.QuadPart - ts->lastDumpQpc.QuadPart)
         > kDumpPeriodSec * double(g_qpcHz.QuadPart))
-      dump(ts);
+      dump(ts, "period");
   }
 }
