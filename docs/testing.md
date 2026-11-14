@@ -74,8 +74,13 @@ device must be an Apple GPU with Metal 4, else exit status 3, no verdict), `buil
 (the native tests plus `test-commit-feedback.sh`, `test-compile-mt.sh` and
 `test-pso-partition.sh`), `hash` (builds `BASE`
 in a worktree, runs both for the spec's `variants=` and `targets=`, compares each pair's frames
-and diagnostics) and `merged-main` (`gpu-tests`, then `hash` against the commit's first parent
-for AIR targets 26 and 27). Every set builds the checkout first. It writes one line per step to
+and diagnostics), `merged-main` (`gpu-tests`, then `hash` against the commit's first parent
+for AIR targets 26 and 27) and `bench` (`BASE` against the checkout on the synthetic benches:
+every counter of `bench_draws` with `D9MT_PROFILE=1` into `counters.tsv`
+(`scripts/bench-counters.py`), the timings of `scripts/perf-abba.sh` as a diagnostic in
+`summary.md`, and the code of the hot-path functions of `ci/gpu/hot-functions.txt`, x64 and i686,
+into `hot-code.tsv` (`scripts/cmp-hot-code.sh`: `same`, `moved only` or `changed`). `bench` fails
+only when a step doesn't run, never on a difference or a timing). Every set builds the checkout first. It writes one line per step to
 `<out dir>/summary.md`, with the swap and memory pressure before and after and the count of
 `IOGPUMetalError` lines in the system log of the run's interval. Exit status 3 is "no verdict"
 (no usable Metal 4, or the GPU was lost or hung); a gate that failed stays a failure.
@@ -286,7 +291,8 @@ its own that a later push doesn't cancel. Its jobs:
   `test-air-invariance.sh`, `test-air-cache-lineage.sh`, `test-build-deps.sh` (without
   `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
   `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
-  `test-upload-copy.sh`, `test-perf-compare.py` and `test-cmp-hash-runs.py`. DXVK's native headers
+  `test-upload-copy.sh`, `test-perf-compare.py`, `test-cmp-hash-runs.py`, `test-bench-counters.py`
+  and `test-cmp-hot-code.sh`. DXVK's native headers
   come from DXVK v3.0.2.
   - The two Wine scripts, `test-fatal-log.sh` and `test-cs-sync.sh`, run console programs with no
     window and no GPU. Their Wine is the engine the app installs (`cx-26.3.0-8` from
