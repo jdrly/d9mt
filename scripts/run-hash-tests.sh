@@ -16,7 +16,9 @@
 #           into the engine clone. engine: keep the engine's own winemetal.
 # VARIANT   default | debug (MTL_DEBUG_LAYER=1) | noattach (D9MT_NO_ATTACHMENT_OPT=1) |
 #           repro (d3d9.reproducibleCommandStream = True) | lifetime (D9MT_LIFETIME_CHECK=1) |
-#           shaderval (Metal shader validation, PSO archives off) | early (D9MT_EARLY_COMMIT=always)
+#           shaderval (Metal shader validation, PSO archives off) | early (D9MT_EARLY_COMMIT=always) |
+#           profile (D9MT_PROFILE=1: every program's log must have d9mt's "D9MT: profiler clock:"
+#           line, which needs a tree from d4391fb (#141) on)
 #           Any other D9MT_* variable of the caller reaches the programs, D9MT_AIR_MACOS too.
 # WORK      a scratch folder, removed and made again (default ${TMPDIR:-/tmp}/d9mt-hash). The
 #           engine clone, a new prefix, d9mt's caches and every log live there, nothing else is
@@ -104,6 +106,7 @@ case "$VARIANT" in
   lifetime) VARIANT_ENV=(D9MT_LIFETIME_CHECK=1) ;;
   shaderval) VARIANT_ENV=(MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 D9MT_PSO_ARCHIVE=0) ;;
   early) VARIANT_ENV=(D9MT_EARLY_COMMIT=always) ;;
+  profile) VARIANT_ENV=(D9MT_PROFILE=1) ;;
   *) echo "FATAL: unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
 esac
 
@@ -224,7 +227,7 @@ if [ "$BUILD_ONLY" = 1 ]; then
 fi
 
 : > "$WORK/hashes.txt"
-noproof="" notclean="" reruns="" rerundiffers=""
+noproof="" noprofile="" notclean="" reruns="" rerundiffers=""
 # run_program <name>: one run of it; sets rc, hashes and fails
 run_program() {
   local t=$1
@@ -254,6 +257,8 @@ for t in "${TESTS[@]}"; do
   fi
   echo "$t rc=$rc fails=$fails $hashes" | tee -a "$WORK/hashes.txt"
   grep -q 'D9MT: compile workers' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null || noproof+="$t "
+  [ "$VARIANT" != profile ] || grep -q 'D9MT: profiler clock:' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
+    || noprofile+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
 done
 stop_wine
@@ -291,6 +296,10 @@ if [ "$gpulost" != 0 ]; then
 fi
 if [ -n "$noproof" ]; then
   echo "[hash] INVALID: no 'D9MT: compile workers' line for: $noproof(d9mt didn't draw them, so their hashes say nothing)" >&2
+  exit 1
+fi
+if [ -n "$noprofile" ]; then
+  echo "[hash] INVALID: variant profile, but no 'D9MT: profiler clock:' line for: $noprofile(D9MT_PROFILE didn't reach d9mt, so these runs aren't profiled)" >&2
   exit 1
 fi
 if [ -n "$rerundiffers" ]; then
