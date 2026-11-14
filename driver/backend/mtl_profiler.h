@@ -93,6 +93,7 @@ namespace dxvk::backend::prof {
     line += str::format(" unsubWait=", unsubWaits, "(", double(unsubWaits) / kFrames, "/f)",
       " unsubWaitUs=", unsubNs / 1000u, "(max ", unsubMaxNs / 1000u, ")");
     line += formatCsTransport(totalMsArr, c);
+    line += formatBindings(c);
 
     Logger::info(line);
   }

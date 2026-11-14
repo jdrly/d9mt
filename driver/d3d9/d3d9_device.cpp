@@ -5971,13 +5971,16 @@ namespace dxvk {
       extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
                 : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
       const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
-      // Present has released the device lock by now; the flush counts are written under it.
+      // Present has released the device lock by now; the flush and constant counts are written
+      // under it.
       stats::FlushCounts fc;
+      stats::ConstCounts cc;
       { D3D9DeviceLock lock = m_multithread.AcquireLock();
         fc = m_flushCounts;
+        cc = m_constCounts;
       }
       const double t = m_statsWindow.seconds(nowNs);
-      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc) + hitch::stampSuffix(wallClockStamp()));
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc, cc) + hitch::stampSuffix(wallClockStamp()));
       std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
@@ -6108,7 +6111,10 @@ namespace dxvk {
       auto& buffer = GetConstantBuffer(ShaderType == D3D9ShaderType::VertexShader
         ? CbvIndex::VSStaticConstants
         : CbvIndex::PSStaticConstants);
+      const auto staticBytes = staticSize;
       staticSize = align(staticSize, buffer.GetAlignment());
+      if (unlikely(hitch::g_enabled))
+        m_constCounts.noteUpload(uint32_t(ShaderType), staticBytes, staticSize);
 
       auto staticData = buffer.Alloc(staticSize);
       auto staticOffset = 0u;
@@ -6143,10 +6149,13 @@ namespace dxvk {
       copyArgs.floatConstantCount = dynamicFloatCount;
       copyArgs.flushNan = m_d3d9Options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled;
 
+      const auto dynamicBytes = dynamicSize;
       dynamicSize += sizeof(Vector4);
 
       auto& buffer = GetConstantBuffer(CbvIndex::VSDynamicConstants);
       dynamicSize = align(dynamicSize, buffer.GetAlignment());
+      if (unlikely(hitch::g_enabled))
+        m_constCounts.noteUpload(uint32_t(ShaderType), dynamicBytes, dynamicSize);
 
       copyArgs.floatBuffer = buffer.Alloc(dynamicSize);
       copyArgs.floatBufferSize = dynamicSize;
@@ -8192,6 +8201,9 @@ namespace dxvk {
 
     bool anyConstantDirty = UpdateStateConstants<ShaderType, ConstantType, T>(
       &m_state, StartRegister, pConstantData, Count);
+
+    if (unlikely(hitch::g_enabled))
+      m_constCounts.noteWrite(uint32_t(ShaderType), anyConstantDirty);
 
     if (unlikely(!anyConstantDirty))
       return D3D_OK;

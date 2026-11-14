@@ -61,6 +61,15 @@ namespace dxvk::backend::prof {
     CntCsBytes,     // bytes those chunks used (commands and their data)
     CntCsSleep,     // the CS thread found its queues empty and waited: each needed a wake
     CntAllocWait,   // beginRecording waits for a command allocator (the AllocWait bucket's count)
+    // flushResources per stage (vertex, fragment; d9mt #127): an argument-buffer shader's flush by
+    // what made it rebuild the buffer (AbCause), or that it kept the buffer; a table shader's
+    // flush, and the table slots it went through (the shadow then skips the unchanged ones)
+    CntAbLayoutVs, CntAbLayoutPs,
+    CntAbResVs,    CntAbResPs,
+    CntAbCbvVs,    CntAbCbvPs,
+    CntAbKeepVs,   CntAbKeepPs,
+    CntTableVs,    CntTablePs,
+    CntTableSlotsVs, CntTableSlotsPs,
     CounterCount
   };
 
@@ -88,6 +97,33 @@ namespace dxvk::backend::prof {
     g_counts[CntCsBytes] += bytes;
   }
 
+  // Why flushResources rebuilt a stage's argument buffer, first match wins: Layout, the shader
+  // (its buffer layout) changed or the stage has no buffer yet; Resources, a texture or sampler
+  // binding changed; Cbv, only constant buffer bindings changed (a new range of the constant
+  // ring); Keep, nothing changed and the buffer stays.
+  enum class AbCause : uint32_t { Layout = 0, Resources, Cbv, Keep };
+
+  inline AbCause abCause(bool layoutChanged, bool noBuffer, uint32_t dirtyCbvs, uint32_t dirtyTextures,
+                         uint32_t dirtySamplers) {
+    if (layoutChanged || noBuffer)
+      return AbCause::Layout;
+    if (dirtyTextures | dirtySamplers)
+      return AbCause::Resources;
+    return dirtyCbvs ? AbCause::Cbv : AbCause::Keep;
+  }
+
+  // stage: 0 vertex, 1 fragment.
+  inline void countAbFlush(uint32_t stage, AbCause cause) {
+    if (!g_profEnabled) return;
+    g_counts[CntAbLayoutVs + 2u * uint32_t(cause) + stage] += 1u;
+  }
+
+  inline void countTableFlush(uint32_t stage, uint32_t slots) {
+    if (!g_profEnabled) return;
+    g_counts[CntTableVs + stage]      += 1u;
+    g_counts[CntTableSlotsVs + stage] += slots;
+  }
+
   // The window's counts; resets them. onFrameEnd calls it when takeWindow rolls over.
   inline void takeCounts(uint64_t (&out)[CounterCount]) {
     for (uint32_t i = 0u; i < CounterCount; i++) {
@@ -113,6 +149,20 @@ namespace dxvk::backend::prof {
       (unsigned long long)c[CntCsSleep], double(c[CntCsSleep]) / f,
       (unsigned long long)c[CntAllocWait], double(c[CntAllocWait]) / f,
       totalMs[AllocWait], totalMs[AllocWait] / f);
+    return buf;
+  }
+
+  // The end of the PROF line, after formatCsTransport (d9mt #127): per frame and stage, the
+  // argument-buffer flushes as layout/resources/cbv/keep and the table flushes as flushes/slots.
+  inline std::string formatBindings(const uint64_t (&c)[CounterCount]) {
+    const double f = double(kWindowFrames);
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+      " | abVs=%.2f/%.2f/%.2f/%.2f abPs=%.2f/%.2f/%.2f/%.2f tableVs=%.2f/%.2f tablePs=%.2f/%.2f",
+      double(c[CntAbLayoutVs]) / f, double(c[CntAbResVs]) / f, double(c[CntAbCbvVs]) / f, double(c[CntAbKeepVs]) / f,
+      double(c[CntAbLayoutPs]) / f, double(c[CntAbResPs]) / f, double(c[CntAbCbvPs]) / f, double(c[CntAbKeepPs]) / f,
+      double(c[CntTableVs]) / f, double(c[CntTableSlotsVs]) / f,
+      double(c[CntTablePs]) / f, double(c[CntTableSlotsPs]) / f);
     return buf;
   }
 

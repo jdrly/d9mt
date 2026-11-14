@@ -48,6 +48,8 @@ int main(int argc, char** argv) {
     // Counters (d9mt #127) don't count either.
     prof::bump(prof::CntCsSleep);
     prof::countCsChunk(false, 10u, 4096u);
+    prof::countAbFlush(1u, prof::AbCause::Cbv);
+    prof::countTableFlush(0u, 3u);
     for (uint64_t c : prof::g_counts) CHECK(c == 0u);
     if (g_fail) return 1;
     setenv("D9MT_PROFILE", "1", 1);
@@ -306,6 +308,41 @@ int main(int argc, char** argv) {
     line = prof::formatCsTransport(ms, c);
     CHECK(line == " | csExec=0.000(0.000) csChunks=1(0.00/f) csInject=0(0.00/f) csCmds=1(0.0/f)"
                   " csKiB=1.0(0.0/f) csSleep=0(0.00/f) | allocWait=0(0.00/f) allocWaitMs=0.000(0.000)");
+  }
+
+  { // Bindings (d9mt #127): why an argument buffer was rebuilt, per stage, and table flushes.
+    using prof::AbCause;
+    CHECK(prof::abCause(true,  false, 0u, 0u, 0u) == AbCause::Layout);   // the shader changed
+    CHECK(prof::abCause(false, true,  0u, 0u, 0u) == AbCause::Layout);   // no buffer yet
+    CHECK(prof::abCause(true,  false, 1u, 2u, 4u) == AbCause::Layout);   // first match wins
+    CHECK(prof::abCause(false, false, 1u, 2u, 0u) == AbCause::Resources);
+    CHECK(prof::abCause(false, false, 0u, 0u, 8u) == AbCause::Resources); // a sampler alone
+    CHECK(prof::abCause(false, false, 5u, 0u, 0u) == AbCause::Cbv);
+    CHECK(prof::abCause(false, false, 0u, 0u, 0u) == AbCause::Keep);
+
+    for (uint64_t& c : prof::g_counts) c = 0u;
+    const AbCause causes[4] = { AbCause::Layout, AbCause::Resources, AbCause::Cbv, AbCause::Keep };
+    for (uint32_t k = 0u; k < 4u; k++) {
+      for (uint32_t n = 0u; n <= k; n++) prof::countAbFlush(0u, causes[k]);        // VS: 1, 2, 3, 4
+      for (uint32_t n = 0u; n < 2u * (k + 1u); n++) prof::countAbFlush(1u, causes[k]); // PS: 2, 4, 6, 8
+    }
+    CHECK(prof::g_counts[prof::CntAbLayoutVs] == 1u && prof::g_counts[prof::CntAbKeepVs] == 4u);
+    CHECK(prof::g_counts[prof::CntAbResPs] == 4u && prof::g_counts[prof::CntAbCbvPs] == 6u);
+    prof::countTableFlush(0u, 3u);
+    prof::countTableFlush(0u, 5u);
+    prof::countTableFlush(1u, 1u);
+    CHECK(prof::g_counts[prof::CntTableVs] == 2u && prof::g_counts[prof::CntTableSlotsVs] == 8u);
+    CHECK(prof::g_counts[prof::CntTablePs] == 1u && prof::g_counts[prof::CntTableSlotsPs] == 1u);
+    CHECK(prof::g_counts[prof::CntDraws] == 0u && prof::g_counts[prof::CntAbRebuild] == 0u);
+
+    // Scaled so each counter reads as a whole number per frame of the 256-frame window.
+    for (uint64_t& c : prof::g_counts) c *= prof::kWindowFrames;
+    uint64_t c[prof::CounterCount];
+    prof::takeCounts(c);
+    for (uint64_t v : prof::g_counts) CHECK(v == 0u);
+    std::string line = prof::formatBindings(c);
+    std::printf("%s\n", line.c_str());
+    CHECK(line == " | abVs=1.00/2.00/3.00/4.00 abPs=2.00/4.00/6.00/8.00 tableVs=2.00/8.00 tablePs=1.00/1.00");
   }
 
   { // The real clock: one calibration for the process, matching the build's architecture.

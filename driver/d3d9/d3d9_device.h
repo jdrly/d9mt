@@ -1556,6 +1556,7 @@ namespace dxvk {
     rstore::Window                  m_restoreWindow;
     xfer::Stats                     m_xferStats;       // D9MT_PROFILE: StretchRect / ColorFill paths
     stats::FlushCounts              m_flushCounts;     // D9MT_PROFILE: flush requests by origin (STATS)
+    stats::ConstCounts              m_constCounts;     // D9MT_PROFILE: constant writes and uploads (STATS)
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 

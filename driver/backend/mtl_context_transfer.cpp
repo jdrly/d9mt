@@ -510,6 +510,8 @@ namespace dxvk::backend {
         const uint32_t dirtySmps = layoutChanged ? ~0u : b.dirtySamplers;
         const bool rebuild = layoutChanged || b.abGpuAddress == 0u
           || (dirtyCbvs | dirtyTexs | dirtySmps) != 0u;
+        if (unlikely(prof::g_profEnabled))
+          prof::countAbFlush(st, prof::abCause(layoutChanged, b.abGpuAddress == 0u, dirtyCbvs, dirtyTexs, dirtySmps));
         b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
 
         if (rebuild) {
@@ -603,6 +605,8 @@ namespace dxvk::backend {
       const uint32_t smpMask = b.dirtySamplers
         & ((1u << b.samplers.size()) - 1u);
       b.dirtyCbvs = b.dirtyTextures = b.dirtySamplers = 0u;
+      if (unlikely(prof::g_profEnabled))
+        prof::countTableFlush(st, bit::popcnt(cbvMask) + bit::popcnt(texMask) + bit::popcnt(smpMask));
 
       for (uint32_t slot : bit::BitMask(cbvMask)) {
         StageBindings::CbvBinding& cbv = b.cbvs[slot];

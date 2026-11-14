@@ -10,6 +10,8 @@
 //     carried=0.0 carryRefused=0.0 carryCap=0.0 | flushChunk=3.0/21.0 flushRt=1.0/4.0
 //     flushDs=0.0/1.0 flushEndScene=1.0/0.0 flushTex=0.0/2.0 flushBuf=0.0/5.0 flushThrottle=0.0/0.0
 //     flushWait=0.0/0.0 flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=0.0
+//     | constVs=3100.0/2900.0 constPs=1500.0/1400.0 upVs=1500.0 upVsKiB=270.0 upVsPadKiB=6.0
+//     upPs=1500.0 upPsKiB=94.0 upPsPadKiB=12.0
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -61,6 +63,12 @@
 //   flushCapped of the refused, those above the flush cap (D9MT_FLUSH_CAP,
 //               d3d9.reproducibleCommandStream), which never flush. The tracker's
 //               estimated-cost escape never fires: d9mt passes it no cost.
+//   constVs/Ps=writes/changed   per Present (d9mt #127): SetVertex/PixelShaderConstantF/I/B
+//               calls the device applied (not recorded into a state block), and those that
+//               changed a value (the others change nothing and upload nothing).
+//   upVs/Ps     constant uploads at draw per Present, into the stage's static and dynamically
+//               indexed constant buffers (each counts); upVs/PsKiB: the bytes they took;
+//               upVs/PsPadKiB: of those, padding (alignment, the dynamic buffer's spare vec4).
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -129,6 +137,30 @@ namespace dxvk::stats {
     }
   };
 
+  // Shader constants per stage (0 vertex, 1 pixel; d9mt #127): the SetShaderConstantF/I/B calls
+  // the device applied and those of them that changed a value; at draw, the uploads into the
+  // constant buffers (a static and a dynamically indexed one count apart), the bytes they took
+  // and the part of those that is padding (alignment, the dynamic buffer's spare vec4). Counted
+  // and copied under the device lock, like FlushCounts.
+  struct ConstCounts {
+    uint64_t writes[2]      = { };
+    uint64_t changed[2]     = { };
+    uint64_t uploads[2]     = { };
+    uint64_t uploadBytes[2] = { };
+    uint64_t padBytes[2]    = { };
+
+    void noteWrite(uint32_t stage, bool changedValue) {
+      writes[stage]++;
+      changed[stage] += changedValue ? 1u : 0u;
+    }
+
+    void noteUpload(uint32_t stage, uint64_t dataBytes, uint64_t allocatedBytes) {
+      uploads[stage]++;
+      uploadBytes[stage] += allocatedBytes;
+      padBytes[stage]    += allocatedBytes - dataBytes;
+    }
+  };
+
   class Window {
 
   public:
@@ -153,7 +185,7 @@ namespace dxvk::stats {
 
     // The line for the window that ends now; starts the next window.
     std::string take(uint64_t nowNs, const rstats::Snapshot& rs, const CompileTotals& ct, const Extra& extra,
-                     const FlushCounts& fc) {
+                     const FlushCounts& fc, const ConstCounts& cc) {
       const double winS = double(nowNs - m_winStartNs) * 1e-9;
       const size_t n = m_dts.size();
 
@@ -218,9 +250,25 @@ namespace dxvk::stats {
       std::snprintf(buf, sizeof(buf), " flushCapped=%.1f", double(fc.capped - m_fc.capped) / pn);
       line += buf;
 
+      // Shader constants per Present: writes/changed, uploads, their KiB and padding KiB.
+      static constexpr const char* kStages[2] = { "Vs", "Ps" };
+      for (uint32_t s = 0u; s < 2u; s++) {
+        std::snprintf(buf, sizeof(buf), "%s const%s=%.1f/%.1f", s ? "" : " |", kStages[s],
+          double(cc.writes[s] - m_cc.writes[s]) / pn, double(cc.changed[s] - m_cc.changed[s]) / pn);
+        line += buf;
+      }
+      for (uint32_t s = 0u; s < 2u; s++) {
+        std::snprintf(buf, sizeof(buf), " up%s=%.1f up%sKiB=%.1f up%sPadKiB=%.1f",
+          kStages[s], double(cc.uploads[s] - m_cc.uploads[s]) / pn,
+          kStages[s], double(cc.uploadBytes[s] - m_cc.uploadBytes[s]) / 1024.0 / pn,
+          kStages[s], double(cc.padBytes[s] - m_cc.padBytes[s]) / 1024.0 / pn);
+        line += buf;
+      }
+
       m_rs = rs;
       m_ct = ct;
       m_fc = fc;
+      m_cc = cc;
       m_winStartNs = nowNs;
       m_dts.clear();
       return line;
@@ -235,6 +283,7 @@ namespace dxvk::stats {
     rstats::Snapshot   m_rs;
     CompileTotals      m_ct;
     FlushCounts        m_fc;
+    ConstCounts        m_cc;
 
   };
 
