@@ -10,7 +10,9 @@
 //
 // Process CPU, not the thread's: under Rosetta on GitHub's virtual M1, CLOCK_THREAD_CPUTIME_ID
 // reads 2 % of a pure ALU loop, while process CPU (and getrusage) reads all of it (#199's probe).
-// The test has one thread, and process CPU is what the speed guard reads.
+// The test has one thread, and process CPU is what the speed guard reads. It counts Rosetta's own
+// threads too: before each measurement 10 untimed burns take the one-time translation out (on the
+// hosted runner the first 101 runs of 50 us once read 55.3 us of CPU each).
 #include "d3d9_diag_burn.h"
 
 #include <algorithm>
@@ -50,6 +52,8 @@ static bool burnsUs(const char* name, Burn burn, uint32_t us) {
   const uint64_t ticks = diagburn::ticksFromUs(us);
   constexpr int kRuns = 101;
   std::vector<double> wall(kRuns);
+  for (int i = 0; i < 10; i++)
+    burn(ticks);
   const double c0 = cpuUs();
   for (int i = 0; i < kRuns; i++) {
     const double w0 = wallUs();
@@ -106,7 +110,7 @@ int main(int argc, char** argv) {
   }
 
   { // The burn takes n us of wall and CPU time.
-    CHECK(burnsUs("spin", [] (uint64_t t) { diagburn::spin(t); }, 50u));
+    CHECK(burnsUs("spin", [] (uint64_t t) { diagburn::spin(t); }, 100u));
     CHECK(burnsUs("spin", [] (uint64_t t) { diagburn::spin(t); }, 300u));
     CHECK(burnsUs("spin", [] (uint64_t t) { diagburn::spin(t); }, 1000u));
 
