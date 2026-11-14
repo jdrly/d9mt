@@ -1449,9 +1449,13 @@ namespace dxvk::backend {
        * folded clear on this image can't land after this one. */
       if (m_pass.active) {
         prof::bump(prof::CntPassCloseClear);
+        if (unlikely(prof::g_profEnabled))
+          m_rs[rstats::ClearsOpen]++;
         closePass();
       }
       flushPendingClears();
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::ClearsViewFull]++;
       PendingPass saved = std::move(m_pass);
       m_pass = PendingPass();
       m_pass.targets.color[0] = view;
@@ -1486,6 +1490,8 @@ namespace dxvk::backend {
       m_blitVs->entryName, m_fillFs->entryName);
     if (!pso)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRect]++;
 
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
     if (m_attOpt)
@@ -1572,6 +1578,8 @@ namespace dxvk::backend {
       key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
     if (!pso)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRectDs]++;
 
     MtlDepthStencilState ds = {};
     ds.depthTest      = true;

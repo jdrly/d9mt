@@ -11,7 +11,9 @@
 //     flushDs=0.0/1.0 flushEndScene=1.0/0.0 flushTex=0.0/2.0 flushBuf=0.0/5.0 flushThrottle=0.0/0.0
 //     flushWait=0.0/0.0 flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=0.0
 //     | constVs=3100.0/2900.0 constPs=1500.0/1400.0 upVs=1500.0 upVsKiB=270.0 upVsPadKiB=6.0
-//     upPs=1500.0 upPsKiB=94.0 upPsPadKiB=12.0
+//     upPs=1500.0 upPsKiB=94.0 upPsPadKiB=12.0 | splitMiBSubmit=315.0 splitMiBXfer=0.0
+//     splitMiBClear=105.1 splitMiBOther=0.0 | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0
+//     clrRect=0.0 clrRectDs=0.0
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -69,6 +71,19 @@
 //   upVs/Ps     constant uploads at draw per Present, into the stage's static and dynamically
 //               indexed constant buffers (each counts); upVs/PsKiB: the bytes they took;
 //               upVs/PsPadKiB: of those, padding (alignment, the dynamic buffer's spare vec4).
+//   splitMiBSubmit/Xfer/Clear/Other   per frame (#80): splitMiB by the reason the split's
+//               previous pass ended, as split= is classified (splitSubmit, splitXfer,
+//               splitClear, else Other: a view change or a vertex fence). The four add up to
+//               splitMiB (each rounded on its own).
+//   clrOpen     per frame (#127): full-surface clears (D3D9 Clear, ColorFill) that ended an open
+//               pass (any pass, the target's or not); the clear then folds or gets its own pass
+//   clrPending  ... clears folded into a pending pass that got a pass of their own because
+//               nothing drew there before it was flushed (counted in clrPass too)
+//   clrViewFull ... color clears through the part-surface path (clearImageView) whose rect covers
+//               the whole mip level: a pass of their own, never folded into the next one
+//   clrRect     ... part-surface color clears (D3D9 Clear with rects or a smaller viewport, a
+//               part-surface ColorFill): a scissored draw
+//   clrRectDs   ... part-surface depth/stencil clears: a draw
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -264,6 +279,17 @@ namespace dxvk::stats {
           kStages[s], double(cc.padBytes[s] - m_cc.padBytes[s]) / 1024.0 / pn);
         line += buf;
       }
+
+      // Split bytes by reason and the clear paths (#80, #127), per render-thread frame.
+      constexpr double MiB = 1.0 / double(1u << 20);
+      std::snprintf(buf, sizeof(buf),
+        " | splitMiBSubmit=%.1f splitMiBXfer=%.1f splitMiBClear=%.1f splitMiBOther=%.1f"
+        " | clrOpen=%.1f clrPending=%.1f clrViewFull=%.1f clrRect=%.1f clrRectDs=%.1f",
+        double(d[rstats::SplitBytesSubmit]) / rf * MiB, double(d[rstats::SplitBytesXfer]) / rf * MiB,
+        double(d[rstats::SplitBytesClear]) / rf * MiB, double(d[rstats::SplitBytesOther]) / rf * MiB,
+        pf(rstats::ClearsOpen), pf(rstats::ClearsPending), pf(rstats::ClearsViewFull),
+        pf(rstats::ClearsRect), pf(rstats::ClearsRectDs));
+      line += buf;
 
       m_rs = rs;
       m_ct = ct;
