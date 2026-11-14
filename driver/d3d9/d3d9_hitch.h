@@ -1,11 +1,11 @@
 #pragma once
 
-// D9MT_PROFILE hitch attribution: per Present, the app-thread time spent inside
-// d9mt (outermost device-locked calls plus the creation entry points that
-// don't lock), broken down by category. A frame longer than D9MT_HITCH_MS
-// (default 50) logs one warn-level HITCH line, so a long frame can be told
-// apart as driver work (inD9mtMs close to dtMs) or the game's own (disk
-// streaming, its own threads: inD9mtMs small).
+// D9MT_PROFILE hitch attribution: per Present, d9mt's per-device outer-entry time (inD9mtMs:
+// the outermost device-locked calls plus the creation entry points that don't lock, from any
+// thread, counted only when no other entry is open on the device; PACE's d9mt), broken down
+// by category (the categories count every thread). A frame longer than D9MT_HITCH_MS
+// (default 50) logs one warn-level HITCH line, so a long frame can be told apart as driver
+// work (inD9mtMs close to dtMs) or the game's own (disk streaming, its threads: inD9mtMs small).
 //
 // Off (D9MT_PROFILE unset): one predictable branch per scope. On: the shared
 // cheap clock (rdtsc on x86, the steady clock otherwise; util_cheap_clock.h,
@@ -179,7 +179,7 @@ namespace dxvk::hitch {
       uint64_t skipped = 0u, budgetHits = 0u;
     };
 
-    // Outermost d9mt entry on this device (depth 0 -> 1) counts towards inD9mt.
+    // Only an entry that takes this device's depth 0 -> 1, from any thread, counts towards inD9mt.
     bool enter() {
       return m_depth.fetch_add(1, std::memory_order_relaxed) == 0;
     }

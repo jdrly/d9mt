@@ -7,6 +7,7 @@
 
 #include "d3d9_hitch.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -134,6 +135,43 @@ int main(int argc, char** argv) {
     CHECK(p.endFrame(hitch::nowNs(), compile, 0u, 0.001, frame, s));
     CHECK(s.cat[hitch::Query].n == 1u);
     CHECK(s.inMs >= 0.9);
+  }
+
+  { // Overlapping entries from two threads (#81): inD9mt is per-device outer-entry time. A enters
+    // and stays 10 ms; B enters while A is inside, so B's entry isn't outer; A leaves; B stays
+    // 30 ms more, waiting in csSync. inD9mt counts A's 10 ms only, none of B's time, while the
+    // categories (PACE's wait among them) count B's time too.
+    hitch::Profiler p;
+    hitch::Profiler::CompileTotals compile;
+    uint64_t frame = 0u;
+    hitch::FrameStats s;
+    p.endFrame(hitch::nowNs(), compile, 0u, 1e9, frame, s);
+    std::atomic<int> step = { 0 };
+    auto waitFor = [&step] (int n) { while (step.load() < n) { } };
+    std::thread a([&] {
+      { hitch::Scope e(p, hitch::Query, true);
+        step = 1;
+        waitFor(2);                   // B is inside too
+        spinMs(10.0);
+      }
+      step = 3;
+    });
+    std::thread b([&] {
+      waitFor(1);
+      hitch::Scope e(p, hitch::Query, true);
+      step = 2;
+      waitFor(3);                     // A has left
+      hitch::Scope w(p, hitch::CsSync);
+      spinMs(30.0);
+    });
+    a.join(); b.join();
+    CHECK(p.endFrame(hitch::nowNs(), compile, 0u, 0.001, frame, s));
+    std::printf("overlap: inD9mtMs=%.1f query=%.1fms csSync=%.1fms\n",
+      s.inMs, s.cat[hitch::Query].ms, s.cat[hitch::CsSync].ms);
+    CHECK(s.cat[hitch::Query].n == 2u);
+    CHECK(s.inMs >= 9.5 && s.inMs < 25.0);           // A's 10 ms, not B's 30 after it
+    CHECK(s.cat[hitch::CsSync].ms >= 29.5);          // B's wait still counts as a category
+    CHECK(s.cat[hitch::Query].ms >= 39.5);           // and so does B's whole entry
   }
 
   { // The wall-clock stamp and presenter state appended to HITCH/PACE/STATS lines
