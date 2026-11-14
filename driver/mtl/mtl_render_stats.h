@@ -37,6 +37,18 @@ namespace dxvk::rstats {
     FlushesCarried,  // deferrable flushes that kept the open pass (G1, D9MT_EARLY_COMMIT)
     CarryRefused,    // deferrable flushes inside a pass the backlog gate refused (GPU caught up)
     CarryCapped,     // ... that ended the pass after the per-serial carry cap
+    SplitBytesSubmit, // SplitBytes by the reason the split's previous pass ended (#80): a submit,
+    SplitBytesXfer,   //   else a copy/blit/resolve, else a clear, else the rest (a view change or a
+    SplitBytesClear,  //   vertex fence); the four add up to SplitBytes
+    SplitBytesOther,
+    // The clear paths (#127). A D3D9 Clear or ColorFill of the whole surface goes to
+    // clearRenderTarget (folded into the target's next pass, or ClearPasses); of part of it, to
+    // clearImageView.
+    ClearsOpen,      // clears that ended their target's open pass (either path, full surface)
+    ClearsPending,   // clears folded into a pending pass that got a pass of their own, nothing drew there (of ClearPasses)
+    ClearsViewFull,  // color clears through clearImageView that cover the surface after all: a pass of their own
+    ClearsRect,      // part-surface color clears: a scissored draw
+    ClearsRectDs,    // part-surface depth/stencil clears: a draw
     Count
   };
 

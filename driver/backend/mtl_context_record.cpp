@@ -844,6 +844,8 @@ namespace dxvk::backend {
         m_pass.discardMask |= mask;
       }
       prof::bump(prof::CntPassCloseClear);
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::ClearsOpen]++;
       closePass();
     }
     if (unlikely(prof::g_profEnabled))
@@ -896,8 +898,10 @@ namespace dxvk::backend {
     if (!any)
       return;
     prof::bump(prof::CntPassCloseClear);
-    if (unlikely(prof::g_profEnabled))
+    if (unlikely(prof::g_profEnabled)) {
       m_rs[rstats::ClearPasses]++;
+      m_rs[rstats::ClearsPending]++;
+    }
     materializePass();
     closePass();
   }
@@ -1198,12 +1202,18 @@ namespace dxvk::backend {
     }
     m_rs[rstats::Splits]++;
     m_rs[rstats::SplitBytes] += loadBytes;
-    if (m_split.serial != m_pass.openSerial)
+    if (m_split.serial != m_pass.openSerial) {
       m_rs[rstats::SplitsSubmit]++;
-    else if (m_split.xfers != m_pass.openXfers)
+      m_rs[rstats::SplitBytesSubmit] += loadBytes;
+    } else if (m_split.xfers != m_pass.openXfers) {
       m_rs[rstats::SplitsXfer]++;
-    else if (m_split.clears != m_pass.openClears)
+      m_rs[rstats::SplitBytesXfer] += loadBytes;
+    } else if (m_split.clears != m_pass.openClears) {
       m_rs[rstats::SplitsClear]++;
+      m_rs[rstats::SplitBytesClear] += loadBytes;
+    } else {
+      m_rs[rstats::SplitBytesOther] += loadBytes;
+    }
   }
 
 

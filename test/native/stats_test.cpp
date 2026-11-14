@@ -48,6 +48,14 @@ int main() {
   rs.v[rstats::SplitsSubmit]  = 60u * 6u;
   rs.v[rstats::SplitsClear]   = 60u * 2u;
   rs.v[rstats::SplitBytes]    = 60ull * (420ull << 20);
+  // #80: the same bytes by reason, 315 + 0 + 105 + 0 = 420 MiB a frame
+  rs.v[rstats::SplitBytesSubmit] = 60ull * (315ull << 20);
+  rs.v[rstats::SplitBytesClear]  = 60ull * (105ull << 20);
+  // #127: the clear paths
+  rs.v[rstats::ClearsOpen]     = 60u * 2u;
+  rs.v[rstats::ClearsPending]  = 60u * 1u;
+  rs.v[rstats::ClearsRect]     = 30u;
+  rs.v[rstats::ClearsRectDs]   = 60u * 3u;
   stats::CompileTotals ct;
   ct.shaders = 3u; ct.psos = 2u; ct.waits = 1u; ct.waitsNs = 12500000u;
   stats::Extra extra;
@@ -90,7 +98,16 @@ int main() {
                   " flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=2.0"
                   " | constVs=4.0/3.0 constPs=2.0/2.0 upVs=2.0 upVsKiB=8.0 upVsPadKiB=1.0"
                   " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"));
-  const std::string tail = " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0";
+  CHECK(has(line, " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"
+                  " | splitMiBSubmit=315.0 splitMiBXfer=0.0 splitMiBClear=105.0 splitMiBOther=0.0"
+                  " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0"));
+  { // The reasons' bytes add up to splitMiB (#80).
+    uint64_t sum = 0u;
+    for (uint32_t c : { rstats::SplitBytesSubmit, rstats::SplitBytesXfer, rstats::SplitBytesClear, rstats::SplitBytesOther })
+      sum += rs.v[c];
+    CHECK(sum == rs.v[rstats::SplitBytes]);
+  }
+  const std::string tail = " clrRect=0.5 clrRectDs=3.0";
   CHECK(line.compare(line.size() - tail.size(), tail.size(), tail) == 0);   // the end of the line
 
   // The next window reports deltas only, and a negative saving (restores).
@@ -100,6 +117,8 @@ int main() {
   }
   rs.v[rstats::Frames] += 61u;
   rs.v[rstats::Restores] += 61u;
+  rs.v[rstats::SplitBytes]      += 61ull << 20;   // 1 MiB a frame, all of it after a view change
+  rs.v[rstats::SplitBytesOther] += 61ull << 20;
   rs.v[rstats::BytesSaved] -= 61u * (1u << 20);
   extra.att = "live-off";
   for (int i = 0; i < 63 * 2; i++) fc.noteFlushed(stats::FlushOrigin::Wait);
@@ -111,6 +130,9 @@ int main() {
   CHECK(has(line, " flushBuf=0.0/0.0 flushThrottle=0.0/0.0 flushWait=2.0/0.0 "));
   CHECK(has(line, " flushPresent=0.0/0.0 flushOther=0.0/0.0 flushCapped=0.0"));
   CHECK(has(line, " | constVs=0.0/0.0 constPs=1.0/0.0 upVs=0.0 upVsKiB=0.0 upVsPadKiB=0.0 upPs=0.0 "));
+  CHECK(has(line, " splitMiB=1.0 "));
+  CHECK(has(line, " | splitMiBSubmit=0.0 splitMiBXfer=0.0 splitMiBClear=0.0 splitMiBOther=1.0"
+                  " | clrOpen=0.0 clrPending=0.0 clrViewFull=0.0 clrRect=0.0 clrRectDs=0.0"));
   CHECK(has(line, " ms=16.0/16.0/16.0 slow33=0 slow50=0 "));
   CHECK(has(line, " rp=0.0 "));
   CHECK(has(line, " restore=1.0 savedMiB=-1.0 attMs=0.00 clrFold=0.0 clrPass=0.0 "));

@@ -383,7 +383,14 @@ them in `<game>_d3d9.log`.
 - shader constants per Present and stage (#127): `constVs`/`constPs` as `writes/changed`
   (SetShaderConstantF/I/B calls applied, and those that changed a value), `upVs`/`upPs` uploads into
   the constant buffers at draw, `upVsKiB`/`upPsKiB` their bytes, `upVsPadKiB`/`upPsPadKiB` the
-  padding in them.
+  padding in them;
+- `splitMiBSubmit`, `splitMiBXfer`, `splitMiBClear`, `splitMiBOther`: `splitMiB` by the reason the
+  split's previous pass ended, as `split=` is classified (the four add up to `splitMiB`; #80);
+- the clear paths per frame (#127): `clrOpen` (full-surface clears that ended their target's open
+  pass), `clrPending` (folded clears that got a pass of their own because nothing drew there; also in
+  `clrPass`), `clrViewFull` (color clears sent down the part-surface path that cover the surface: a
+  pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
+  (part-surface depth/stencil clears: a draw).
 - **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
   (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for
   every present-path change.

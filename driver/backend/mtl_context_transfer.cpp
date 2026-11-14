@@ -1449,9 +1449,13 @@ namespace dxvk::backend {
        * folded clear on this image can't land after this one. */
       if (m_pass.active) {
         prof::bump(prof::CntPassCloseClear);
+        if (unlikely(prof::g_profEnabled))
+          m_rs[rstats::ClearsOpen]++;
         closePass();
       }
       flushPendingClears();
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::ClearsViewFull]++;
       PendingPass saved = std::move(m_pass);
       m_pass = PendingPass();
       m_pass.targets.color[0] = view;
@@ -1474,6 +1478,8 @@ namespace dxvk::backend {
     uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
     if (offset.x >= x1 || offset.y >= y1)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRect]++;
 
     RenderPsoKey key = {};
     key.vsCookie              = uint64_t(m_blitVs->library);
@@ -1562,6 +1568,8 @@ namespace dxvk::backend {
     uint32_t y1 = std::min(offset.y + extent.height, mipExtent.height);
     if (offset.x >= x1 || offset.y >= y1)
       return;
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRectDs]++;
 
     RenderPsoKey key = {};
     key.vsCookie      = uint64_t(m_depthClearVs->library);
