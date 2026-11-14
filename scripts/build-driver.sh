@@ -236,13 +236,18 @@ PROFILE_INSTRUMENT="${PROFILE_INSTRUMENT:-0}"
 # d3d9_constant_buffer.cpp d3d9_stateblock.cpp dxvk_cs.cpp (docs/configuration.md).
 INSTRUMENT_TUS=" ${INSTRUMENT_TUS:-mtl_context_record.cpp mtl_context_transfer.cpp mtl_pso_cache.cpp mtl_submission.cpp mtl_device_impl.cpp mtl_ring.cpp mtl_residency.cpp} "
 # GCC instruments pre-inline, so trivial getters (std::array::operator[],
-# Rc<>::operator->, MtlBufferSlice::defined, the front end's Com<>, bit::, dirty-flag
-# Flags<>::test/set/clr and D3D9DeviceLock, ...) each cost two hook calls that
-# land in their CALLER's self time (400k+ calls/10s observed in GTA IV). The
-# exclude list is GCC's stand-in for clang's -finstrument-functions-after-inlining: comma-
-# separated substrings of the qualified name without parameters (dxvk::Rc<dxvk::Foo>::operator->);
-# mangled names never match. INSTRUMENT_EXCLUDE replaces the whole list.
-INSTRUMENT_EXCLUDE="${INSTRUMENT_EXCLUDE:-std::,dxvk::Rc,MtlBufferSlice,dxvk::Com<,dxvk::bit::,dxvk::Flags<,D3D9DeviceLock}"
+# Rc<>::operator->, MtlBufferSlice::defined, ...) each cost two hook calls that
+# land in their CALLER's self time (400k+ calls/10s observed in GTA IV; on the front end about
+# 20 ns a call under Rosetta on an M1 with macOS 27, and 168 calls per bench_draws draw on the
+# game thread before the list below grew, 2026-11-14). The exclude list is GCC's stand-in for
+# clang's -finstrument-functions-after-inlining: comma-separated substrings of the qualified name
+# without parameters
+# (dxvk::Rc<dxvk::Foo>::operator->); mangled names never match. The first line is the backend's,
+# the second the front end's and the CS chunk's trivial helpers. INSTRUMENT_EXCLUDE replaces the
+# whole list.
+INSTRUMENT_EXCLUDE_DEFAULT="std::,__gnu_cxx::,dxvk::Rc,MtlBufferSlice,operator->,operator new"
+INSTRUMENT_EXCLUDE_DEFAULT+=",dxvk::Com<,dxvk::bit::,dxvk::Flags<,dxvk::align<,dxvk::static_item<,D3D9DeviceLock,::LockDevice,D3D9Multithread::AcquireLock,D3D9SpecData::set<,MtlRasterizerState::set,computeConstantCount,DxvkCsCmd::,DxvkCsDataBlock::,DxvkCsChunk::append,DxvkCsChunk::alloc<"
+INSTRUMENT_EXCLUDE="${INSTRUMENT_EXCLUDE:-$INSTRUMENT_EXCLUDE_DEFAULT}"
 # The exclude list is part of an instrumented object's name: a changed list rebuilds those objects.
 PROF_SUFFIX=".prof-$(printf '%s' "$INSTRUMENT_EXCLUDE" | shasum -a 256 | cut -c1-8)"
 [ "$PROFILE_INSTRUMENT" = 1 ] && echo "=== [driver] PROFILE_INSTRUMENT=1: instrumenting$INSTRUMENT_TUS(excluding $INSTRUMENT_EXCLUDE) ==="

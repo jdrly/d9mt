@@ -37,7 +37,7 @@ namespace {
     uint32_t   zeroEvents;
     LARGE_INTEGER lastDumpQpc;
     DWORD      tid;
-    HANDLE     thread;  /* for its description at dump time, also after the thread ended */
+    char       name[128];  /* its description, read while it runs: Wine drops it when the thread ends */
   };
 
   /* -1 = not probed, 0 = off, 1 = on; racy init is benign since it's idempotent. */
@@ -73,8 +73,6 @@ namespace {
     if (!ts)
       return nullptr;
     ts->tid = GetCurrentThreadId();
-    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
-      &ts->thread, THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0);
     if (InterlockedCompareExchange(&g_calibInit, 1, 0) == 0) {
       QueryPerformanceFrequency(&g_qpcHz);
       QueryPerformanceCounter(&g_qpc0);
@@ -115,14 +113,14 @@ namespace {
     return elapsedTicks > 0.0 ? elapsedNs / elapsedTicks : 0.0;
   }
 
-  /* The thread's description (SetThreadDescription, e.g. dxvk-cs) in UTF-8, or "-". */
-  NOINSTR static void threadName(HANDLE thread, char* out, int size) {
+  /* The calling thread's description (SetThreadDescription, e.g. dxvk-cs) in UTF-8, or "-". */
+  NOINSTR static void threadName(char* out, int size) {
     using GetThreadDescriptionProc = HRESULT (WINAPI *) (HANDLE, PWSTR*);
     static auto getDescription = reinterpret_cast<GetThreadDescriptionProc>(
       GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
     PWSTR wide = nullptr;
     out[0] = '\0';
-    if (thread && getDescription && SUCCEEDED(getDescription(thread, &wide)) && wide) {
+    if (getDescription && SUCCEEDED(getDescription(GetCurrentThread(), &wide)) && wide) {
       if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, size, nullptr, nullptr))
         out[0] = '\0';
       LocalFree(wide);
@@ -135,8 +133,6 @@ namespace {
     double npt = nsPerTick();
     if (npt <= 0.0)
       return;
-    char name[128];
-    threadName(ts->thread, name, int(sizeof(name)));
     uintptr_t base = reinterpret_cast<uintptr_t>(&__ImageBase);
     std::fprintf(stderr,
       "D9MTINST BEGIN tid=%lu base=0x%08llx ns_per_tick=%.6f dropped=%llu overflow=%lu at=%s name=%s\n",
@@ -146,7 +142,7 @@ namespace {
       static_cast<unsigned long long>(ts->droppedSlots),
       static_cast<unsigned long>(ts->overflow),
       when,
-      name);
+      ts->name[0] ? ts->name : "-");
     for (uint32_t i = 0u; i < kTableSize; i++) {
       const Slot& s = ts->table[i];
       if (!s.fn)
@@ -243,7 +239,12 @@ extern "C" NOINSTR void __cyg_profile_func_exit(void* this_fn, void* call_site) 
 
   if (ts->depth) {
     ts->stack[ts->depth - 1u].childTicks += incl;
-  } else if ((++ts->zeroEvents & 0x1FFFu) == 0u) {
+  } else if (uint32_t z = ++ts->zeroEvents; z == 1u || (z & 0x1FFFu) == 0u) {
+    /* the name at the first and every 8192nd return to depth 0: a thread whose outermost
+     * instrumented call returns only when it ends still names itself */
+    threadName(ts->name, int(sizeof(ts->name)));
+    if (z == 1u)
+      return;
     LARGE_INTEGER qpcNow;
     QueryPerformanceCounter(&qpcNow);
     if (double(qpcNow.QuadPart - ts->lastDumpQpc.QuadPart)
