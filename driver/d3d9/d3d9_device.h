@@ -825,7 +825,7 @@ namespace dxvk {
 
     void SynchronizeCsThread(uint64_t SequenceNumber);
 
-    void Flush();
+    void Flush(stats::FlushOrigin Origin);
     void FlushAndSync9On12();
 
     // Live debug facility (d3d9_debug.cpp), API thread under the device lock.
@@ -1052,15 +1052,15 @@ namespace dxvk {
      * (docs/g1-early-commit.md §4.4). The backend may then commit the work recorded before
      * the open pass and keep the pass open (docs/g1-early-commit.md, D9MT_EARLY_COMMIT=0
      * turns that off); the next flush that isn't deferrable completes it. */
-    void ConsiderFlush(GpuFlushType FlushType, bool AllowDefer = false);
+    void ConsiderFlush(GpuFlushType FlushType, stats::FlushOrigin Origin, bool AllowDefer = false);
 
     /* Before a blocking wait on GPU progress (the staging throttle): the last flush was
      * deferrable and the CS thread either hasn't run it yet or carried it (the backend kept a
      * pass open under its submission), so submit for real first (docs/g1-early-commit.md §4.5). */
-    void FlushIfCarried() {
+    void FlushIfCarried(stats::FlushOrigin Origin) {
       if (m_flushDeferPending.load(std::memory_order_acquire)
        && (m_csThread.lastSequenceNumber() < m_flushSeqNum || m_dxvkDevice->carryOpen()))
-        ExecuteFlush(false);
+        ExecuteFlush(Origin, false);
     }
 
     /* The backend keeps a pass open under a carried flush (G1). */
@@ -1192,7 +1192,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::ChunkFull, true);
 
         m_csChunk->push(command);
       }
@@ -1208,7 +1208,7 @@ namespace dxvk {
         m_csChunk = AllocCsChunk();
 
         if constexpr (AllowFlush)
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint, true);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::ChunkFull, true);
 
         m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
       }
@@ -1229,7 +1229,7 @@ namespace dxvk {
       return m_resetCtr;
     }
 
-    void ExecuteFlush(bool Synchronize9On12, bool Deferrable = false);
+    void ExecuteFlush(stats::FlushOrigin Origin, bool Synchronize9On12, bool Deferrable = false);
 
     void        DebugInitPath();
     void        DebugPoll();
@@ -1552,6 +1552,7 @@ namespace dxvk {
     pace::Window                    m_paceWindow;
     rstore::Window                  m_restoreWindow;
     xfer::Stats                     m_xferStats;       // D9MT_PROFILE: StretchRect / ColorFill paths
+    stats::FlushCounts              m_flushCounts;     // D9MT_PROFILE: flush requests by origin (STATS)
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 

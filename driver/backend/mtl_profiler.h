@@ -16,27 +16,6 @@
 
 namespace dxvk::backend::prof {
 
-  enum Counter : uint32_t {
-    CntDraws = 0,
-    CntChunkFlush,
-    CntPsoMiss,
-    CntArgRotate,
-    CntAbRebuild,
-    CntPsoKeyBuild,
-    CntPassCloseSubmit,
-    CntPassCloseRt,
-    CntPassCloseClear,
-    CntPassCloseXfer,
-    CntPassCloseBarrier,
-    CntPassCloseBlit,
-    CntFramePasses,
-    CntStoreDontCare,
-    CntVtxFence,
-    CounterCount
-  };
-
-  inline uint64_t g_counts[CounterCount] = {};
-
   // MTLSharedEvent_signaledValue reads (SubmissionTracker::completedSerial): any thread, so
   // atomic, and outside g_counts.
   inline std::atomic<uint64_t> g_eventReads = { 0u };
@@ -63,18 +42,17 @@ namespace dxvk::backend::prof {
     while (ns > max && !g_unsubWaitMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) { }
   }
 
-  inline void bump(Counter c, uint64_t n = 1u) {
-    if (!g_profEnabled) return;
-    g_counts[c] += n;
-  }
-
   inline void onFrameEnd() {
     if (!g_profEnabled) return;
     double totalMsArr[BucketCount];
     if (!takeWindow(cheap_clock::process(), totalMsArr))
       return;
+    uint64_t c[CounterCount];
+    takeCounts(c);
 
-    static constexpr const char* kNames[BucketCount] = {
+    // The buckets d9mt #127 added (csExec, allocWait) are printed at the end of the line, after
+    // the fields parsers already know.
+    static constexpr const char* kNames[CsExec] = {
       "beginRecording", "prepareDraw", "resolvePso", "flushVB",
       "flushRes", "flushDyn", "encodeDraw", "flushChunk",
       "submit", "syncWsi", "endFrame"
@@ -82,31 +60,31 @@ namespace dxvk::backend::prof {
     constexpr double kFrames = 256.0;
 
     std::string line = str::format("PROF frame=", g_frames, " win=256 ms(avg/f):");
-    for (uint32_t i = 0u; i < BucketCount; i++) {
+    for (uint32_t i = 0u; i < CsExec; i++) {
       const double totalMs = totalMsArr[i];
       line += str::format(" ", kNames[i], "=",
         totalMs, "(", totalMs / kFrames, ")");
     }
-    line += str::format(" | draws=", g_counts[CntDraws],
-      "(", double(g_counts[CntDraws]) / kFrames, "/f)",
-      " chunkFlush=", g_counts[CntChunkFlush],
-      "(", double(g_counts[CntChunkFlush]) / kFrames, "/f)",
-      " psoMiss=", g_counts[CntPsoMiss],
-      " argRotate=", g_counts[CntArgRotate],
-      "(", double(g_counts[CntArgRotate]) / kFrames, "/f)",
-      " abRebuild=", g_counts[CntAbRebuild],
-      "(", double(g_counts[CntAbRebuild]) / kFrames, "/f)",
-      " psoKeyBuild=", g_counts[CntPsoKeyBuild],
-      "(", double(g_counts[CntPsoKeyBuild]) / kFrames, "/f)",
-      " passClose/f: submit=", double(g_counts[CntPassCloseSubmit]) / kFrames,
-      " rt=", double(g_counts[CntPassCloseRt]) / kFrames,
-      " clear=", double(g_counts[CntPassCloseClear]) / kFrames,
-      " xfer=", double(g_counts[CntPassCloseXfer]) / kFrames,
-      " barrier=", double(g_counts[CntPassCloseBarrier]) / kFrames,
-      " blit=", double(g_counts[CntPassCloseBlit]) / kFrames,
-      " | framePasses=", double(g_counts[CntFramePasses]) / kFrames, "/f",
-      " storeDontCare=", double(g_counts[CntStoreDontCare]) / kFrames, "/f",
-      " vtxFence=", double(g_counts[CntVtxFence]) / kFrames, "/f");
+    line += str::format(" | draws=", c[CntDraws],
+      "(", double(c[CntDraws]) / kFrames, "/f)",
+      " chunkFlush=", c[CntChunkFlush],
+      "(", double(c[CntChunkFlush]) / kFrames, "/f)",
+      " psoMiss=", c[CntPsoMiss],
+      " argRotate=", c[CntArgRotate],
+      "(", double(c[CntArgRotate]) / kFrames, "/f)",
+      " abRebuild=", c[CntAbRebuild],
+      "(", double(c[CntAbRebuild]) / kFrames, "/f)",
+      " psoKeyBuild=", c[CntPsoKeyBuild],
+      "(", double(c[CntPsoKeyBuild]) / kFrames, "/f)",
+      " passClose/f: submit=", double(c[CntPassCloseSubmit]) / kFrames,
+      " rt=", double(c[CntPassCloseRt]) / kFrames,
+      " clear=", double(c[CntPassCloseClear]) / kFrames,
+      " xfer=", double(c[CntPassCloseXfer]) / kFrames,
+      " barrier=", double(c[CntPassCloseBarrier]) / kFrames,
+      " blit=", double(c[CntPassCloseBlit]) / kFrames,
+      " | framePasses=", double(c[CntFramePasses]) / kFrames, "/f",
+      " storeDontCare=", double(c[CntStoreDontCare]) / kFrames, "/f",
+      " vtxFence=", double(c[CntVtxFence]) / kFrames, "/f");
     const uint64_t eventReads = g_eventReads.exchange(0u, std::memory_order_relaxed);
     line += str::format(" evRead=", eventReads, "(", double(eventReads) / kFrames, "/f)");
     const uint64_t unsubWaits = g_unsubWaits.exchange(0u, std::memory_order_relaxed);
@@ -114,8 +92,7 @@ namespace dxvk::backend::prof {
     const uint64_t unsubMaxNs = g_unsubWaitMaxNs.exchange(0u, std::memory_order_relaxed);
     line += str::format(" unsubWait=", unsubWaits, "(", double(unsubWaits) / kFrames, "/f)",
       " unsubWaitUs=", unsubNs / 1000u, "(max ", unsubMaxNs / 1000u, ")");
-    for (uint32_t i = 0u; i < CounterCount; i++)
-      g_counts[i] = 0u;
+    line += formatCsTransport(totalMsArr, c);
 
     Logger::info(line);
   }

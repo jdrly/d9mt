@@ -195,11 +195,11 @@ namespace dxvk {
     // without FLUSH, since that flush would have submitted it at once. A query from an
     // earlier, submitted serial never flushes here (docs/g1-early-commit.md §4.5).
     if (hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN && m_parent->CarryOpen() && Unsubmitted())
-      m_parent->Flush();
+      m_parent->Flush(stats::FlushOrigin::Query);
 
     if (flush && hr == S_FALSE && m_state != D3D9_VK_QUERY_BEGUN) {
       this->NotifyStall();
-      m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+      m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization, stats::FlushOrigin::Query);
     }
 
     if (occlusion) {

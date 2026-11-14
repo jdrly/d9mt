@@ -373,7 +373,13 @@ them in `<game>_d3d9.log`.
 - compiles: `sh`, `pso`, `wait=count/ms` (render-thread compile waits);
 - `split`, `splitSubmit`, `splitXfer`, `splitClear`, `splitMiB`: pass splits
   ([docs/gpu-4k.md](docs/gpu-4k.md)); `carried`, `carryRefused`, `carryCap`: G1;
-- `allocMiB` (Metal's allocated size), `att` (`on`, `off`, `live-off`).
+- `allocMiB` (Metal's allocated size), `att` (`on`, `off`, `live-off`);
+- the front end's flush requests per Present, as `flushed/refused` by why it asked:
+  `flushChunk` (a CS chunk filled up), `flushRt`, `flushDs` (render target and depth-stencil
+  changes), `flushEndScene`, `flushTex` (texture uploads: unlock, managed at draw, UpdateSurface,
+  UpdateTexture), `flushBuf` (buffer uploads: unlock, managed at draw), `flushThrottle` (staging memory), `flushWait` (WaitForResource),
+  `flushQuery`, `flushPresent`, `flushOther` (reset, creation, destruction); `flushCapped`: refused
+  requests above `D9MT_FLUSH_CAP`'s or `d3d9.reproducibleCommandStream`'s cap (#127).
 - **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
   (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for
   every present-path change.
@@ -397,7 +403,12 @@ that compiled something or took 33.4 ms or more; `skipped` (draws dropped by the
 (beginRecording, prepareDraw, resolvePso, flushVB, flushRes, flushDyn, encodeDraw, flushChunk,
 submit, syncWsi, endFrame; they nest) and counters: `psoMiss`, `psoKeyBuild`, `argRotate`,
 `abRebuild`, `chunkFlush`, `passClose` by cause, `evRead` (shared-event reads, each a unix call),
-`unsubWait` (waits on a serial not yet submitted, also as `PROF-UNSUB` lines).
+`unsubWait` (waits on a serial not yet submitted, also as `PROF-UNSUB` lines). At the end of the
+line (#127): `csExec` (ms the CS thread executed chunks; every other bucket nests in it, and the
+chunk that rolls the window over counts in the next window), `csChunks` and `csInject` (ordered and high-priority chunks executed),
+`csCmds`, `csKiB` (their commands and bytes), `csSleep` (times the CS thread found no work and
+waited, so the next chunk had to wake it), `allocWait` and `allocWaitMs` (`beginRecording`
+waiting for a command allocator because the in-flight cap was reached).
 
 **Others**: `RESTORE`/`RESTORE-SUMMARY` (attachment re-clears by image, aspect and reason;
 `driver/mtl/mtl_restore_stats.h`), `XFER` (StretchRect and ColorFill by path), `STATECACHE`

@@ -142,7 +142,7 @@ namespace dxvk {
     if (this_thread::isInModuleDetachment())
       return;
 
-    ExecuteFlush(true);
+    ExecuteFlush(stats::FlushOrigin::Other, true);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
     // Stops the prewarm and writes the file while shaders, the compiler and
@@ -458,7 +458,7 @@ namespace dxvk {
       return hr;
     }
 
-    ExecuteFlush(true);
+    ExecuteFlush(stats::FlushOrigin::Other, true);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
     if (m_d3d9Options.deferSurfaceCreation)
@@ -1035,7 +1035,7 @@ namespace dxvk {
     if (dstTexInfo->IsAutomaticMip() && dstMipLevels != dstTexInfo->Desc()->MipLevels)
       MarkTextureMipsDirty(dstTexInfo);
 
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Texture);
 
     return D3D_OK;
   }
@@ -1754,7 +1754,7 @@ namespace dxvk {
 
     ConsiderFlush(RenderTargetIndex == 0
       ? GpuFlushType::ImplicitStrongHint
-      : GpuFlushType::ImplicitWeakHint);
+      : GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::RenderTarget);
 
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
@@ -1833,7 +1833,7 @@ namespace dxvk {
     if (m_state.depthStencil == ds)
       return D3D_OK;
 
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::DepthStencil);
     m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
     // Metal's depthBias is in units of r like Vulkan's (measured on Apple GPUs:
@@ -1904,7 +1904,7 @@ namespace dxvk {
     if (unlikely(!m_inScene))
       return D3DERR_INVALIDCALL;
 
-    ConsiderFlush(GpuFlushType::ImplicitStrongHint, true);
+    ConsiderFlush(GpuFlushType::ImplicitStrongHint, stats::FlushOrigin::EndScene, true);
 
     m_inScene = false;
 
@@ -4833,15 +4833,15 @@ namespace dxvk {
 
     if (stagingBufferAllocated > m_stagingMemorySignaled + MaxMemoryPerSubmission) {
       if (stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight)
-        ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+        ConsiderFlush(GpuFlushType::ImplicitSynchronization, stats::FlushOrigin::Throttle);
       else
-        ExecuteFlush(false);
+        ExecuteFlush(stats::FlushOrigin::Throttle, false);
     }
 
     if (stagingBufferAllocated > MaxMemoryInFlight) {
       const uint64_t target = stagingBufferAllocated - MaxMemoryInFlight;
       if (m_stagingBufferFence->value() < target)
-        FlushIfCarried();
+        FlushIfCarried(stats::FlushOrigin::Throttle);
       if (unlikely(hitch::g_enabled) && m_stagingBufferFence->value() < target) {
         hitch::Scope hs(m_hitch, hitch::Throttle);
         m_stagingBufferFence->wait(target);
@@ -4885,13 +4885,13 @@ namespace dxvk {
         // poll could wait for a submit that only the end of the pass brings. Otherwise a hint,
         // as before (docs/g1-early-commit.md §4.5).
         if (m_dxvkDevice->carryOpen() && Resource.trackingSerial() >= m_dxvkDevice->getNextSerial())
-          ExecuteFlush(false);
+          ExecuteFlush(stats::FlushOrigin::Wait, false);
         else
-          ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+          ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Wait);
         return false;
       }
 
-      ExecuteFlush(false);
+      ExecuteFlush(stats::FlushOrigin::Wait, false);
       SynchronizeCsThread(SequenceNumber);
 
       { hitch::Scope hs(m_hitch, hitch::GpuWait);
@@ -5364,7 +5364,7 @@ namespace dxvk {
     }
     MarkTextureWritten(pDestTexture);
     UnmapTextures();
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Texture);
   }
 
 
@@ -5579,7 +5579,7 @@ namespace dxvk {
     TrackBufferMappingBufferSequenceNumber(pResource);
 
     UnmapTextures();
-    ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+    ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Buffer);
     return D3D_OK;
   }
 
@@ -5863,12 +5863,14 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType, bool AllowDefer) {
+  void D3D9DeviceEx::ConsiderFlush(GpuFlushType FlushType, stats::FlushOrigin Origin, bool AllowDefer) {
     uint64_t chunkId = GetCurrentSequenceNumber();
     uint64_t submissionId = m_submissionFence->value();
 
     if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId, 0u))
-      ExecuteFlush(false, AllowDefer);
+      ExecuteFlush(Origin, false, AllowDefer);
+    else if (unlikely(hitch::g_enabled))
+      m_flushCounts.noteRefused(Origin, FlushType > GetMaxFlushType());
   }
 
 
@@ -5948,8 +5950,13 @@ namespace dxvk {
       extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
                 : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
       const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
+      // Present has released the device lock by now; the flush counts are written under it.
+      stats::FlushCounts fc;
+      { D3D9DeviceLock lock = m_multithread.AcquireLock();
+        fc = m_flushCounts;
+      }
       const double t = m_statsWindow.seconds(nowNs);
-      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra) + hitch::stampSuffix(wallClockStamp()));
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc) + hitch::stampSuffix(wallClockStamp()));
       std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
@@ -6160,8 +6167,11 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ExecuteFlush(bool Synchronize9On12, bool Deferrable) {
+  void D3D9DeviceEx::ExecuteFlush(stats::FlushOrigin Origin, bool Synchronize9On12, bool Deferrable) {
     D3D9DeviceLock lock = LockDevice();
+
+    if (unlikely(hitch::g_enabled))
+      m_flushCounts.noteFlushed(Origin);
 
 
     m_stagingMemorySignaled = GetStagingMemoryStatistics().allocated;
@@ -6193,15 +6203,15 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::Flush() {
+  void D3D9DeviceEx::Flush(stats::FlushOrigin Origin) {
     D3D9DeviceLock lock = LockDevice();
-    ExecuteFlush(false);
+    ExecuteFlush(Origin, false);
   }
 
 
   void D3D9DeviceEx::FlushAndSync9On12() {
     D3D9DeviceLock lock = LockDevice();
-    ExecuteFlush(true);
+    ExecuteFlush(stats::FlushOrigin::Other, true);
   }
 
 
@@ -7911,10 +7921,10 @@ namespace dxvk {
     pQuery->NotifyEnd();
     if (unlikely(pQuery->IsEvent())) {
       pQuery->IsStalling()
-        ? ExecuteFlush(false)
-        : ConsiderFlush(GpuFlushType::ImplicitStrongHint);
+        ? ExecuteFlush(stats::FlushOrigin::Query, false)
+        : ConsiderFlush(GpuFlushType::ImplicitStrongHint, stats::FlushOrigin::Query);
     } else if (pQuery->IsStalling()) {
-      ConsiderFlush(GpuFlushType::ImplicitWeakHint);
+      ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Query);
     }
   }
 
@@ -9062,7 +9072,7 @@ namespace dxvk {
     if (FAILED(hr))
       return hr;
 
-    ExecuteFlush(false);
+    ExecuteFlush(stats::FlushOrigin::Other, false);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
     return D3D_OK;

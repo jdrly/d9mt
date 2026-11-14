@@ -4,6 +4,8 @@
 #include "../util/util_error.h"
 #include "../util/log/log.h"
 
+#include "../backend/mtl_profiler_scope.h"
+
 namespace dxvk {
 
   DxvkCsChunk::DxvkCsChunk() {
@@ -196,6 +198,7 @@ namespace dxvk {
           };
 
           if (unlikely(!pred())) {
+            backend::prof::bump(backend::prof::CntCsSleep);
             m_condOnAdd.wait(lock, [&] {
               return pred();
             });
@@ -224,7 +227,14 @@ namespace dxvk {
           bool isHighPrio = highPrioIndex < highPrio.size();
           auto& entry = isHighPrio ? highPrio[highPrioIndex++] : ordered[orderedIndex++];
 
-          entry.chunk->executeAll(m_context.ptr());
+          if (unlikely(backend::prof::g_profEnabled))
+            backend::prof::countCsChunk(isHighPrio, entry.chunk->commandCount(), entry.chunk->byteCount());
+
+          // D9MT_PROFILE: PROF csExec. Per chunk, so the chunk that rolls PROF's window over
+          // is the only time that lands in the next window.
+          { backend::prof::Scope execScope(backend::prof::CsExec);
+            entry.chunk->executeAll(m_context.ptr());
+          }
 
           if (entry.seq) {
             std::lock_guard lock(m_counterMutex);

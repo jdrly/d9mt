@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -44,6 +45,10 @@ int main(int argc, char** argv) {
     CHECK(!cheap_clock::process().tsc && cheap_clock::process().nsPerTick == 1.0);
     { FakeScope scope(prof::Submit); FakeClock::t += 100u; }
     CHECK(prof::g_ticks[prof::Submit] == 0u);
+    // Counters (d9mt #127) don't count either.
+    prof::bump(prof::CntCsSleep);
+    prof::countCsChunk(false, 10u, 4096u);
+    for (uint64_t c : prof::g_counts) CHECK(c == 0u);
     if (g_fail) return 1;
     setenv("D9MT_PROFILE", "1", 1);
     execv(argv[0], argv);
@@ -252,6 +257,55 @@ int main(int argc, char** argv) {
     prof::g_ticks[prof::EndFrame] = 3000000u;
     for (uint32_t f = 1u; f < prof::kWindowFrames; f++) prof::takeWindow(cheap_clock::Calibration(), ms);
     CHECK(prof::takeWindow(cheap_clock::Calibration(), ms) && near(ms[prof::EndFrame], 3.0, 1e-12));
+  }
+
+  { // CS transport and allocator waits (d9mt #127): classification, the window, the line's end.
+    for (uint64_t& c : prof::g_counts) c = 0u;
+    prof::countCsChunk(false, 120u, 16000u);                // ordered chunks
+    prof::countCsChunk(false, 80u, 9000u);
+    prof::countCsChunk(true, 2u, 192u);                     // a high-priority (injected) one
+    prof::bump(prof::CntCsSleep, 3u);
+    prof::bump(prof::CntAllocWait);
+    CHECK(prof::g_counts[prof::CntCsChunk] == 2u && prof::g_counts[prof::CntCsInject] == 1u);
+    CHECK(prof::g_counts[prof::CntCsCmd] == 202u && prof::g_counts[prof::CntCsBytes] == 25192u);
+    CHECK(prof::g_counts[prof::CntCsSleep] == 3u && prof::g_counts[prof::CntAllocWait] == 1u);
+    CHECK(prof::g_counts[prof::CntDraws] == 0u);            // nothing else moves
+
+    // The CS thread's execution and the allocator wait are buckets like the others.
+    for (uint64_t& t : prof::g_ticks) t = 0u;
+    FakeClock::t = 0u;
+    { FakeScope exec(prof::CsExec);
+      FakeClock::t += 1000u;
+      { FakeScope wait(prof::AllocWait); FakeClock::t += 250u; }
+    }
+    CHECK(prof::g_ticks[prof::CsExec] == 1250u && prof::g_ticks[prof::AllocWait] == 250u);
+
+    // Counts survive until the window rolls over, then are taken once and reset.
+    cheap_clock::Calibration cal = cheap_clock::fromSamples(0u, 0u, 10000000u, 4000000u); // 0.4 ns/tick
+    prof::g_ticks[prof::CsExec]    = 640000000u;            // 256 ms: 1 ms a frame
+    prof::g_ticks[prof::AllocWait] = 6400000u;              // 2.56 ms
+    prof::g_frames = 0u;
+    double ms[prof::BucketCount] = {};
+    for (uint32_t f = 1u; f < prof::kWindowFrames; f++)
+      CHECK(!prof::takeWindow(cal, ms));
+    CHECK(prof::g_counts[prof::CntCsChunk] == 2u);
+    CHECK(prof::takeWindow(cal, ms));
+    uint64_t c[prof::CounterCount];
+    prof::takeCounts(c);
+    for (uint64_t v : prof::g_counts) CHECK(v == 0u);
+    CHECK(c[prof::CntCsChunk] == 2u && c[prof::CntCsCmd] == 202u);
+    std::string line = prof::formatCsTransport(ms, c);
+    std::printf("%s\n", line.c_str());
+    CHECK(line == " | csExec=256.000(1.000) csChunks=2(0.01/f) csInject=1(0.00/f) csCmds=202(0.8/f)"
+                  " csKiB=24.6(0.1/f) csSleep=3(0.01/f) | allocWait=1(0.00/f) allocWaitMs=2.560(0.010)");
+
+    // The next window holds only what happened in it.
+    prof::countCsChunk(false, 1u, 1024u);
+    for (uint32_t f = 1u; f <= prof::kWindowFrames; f++) prof::takeWindow(cal, ms);
+    prof::takeCounts(c);
+    line = prof::formatCsTransport(ms, c);
+    CHECK(line == " | csExec=0.000(0.000) csChunks=1(0.00/f) csInject=0(0.00/f) csCmds=1(0.0/f)"
+                  " csKiB=1.0(0.0/f) csSleep=0(0.00/f) | allocWait=0(0.00/f) allocWaitMs=0.000(0.000)");
   }
 
   { // The real clock: one calibration for the process, matching the build's architecture.

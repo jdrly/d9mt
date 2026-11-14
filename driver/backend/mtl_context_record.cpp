@@ -252,6 +252,8 @@ namespace dxvk::backend {
       slot = m_allocatorCursor % n;
       if (slot == m_allocatorSlot)
         slot = (slot + 1u) % n;
+      prof::bump(prof::CntAllocWait);
+      prof::Scope waitScope(prof::AllocWait);
       m_device->submissions().waitFor(m_allocatorSerial[slot]);
     }
     if (!fresh) {

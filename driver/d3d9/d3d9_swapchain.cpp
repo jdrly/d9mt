@@ -454,7 +454,7 @@ namespace dxvk {
 
   HRESULT D3D9SwapChainEx::PresentImageGDI(HWND Window) {
     m_parent->EndFrame(nullptr);
-    m_parent->Flush();
+    m_parent->Flush(stats::FlushOrigin::Present);
 
     if (!std::exchange(m_warnedAboutGDIFallback, true))
       Logger::warn("Using GDI for swapchain presentation. This will impact performance.");
@@ -903,7 +903,7 @@ namespace dxvk {
     // Before the flush below ends the pass that may still render into it.
     m_parent->DiscardAutoDepthStencilAtPresent();
     m_parent->EndFrame(m_latencyTracker);
-    m_parent->Flush();
+    m_parent->Flush(stats::FlushOrigin::Present);
 
     Rc<MtlTexture>     swapImage     = m_backBuffers[0]->GetCommonTexture()->GetImage();
     Rc<MtlTextureView> swapImageView = m_backBuffers[0]->GetCommonTexture()->GetSampleView(false);
