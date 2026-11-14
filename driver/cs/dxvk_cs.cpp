@@ -4,6 +4,8 @@
 #include "../util/util_error.h"
 #include "../util/log/log.h"
 
+#include "../backend/mtl_profiler_scope.h"
+
 namespace dxvk {
 
   DxvkCsChunk::DxvkCsChunk() {
@@ -196,6 +198,7 @@ namespace dxvk {
           };
 
           if (unlikely(!pred())) {
+            backend::prof::bump(backend::prof::CntCsSleep);
             m_condOnAdd.wait(lock, [&] {
               return pred();
             });
@@ -206,6 +209,9 @@ namespace dxvk {
 
           m_hasHighPrio.store(false);
         }
+
+        // D9MT_PROFILE: from here to the next wait, the CS thread executes (PROF csExec).
+        backend::prof::Scope execScope(backend::prof::CsExec);
 
         size_t orderedIndex = 0u;
         size_t highPrioIndex = 0u;
@@ -223,6 +229,9 @@ namespace dxvk {
 
           bool isHighPrio = highPrioIndex < highPrio.size();
           auto& entry = isHighPrio ? highPrio[highPrioIndex++] : ordered[orderedIndex++];
+
+          if (unlikely(backend::prof::g_profEnabled))
+            backend::prof::countCsChunk(isHighPrio, entry.chunk->commandCount(), entry.chunk->byteCount());
 
           entry.chunk->executeAll(m_context.ptr());
 

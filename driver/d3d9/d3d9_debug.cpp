@@ -665,7 +665,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::DebugSyncQuery() {
-    Flush();
+    Flush(stats::FlushOrigin::Other);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
   }
 

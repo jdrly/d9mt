@@ -138,6 +138,18 @@ namespace dxvk {
       return m_commandOffset == 0;
     }
 
+    // D9MT_PROFILE only (PROF csCmds, csKiB): walks the command list.
+    size_t commandCount() const {
+      size_t n = 0u;
+      for (const DxvkCsCmd* cmd = m_head; cmd != nullptr; cmd = cmd->next())
+        n++;
+      return n;
+    }
+
+    size_t byteCount() const {
+      return m_commandOffset;
+    }
+
     template<typename T>
     bool push(T& command) {
       using FuncType = DxvkCsTypedCmd<T>;

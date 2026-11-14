@@ -7,7 +7,9 @@
 //     cb=13.0 draws=1520 | ld=12.1 clr=9.0 ldDc=4.0 st=15.2 stDc=6.0 rsv=0.0
 //     restore=0.0 savedMiB=231.4 attMs=1.3 clrFold=6.0 clrPass=1.0 | sh=0 pso=0 wait=0/0.0ms
 //     | allocMiB=5210 att=on | split=8.0 splitSubmit=6.0 splitXfer=0.0 splitClear=2.0 splitMiB=420.1
-//     carried=0.0 carryRefused=0.0 carryCap=0.0
+//     carried=0.0 carryRefused=0.0 carryCap=0.0 | flushChunk=3.0/21.0 flushRt=1.0/4.0
+//     flushDs=0.0/1.0 flushEndScene=1.0/0.0 flushTex=0.0/2.0 flushBuf=0.0/5.0 flushThrottle=0.0/0.0
+//     flushWait=0.0/0.0 flushQuery=0.0/0.0 flushPresent=1.0/0.0 flushOther=0.0/0.0 flushCapped=0.0
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -45,6 +47,20 @@
 //               carryRefused: ... that the backlog gate refused (the GPU had caught up);
 //               carryCap: ... that ended it after the per-serial cap. cb= includes the
 //               prefix commits of carried flushes.
+//   flush<Origin>=flushed/refused   per Present (app thread, d9mt #127): the front end's
+//               flush requests by why it asked (FlushOrigin below). Chunk: a CS chunk filled
+//               up; Rt: SetRenderTarget; Ds: SetDepthStencilSurface; EndScene; Tex: a texture
+//               upload (unlock, managed at draw, UpdateSurface, UpdateTexture); Buf: a buffer
+//               upload (unlock, managed at draw); Throttle: the staging memory throttle; Wait:
+//               WaitForResource (a DONOTWAIT poll or a blocking wait); Query: a query's End or
+//               GetData; Present; Other: reset, creation, destruction, the debug query sync.
+//               flushed: requests that flushed (forced, or accepted by GpuFlushTracker; a
+//               deferrable one may then be carried, see carried=). refused: requests the
+//               tracker turned down (too few CS chunks since the last flush for the request's
+//               type and the submissions still pending).
+//   flushCapped of the refused, those above the flush cap (D9MT_FLUSH_CAP,
+//               d3d9.reproducibleCommandStream), which never flush. The tracker's
+//               estimated-cost escape never fires: d9mt passes it no cost.
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -76,6 +92,42 @@ namespace dxvk::stats {
     const char* att        = "on";
   };
 
+  // Why the front end asked for a flush (a command buffer submit): the STATS flush<Origin>=
+  // fields (d9mt #127).
+  enum class FlushOrigin : uint32_t {
+    ChunkFull = 0,  // a CS chunk filled up (EmitCs, a weak hint)
+    RenderTarget,   // SetRenderTarget (strong for RT 0, weak otherwise)
+    DepthStencil,   // SetDepthStencilSurface (weak)
+    EndScene,       // EndScene (strong, deferrable)
+    Texture,        // a texture upload: unlock, managed at draw, UpdateSurface, UpdateTexture (weak)
+    Buffer,         // a buffer upload: unlock, or a managed buffer at draw (weak)
+    Throttle,       // staging memory throttle (synchronization, or forced past the in-flight limit)
+    Wait,           // WaitForResource: a D3DLOCK_DONOTWAIT poll (weak) or a blocking wait (forced)
+    Query,          // a query's End (event) or GetData (synchronization, or forced)
+    Present,        // Present (forced)
+    Other,          // device reset, creation and destruction, the debug query sync (forced)
+    Count
+  };
+
+  // The front end's flush requests by origin: those that flushed (forced, or accepted by
+  // GpuFlushTracker) and those the tracker refused; of the refused, those whose type is above
+  // the cap (D9MT_FLUSH_CAP, d3d9.reproducibleCommandStream), which never flush. Counted by the
+  // app thread under the device lock, totals since the device was created.
+  struct FlushCounts {
+    uint64_t flushed[uint32_t(FlushOrigin::Count)] = { };
+    uint64_t refused[uint32_t(FlushOrigin::Count)] = { };
+    uint64_t capped = 0u;
+
+    void noteFlushed(FlushOrigin o) {
+      flushed[uint32_t(o)]++;
+    }
+
+    void noteRefused(FlushOrigin o, bool aboveCap) {
+      refused[uint32_t(o)]++;
+      capped += aboveCap ? 1u : 0u;
+    }
+  };
+
   class Window {
 
   public:
@@ -99,7 +151,8 @@ namespace dxvk::stats {
     }
 
     // The line for the window that ends now; starts the next window.
-    std::string take(uint64_t nowNs, const rstats::Snapshot& rs, const CompileTotals& ct, const Extra& extra) {
+    std::string take(uint64_t nowNs, const rstats::Snapshot& rs, const CompileTotals& ct, const Extra& extra,
+                     const FlushCounts& fc) {
       const double winS = double(nowNs - m_winStartNs) * 1e-9;
       const size_t n = m_dts.size();
 
@@ -150,11 +203,26 @@ namespace dxvk::stats {
         double(d[rstats::SplitBytes]) / rf / double(1u << 20),
         pf(rstats::FlushesCarried), pf(rstats::CarryRefused), pf(rstats::CarryCapped));
 
+      // Front-end flush requests per Present of the window: flushed/refused by origin.
+      static constexpr const char* kOrigins[uint32_t(FlushOrigin::Count)] = {
+        "Chunk", "Rt", "Ds", "EndScene", "Tex", "Buf", "Throttle", "Wait", "Query", "Present", "Other"
+      };
+      const double pn = n ? double(n) : 1.0;
+      std::string line = buf;
+      for (uint32_t i = 0u; i < uint32_t(FlushOrigin::Count); i++) {
+        std::snprintf(buf, sizeof(buf), "%s flush%s=%.1f/%.1f", i ? "" : " |", kOrigins[i],
+          double(fc.flushed[i] - m_fc.flushed[i]) / pn, double(fc.refused[i] - m_fc.refused[i]) / pn);
+        line += buf;
+      }
+      std::snprintf(buf, sizeof(buf), " flushCapped=%.1f", double(fc.capped - m_fc.capped) / pn);
+      line += buf;
+
       m_rs = rs;
       m_ct = ct;
+      m_fc = fc;
       m_winStartNs = nowNs;
       m_dts.clear();
-      return buf;
+      return line;
     }
 
   private:
@@ -165,6 +233,7 @@ namespace dxvk::stats {
     std::vector<float> m_dts;
     rstats::Snapshot   m_rs;
     CompileTotals      m_ct;
+    FlushCounts        m_fc;
 
   };
 
