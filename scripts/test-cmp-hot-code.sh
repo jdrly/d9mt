@@ -12,6 +12,7 @@
 #   trap      a nop inside hot::step becomes int3: `changed` (padding is dropped, a trap isn't)
 #   lea       a lea of a register into itself (padding) writes another register: `changed`
 #   lea32     (x64) that lea at 32 bits, which clears the upper half: `changed`
+#   tailtrap  tailfn's last instruction, a branch target, turns from nop into int3: `changed`
 # CXX64 and CXX32 name the compilers (default x86_64-w64-mingw32-g++, i686-w64-mingw32-g++).
 set -euo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
@@ -78,8 +79,15 @@ NI int step(int x) {
 NI int caller(int x) { return step(x) + twice(x); }
 }
 extern "C" __declspec(dllexport) int entry(int x) { return hot::caller(x) + leaf(x); }
+// a function whose last instruction is reached only by its branch
+#if VARIANT == 9
+#define TAIL "int3"
+#else
+#define TAIL "nop"
+#endif
+asm(".text\n.globl tailfn\ntailfn:\n test %ecx,%ecx\n jz 1f\n ret\n1:\n " TAIL "\n.globl tailnext\ntailnext:\n ret\n");
 EOF
-printf '%s\n' '# the functions under test' hot::step hot::caller leaf > "$T/list.txt"
+printf '%s\n' '# the functions under test' hot::step hot::caller leaf tailfn > "$T/list.txt"
 
 fails=0
 check() {  # <arch> <variant> <expected: function=result[|result] ...>
@@ -87,7 +95,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
   out=$("$V2/scripts/cmp-hot-code.sh" "$T/list.txt" "$T/$arch-0.dll" "$T/$arch-$variant.dll") \
     || { echo "FAIL $arch $variant: cmp-hot-code.sh failed"; fails=$((fails + 1)); return; }
   # one line per listed function: the lambda inside hot::step has no line of its own
-  if [ "$(wc -l <<< "$out")" -ne 4 ]; then   # a number: macOS pads wc's output
+  if [ "$(wc -l <<< "$out")" -ne 5 ]; then   # a number: macOS pads wc's output
     echo "FAIL $arch $variant: not one line per function"; echo "$out"; fails=$((fails + 1))
   fi
   for e in "$@"; do
@@ -99,7 +107,7 @@ check() {  # <arch> <variant> <expected: function=result[|result] ...>
 }
 for arch in x64 i686; do
   if [ "$arch" = x64 ]; then cxx=${CXX64:-x86_64-w64-mingw32-g++}; else cxx=${CXX32:-i686-w64-mingw32-g++}; fi
-  for v in 0 1 2 3 4 5 6 7 8; do
+  for v in 0 1 2 3 4 5 6 7 8 9; do
     "$cxx" -O2 -g -shared -DVARIANT=$v "$T/hot.cpp" -o "$T/$arch-$v.dll"
   done
   check "$arch" 0 hot::step=same hot::caller=same leaf=same
@@ -111,6 +119,7 @@ for arch in x64 i686; do
   check "$arch" 6 hot::step=changed
   check "$arch" 7 hot::step=changed
   if [ "$arch" = x64 ]; then check "$arch" 8 hot::step=changed; fi
+  check "$arch" 9 tailfn=changed hot::step="same|moved only"
 done
 # a name that matches nothing is an error, not an empty table
 printf '%s\n' hot::nothing > "$T/none.txt"
