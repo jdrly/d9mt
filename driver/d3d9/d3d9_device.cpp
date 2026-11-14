@@ -5950,8 +5950,13 @@ namespace dxvk {
       extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
                 : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
       const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
+      // Present has released the device lock by now; the flush counts are written under it.
+      stats::FlushCounts fc;
+      { D3D9DeviceLock lock = m_multithread.AcquireLock();
+        fc = m_flushCounts;
+      }
       const double t = m_statsWindow.seconds(nowNs);
-      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, m_flushCounts) + hitch::stampSuffix(wallClockStamp()));
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc) + hitch::stampSuffix(wallClockStamp()));
       std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())

@@ -112,7 +112,8 @@ namespace dxvk::stats {
   // The front end's flush requests by origin: those that flushed (forced, or accepted by
   // GpuFlushTracker) and those the tracker refused; of the refused, those whose type is above
   // the cap (D9MT_FLUSH_CAP, d3d9.reproducibleCommandStream), which never flush. Counted by the
-  // app thread under the device lock, totals since the device was created.
+  // app thread under the device lock and copied under it for STATS; totals since the device was
+  // created.
   struct FlushCounts {
     uint64_t flushed[uint32_t(FlushOrigin::Count)] = { };
     uint64_t refused[uint32_t(FlushOrigin::Count)] = { };
