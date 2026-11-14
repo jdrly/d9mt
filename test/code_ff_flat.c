@@ -5,7 +5,11 @@
  *                 draws: fixed-function triangle-strip UP draws), 4 triangles each;
  *   band 2, FLAT: the same, indexed (DrawIndexedPrimitiveUP);
  *   band 3, FLAT: line list and line strip, 4 segments each;
- *   band 4, GOURAUD: the band 1 triangles again (their frames must hash as base).
+ *   band 4, GOURAUD: the band 1 triangles again (their frames must hash as base);
+ *   band 5, GOURAUD: indexed fans from index buffers (DrawIndexedPrimitive), 4 triangles each:
+ *                 16-bit DEFAULT, 32-bit MANAGED and 16-bit SYSTEMMEM DYNAMIC, each with a base
+ *                 vertex, a start index past indices that point at a stray vertex, and its
+ *                 vertices stored in reverse (hub = index 5).
  * Oracle, read back from the first frame before it's presented, one probe pixel per primitive
  * (a triangle's centroid, a horizontal segment's midpoint):
  *   - FLAT: exactly D3D9's provoking vertex colour: the first vertex of each list or strip
@@ -13,11 +17,9 @@
  *   - FLAT, triangle fans (indexed or not): Gouraud by design until the fan index rotation lands
  *     (#170): the mean of the triangle's vertex colours, within 12 (the probe is a pixel, not the
  *     exact centroid). When #170 lands, non-indexed fans expect vertex t+1 of triangle t;
- *   - the indexed fan's probes are printed and counted but don't decide PASS or FAIL (issue #187):
- *     d9mt has no index remap for fans and draws an indexed fan's indices as a triangle list
- *     ("MtlContextImpl: indexed triangle fan drawn as list (index remap unimplemented)",
- *     mtl_context_record.cpp). The six indices give fan triangle 0 and a degenerate triangle, so
- *     1 of 4 probes is right, on base too. The case gates again once #187 is fixed;
+ *   - indexed fans (band 2's "indexed fan", band 5's "ib fan"): the mean, within 12. Before #187
+ *     d9mt drew an indexed fan's indices as a triangle list: fan triangle 0 and another one, so
+ *     1 of 4 probes was right;
  *   - GOURAUD: the mean, within 12.
  * Prints "code_ff_flat <case>: <ok>/<n>" per case and "code_ff_flat: PASS" or "code_ff_flat: FAIL"
  * once. On base (the FF FS ignored flat) the FLAT list, strip and line cases fail; that run is part
@@ -127,6 +129,59 @@ static void lines(float x0, float y0, int record) {
   IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_LINESTRIP, 4, v, sizeof(v[0]));
 }
 
+/* band 5: one vertex buffer, three index buffers (see the header) */
+static IDirect3DVertexBuffer9 *g_vb;
+static IDirect3DIndexBuffer9 *g_ib[3];
+static const int g_base[3] = { 1, 8, 15 }, g_start[3] = { 2, 1, 3 };
+static struct V g_ibv[22];
+
+static int ib_fans_setup(void) {
+  static const D3DFORMAT fmt[3] = { D3DFMT_INDEX16, D3DFMT_INDEX32, D3DFMT_INDEX16 };
+  static const D3DPOOL pool[3] = { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM };
+  static const DWORD usage[3] = { D3DUSAGE_WRITEONLY, 0, D3DUSAGE_DYNAMIC };
+  const struct V stray = { 630.0f, 470.0f, 0.5f, 1.0f, 0 };   /* every unused vertex */
+  void *p;
+  for (int i = 0; i < 22; i++) g_ibv[i] = stray;
+  for (int f = 0; f < 3; f++) {
+    const float x0 = 20.0f + 210.0f * f, y0 = 400.0f;
+    for (int k = 0; k < 6; k++) {   /* fan vertex k at base + 5 - k: hub 0, rim 1..5 */
+      struct V v = { k ? x0 + 45.0f * (k - 1) : x0 + 90.0f, k ? y0 : y0 + 64.0f, 0.5f, 1.0f, color_of(100 + 6 * f + k) };
+      g_ibv[g_base[f] + 5 - k] = v;
+    }
+    DWORD ix[9];
+    int n = 0;
+    for (int j = 0; j < g_start[f]; j++) ix[n++] = 6;   /* skipped: the stray vertex */
+    for (int k = 0; k < 6; k++) ix[n++] = 5 - k;
+    const int size = fmt[f] == D3DFMT_INDEX16 ? 2 : 4;
+    if (FAILED(IDirect3DDevice9_CreateIndexBuffer(dev, n * size, usage[f], fmt[f], pool[f], &g_ib[f], NULL))
+     || FAILED(IDirect3DIndexBuffer9_Lock(g_ib[f], 0, 0, &p, 0)))
+      return 0;
+    for (int j = 0; j < n; j++) {
+      if (size == 2) ((WORD *)p)[j] = (WORD)ix[j];
+      else ((DWORD *)p)[j] = ix[j];
+    }
+    IDirect3DIndexBuffer9_Unlock(g_ib[f]);
+  }
+  if (FAILED(IDirect3DDevice9_CreateVertexBuffer(dev, sizeof(g_ibv), 0, FVF, D3DPOOL_MANAGED, &g_vb, NULL))
+   || FAILED(IDirect3DVertexBuffer9_Lock(g_vb, 0, 0, &p, 0)))
+    return 0;
+  memcpy(p, g_ibv, sizeof(g_ibv));
+  IDirect3DVertexBuffer9_Unlock(g_vb);
+  return 1;
+}
+
+static void ib_fans(int record) {
+  IDirect3DDevice9_SetStreamSource(dev, 0, g_vb, 0, sizeof(struct V));
+  for (int f = 0; f < 3; f++) {
+    const struct V *v = &g_ibv[g_base[f]];   /* fan vertex k is v[5 - k] */
+    if (record)
+      for (int t = 0; t < 4; t++) probe_tri("ib fan", &v[5], &v[4 - t], &v[3 - t], &v[4 - t], 1);
+    IDirect3DDevice9_SetIndices(dev, g_ib[f]);
+    IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLEFAN, g_base[f], 0, 7, g_start[f], 4);
+  }
+  IDirect3DDevice9_SetIndices(dev, NULL);
+}
+
 static void scene(int record) {
   g_vertex = 0;
   IDirect3DDevice9_SetRenderState(dev, D3DRS_SHADEMODE, D3DSHADE_FLAT);
@@ -135,6 +190,7 @@ static void scene(int record) {
   lines(20, 220, record);
   IDirect3DDevice9_SetRenderState(dev, D3DRS_SHADEMODE, D3DSHADE_GOURAUD);
   triangles(20, 320, 0, 0, record);
+  ib_fans(record);
 }
 
 static int close_enough(DWORD a, DWORD b, int tol) {
@@ -154,10 +210,9 @@ static void check(void) {
     return;
   }
   static const char *cases[] = { "list", "strip", "fan", "indexed list", "indexed strip", "indexed fan",
-                                 "line list", "line strip", "gouraud" };
+                                 "line list", "line strip", "gouraud", "ib fan" };
   int all = 1;
-  for (int c = 0; c < 9; c++) {
-    const int gated = strcmp(cases[c], "indexed fan") != 0;   /* #187: drawn as a list until it is fixed */
+  for (int c = 0; c < 10; c++) {
     int n = 0, ok = 0;
     for (int i = 0; i < nprobe; i++) {
       if (strcmp(probe_case[i], cases[c])) continue;
@@ -167,9 +222,8 @@ static void check(void) {
       if (!good) printf("  %s probe (%d,%d): want %08lx got %08lx\n", cases[c], probes[i].x, probes[i].y,
                         (unsigned long)probes[i].want, (unsigned long)got);
     }
-    printf("code_ff_flat %s: %d/%d%s\n", cases[c], ok, n,
-           gated ? "" : " (reported, not gated: d9mt draws an indexed fan as a triangle list, issue #187)");
-    all &= n > 0 && (ok == n || !gated);
+    printf("code_ff_flat %s: %d/%d\n", cases[c], ok, n);
+    all &= n > 0 && ok == n;
   }
   printf("code_ff_flat: %s\n", all ? "PASS" : "FAIL");
   IDirect3DSurface9_UnlockRect(sys);
@@ -208,6 +262,10 @@ int main(void) {
   IDirect3DDevice9_SetRenderState(dev, D3DRS_LIGHTING, FALSE);
   IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
   IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, FALSE);
+  if (!ib_fans_setup()) {
+    printf("code_ff_flat: FAIL (index or vertex buffer setup)\n");
+    return 1;
+  }
 
   int frames = 0;
   MSG msg;
@@ -229,6 +287,8 @@ int main(void) {
     if (++frames == 3) printf("3 frames\n");
   }
 done:
+  for (int f = 0; f < 3; f++) IDirect3DIndexBuffer9_Release(g_ib[f]);
+  IDirect3DVertexBuffer9_Release(g_vb);
   IDirect3DDevice9_Release(dev);
   IDirect3D9_Release(d3d);
   return 0;

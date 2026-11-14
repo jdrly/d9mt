@@ -38,6 +38,7 @@ host conditions_duplicate_operand_test -O1 -I third_party/dxbc-spirv test/native
 host conditions_signed_zero_test -O1 -I third_party/dxbc-spirv test/native/conditions_signed_zero_test.cpp \
   third_party/dxbc-spirv/ir/*.cpp third_party/dxbc-spirv/ir/passes/*.cpp third_party/dxbc-spirv/util/*.cpp
 host draw_bounds_test -g -fsanitize=address,undefined -fno-sanitize-recover=all -I driver/backend test/native/draw_bounds_test.cpp
+host fan_indices_test -g -fsanitize=address,undefined -fno-sanitize-recover=all -I driver/d3d9 test/native/fan_indices_test.cpp
 host fenced_pool_test -I driver/util test/native/fenced_pool_test.cpp
 host fill_mode_test -I driver/backend test/native/fill_mode_test.cpp
 host frame_cap_test -I driver/d3d9 test/native/frame_cap_test.cpp
