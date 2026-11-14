@@ -16,6 +16,10 @@
  *   7 non-indexed triangle list   0
  *   8 the reorder pair            0
  *
+ * Draw 2 changed the frames with #187. Before it, d9mt drew that indexed fan's four indices as a
+ * triangle list, so only 1 of its 2 triangles, and the checks below never looked at the missing
+ * one.
+ *
  * D9MT_FLAT_CHECK=1 logs "D9MT-FLAT-DRAW topo=<D3DPT> indexed=<0|1> effective=<0|1> ps=sm
  * psflat=<0|1>" per draw (expected, frame 1: 1/1, 0/0, 0/0, 1/1, 1/0, 1/1, 0/0, 0/0) and one
  * "D9MT-FLAT-CHECK <ps> <flat|gouraud> <prev reconciled=0|1|standalone> ok (...)" per PS
