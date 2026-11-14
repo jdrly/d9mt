@@ -162,6 +162,11 @@ D9MT_FPS_CAP=0 ENGINE=<Wine engine root> WORK=<scratch dir> scripts/perf-abba.sh
 - For a virtual display, build the benches with `BENCH_INCLUDE=<header>` and wrap the whole
   `perf-abba.sh` call in the display tool (`scripts/build-benches.sh`, `scripts/perf-abba.sh`).
   A virtual display can vanish when the physical display is forced to sleep during a run (#43).
+- `ci/gpu/run.sh bench` ([docs/testing.md](docs/testing.md)) runs this harness for base against
+  head on `bench_draws` and `bindbench`, and beside it the two exact parts: every counter of
+  `bench_draws` with `D9MT_PROFILE=1` (`counters.tsv`), and the code of the hot-path functions of
+  `ci/gpu/hot-functions.txt` (`hot-code.tsv`, x64 and i686). A change that claims to leave the
+  profile-off paths alone cites that table. Its exit status never depends on a timing.
 
 #### Through the maintainer's job runner (`job Q`)
 

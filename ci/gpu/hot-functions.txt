@@ -1,0 +1,14 @@
+# The functions ci/gpu/run.sh bench compares between base and head (scripts/cmp-hot-code.sh):
+# the per-draw path of the D3D9 front end, the CS thread and the backend (bench_draws draws with
+# DrawPrimitive, games mostly with DrawIndexedPrimitive).
+dxvk::D3D9DeviceEx::DrawPrimitive
+dxvk::D3D9DeviceEx::DrawIndexedPrimitive
+dxvk::D3D9DeviceEx::PrepareDraw
+dxvk::D3D9DeviceEx::SetStreamSource
+dxvk::D3D9DeviceEx::SetIndices
+dxvk::D3D9DeviceEx::EmitCsChunk
+dxvk::backend::MtlContextImpl::draw
+dxvk::backend::MtlContextImpl::drawIndexed
+dxvk::backend::MtlContextImpl::prepareDraw
+dxvk::backend::MtlContextImpl::flushCmdChunk
+dxvk::DxvkCsThread::threadFunc
