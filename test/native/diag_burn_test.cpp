@@ -4,15 +4,16 @@
 // -arch x86_64 (Rosetta: the TSC). It re-runs itself with D9MT_PROFILE=1, which calibrates the
 // TSC on x86, so the tick conversion is tested with a real calibration too.
 //
-// The burn's length must be within 10 % of n twice: the median wall time of 101 runs, and the
-// process CPU time over those runs divided by 101. Two stubs run through the same check and must
-// fail it: one that returns at once, and one that sleeps for n (right wall time, no CPU time).
+// The burn's length must be within 10 % of n twice: the median wall time of 101 runs, and their
+// median process CPU time, each less the same median for an empty burn. Two stubs run through the
+// same check and must fail it: one that returns at once, and one that sleeps for n (right wall
+// time, no CPU time).
 //
 // Process CPU, not the thread's: under Rosetta on GitHub's virtual M1, CLOCK_THREAD_CPUTIME_ID
 // reads 2 % of a pure ALU loop, while process CPU (and getrusage) reads all of it (#199's probe).
-// The test has one thread, and process CPU is what the speed guard reads. It counts Rosetta's own
-// threads too: before each measurement 10 untimed burns take the one-time translation out (on the
-// hosted runner the first 101 runs of 50 us once read 55.3 us of CPU each).
+// The test has one thread, and process CPU is what the speed guard reads. Medians, because the
+// hosted VM's CPU time jumps now and then (a mean read 167 us for a 100 us burn on arm64), and
+// 10 untimed burns first, because process CPU counts Rosetta's one-time translation.
 #include "d3d9_diag_burn.h"
 
 #include <algorithm>
@@ -44,28 +45,38 @@ static bool within10(double v, double n) {
   return v >= n * 0.9 && v <= n * 1.1;
 }
 
-// The median wall time of `burn(ticksFromUs(us))` and its mean process CPU time, and whether both
-// are within 10 % of us. Only the wall clock is read between runs: a CPU clock read can cost
-// microseconds (Rosetta), which a per-run CPU time would count.
+struct Sample { double wall, cpu; };
+
+// The median wall and process CPU time of `burn(ticks)` over 101 runs, after 10 untimed ones.
+template<typename Burn>
+static Sample measure(Burn burn, uint64_t ticks) {
+  constexpr int kRuns = 101;
+  std::vector<double> wall(kRuns), cpu(kRuns);
+  for (int i = 0; i < 10; i++)
+    burn(ticks);
+  for (int i = 0; i < kRuns; i++) {
+    const double c0 = cpuUs(), w0 = wallUs();
+    burn(ticks);
+    const double w1 = wallUs(), c1 = cpuUs();
+    wall[i] = w1 - w0;
+    cpu[i]  = c1 - c0;
+  }
+  std::sort(wall.begin(), wall.end());
+  std::sort(cpu.begin(), cpu.end());
+  return { wall[kRuns / 2], cpu[kRuns / 2] };
+}
+
+// The burn's wall and CPU time, less the same measurement of an empty burn (a CPU clock read can
+// cost microseconds under Rosetta), and whether both are within 10 % of us.
 template<typename Burn>
 static bool burnsUs(const char* name, Burn burn, uint32_t us) {
   const uint64_t ticks = diagburn::ticksFromUs(us);
-  constexpr int kRuns = 101;
-  std::vector<double> wall(kRuns);
-  for (int i = 0; i < 10; i++)
-    burn(ticks);
-  const double c0 = cpuUs();
-  for (int i = 0; i < kRuns; i++) {
-    const double w0 = wallUs();
-    burn(ticks);
-    wall[i] = wallUs() - w0;
-  }
-  const double c = (cpuUs() - c0) / kRuns;
-  std::sort(wall.begin(), wall.end());
-  const double w = wall[kRuns / 2];
+  const Sample base = measure([] (uint64_t) { }, 0u);
+  const Sample s    = measure(burn, ticks);
+  const double w = s.wall - base.wall, c = s.cpu - base.cpu;
   const bool ok = within10(w, us) && within10(c, us);
-  std::printf("%-6s n=%4u us: median wall %8.1f us, mean cpu %8.1f us (%llu ticks): %s\n", name, us, w, c,
-    (unsigned long long) ticks, ok ? "within 10 %" : "outside 10 %");
+  std::printf("%-6s n=%4u us: median wall %8.1f us, cpu %8.1f us, less %.1f / %.1f us for the clocks (%llu ticks): %s\n",
+    name, us, w, c, base.wall, base.cpu, (unsigned long long) ticks, ok ? "within 10 %" : "outside 10 %");
   return ok;
 }
 
