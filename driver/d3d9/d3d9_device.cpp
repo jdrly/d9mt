@@ -5919,12 +5919,12 @@ namespace dxvk {
       Logger::warn(hitch::formatHitch(frame, stats) + hitch::stampSuffix(wallClockStamp(), vis, stalled));
     }
 
-    // PACE: the blocked part of the time inside d9mt (these don't nest in each other)
+    // PACE: the device's blocked time, from any thread (these don't nest in each other)
     const double waitMs = every.cat[hitch::Latency].ms + every.cat[hitch::CsSync].ms
                         + every.cat[hitch::GpuWait].ms + every.cat[hitch::Throttle].ms
                         + every.cat[hitch::BgSleep].ms + every.cat[hitch::CapSleep].ms;
     if (m_paceWindow.frameEnd(nowNs, every.dtMs, every.inMs, waitMs)) {
-      // The Present thread's CPU time (100 ns units), once a second
+      // GetThreadTimes on the Present thread (100 ns units; process-wide on Wine for macOS)
       FILETIME created, exited, kernel, user;
       uint64_t cpuNs = 0u;
       if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {

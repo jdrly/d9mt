@@ -239,6 +239,12 @@ last piece of at most 1 ms, then a spin as long as the last piece recently overs
 A frame longer than `D9MT_HITCH_MS` (default 50 ms), attributed to d9mt or to the game in a
 `HITCH` line under `D9MT_PROFILE` (`driver/d3d9/d3d9_hitch.h`).
 
+**Per-device outer-entry time**
+d9mt's share of a frame in the `PACE` (`d9mt`) and `HITCH` (`inD9mtMs`) lines: the wall time of
+the D3D9 entries on one device, from any thread, that began while no other entry was open on it.
+It is neither the Present thread's time nor a sum over threads: an entry that overlaps another
+thread's isn't counted (#81; [PERFORMANCE.md](PERFORMANCE.md) §4).
+
 **Hash suite**
 The D3D9 test programs `test/code_*.c` (except `code_sm3_ref` and `code_statecache`, which have
 harnesses of their own), five frames each, whose frame hashes are compared with the base commit's; the correctness gate of every PR (CONTRIBUTING, *Definition of Done*).

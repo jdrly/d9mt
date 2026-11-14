@@ -1,10 +1,10 @@
 #pragma once
 
 // D9MT_PROFILE: one warn-level PACE line per second (app thread, after each
-// Present, next to STATS): how evenly the game calls Present, and how its
-// thread's time per frame splits into d9mt's D3D9 calls and everything else.
-// For telling dense-scene judder from uneven CPU frame cost, and d9mt's
-// per-draw cost (under Rosetta) from the game's own work.
+// Present, next to STATS): how evenly the game calls Present, and how a frame
+// splits into d9mt's D3D9 entries on the device and everything else. For
+// telling dense-scene judder from uneven CPU frame cost, and d9mt's per-draw
+// cost (under Rosetta) from the game's own work. d9mt's share: see d9mt below.
 //
 //   PACE t=63 n=60 present=15.2/16.7/18.4 sd=0.61 | d9mt=4.1/5.0/7.9 wait=1.2
 //     game=9.0/11.7/13.0 | cpu=812 d9mtBusy=230 gameCpu=582
@@ -15,18 +15,18 @@
 //            entered, before d9mt's frame latency wait): min / avg / max ms
 //   sd       standard deviation of those intervals, ms (at a steady 60 fps on a
 //            60 Hz display, even pacing is 16.7 with an sd near 0)
-//   d9mt     per frame: wall time of the Present thread inside d9mt (its
-//            outermost D3D9 calls, Present included): min / avg / max ms
-//   wait     per frame, average: the part of that spent blocked (frame latency
-//            wait, waiting for the CS thread or the GPU, staging throttle, the
-//            background sleep while the window is hidden, the D9MT_FPS_CAP sleep), ms
-//   game     per frame: the rest of the frame, outside d9mt (the game's own
-//            work and waits): min / avg / max ms
-//   cpu      the Present thread's CPU time (user + kernel, GetThreadTimes) in
-//            the window, ms per second
-//   d9mtBusy d9mt time that is not a wait, ms per second (wall time; d9mt's
-//            calls rarely sleep outside the waits above)
-//   gameCpu  cpu - d9mtBusy: the game thread's own CPU time, ms per second
+//   d9mt     per frame, per-device outer-entry time: the wall time of the D3D9 entries on this
+//            device (any thread, Present included) that began while no other entry was open
+//            on it; one that begins inside another thread's isn't counted, even after that
+//            one leaves. min / avg / max ms. From one calling thread: that thread's d9mt time
+//   wait     per frame, average: blocked time on this device from any thread, counted in d9mt
+//            or not (frame latency wait, the CS thread, the GPU, staging throttle, the hidden
+//            window's sleep, the D9MT_FPS_CAP sleep), ms
+//   game     per frame: the frame minus d9mt (the game's own work and waits): min / avg / max ms
+//   cpu      GetThreadTimes(GetCurrentThread()) on the Present thread (user + kernel), ms per
+//            second; on Wine for macOS that is the whole process's CPU time, every thread
+//   d9mtBusy d9mt - wait (at least 0), ms per second: wall time, not CPU time
+//   gameCpu  cpu - d9mtBusy, ms per second: cpu less the per-device figure, not a thread's CPU
 //
 // Off (D9MT_PROFILE unset): never constructed or called. Header-only and
 // dependency-free so the window logic and the format can be unit-tested
@@ -56,8 +56,8 @@ namespace dxvk::pace {
     }
 
     // Present returned. `dtMs`: Present-to-Present frame time (0 for the first
-    // frame), `inD9mtMs` the Present thread's time inside d9mt in that frame,
-    // `waitMs` the blocked part of it. Returns true when a line is due.
+    // frame), `inD9mtMs` the device's outer-entry time in that frame (d9mt),
+    // `waitMs` the device's blocked time (wait). Returns true when a line is due.
     bool frameEnd(uint64_t nowNs, double dtMs, double inD9mtMs, double waitMs) {
       if (!m_startNs) {
         m_startNs = m_winStartNs = nowNs;
@@ -78,7 +78,7 @@ namespace dxvk::pace {
     }
 
     // The line for the window that ends now; starts the next window.
-    // `threadCpuNs`: the Present thread's total CPU time so far (0: unknown).
+    // `threadCpuNs`: GetThreadTimes' total so far (0: unknown; see cpu above).
     std::string take(uint64_t nowNs, uint64_t threadCpuNs) {
       const double winS = double(nowNs - m_winStartNs) * 1e-9;
       const double perS = winS > 0.0 ? 1.0 / winS : 0.0;

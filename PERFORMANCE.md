@@ -386,12 +386,29 @@ them in `<game>_d3d9.log`.
 
 **`PACE`**, once a second (`driver/d3d9/d3d9_pace.h`): `present=min/avg/max` and `sd` (the
 interval between the game's Present calls; even pacing is 16.7 ms with an `sd` near 0),
-`d9mt=min/avg/max` (time inside d9mt per frame), `wait` (the blocked part of it), `game` (the rest
-of the frame), `cpu`, `d9mtBusy`, `gameCpu`.
+`d9mt=min/avg/max`, `wait`, `game`, `cpu`, `d9mtBusy`, `gameCpu`. None of the last six is a
+per-thread figure:
+
+- `d9mt` is **per-device outer-entry time**: the wall time of the D3D9 entries on the device, from
+  any thread, that began while no other entry was open on it. An entry that begins while another
+  thread's is open isn't counted at all, even after that one leaves. For a game that calls d9mt
+  from one thread, it is that thread's time inside d9mt. SWTOR calls it from several threads
+  without `D3DCREATE_MULTITHREADED`, so a streaming thread's call can count while the Present
+  thread runs the game's code, and a call that begins during another thread's doesn't count.
+- `wait` is the device's blocked time from any thread (frame latency, the CS thread, the GPU,
+  the staging throttle, the background and cap sleeps), whether or not that entry counted in `d9mt`.
+  `game` is the frame minus `d9mt`.
+- `cpu` is `GetThreadTimes(GetCurrentThread())` on the Present thread. On Wine for macOS it
+  returns the whole process's CPU time: SWTOR read 1,878 to 2,485 ms per second, more than one
+  thread can use, and a loop replay on the rented M1 (macOS 27.0) read 846 ms per second, equal
+  to `GetProcessTimes` over the same 43 s.
+- `d9mtBusy` is `d9mt - wait` (at least 0) in wall time per second. `gameCpu = cpu - d9mtBusy`
+  subtracts that per-device figure from `cpu`, so on Wine for macOS it is the process's CPU time
+  less d9mt's busy time on the device, not the game thread's CPU time.
 
 **`HITCH`**, per frame of at least `D9MT_HITCH_MS` (default 50) (`driver/d3d9/d3d9_hitch.h`):
-`inD9mtMs` close to `dtMs` means driver work; a small `inD9mtMs` means the game's own (disk
-streaming, its threads). The categories (present, latencyWait, texCreate, texLock, texUpload,
+`inD9mtMs` (the same per-device outer-entry time as PACE's `d9mt`) close to `dtMs` means driver
+work; a small `inD9mtMs` means the game's own (disk streaming, its threads). The categories (present, latencyWait, texCreate, texLock, texUpload,
 bufCreate, bufLock, shaderCreate, csSync, gpuWait, throttle, query, bgSleep) nest: read a nested
 one as a breakdown, not as additive.
 
