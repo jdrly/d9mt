@@ -404,8 +404,8 @@ that compiled something or took 33.4 ms or more; `skipped` (draws dropped by the
 submit, syncWsi, endFrame; they nest) and counters: `psoMiss`, `psoKeyBuild`, `argRotate`,
 `abRebuild`, `chunkFlush`, `passClose` by cause, `evRead` (shared-event reads, each a unix call),
 `unsubWait` (waits on a serial not yet submitted, also as `PROF-UNSUB` lines). At the end of the
-line (#127): `csExec` (ms the CS thread executed chunks, from its wake to its next wait; every
-other bucket nests in it), `csChunks` and `csInject` (ordered and high-priority chunks executed),
+line (#127): `csExec` (ms the CS thread executed chunks; every other bucket nests in it, and the
+chunk that rolls the window over counts in the next window), `csChunks` and `csInject` (ordered and high-priority chunks executed),
 `csCmds`, `csKiB` (their commands and bytes), `csSleep` (times the CS thread found no work and
 waited, so the next chunk had to wake it), `allocWait` and `allocWaitMs` (`beginRecording`
 waiting for a command allocator because the in-flight cap was reached).

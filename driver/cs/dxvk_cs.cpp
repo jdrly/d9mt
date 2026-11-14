@@ -210,9 +210,6 @@ namespace dxvk {
           m_hasHighPrio.store(false);
         }
 
-        // D9MT_PROFILE: from here to the next wait, the CS thread executes (PROF csExec).
-        backend::prof::Scope execScope(backend::prof::CsExec);
-
         size_t orderedIndex = 0u;
         size_t highPrioIndex = 0u;
 
@@ -233,7 +230,11 @@ namespace dxvk {
           if (unlikely(backend::prof::g_profEnabled))
             backend::prof::countCsChunk(isHighPrio, entry.chunk->commandCount(), entry.chunk->byteCount());
 
-          entry.chunk->executeAll(m_context.ptr());
+          // D9MT_PROFILE: PROF csExec. Per chunk, so the chunk that rolls PROF's window over
+          // is the only time that lands in the next window.
+          { backend::prof::Scope execScope(backend::prof::CsExec);
+            entry.chunk->executeAll(m_context.ptr());
+          }
 
           if (entry.seq) {
             std::lock_guard lock(m_counterMutex);

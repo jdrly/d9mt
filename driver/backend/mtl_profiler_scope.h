@@ -33,7 +33,8 @@ namespace dxvk::backend::prof {
     Submit,
     SynchronizeWsi,
     EndFrame,
-    CsExec,     // the CS thread executing chunks, from its wake to its next wait (d9mt #127)
+    CsExec,     // the CS thread executing chunks (d9mt #127); the chunk that rolls the window
+                // over is counted in the next one
     AllocWait,  // beginRecording blocked on a command allocator: the in-flight cap is exhausted
     BucketCount
   };
