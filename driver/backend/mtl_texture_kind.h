@@ -7,8 +7,9 @@
  * texture where the shader expects a cube is an invalid binding (Metal's shader validation:
  * "Invalid texture type MTLTextureType2D bound to shader, expected MTLTextureTypeCube"), and the
  * GPU's read through it is undefined. D3D9 leaves such a draw undefined too, so a texture of
- * another kind is bound as the null texture of the declared kind: it reads zero, as an unbound
- * sampler does. */
+ * another kind is bound as the null texture of the declared kind: it reads (0, 0, 0, 0), as native
+ * D3D9 on Nvidia and DXVK do. An unbound sampler differs in alpha: the shader's own null check
+ * returns (0, 0, 0, 1) without reading a texture. */
 namespace dxvk::backend::texkind {
 
   // The declared kinds (MtlShaderFunction::AbWord::dim), and every other Metal texture type.

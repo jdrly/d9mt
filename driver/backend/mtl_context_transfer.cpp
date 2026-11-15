@@ -24,13 +24,22 @@ namespace dxvk::backend {
 
     /* A shader's sampler had a texture of another kind than it declares (a game's binding, e.g.
      * a 2D texture at a dcl_cube sampler): it is bound as the null texture of the declared kind.
-     * One line per shader, sampler and bound kind, at most 16 (cold: only reached on a mismatch). */
+     * The line describes the bound texture from its image's creation info (size, mip levels and
+     * Metal pixel format; the D3D9 format isn't kept in the back end), and only describes it: the
+     * view is neither read nor bound here. One line per shader, sampler, bound kind and bound
+     * texture's description, at most 16 (cold: only reached on a mismatch). */
     __attribute__((noinline, cold)) void noteTextureKindMismatch(
-        const MtlShaderFunction& fn, uint32_t reg, uint8_t dim, uint8_t bound) {
+        const MtlShaderFunction& fn, uint32_t reg, uint8_t dim, const MtlTextureViewImpl& tv) {
+      struct Seen {
+        uint64_t    key;
+        MtlImageInfo info;
+      };
       static std::mutex s_mutex;
-      static std::array<uint64_t, 16> s_seen = { };
+      static std::array<Seen, 16> s_seen = { };
       static uint32_t s_count = 0u;
 
+      const uint8_t bound = tv.kind;
+      const MtlImageInfo info = tv.image != nullptr ? tv.image->info() : MtlImageInfo();
       uint64_t sha = 0u;
       std::memcpy(&sha, fn.stateId.sha, sizeof(sha));
       const uint64_t key = sha ^ (uint64_t(fn.stage == MtlShaderStage::Fragment) << 63)
@@ -40,10 +49,13 @@ namespace dxvk::backend {
       if (s_count >= s_seen.size())
         return;
       for (uint32_t i = 0u; i < s_count; i++) {
-        if (s_seen[i] == key)
+        const MtlImageInfo& s = s_seen[i].info;
+        if (s_seen[i].key == key && s.format == info.format && s.mipLevels == info.mipLevels
+         && s.extent.width == info.extent.width && s.extent.height == info.extent.height
+         && s.extent.depth == info.extent.depth)
           return;
       }
-      s_seen[s_count++] = key;
+      s_seen[s_count++] = { key, info };
 
       static const char digits[] = "0123456789abcdef";
       std::string hex;
@@ -51,11 +63,16 @@ namespace dxvk::backend {
         hex += digits[fn.stateId.sha[i] >> 4u];
         hex += digits[fn.stateId.sha[i] & 15u];
       }
+      std::string size = str::format(info.extent.width, "x", info.extent.height);
+      if (info.type == MtlImageType::e3D)
+        size += str::format("x", info.extent.depth);
       Logger::warn(str::format("D9MT: texture kind mismatch: ",
         fn.stage == MtlShaderStage::Fragment ? "ps" : "vs", " ", hex, " sampler s", reg,
-        " declares ", texkind::name(dim), ", a ", texkind::name(bound),
-        " texture is bound: bound as the null ", texkind::name(dim),
-        " texture instead", s_count == s_seen.size() ? " (further mismatches not logged)" : ""));
+        " declares ", texkind::name(dim), ", a ", texkind::name(bound), " texture (", size, ", ",
+        info.mipLevels, info.mipLevels == 1u ? " level, " : " levels, ",
+        rstore::formatName(uint32_t(info.format)), ") is bound: bound as the null ",
+        texkind::name(dim), " texture instead",
+        s_count == s_seen.size() ? " (further mismatches not logged)" : ""));
     }
 
     WMTAttributeFormat attributeFormat(MtlFormat f) {
@@ -553,7 +570,7 @@ namespace dxvk::backend {
                     v = tv->gpuResourceId;
                     lifetime::noteUse(tv->view.tex, m_currentSerial, lifetime::Use::Sampled);
                   } else {
-                    noteTextureKindMismatch(*fn, e.reg, e.dim, tv->kind);
+                    noteTextureKindMismatch(*fn, e.reg, e.dim, *tv);
                   }
                 }
               } break;
@@ -665,7 +682,7 @@ namespace dxvk::backend {
           const uint8_t dim = tableTextureKind(st, slot, fn.ptr());
           if (unlikely(!texkind::matches(dim, tv->kind))) {
             if (fn != nullptr)
-              noteTextureKindMismatch(*fn, slot, dim, tv->kind);
+              noteTextureKindMismatch(*fn, slot, dim, *tv);
             appendTableTexture(shadow, table, nullTextureId(st, slot, fn.ptr()), slot);
             continue;
           }
