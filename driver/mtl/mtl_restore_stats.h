@@ -78,28 +78,62 @@ namespace dxvk::rstore {
     return uint32_t(a) < uint32_t(Api::Count) ? k[uint32_t(a)] : "Unknown";
   }
 
-  // Metal pixel format names of the usual render target formats (MtlFormat
-  // values are MTLPixelFormat values); others print as their number.
+  // Metal pixel format names of every MtlFormat pixel format (MtlFormat values
+  // are MTLPixelFormat values; also the texture kind mismatch warning's,
+  // mtl_context_transfer.cpp); others print as their number.
   inline std::string formatName(uint32_t f) {
     switch (f) {
       case 1u:   return "A8Unorm";
       case 10u:  return "R8Unorm";
+      case 11u:  return "R8Unorm_sRGB";
+      case 12u:  return "R8Snorm";
+      case 13u:  return "R8Uint";
+      case 14u:  return "R8Sint";
+      case 20u:  return "R16Unorm";
+      case 22u:  return "R16Snorm";
+      case 23u:  return "R16Uint";
+      case 24u:  return "R16Sint";
       case 25u:  return "R16Float";
       case 30u:  return "RG8Unorm";
+      case 31u:  return "RG8Unorm_sRGB";
+      case 32u:  return "RG8Snorm";
       case 40u:  return "B5G6R5Unorm";
+      case 41u:  return "A1BGR5Unorm";
+      case 42u:  return "ABGR4Unorm";
+      case 43u:  return "BGR5A1Unorm";
+      case 53u:  return "R32Uint";
+      case 54u:  return "R32Sint";
       case 55u:  return "R32Float";
       case 60u:  return "RG16Unorm";
+      case 62u:  return "RG16Snorm";
+      case 64u:  return "RG16Sint";
       case 65u:  return "RG16Float";
       case 70u:  return "RGBA8Unorm";
       case 71u:  return "RGBA8Unorm_sRGB";
+      case 72u:  return "RGBA8Snorm";
+      case 73u:  return "RGBA8Uint";
       case 80u:  return "BGRA8Unorm";
       case 81u:  return "BGRA8Unorm_sRGB";
       case 90u:  return "RGB10A2Unorm";
+      case 91u:  return "RGB10A2Uint";
+      case 92u:  return "RG11B10Float";
+      case 93u:  return "RGB9E5Float";
       case 94u:  return "BGR10A2Unorm";
+      case 103u: return "RG32Uint";
       case 105u: return "RG32Float";
       case 110u: return "RGBA16Unorm";
+      case 112u: return "RGBA16Snorm";
+      case 114u: return "RGBA16Sint";
       case 115u: return "RGBA16Float";
       case 125u: return "RGBA32Float";
+      case 130u: return "BC1_RGBA";
+      case 131u: return "BC1_RGBA_sRGB";
+      case 132u: return "BC2_RGBA";
+      case 133u: return "BC2_RGBA_sRGB";
+      case 134u: return "BC3_RGBA";
+      case 135u: return "BC3_RGBA_sRGB";
+      case 140u: return "BC4_RUnorm";
+      case 142u: return "BC5_RGUnorm";
       case 250u: return "Depth16Unorm";
       case 252u: return "Depth32Float";
       case 253u: return "Stencil8";
