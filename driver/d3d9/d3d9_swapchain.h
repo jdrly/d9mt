@@ -111,10 +111,10 @@ namespace dxvk {
     // and whenever it changes); `t` is PACE's t (d3d9_screen.h).
     void LogScreen(double t);
 
-    // SCREEN-INFO (d3d9_screen.h): reads the presenter's screen state (never blocks) and writes
+    // SCREEN-INFO (d3d9_screen.h): reads `presenter`'s screen state (never blocks) and writes
     // the line when it changed. `cadence`: Present's unprofiled call, which InfoCadence decides
-    // to write or not; false: LogScreen's, which always may.
-    void LogScreenInfo(bool cadence);
+    // to write or not; false: LogScreen's (the presenter it drained), which always may.
+    void LogScreenInfo(const Rc<MtlPresenter>& presenter, bool cadence);
 
     // D9MT_PROFILE: the presenter's state for a HITCH line (lastVisibility, isDrawableStalled);
     // false without a presenter.

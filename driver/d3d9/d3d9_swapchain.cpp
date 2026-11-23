@@ -444,8 +444,8 @@ namespace dxvk {
         m_screenInterval = m_parent->GetOptions()->presentInterval >= 0
           ? presentInterval : screen::d3dIntervalRefreshes(presentInterval);
       }
-      if (unlikely(screenInfoDue))
-        LogScreenInfo(true);
+      if (unlikely(screenInfoDue) && m_wctx->presenter != nullptr)
+        LogScreenInfo(m_wctx->presenter, true);
       PresentImage(presentInterval, capped ? m_capPlan.minDurationS : 0.0);
       if (capped)
         m_capUntilNs = m_capCadence.next(clockNs(), m_capPlan.intervalNs);
@@ -886,7 +886,7 @@ namespace dxvk {
         break;
     }
 
-    LogScreenInfo(false);
+    LogScreenInfo(presenter, false);
     // an unknown display mode: judged against 60 Hz, printed as "?" (take)
     const double hz = screen::hzKnown(m_displayRefreshRate) ? m_displayRefreshRate : 60.0;
     Logger::warn(m_screenWindow.take(t, m_displayRefreshRate,
@@ -894,11 +894,9 @@ namespace dxvk {
   }
 
 
-  void D3D9SwapChainEx::LogScreenInfo(bool cadence) {
-    if (m_wctx == nullptr || m_wctx->presenter == nullptr)
-      return;
+  void D3D9SwapChainEx::LogScreenInfo(const Rc<MtlPresenter>& presenter, bool cadence) {
     // never blocks: the values AppKit published last (d3d9_screen.h, InfoCadence)
-    const MtlScreenState st = m_wctx->presenter->screenState();
+    const MtlScreenState st = presenter->screenState();
     if (cadence && !m_screenInfoCadence.mayWrite(st.windowValid && st.screenMaxFps > 0.0))
       return;
     screen::Info info;
