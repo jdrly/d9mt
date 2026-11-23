@@ -4,12 +4,14 @@
 // repeated frame, drops, a sustained 33 ms on 60 Hz, 60 fps on 120 Hz (swap interval 1, and
 // capped at 60), the refresh histogram, the requested cadence, latency quantiles, the carry-over
 // between windows, chain breaks (a seq gap, a break marker, a stream switch A -> B -> A), the
-// D3D9 interval mapping, SCREEN-INFO. The ring itself, and delayed handlers across drains:
-// present_ring_test.cpp.
+// D3D9 interval mapping, SCREEN-INFO (unknown values as "?"), the unprofiled SCREEN-INFO
+// cadence. The ring itself, and delayed handlers across drains: present_ring_test.cpp.
 #include "d3d9_screen.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace dxvk;
 
@@ -111,13 +113,14 @@ int main() {
   }
 
   // 6. no records: n/a fields; pend is the stream's (passed in), lost is what the drains of
-  //    this window reported; hz outside 20-1000 → 60; a requested cadence <= 0 → 1 refresh
+  //    this window reported; hz outside 20-1000 → judged against 60, printed as "?"; a
+  //    requested cadence <= 0 → 1 refresh
   {
     screen::Window w;
     w.addLost(2u);
     std::string line = w.take(3.0, 0.0, 0.0, 3u);
     std::printf("%s\n", line.c_str());
-    CHECK(has(line, "shown=0 dropped=0 pend=3 lost=2 onscreen=n/a refreshes=0/0/0 late=0 req=16.7 lat=n/a hz=60"));
+    CHECK(has(line, "shown=0 dropped=0 pend=3 lost=2 onscreen=n/a refreshes=0/0/0 late=0 req=16.7 lat=n/a hz=?"));
     line = w.take(4.0, 0.0, 0.0, 3u);
     CHECK(has(line, "pend=3 lost=0"));
   }
@@ -198,6 +201,95 @@ int main() {
     std::printf("%s\n", b.c_str());
     CHECK(b == "SCREEN-INFO displaySync=1 drawables=3 interval=2 cap=33.3 hz=60.0 screenMaxFps=120"
                " refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1 forceComposited=1");
+
+    // Wine's display mode not known (0, or NaN from a 0/0 mode), and a window without a screen
+    // (AppKit answers valid with zeros): "?", never 0 or a guess
+    i.hz = 0.0;
+    CHECK(has(screen::formatInfo(i), " hz=? screenMaxFps=120 "));
+    i.hz = std::nan("");
+    CHECK(has(screen::formatInfo(i), " hz=? "));
+    i.hz = 120.0; i.screenMaxFps = 0.0; i.minIntervalMs = 0.0; i.maxIntervalMs = 0.0;
+    i.nsFullscreen = false;
+    std::string c = screen::formatInfo(i);
+    std::printf("%s\n", c.c_str());
+    CHECK(has(c, " hz=120.0 screenMaxFps=? refreshInterval=? nsFullscreen=0 "));
+
+    // the SCREEN line with the mode not known: judged against 60 Hz, printed as "?"
+    screen::Window w;
+    for (int k = 0; k < 4; k++)
+      w.add({ uint64_t(k + 1), 0.0, 10.0 + k * P60 });
+    std::string d = w.take(1.0, 0.0, screen::requestedMs(1u, 0.0, R60), 0u);
+    std::printf("%s\n", d.c_str());
+    CHECK(has(d, "refreshes=3/0/0 late=0 req=16.7"));
+    CHECK(has(d, " hz=?") && !has(d, "hz=60"));
+  }
+
+  // 11. the unprofiled SCREEN-INFO cadence: which Presents read, and which reads may write
+  {
+    auto run = [] (screen::InfoCadence& c, int from, int to, int knownFrom,
+                   std::vector<int>& reads, std::vector<int>& writes, bool restartEach = false) {
+      for (int p = from; p <= to; p++) {
+        if (restartEach)
+          c.restart();
+        if (c.due()) {
+          reads.push_back(p);
+          if (c.mayWrite(knownFrom > 0 && p >= knownFrom))
+            writes.push_back(p);
+        }
+      }
+    };
+
+    // the values known from the start: the first read only asks (they may be another window's
+    // or stale), the second writes, then every 512th Present
+    {
+      screen::InfoCadence c;
+      std::vector<int> reads, writes;
+      run(c, 1, 1200, 1, reads, writes);
+      CHECK((reads  == std::vector<int>{ 1, 65, 577, 1089 }));
+      CHECK((writes == std::vector<int>{ 65, 577, 1089 }));
+    }
+
+    // known only from the 200th Present (AppKit answered late): fast reads until then
+    {
+      screen::InfoCadence c;
+      std::vector<int> reads, writes;
+      run(c, 1, 800, 200, reads, writes);
+      CHECK((reads  == std::vector<int>{ 1, 65, 129, 193, 257, 769 }));
+      CHECK((writes == std::vector<int>{ 257, 769 }));
+    }
+
+    // never known: no line at the fast cadence, one at the 9th read (the 513th Present), then
+    // the slow cadence
+    {
+      screen::InfoCadence c;
+      std::vector<int> reads, writes;
+      run(c, 1, 1100, 0, reads, writes);
+      CHECK(reads.size() == 10u && reads[8] == 513 && reads[9] == 1025);
+      CHECK((writes == std::vector<int>{ 513, 1025 }));
+    }
+
+    // a Reset at the 700th Present (slow, next read due at 1089): the fast cadence again, its
+    // first read only asking
+    {
+      screen::InfoCadence c;
+      std::vector<int> reads, writes;
+      run(c, 1, 699, 1, reads, writes);
+      c.restart();
+      reads.clear(); writes.clear();
+      run(c, 700, 1400, 1, reads, writes);
+      CHECK((reads  == std::vector<int>{ 763, 827, 1339 }));
+      CHECK((writes == std::vector<int>{ 827, 1339 }));
+    }
+
+    // restarts at every Present (a game presenting to two windows in turn): still a read every
+    // 64th Present at most, and none of them writes
+    {
+      screen::InfoCadence c;
+      std::vector<int> reads, writes;
+      run(c, 1, 640, 1, reads, writes, true);
+      CHECK(reads.size() == 10u && reads[0] == 1 && reads[1] == 65);
+      CHECK(writes.empty());
+    }
   }
 
   std::printf("%s (%d failures)\n", g_fail ? "FAILED" : "ok", g_fail);

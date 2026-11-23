@@ -99,7 +99,9 @@ namespace dxvk {
       (void)out; (void)max; *pending = 0u; *lostNew = 0u; return 0u;
     }
 
-    // D9MT_PROFILE only: the layer's and its window's present-relevant state (never blocks).
+    // The layer's and its window's present-relevant state (never blocks: the window's values are
+    // the ones AppKit published last, and each call asks the main thread for fresh ones). Read
+    // for SCREEN-INFO: every second under D9MT_PROFILE, otherwise at InfoCadence's Presents.
     virtual MtlScreenState screenState() { return MtlScreenState(); }
 
     // D9MT_PROFILE only: identifies this presenter's stream (unique in the process, never reused;

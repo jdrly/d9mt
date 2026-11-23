@@ -354,6 +354,7 @@ namespace dxvk {
     if (m_window != window) {
       m_window = window;
       m_displayRefreshRateDirty = true;
+      m_screenInfoCadence.restart();
     }
 
     if (!UpdateWindowCtx())
@@ -434,12 +435,17 @@ namespace dxvk {
         m_wctx->presenter->setRefreshRate(hz);
       }
       UpdateTargetFrameRate(presentInterval);
-      if (unlikely(hitch::g_enabled)) {
+      // SCREEN-INFO: every second under D9MT_PROFILE (LogScreen), otherwise at the cadence's
+      // Presents (one decrement and compare per Present; d3d9_screen.h)
+      const bool screenInfoDue = !hitch::g_enabled && m_screenInfoCadence.due();
+      if (unlikely(hitch::g_enabled || screenInfoDue)) {
         m_screenCapMs    = capped ? m_capPlan.minDurationS * 1e3 : 0.0;
         // the game's D3DPRESENT_INTERVAL_* in refreshes; d3d9.presentInterval counts refreshes
         m_screenInterval = m_parent->GetOptions()->presentInterval >= 0
           ? presentInterval : screen::d3dIntervalRefreshes(presentInterval);
       }
+      if (unlikely(screenInfoDue))
+        LogScreenInfo(true);
       PresentImage(presentInterval, capped ? m_capPlan.minDurationS : 0.0);
       if (capped)
         m_capUntilNs = m_capCadence.next(clockNs(), m_capPlan.intervalNs);
@@ -665,6 +671,7 @@ namespace dxvk {
     D3D9DeviceLock lock = m_parent->LockDevice();
 
     HRESULT hr = D3D_OK;
+    m_screenInfoCadence.restart();
 
     this->NormalizePresentParameters(pPresentParams);
 
@@ -879,7 +886,21 @@ namespace dxvk {
         break;
     }
 
-    const MtlScreenState st = presenter->screenState();
+    LogScreenInfo(false);
+    // an unknown display mode: judged against 60 Hz, printed as "?" (take)
+    const double hz = screen::hzKnown(m_displayRefreshRate) ? m_displayRefreshRate : 60.0;
+    Logger::warn(m_screenWindow.take(t, m_displayRefreshRate,
+      screen::requestedMs(m_screenInterval, m_screenCapMs, 1e3 / hz), pending));
+  }
+
+
+  void D3D9SwapChainEx::LogScreenInfo(bool cadence) {
+    if (m_wctx == nullptr || m_wctx->presenter == nullptr)
+      return;
+    // never blocks: the values AppKit published last (d3d9_screen.h, InfoCadence)
+    const MtlScreenState st = m_wctx->presenter->screenState();
+    if (cadence && !m_screenInfoCadence.mayWrite(st.windowValid && st.screenMaxFps > 0.0))
+      return;
     screen::Info info;
     info.displaySync   = st.displaySync;
     info.drawables     = st.drawables;
@@ -899,10 +920,6 @@ namespace dxvk {
       Logger::warn(infoLine);
       m_screenInfo = std::move(infoLine);
     }
-    const double hz = (m_displayRefreshRate >= 20.0 && m_displayRefreshRate <= 1000.0)
-      ? m_displayRefreshRate : 60.0;
-    Logger::warn(m_screenWindow.take(t, hz,
-      screen::requestedMs(m_screenInterval, m_screenCapMs, 1e3 / hz), pending));
   }
 
 

@@ -39,10 +39,13 @@
 //   req       that requested cadence, ms
 //   lat       presentedTime minus the moment present was called on the drawable (the render
 //             thread's present, after the frame's command buffer was committed): median / p90 ms
-//   hz        the display refresh rate these were judged against
+//   hz        the display refresh rate these were judged against; "?" when Wine's display mode
+//             isn't known, and the line is then judged against 60 Hz
 //
 // A SCREEN-INFO line comes before the first SCREEN line and again whenever one of its values
-// changes:
+// changes. Without D9MT_PROFILE the swapchain writes it too, from Present at InfoCadence's
+// Presents (below): the first line once the screen's values are known, then a line whenever
+// one changes (another screen, another mode, Low Power Mode switched):
 //
 //   SCREEN-INFO displaySync=1 drawables=3 interval=1 cap=off hz=60.0 screenMaxFps=120
 //     refreshInterval=8.3-41.7 nsFullscreen=1 d3dWindowed=1 forceComposited=0
@@ -50,9 +53,11 @@
 //   displaySync, drawables   the CAMetalLayer's displaySyncEnabled and maximumDrawableCount
 //   interval   the game's swap interval (vsyncs per frame; 0 = immediate)
 //   cap        off, or the presentAfterMinimumDuration in ms (D9MT_FPS_CAP)
-//   hz         the refresh rate d9mt paces to (Wine's display mode)
+//   hz         the refresh rate d9mt paces to (Wine's display mode); "?" when Wine doesn't
+//              know it
 //   screenMaxFps, refreshInterval  the window's NSScreen: maximumFramesPerSecond, and
-//              minimumRefreshInterval-maximumRefreshInterval in ms (a range: adaptive sync)
+//              minimumRefreshInterval-maximumRefreshInterval in ms (a range: adaptive sync);
+//              "?" until AppKit answered, or when the window has no screen
 //   nsFullscreen  the window is in macOS fullscreen (its own Space); "?" until AppKit answered
 //   d3dWindowed   the game's D3DPRESENT_PARAMETERS.Windowed
 //   forceComposited  D9MT_FORCE_COMPOSITED=1: the bridge requests composition (a 1x1-point
@@ -63,9 +68,10 @@
 // accounting (pending, lost): switching between windows (A -> B -> A, presenters cached) or a
 // recreated or second device never mixes counts. bindStream only breaks the interval chain.
 //
-// Off (D9MT_PROFILE unset): never constructed or called, and drawables are presented without a
-// handler. Header-only and dependency-free so the statistics and the format can be unit-tested
-// natively (test/native/screen_test.cpp).
+// Off (D9MT_PROFILE unset): no SCREEN line, the Window is never fed, and drawables are presented
+// without a handler; only SCREEN-INFO is written, at InfoCadence's Presents. Header-only and
+// dependency-free so the statistics, the format and the cadence can be unit-tested natively
+// (test/native/screen_test.cpp).
 
 #include <algorithm>
 #include <cmath>
@@ -97,26 +103,87 @@ namespace dxvk::screen {
     bool     forceComposited = false;
   };
 
+  // A refresh rate d9mt can judge against (false for 0, unknown, NaN).
+  inline bool hzKnown(double hz) {
+    return hz >= 20.0 && hz <= 1000.0;
+  }
+
   inline std::string formatInfo(const Info& i) {
     char cap[32];
     if (i.capMs > 0.0)
       std::snprintf(cap, sizeof(cap), "%.1f", i.capMs);
     else
       std::snprintf(cap, sizeof(cap), "off");
+    char hz[32] = "?";
+    if (hzKnown(i.hz))
+      std::snprintf(hz, sizeof(hz), "%.1f", i.hz);
+    // the window without a screen answers valid with zeros
+    char maxFps[32] = "?", range[64] = "?", fullscreen[8] = "?";
+    if (i.screenValid) {
+      if (i.screenMaxFps > 0.0)
+        std::snprintf(maxFps, sizeof(maxFps), "%.0f", i.screenMaxFps);
+      if (i.minIntervalMs > 0.0 && i.maxIntervalMs > 0.0)
+        std::snprintf(range, sizeof(range), "%.1f-%.1f", i.minIntervalMs, i.maxIntervalMs);
+      std::snprintf(fullscreen, sizeof(fullscreen), "%d", int(i.nsFullscreen));
+    }
     char buf[320];
-    if (i.screenValid)
-      std::snprintf(buf, sizeof(buf),
-        "SCREEN-INFO displaySync=%d drawables=%u interval=%u cap=%s hz=%.1f screenMaxFps=%.0f"
-        " refreshInterval=%.1f-%.1f nsFullscreen=%d d3dWindowed=%d forceComposited=%d",
-        int(i.displaySync), i.drawables, i.interval, cap, i.hz, i.screenMaxFps,
-        i.minIntervalMs, i.maxIntervalMs, int(i.nsFullscreen), int(i.d3dWindowed), int(i.forceComposited));
-    else
-      std::snprintf(buf, sizeof(buf),
-        "SCREEN-INFO displaySync=%d drawables=%u interval=%u cap=%s hz=%.1f screenMaxFps=?"
-        " refreshInterval=? nsFullscreen=? d3dWindowed=%d forceComposited=%d",
-        int(i.displaySync), i.drawables, i.interval, cap, i.hz, int(i.d3dWindowed), int(i.forceComposited));
+    std::snprintf(buf, sizeof(buf),
+      "SCREEN-INFO displaySync=%d drawables=%u interval=%u cap=%s hz=%s screenMaxFps=%s"
+      " refreshInterval=%s nsFullscreen=%s d3dWindowed=%d forceComposited=%d",
+      int(i.displaySync), i.drawables, i.interval, cap, hz, maxFps, range, fullscreen,
+      int(i.d3dWindowed), int(i.forceComposited));
     return buf;
   }
+
+  // Without D9MT_PROFILE: at which Presents the swapchain reads the screen's state for
+  // SCREEN-INFO, and whether that read may write the line (it is written only when it changed).
+  // The read never waits: it returns the values AppKit published last and asks the main thread
+  // for fresh ones, so the first read after a (re)start only asks. Then every 64th Present until
+  // the values are known (the first line), every 512th after it. Values that stay unknown are
+  // written once, at the 9th read (the 513th Present), and then asked for every 512th Present.
+  class InfoCadence {
+
+  public:
+
+    static constexpr uint32_t FastPresents = 64u;
+    static constexpr uint32_t SlowPresents = 512u;
+    static constexpr uint32_t FastReads    = 8u;  // reads that wait for known values
+
+    // Every Present: true when this one reads.
+    bool due() {
+      if (--m_countdown != 0u)
+        return false;
+      m_countdown = m_slow ? SlowPresents : FastPresents;
+      return true;
+    }
+
+    // After a due() read: true when the line may be written. `known`: the screen's values are.
+    bool mayWrite(bool known) {
+      if (m_slow)
+        return true;
+      if (++m_reads == 1u || (!known && m_reads <= FastReads))
+        return false;
+      m_slow = true;
+      m_countdown = SlowPresents;
+      return true;
+    }
+
+    // The swapchain was reset, or presents to another window: back to the fast cadence, its
+    // first read only asking. Never sooner than the next fast read, so restarts at every Present
+    // still read every 64th Present at most.
+    void restart() {
+      m_countdown = std::min(m_countdown, FastPresents);
+      m_reads     = 0u;
+      m_slow      = false;
+    }
+
+  private:
+
+    uint32_t m_countdown = 1u;
+    uint32_t m_reads     = 0u;
+    bool     m_slow      = false;
+
+  };
 
   // D3DPRESENT_INTERVAL_* (ONE 1, TWO 2, THREE 4, FOUR 8; 0 here = immediate) in refreshes.
   inline uint32_t d3dIntervalRefreshes(uint32_t interval) {
@@ -176,10 +243,11 @@ namespace dxvk::screen {
     }
 
     // The line for the window that ends now; starts the next one. `pending`: the stream's
-    // presents not yet retired, `hz`: the display refresh rate (outside 20-1000: 60), `reqMs`:
-    // the requested cadence (requestedMs; <= 0: 1 refresh).
+    // presents not yet retired, `hz`: the display refresh rate (not hzKnown: judged against 60,
+    // printed as "?"), `reqMs`: the requested cadence (requestedMs; <= 0: 1 refresh).
     std::string take(double tSec, double hz, double reqMs, uint64_t pending) {
-      if (!(hz >= 20.0 && hz <= 1000.0))
+      const bool known = hzKnown(hz);
+      if (!known)
         hz = 60.0;
       const double refreshMs = 1e3 / hz;
       if (!(reqMs > 0.0))
@@ -218,7 +286,10 @@ namespace dxvk::screen {
       else
         len += std::snprintf(buf + len, sizeof(buf) - size_t(len), " lat=n/a");
 
-      std::snprintf(buf + len, sizeof(buf) - size_t(len), " hz=%.0f", hz);
+      if (known)
+        std::snprintf(buf + len, sizeof(buf) - size_t(len), " hz=%.0f", hz);
+      else
+        std::snprintf(buf + len, sizeof(buf) - size_t(len), " hz=?");
 
       m_iv.clear();
       m_latMs.clear();
