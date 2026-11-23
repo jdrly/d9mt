@@ -239,14 +239,15 @@ int main() {
       }
     };
 
-    // the values known from the start: the first read only asks (they may be another window's
-    // or stale), the second writes, then every 512th Present
+    // the values known from the start: the first two reads only ask (the values may be stale
+    // or another window's, whose request may still be pending), the third writes, then every
+    // 512th Present
     {
       screen::InfoCadence c;
       std::vector<int> reads, writes;
       run(c, 1, 1200, 1, reads, writes);
-      CHECK((reads  == std::vector<int>{ 1, 65, 577, 1089 }));
-      CHECK((writes == std::vector<int>{ 65, 577, 1089 }));
+      CHECK((reads  == std::vector<int>{ 1, 65, 129, 641, 1153 }));
+      CHECK((writes == std::vector<int>{ 129, 641, 1153 }));
     }
 
     // known only from the 200th Present (AppKit answered late): fast reads until then
@@ -259,26 +260,30 @@ int main() {
     }
 
     // never known: no line at the fast cadence, one at the 9th read (the 513th Present), then
-    // the slow cadence
+    // the slow cadence, which writes known values only
     {
       screen::InfoCadence c;
       std::vector<int> reads, writes;
-      run(c, 1, 1100, 0, reads, writes);
-      CHECK(reads.size() == 10u && reads[8] == 513 && reads[9] == 1025);
-      CHECK((writes == std::vector<int>{ 513, 1025 }));
+      run(c, 1, 1600, 0, reads, writes);
+      CHECK(reads.size() == 11u && reads[8] == 513 && reads[9] == 1025 && reads[10] == 1537);
+      CHECK((writes == std::vector<int>{ 513 }));
+      screen::InfoCadence k;
+      reads.clear(); writes.clear();
+      run(k, 1, 1600, 1100, reads, writes); // known from the 1100th: written at the next read
+      CHECK((writes == std::vector<int>{ 513, 1537 }));
     }
 
-    // a Reset at the 700th Present (slow, next read due at 1089): the fast cadence again, its
-    // first read only asking
+    // a Reset at the 700th Present (slow, next read due at 1153): the fast cadence again, its
+    // first two reads only asking
     {
       screen::InfoCadence c;
       std::vector<int> reads, writes;
       run(c, 1, 699, 1, reads, writes);
       c.restart();
       reads.clear(); writes.clear();
-      run(c, 700, 1400, 1, reads, writes);
-      CHECK((reads  == std::vector<int>{ 763, 827, 1339 }));
-      CHECK((writes == std::vector<int>{ 827, 1339 }));
+      run(c, 700, 1500, 1, reads, writes);
+      CHECK((reads  == std::vector<int>{ 763, 827, 891, 1403 }));
+      CHECK((writes == std::vector<int>{ 891, 1403 }));
     }
 
     // restarts at every Present (a game presenting to two windows in turn): still a read every

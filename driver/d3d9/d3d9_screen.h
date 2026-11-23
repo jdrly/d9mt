@@ -138,15 +138,18 @@ namespace dxvk::screen {
   // Without D9MT_PROFILE: at which Presents the swapchain reads the screen's state for
   // SCREEN-INFO, and whether that read may write the line (it is written only when it changed).
   // The read never waits: it returns the values AppKit published last and asks the main thread
-  // for fresh ones, so the first read after a (re)start only asks. Then every 64th Present until
-  // the values are known (the first line), every 512th after it. Values that stay unknown are
-  // written once, at the 9th read (the 513th Present), and then asked for every 512th Present.
+  // for fresh ones, unless a request is still pending (one at a time, process-wide: possibly
+  // another window's). So the first two reads after a (re)start only ask, and the third (the
+  // 129th Present) is the first that may write. Then every 64th Present until the values are
+  // known (the first line), every 512th after it, writing only known values. Values that stay
+  // unknown are written once, at the 9th read (the 513th Present).
   class InfoCadence {
 
   public:
 
     static constexpr uint32_t FastPresents = 64u;
     static constexpr uint32_t SlowPresents = 512u;
+    static constexpr uint32_t AskReads     = 2u;  // reads that only ask
     static constexpr uint32_t FastReads    = 8u;  // reads that wait for known values
 
     // Every Present: true when this one reads.
@@ -160,16 +163,16 @@ namespace dxvk::screen {
     // After a due() read: true when the line may be written. `known`: the screen's values are.
     bool mayWrite(bool known) {
       if (m_slow)
-        return true;
-      if (++m_reads == 1u || (!known && m_reads <= FastReads))
+        return known;
+      if (++m_reads <= AskReads || (!known && m_reads <= FastReads))
         return false;
       m_slow = true;
       m_countdown = SlowPresents;
-      return true;
+      return true; // known, or the unknown line once
     }
 
     // The swapchain was reset, or presents to another window: back to the fast cadence, its
-    // first read only asking. Never sooner than the next fast read, so restarts at every Present
+    // first two reads only asking. Never sooner than the next fast read, so restarts at every Present
     // still read every 64th Present at most.
     void restart() {
       m_countdown = std::min(m_countdown, FastPresents);
