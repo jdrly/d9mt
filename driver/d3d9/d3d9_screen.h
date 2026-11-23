@@ -54,8 +54,8 @@
 //   interval   the game's swap interval (vsyncs per frame; 0 = immediate)
 //   cap        off, or the presentAfterMinimumDuration in ms (D9MT_FPS_CAP)
 //   hz         the refresh rate d9mt paces to (Wine's display mode); "?" when Wine doesn't
-//              know it. Refreshed on a window change, a fullscreen change or a Reset, so it can
-//              lag after the window moves to another display
+//              know it. A cached value, re-read mainly on a window or fullscreen change, so it
+//              can lag after the window moves to another display or the mode changes
 //   screenMaxFps, refreshInterval  the window's NSScreen: maximumFramesPerSecond, and
 //              minimumRefreshInterval-maximumRefreshInterval in ms (a range: adaptive sync);
 //              "?" until AppKit answered, or when the window has no screen
