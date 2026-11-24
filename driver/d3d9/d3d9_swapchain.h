@@ -111,6 +111,11 @@ namespace dxvk {
     // and whenever it changes); `t` is PACE's t (d3d9_screen.h).
     void LogScreen(double t);
 
+    // SCREEN-INFO (d3d9_screen.h): reads `presenter`'s screen state (never blocks) and writes
+    // the line when it changed. `cadence`: Present's unprofiled call, which InfoCadence decides
+    // to write or not; false: LogScreen's (the presenter it drained), which always may.
+    void LogScreenInfo(const Rc<MtlPresenter>& presenter, bool cadence);
+
     // D9MT_PROFILE: the presenter's state for a HITCH line (lastVisibility, isDrawableStalled);
     // false without a presenter.
     bool PresenterState(uint64_t* vis, bool* stalled) const;
@@ -191,9 +196,11 @@ namespace dxvk {
     uint64_t                  m_capUntilNs = 0u;
     LogLimiter                m_capLog = { 20u, std::chrono::seconds(10) };
 
-    // D9MT_PROFILE (LogScreen): the SCREEN window, the last SCREEN-INFO line, the cap's
-    // minimum duration (ms, 0 = none) and the swap interval of the last Present
+    // D9MT_PROFILE (LogScreen): the SCREEN window; the last SCREEN-INFO line, the cap's
+    // minimum duration (ms, 0 = none) and the swap interval of the last Present (with or without
+    // D9MT_PROFILE, LogScreenInfo), and without it the Presents that read for SCREEN-INFO
     screen::Window            m_screenWindow;
+    screen::InfoCadence       m_screenInfoCadence;
     std::string               m_screenInfo;
     double                    m_screenCapMs = 0.0;
     uint32_t                  m_screenInterval = 1u;
