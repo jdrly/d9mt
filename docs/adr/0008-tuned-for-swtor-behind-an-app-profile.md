@@ -25,7 +25,8 @@ target other GPUs and other games than SWTOR on Apple's GPUs.
 ## Decision
 
 - **I tune d9mt for SWTOR.** A change meant for SWTOR alone goes behind the `swtor` app profile.
-  d9mt selects it when the game's exe is named `swtor.exe`, in any case and in any folder;
+  d9mt selects it when the game's exe is named `swtor.exe`, in any case and in any folder whose
+  path Windows' `MAX_PATH` holds;
   `D9MT_APP_PROFILE=generic|swtor` overrides that for tests and A/Bs
   ([configuration](../configuration.md#environment-variables)). The app profile is a struct the
   code reads (`driver/mtl/mtl_app_profile.h`). A SWTOR-only change adds its field there, with the
