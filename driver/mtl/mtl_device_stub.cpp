@@ -197,11 +197,22 @@ namespace dxvk {
   MtlInstance::MtlInstance() {
     wsi::init();
 
+    // GetModuleFileNameW(NULL), read here, in Direct3DCreate9, not at DLL load (d3d9.dll
+    // has no DllMain). The built-in config and the app profile both match on it.
+    const std::string exePath = env::getExePath();
+
     m_config.merge(Config::getUserConfig());
-    m_config.merge(Config::getAppConfig(env::getExePath()));
+    m_config.merge(Config::getAppConfig(exePath));
     m_config.logOptions();
 
     m_memProfile = resolveMemoryProfile(m_config);
+
+    const std::string profileEnv = env::getEnvVar("D9MT_APP_PROFILE");
+    AppProfileOverride how = AppProfileOverride::Unset;
+    m_appProfile = resolveAppProfile(exePath, profileEnv, how);
+    if (how == AppProfileOverride::Unknown)
+      Logger::warn(str::format("d9mt: unknown D9MT_APP_PROFILE '", profileEnv, "' ignored (generic or swtor)"));
+    Logger::info(appProfileLogLine(m_appProfile, exePath, how));
   }
 
   MtlInstance::~MtlInstance() {

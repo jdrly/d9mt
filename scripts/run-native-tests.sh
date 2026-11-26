@@ -29,6 +29,7 @@ skip() { # <name> <owner>
   echo "$1: skipped, run by $2"
 }
 
+host app_profile_test -I driver/mtl test/native/app_profile_test.cpp
 host attachment_opt_test -I driver/backend test/native/attachment_opt_test.cpp
 host block_fill_test -I driver test/native/block_fill_test.cpp
 host buffer_tracking_test -I driver/d3d9 -I driver/mtl test/native/buffer_tracking_test.cpp

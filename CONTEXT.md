@@ -54,6 +54,14 @@ The second build of each embedded metallib (fixed-function shaders, blit), for t
 version: the driver loads the newest Metal language and falls back to Compat where Metal rejects
 it (MSL 4.1 on macOS 26) ([building](docs/building.md#toolchain-and-targets)).
 
+**App profile**
+`swtor` or `generic`: the game-specific tuning d9mt applies, selected by the game's exe
+(`swtor.exe` selects `swtor`) or by `D9MT_APP_PROFILE`. Both are the same today
+([ADR-0008](docs/adr/0008-tuned-for-swtor-behind-an-app-profile.md),
+[configuration](docs/configuration.md#environment-variables)).
+_Avoid_: “profile” alone, which also names the memory profile and `D9MT_PROFILE`; “app config”
+for it (DXVK's built-in per-exe options in `config.cpp` are a separate thing).
+
 ## Submission and lifetime
 
 **Serial**

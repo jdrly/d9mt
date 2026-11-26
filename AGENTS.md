@@ -12,6 +12,9 @@ asking or choosing an approach of your own. `docs/dev-notes/` is historical, not
   [PERFORMANCE.md](PERFORMANCE.md) for evidence by change type and the explicit transition
   while representative calibration is pending. Timing claims name chip, OS and conditions;
   M5 routing checks do not validate M1-M4 hardware.
+- A change for SWTOR alone goes behind the `swtor` app profile (ADR-0008,
+  `driver/mtl/mtl_app_profile.h`); SWGL and every other game keep the generic path, which the hash
+  suite guards. A fix every game needs stays on the generic path.
 - Metal 4 doesn't retain resources: anything a command buffer uses lives until its serial retires
   (ADR-0001).
 - Don't touch the AIR codegen (`air/`, `airlib/`, dxbc-spirv, LLVM, `bridge/unix/air_cache.c`,

@@ -56,6 +56,15 @@ If two sources conflict, report the conflict instead of silently choosing one.
   action in a game and, after the arrow, the expected result. d9mt has no window of its own;
   when no game shows the change, the scenario uses a test program from `test/`.
 
+## Game-specific changes
+
+d9mt is tuned for SWTOR, and SWGL and every other game keep the generic path
+([ADR-0008](docs/adr/0008-tuned-for-swtor-behind-an-app-profile.md)). A change for SWTOR alone
+adds a field to the app profile (`driver/mtl/mtl_app_profile.h`) with the generic value as its
+default, and reads it where the behaviour differs. Such a change leaves the hash suite
+frame-equal to base, runs the `appswtor` variant to show what it changes under the `swtor`
+profile, and is judged on SWTOR captures under ADR-0007. A fix that every game needs goes on the generic path, not behind the profile.
+
 ## Branches
 
 - Never push directly to `main`. Every change goes through a pull request into `main`.

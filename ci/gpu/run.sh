@@ -32,7 +32,7 @@
 #                   d3d9.dll x64 and i686, into <out>/hot-code.tsv
 #                A difference or a timing never fails the set: only a step that doesn't run does.
 #
-# Spec words (hash, merged-main): variants=default,debug,noattach,repro,lifetime,shaderval,early,profile
+# Spec words (hash, merged-main): variants=default,debug,noattach,repro,lifetime,shaderval,early,profile,appswtor
 # (default: default); targets=27,26 (default: this Mac's own); new=<names>, allow=<names>,
 # allow-notclean=<names> for scripts/cmp-hash-runs.py.
 # Spec words (bench): benches=<names> for part B (default bench_draws,bindbench; bench_draws runs
@@ -99,7 +99,7 @@ done
 set -- $VARIANTS
 [ $# -gt 0 ] || { echo "variants= names no variant" >&2; exit 64; }
 for v in "$@"; do
-  case "$v" in default|debug|noattach|repro|lifetime|shaderval|early|profile) ;; *) echo "unknown variant: $v" >&2; exit 64 ;; esac
+  case "$v" in default|debug|noattach|repro|lifetime|shaderval|early|profile|appswtor) ;; *) echo "unknown variant: $v" >&2; exit 64 ;; esac
 done
 for t in $TARGETS; do
   case "$t" in 26|27) ;; *) echo "unknown AIR target: $t (26 or 27)" >&2; exit 64 ;; esac
@@ -244,8 +244,9 @@ hash_run() {
   cp "$WORK/hash-$label/hashes.txt" "$OUT/$label.hashes.txt" 2>/dev/null || true
   cp "$WORK/hash-$label/stats.txt" "$OUT/$label.stats.txt" 2>/dev/null || true
   [ ! -f "$OUT/$label.stats.txt" ] || note "$(cat "$OUT/$label.stats.txt")"
-  # a failed run's logs, and every finished profile run's: its HITCH/STATS/PROF lines are the point
-  if [ "$rc" != 0 ] || [ "$variant" = profile ]; then
+  # a failed run's logs, and every finished profile and appswtor run's: the HITCH/STATS/PROF
+  # lines, and the app profile line, are the point
+  if [ "$rc" != 0 ] || [ "$variant" = profile ] || [ "$variant" = appswtor ]; then
     mkdir -p "$OUT/$label-logs" && cp "$WORK/hash-$label/logs/"*.err "$WORK/hash-$label/logs/"*.out "$WORK/hash-$label/logs/"*.exc "$OUT/$label-logs/" 2>/dev/null || true
   fi
   keep_killed_logs "$label"
