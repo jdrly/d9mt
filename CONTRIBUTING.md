@@ -63,7 +63,7 @@ d9mt is tuned for SWTOR, and SWGL and every other game keep the generic path
 adds a field to the app profile (`driver/mtl/mtl_app_profile.h`) with the generic value as its
 default, and reads it where the behaviour differs. Such a change leaves the hash suite
 frame-equal to base, runs the `appswtor` variant to show what it changes under the `swtor`
-profile, and is judged on SWTOR captures under ADR-0007. A fix that every game needs goes on the generic path, not behind the profile.
+app profile, and is judged on SWTOR captures under ADR-0007. A fix that every game needs goes on the generic path, not behind the app profile.
 
 ## Branches
 

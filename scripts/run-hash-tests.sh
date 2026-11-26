@@ -309,7 +309,7 @@ if [ -n "$noprofile" ]; then
   exit 1
 fi
 if [ -n "$noapp" ]; then
-  echo "[hash] INVALID: variant appswtor, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor profile)" >&2
+  echo "[hash] INVALID: variant appswtor, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor app profile)" >&2
   exit 1
 fi
 if [ -n "$rerundiffers" ]; then

@@ -2,9 +2,9 @@
 
 // The app profile (ADR-0008, D9MT_APP_PROFILE in docs/configuration.md): which game's tuning d9mt
 // applies. The game's exe selects it: swtor.exe gets `swtor`, every other exe `generic`.
-// Both profiles hold the same values today, so no game behaves differently yet. A change for
+// Both app profiles hold the same values today, so no game behaves differently yet. A change for
 // SWTOR alone adds its field to AppProfile, with the generic value as the default, and sets the
-// SWTOR value where the profile is resolved.
+// SWTOR value where the app profile is resolved.
 //
 // Header-only and dependency-free so the exe match and the override are unit-tested natively
 // (test/native/app_profile_test.cpp). MtlInstance reads the exe path and the variable once, at
@@ -21,7 +21,7 @@ namespace dxvk {
     AppProfileId id = AppProfileId::Generic;
   };
 
-  // What D9MT_APP_PROFILE did: unset or empty, chose the profile, or named no profile (ignored).
+  // What D9MT_APP_PROFILE did: unset or empty, chose the app profile, or named none (ignored).
   enum class AppProfileOverride : uint32_t { Unset, Used, Unknown };
 
   inline const char* appProfileName(AppProfileId id) {
@@ -40,7 +40,7 @@ namespace dxvk {
     return n == std::string::npos ? exePath : exePath.substr(n + 1);
   }
 
-  // The profile an exe selects: swtor for a file named swtor.exe in any case, generic for any
+  // The app profile an exe selects: swtor for a file named swtor.exe in any case, generic for any
   // other name, and for an empty path (the exe's path couldn't be read).
   inline AppProfileId appProfileForExe(const std::string& exePath) {
     return appProfileLower(appProfileExeName(exePath)) == "swtor.exe"
@@ -56,8 +56,8 @@ namespace dxvk {
     return true;
   }
 
-  // The override when it names a profile, otherwise the exe's profile. An empty value is unset;
-  // any other value that names no profile is ignored and reported in `how`.
+  // The override when it names an app profile, otherwise the exe's. An empty value is unset; any
+  // other value that names no app profile is ignored and reported in `how`.
   inline AppProfile resolveAppProfile(const std::string& exePath, const std::string& value,
                                       AppProfileOverride& how) {
     AppProfile p;

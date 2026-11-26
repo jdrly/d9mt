@@ -24,33 +24,34 @@ target other GPUs and other games than SWTOR on Apple's GPUs.
 
 ## Decision
 
-- **d9mt is tuned for SWTOR.** A change meant for SWTOR alone goes behind the `swtor` app profile.
+- **I tune d9mt for SWTOR.** A change meant for SWTOR alone goes behind the `swtor` app profile.
   d9mt selects it when the game's exe is named `swtor.exe`, in any case and in any folder;
   `D9MT_APP_PROFILE=generic|swtor` overrides that for tests and A/Bs
-  ([configuration](../configuration.md#environment-variables)). The profile is a struct the code
-  reads (`driver/mtl/mtl_app_profile.h`). A SWTOR-only change adds its field there, with the
+  ([configuration](../configuration.md#environment-variables)). The app profile is a struct the
+  code reads (`driver/mtl/mtl_app_profile.h`). A SWTOR-only change adds its field there, with the
   generic value as the default.
-- **Every other game runs the `generic` profile**, SWGL included. That is the path d9mt has today,
-  and it changes only under the existing rules. The hash suite guards it: its programs aren't
-  `swtor.exe`, so they run generic, and a SWTOR-profile change leaves them frame-equal to base.
-  The suite's `appswtor` variant runs the same programs under the `swtor` profile.
-- **A SWTOR-profile change is judged on SWTOR captures under ADR-0007**: its correctness
-  evidence, the representative guard on SWTOR workloads, and a UAT in SWTOR. A synthetic program
-  alone doesn't show what such a change does.
-- **A fix that every game needs goes on the generic path**, not behind the profile. The profile
-  holds choices that are right for SWTOR and unproven or wrong elsewhere.
-- **Upstream is read, not followed.** I read DXVK, DXMT and dxbc-spirv and port what helps SWTOR or
-  every game (`port/` branches, CONTRIBUTING). d9mt doesn't track their releases, and an upstream
-  default isn't a reason to change d9mt's without d9mt's own evidence.
+- **Every other game runs the `generic` app profile**, SWGL included. That is the path d9mt has
+  today, and it changes only under the existing rules. The hash suite guards it: its programs
+  aren't `swtor.exe`, so they run generic, and a SWTOR-only change leaves them frame-equal to
+  base. The suite's `appswtor` variant runs the same programs under the `swtor` app profile.
+- **I judge a SWTOR-only change on SWTOR captures under ADR-0007**: its correctness evidence, the
+  representative guard on SWTOR workloads, and a UAT in SWTOR. A synthetic program alone doesn't
+  show what such a change does.
+- **A fix that every game needs goes on the generic path**, not behind the app profile. The
+  `swtor` app profile holds choices that are right for SWTOR and unproven or wrong elsewhere.
+- **I read upstream and don't follow it.** I read DXVK, DXMT and dxbc-spirv and port what helps
+  SWTOR or every game (`port/` branches, CONTRIBUTING). d9mt doesn't track their releases, and an
+  upstream default isn't a reason to change d9mt's without d9mt's own evidence.
 
 ## Consequences
 
-- Two paths to keep correct. Every profile field is a branch that only SWTOR takes in practice,
-  and the hash suite's programs don't draw what SWTOR draws, so `appswtor` proves only that the
-  synthetic frames stay the same. The real test of a SWTOR-profile change is a SWTOR session.
-- A SWTOR-profile change that would also help SWGL doesn't reach SWGL players until someone
-  moves it to the generic path, with the evidence that needs.
-- The captures that judge SWTOR-profile changes contain game data and stay private (ADR-0007).
+- Two paths to keep correct. Every field of the app profile is a branch that only SWTOR takes in
+  practice, and the hash suite's programs don't draw what SWTOR draws. The `appswtor` variant
+  shows that the override reached d9mt (the runner requires its log line) and compares the
+  programs' frames with base; it can't show what a change does in SWTOR. A SWTOR session can.
+- A SWTOR-only change that would also help SWGL doesn't reach SWGL players until someone moves it
+  to the generic path, with the evidence that needs.
+- The captures that judge SWTOR-only changes contain game data and stay private (ADR-0007).
   Outside contributors can't run that check. I run it.
 - The match is on the file name only. A renamed `swtor.exe` runs generic, and any program named
   `swtor.exe` gets SWTOR's tuning. `D9MT_APP_PROFILE` covers both cases by hand.
@@ -63,17 +64,17 @@ target other GPUs and other games than SWTOR on Apple's GPUs.
 - **A `dxvk.conf` option per tuning, set by SWTOR on Mac.** Rejected: each tuning becomes a
   player-visible option to document and keep, the app has to ship and maintain the config, and
   a player's own `dxvk.conf` can drop it by accident.
-- **DXVK's built-in profile table in `config.cpp`.** Rejected for now: it sets string options
-  that the code reads through the config, so every tuning would still need an option of its own,
-  as above. A profile field can later read an option where one makes sense.
+- **DXVK's built-in table in `config.cpp`.** Rejected for now: it sets string options that the
+  code reads through the config, so every tuning would still need an option of its own, as
+  above. A field of the app profile can later read an option where one makes sense.
 - **Match the exe by hash or version.** Rejected: every game patch would drop SWTOR's tuning until
   d9mt learned the new hash.
 
 ## Open questions
 
-- Which tuning goes behind the profile first. This record adds none: today both profiles hold
-  the same values, so no game behaves differently.
-- Whether SWGL gets a profile of its own once something is tuned for it.
+- Which tuning goes behind the `swtor` app profile first. This record adds none: today both app
+  profiles hold the same values, so no game behaves differently.
+- Whether SWGL gets an app profile of its own once something is tuned for it.
 
 ## Implementation status as of 2026-11-27
 

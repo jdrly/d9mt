@@ -211,7 +211,7 @@ namespace dxvk {
     AppProfileOverride how = AppProfileOverride::Unset;
     m_appProfile = resolveAppProfile(exePath, profileEnv, how);
     if (how == AppProfileOverride::Unknown)
-      Logger::warn(str::format("d9mt: unknown D9MT_APP_PROFILE '", profileEnv, "' ignored (generic or swtor)"));
+      Logger::warn("d9mt: D9MT_APP_PROFILE names no app profile (generic or swtor), ignored");
     Logger::info(appProfileLogLine(m_appProfile, exePath, how));
   }
 

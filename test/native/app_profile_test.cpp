@@ -1,8 +1,8 @@
 // Native unit test for the app profile (ADR-0008; no Wine, no Metal):
 //   clang++ -std=c++17 -I driver/mtl test/native/app_profile_test.cpp -o /tmp/apt && /tmp/apt
 //
-// One table of exe paths and D9MT_APP_PROFILE values with the profile and the override's effect
-// each must give. resolveAppProfile must pass it. Stubs that get one rule wrong run through the
+// One table of exe paths and D9MT_APP_PROFILE values with the app profile and the override's
+// effect each must give. resolveAppProfile must pass it. Stubs that get one rule wrong run through the
 // same table and must fail it: a table they passed wouldn't test that rule.
 #include "mtl_app_profile.h"
 
@@ -41,7 +41,7 @@ static const Case kCases[] = {
   { "C:\\Games\\swtor",                   "", G, Unset },
   { "C:\\Games\\swtor.exe\\",             "", G, Unset },
   { "",                                   "", G, Unset },  // the path couldn't be read
-  // The override wins when it names a profile, in any case.
+  // The override wins when it names an app profile, in any case.
   { "C:\\Games\\code_clear.exe",     "swtor", S, Used },
   { "C:\\Games\\code_clear.exe",     "SWTOR", S, Used },
   { "C:\\Games\\swtor.exe",        "generic", G, Used },
@@ -55,7 +55,7 @@ static const Case kCases[] = {
   { "C:\\Games\\code_clear.exe",         "1", G, Unknown },
 };
 
-// Whether `resolve` gives every case's profile and override effect; prints the first miss.
+// Whether `resolve` gives every case's app profile and override effect; prints the first miss.
 static bool passes(const char* name, Resolve resolve) {
   for (const Case& c : kCases) {
     AppProfileOverride how = AppProfileOverride::Used;
