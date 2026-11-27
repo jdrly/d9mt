@@ -458,7 +458,7 @@ namespace dxvk::rtsample {
             break;
           }
           if (r == Sampled::CaptureStuck) {
-            why = "last, a context capture took too long";
+            why = s.captureError == 0u ? "last, a context capture took too long" : "last, the wait for a context capture failed";
             stuck = true;
             break;
           }
