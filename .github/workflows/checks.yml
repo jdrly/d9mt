@@ -310,6 +310,7 @@ jobs:
             scripts/test-sampler-lod-bias.sh
             scripts/test-state-cache.sh
             scripts/test-upload-copy.sh
+            scripts/test-wait-resource.sh
             scripts/test-perf-compare.py
             scripts/test-cmp-hash-runs.py
             scripts/test-bench-counters.py

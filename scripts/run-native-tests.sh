@@ -74,6 +74,7 @@ skip device_teardown_test "scripts/test-residency.sh (extracts the device destru
 skip upload_copy_test "scripts/test-upload-copy.sh (extracts d3d9_device.cpp; ASan/UBSan)"
 skip query_getdata_test "scripts/test-query-getdata.sh (compiles d3d9_query.cpp against fakes, with planted-fault controls; ASan/UBSan)"
 skip sampler_lod_bias_test "scripts/test-sampler-lod-bias.sh (extracts createSampler's fill from mtl_device_impl.cpp; ASan/UBSan)"
+skip wait_resource_test "scripts/test-wait-resource.sh (extracts WaitForResource from d3d9_device.cpp; ASan/UBSan)"
 skip null_kind_test "scripts/test-null-kind.sh (extracts mtl_context_impl.h and mtl_context_transfer.cpp; ASan/UBSan)"
 skip pass_barrier_test "scripts/test-pass-barrier.sh (extracts emitProducerBarrier from mtl_context_transfer.cpp; ASan/UBSan)"
 
