@@ -211,6 +211,8 @@ namespace dxvk::backend {
     std::atomic<int64_t> m_recycledBytes { 0 };
     uint32_t             m_memStatsInterval = 0u;
     bool                 m_labels = false;
+    // Samplers get the key's LOD bias (Apple10, not turned off: mtl_sampler_bias.h).
+    bool                 m_samplerLodBias = false;
 
     std::atomic<uint64_t> m_diagBuffersCreated { 0u };
     std::atomic<uint64_t> m_diagBuffersRenamed { 0u };

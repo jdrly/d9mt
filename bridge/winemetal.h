@@ -280,9 +280,13 @@ struct WMTSamplerInfo {
   bool lod_average;
   bool support_argument_buffers;
   uint64_t gpu_resource_id;
+  /* MTLSamplerDescriptor.lodBias, set only when non-zero. The driver sends 0 on GPUs before
+     Apple10, which have no sampler LOD bias (driver/backend/mtl_sampler_bias.h). */
+  float lod_bias;
+  uint32_t padding;
 };
 
-STATIC_ASSERT(sizeof(WMTSamplerInfo) == 32);
+STATIC_ASSERT(sizeof(WMTSamplerInfo) == 40);
 
 WINEMETAL_API obj_handle_t MTLDevice_newSamplerState(obj_handle_t device, struct WMTSamplerInfo *info);
 

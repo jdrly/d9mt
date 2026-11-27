@@ -91,6 +91,8 @@ fanless one among them.
   carry the same version tags Apple's `metallib` writes for the same bitcode.
 - A selector bug breaks MetalFX upscaling, `D9MT_METALFX`.
 - d9mt ignores `SetGammaRamp`, so brightness sliders that use it do nothing.
+- On GPUs before Apple10 (M1–M4), d9mt ignores a sampler's `D3DSAMP_MIPMAPLODBIAS`: their Metal
+  samplers have no LOD bias. Apple10 GPUs (M5) apply it (`D9MT_SAMPLER_LOD_BIAS`).
 - Code review found these unimplemented or unverified: instance divisors above 1, indexed
   triangle fans and stride-0 vertex streams. d9mt rejects hardware vertex shaders that address
   more than 256 float constants, as DXVK does.

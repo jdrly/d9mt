@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "mtl_context_impl.h"
+#include "mtl_sampler_bias.h"
 #include "mtl_texture_kind.h"
 #include "../mtl/mtl_context.h"
 #include "../mtl/mtl_pfv.h"
@@ -220,6 +221,15 @@ namespace dxvk::backend {
     std::string pfvLine;
     m_info.pfvImages = pfvImages(m_device.handle(), pfvLine);
     Logger::info(pfvLine);
+
+    const char* biasEnv = std::getenv("D9MT_SAMPLER_LOD_BIAS");
+    bool biasUnderstood = true;
+    const SamplerLodBiasMode biasMode = samplerLodBiasMode(
+      MTLDevice_supportsFamily(m_device.handle(), GpuFamilyApple10), biasEnv, biasUnderstood);
+    if (!biasUnderstood)
+      Logger::warn(str::format("D9MT: D9MT_SAMPLER_LOD_BIAS=", biasEnv, " not understood (0 or 1): the default"));
+    m_samplerLodBias = biasMode == SamplerLodBiasMode::On;
+    Logger::info(samplerLodBiasLine(biasMode));
   }
 
   void MtlDeviceImpl::labelResource(obj_handle_t handle, MtlMemCategory c,
@@ -570,6 +580,7 @@ namespace dxvk::backend {
     samplerInfo.max_anisotroy = key.maxAnisotropy;
     samplerInfo.normalized_coords = true;
     samplerInfo.support_argument_buffers = true;
+    samplerInfo.lod_bias = metalLodBias(key.mipLodBias, m_samplerLodBias);
 
     obj_handle_t handle = MTLDevice_newSamplerState(m_device.handle(), &samplerInfo);
 

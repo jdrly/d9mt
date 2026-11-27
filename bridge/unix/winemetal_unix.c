@@ -1049,6 +1049,7 @@ dxmt_apitrace_sampler_descriptor_json(const struct WMTSamplerInfo *info, obj_han
     @"lod_average" : @(info->lod_average),
     @"normalized_coordinates" : @(info->normalized_coords),
     @"support_argument_buffers" : @(info->support_argument_buffers),
+    @"lod_bias" : @(info->lod_bias),
   });
 }
 
@@ -2010,6 +2011,8 @@ _MTLDevice_newSamplerState(void *obj) {
   sampler_desc.lodAverage = info->lod_average;
   sampler_desc.normalizedCoordinates = info->normalized_coords;
   sampler_desc.supportArgumentBuffers = info->support_argument_buffers;
+  if (info->lod_bias != 0.0f)
+    sampler_desc.lodBias = info->lod_bias;
 
   id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_desc];
   info->gpu_resource_id = info->support_argument_buffers ? [sampler gpuResourceID]._impl : 0;
