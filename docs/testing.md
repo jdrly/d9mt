@@ -36,7 +36,7 @@ scripts/cmp-hash-runs.py <scratch>/base/hashes.txt <scratch>/head/hashes.txt \
 Both runs go through this tree's runner and harness; `SRC` names the tree whose programs and
 builds are tested, so a base from before the runner existed works too.
 
-- `VARIANT=debug|noattach|repro|lifetime|shaderval|early|profile|appswtor` sets one of the variants above;
+- `VARIANT=debug|noattach|repro|lifetime|shaderval|early|profile|appswtor|unlimited` sets one of the variants above;
   `profile` runs with `D9MT_PROFILE=1`, for a change to the profiling counters, and is invalid
   unless every program logs `D9MT: profiler clock:` (a base from #141 on). `ci/gpu/run.sh` keeps
   the logs of every profile run that finishes (not of one the queue ended). Five frames reach no `PROF` window (256 frames) and rarely a `STATS`
@@ -45,6 +45,9 @@ builds are tested, so a base from before the runner existed works too.
   ([ADR-0008](adr/0008-tuned-for-swtor-behind-an-app-profile.md)), and is invalid unless every
   program of a tree that has the app profile logs `d9mt: app profile swtor (D9MT_APP_PROFILE`; a
   base from before it runs generic. `ci/gpu/run.sh` keeps its logs too;
+  `unlimited` runs with `D9MT_MEMORY_PROFILE=unlimited`, the memory profile `auto` picks on a Mac
+  with 64 GB or more, so a smaller Mac runs its paths (static buffers on the staging path, not
+  mapped directly), and is invalid unless every program logs `D9MT: memory profile unlimited:`;
   `D9MT_AIR_MACOS=26` or `27` reaches the programs for the AIR target.
 - `CACHE=<dir>` puts d9mt's three caches (AIR cache, PSO archives, state cache) into a folder
   of the caller's, used as found and left behind (neither it nor `WORK` may lie inside the other). Without it every run starts

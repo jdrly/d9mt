@@ -395,7 +395,13 @@ them in `<game>_d3d9.log`.
   target's or not), `clrPending` (folded clears that got a pass of their own because nothing drew there; also in
   `clrPass`), `clrViewFull` (color clears through the part-surface path whose rect covers the whole mip
   level: a pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
-  (part-surface depth/stencil clears: a draw).
+  (part-surface depth/stencil clears: a draw);
+- the lock waits, as the second's totals: `lockCs` and `lockGpu` as `count/ms` (buffer Locks that
+  waited for the CS thread to run the buffer's last use, and those the GPU still had: flush, sync,
+  block), `lockStatic` (of those, static buffers: DEFAULT pool, WRITEONLY without DYNAMIC),
+  `demoted` (static buffers that went from direct mapping to staging), `readWait` as `count/ms`
+  (readbacks that waited). A buffer on the staging path never waits at Lock: its cost is the
+  upload at Unlock (`flushBuf`) and the pass that upload ends (`splitXfer`).
 - **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
   (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for
   every present-path change.

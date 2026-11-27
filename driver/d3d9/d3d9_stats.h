@@ -13,7 +13,8 @@
 //     | constVs=3100.0/2900.0 constPs=1500.0/1400.0 upVs=1500.0 upVsKiB=270.0 upVsPadKiB=6.0
 //     upPs=1500.0 upPsKiB=94.0 upPsPadKiB=12.0 | splitMiBSubmit=315.0 splitMiBXfer=0.0
 //     splitMiBClear=105.1 splitMiBOther=0.0 | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0
-//     clrRect=0.0 clrRectDs=0.0
+//     clrRect=0.0 clrRectDs=0.0 | lockCs=0/0.00ms lockGpu=0/0.00ms lockStatic=0 demoted=0
+//     readWait=0/0.00ms
 //
 //   t           seconds since the first Present
 //   fps         Presents per second over the window
@@ -84,6 +85,17 @@
 //   clrRect     ... part-surface color clears (D3D9 Clear with rects or a smaller viewport, a
 //               part-surface ColorFill): a scissored draw
 //   clrRectDs   ... part-surface depth/stencil clears: a draw
+//   lockCs=n/ms   the window's totals, not per frame: buffer Locks that waited for the CS
+//               thread to run the buffer's last use (the GPU no longer had it), and the time
+//   lockGpu     ... buffer Locks the GPU still had: flush, CS sync and a block on the GPU
+//   lockStatic  of lockCs and lockGpu, the Locks of static buffers (DEFAULT pool, WRITEONLY
+//               without DYNAMIC). A Lock that needs no wait doesn't count, nor does any Lock
+//               of a buffer on the staging path (BUFFER mode: writes go to a CPU copy that
+//               Unlock uploads, flushBuf=)
+//   demoted     static buffers that went from direct mapping to the staging path
+//               (d9mt.writeOnlyDemoteLocks)
+//   readWait    readbacks that waited (texture locks, UpdateTexture sources, a buffer copied
+//               at draw), and the time
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.
@@ -176,6 +188,36 @@ namespace dxvk::stats {
     }
   };
 
+  // What a WaitForResource call waited for: a buffer Lock (a static buffer, DEFAULT pool and
+  // WRITEONLY without DYNAMIC, apart from the others) or a readback (a texture lock, an
+  // UpdateTexture source, a buffer copied at draw).
+  enum class LockWait : uint32_t { Buffer, StaticBuffer, Readback };
+
+  // The lock waits for STATS (lockCs= … readWait=): WaitForResource calls that waited, by what
+  // they waited for. A buffer lock waits in one of two ways: it syncs the CS thread up to the
+  // buffer's last use (cs), or the GPU still has the buffer and it flushes, syncs and blocks
+  // (gpu). Calls that found nothing to wait for don't count. Also the static buffers demoted to
+  // staging (the memory profile's writeOnlyDemoteLocks). Counted and copied under the device
+  // lock, like FlushCounts.
+  struct LockWaitCounts {
+    uint64_t cs = 0u, csNs = 0u;
+    uint64_t gpu = 0u, gpuNs = 0u;
+    uint64_t staticBuffer = 0u;   // of cs and gpu, the static buffers' locks
+    uint64_t readback = 0u, readbackNs = 0u;
+    uint64_t demoted = 0u;
+
+    void noteWait(LockWait what, bool gpuBlocked, uint64_t ns) {
+      if (what == LockWait::Readback) {
+        readback++;
+        readbackNs += ns;
+        return;
+      }
+      (gpuBlocked ? gpu : cs)++;
+      (gpuBlocked ? gpuNs : csNs) += ns;
+      staticBuffer += what == LockWait::StaticBuffer ? 1u : 0u;
+    }
+  };
+
   class Window {
 
   public:
@@ -200,7 +242,7 @@ namespace dxvk::stats {
 
     // The line for the window that ends now; starts the next window.
     std::string take(uint64_t nowNs, const rstats::Snapshot& rs, const CompileTotals& ct, const Extra& extra,
-                     const FlushCounts& fc, const ConstCounts& cc) {
+                     const FlushCounts& fc, const ConstCounts& cc, const LockWaitCounts& lw) {
       const double winS = double(nowNs - m_winStartNs) * 1e-9;
       const size_t n = m_dts.size();
 
@@ -291,10 +333,21 @@ namespace dxvk::stats {
         pf(rstats::ClearsRect), pf(rstats::ClearsRectDs));
       line += buf;
 
+      // Lock waits: the window's totals, not per frame (a few in a second are worth seeing).
+      std::snprintf(buf, sizeof(buf),
+        " | lockCs=%llu/%.2fms lockGpu=%llu/%.2fms lockStatic=%llu demoted=%llu readWait=%llu/%.2fms",
+        (unsigned long long)(lw.cs - m_lw.cs), double(lw.csNs - m_lw.csNs) * 1e-6,
+        (unsigned long long)(lw.gpu - m_lw.gpu), double(lw.gpuNs - m_lw.gpuNs) * 1e-6,
+        (unsigned long long)(lw.staticBuffer - m_lw.staticBuffer),
+        (unsigned long long)(lw.demoted - m_lw.demoted),
+        (unsigned long long)(lw.readback - m_lw.readback), double(lw.readbackNs - m_lw.readbackNs) * 1e-6);
+      line += buf;
+
       m_rs = rs;
       m_ct = ct;
       m_fc = fc;
       m_cc = cc;
+      m_lw = lw;
       m_winStartNs = nowNs;
       m_dts.clear();
       return line;
@@ -310,6 +363,7 @@ namespace dxvk::stats {
     CompileTotals      m_ct;
     FlushCounts        m_fc;
     ConstCounts        m_cc;
+    LockWaitCounts     m_lw;
 
   };
 

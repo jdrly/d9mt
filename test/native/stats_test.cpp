@@ -83,7 +83,17 @@ int main() {
   CHECK(cc.writes[0] == 59u * 4u && cc.changed[0] == 59u * 3u && cc.changed[1] == 59u * 2u);
   CHECK(cc.uploadBytes[0] == 59u * 8192u && cc.padBytes[0] == 59u * 1024u && cc.padBytes[1] == 0u);
 
-  std::string line = w.take(t, rs, ct, extra, fc, cc);
+  // Lock waits: window totals by what for and how; a Readback never counts as a buffer Lock.
+  stats::LockWaitCounts lw;
+  lw.noteWait(stats::LockWait::StaticBuffer, false, 1500000u);   // CS sync, 1.5 ms
+  lw.noteWait(stats::LockWait::StaticBuffer, true,  4000000u);   // GPU, 4 ms
+  lw.noteWait(stats::LockWait::Buffer,       true,  250000u);    // GPU, 0.25 ms
+  lw.noteWait(stats::LockWait::Readback,     true,  2000000u);   // a readback, 2 ms
+  lw.demoted = 1u;
+  CHECK(lw.cs == 1u && lw.gpu == 2u && lw.staticBuffer == 2u && lw.readback == 1u);
+  CHECK(lw.csNs == 1500000u && lw.gpuNs == 4250000u && lw.readbackNs == 2000000u);
+
+  std::string line = w.take(t, rs, ct, extra, fc, cc, lw);
   std::printf("%s\n", line.c_str());
   CHECK(has(line, "STATS t=1 fps=58.3 "));
   CHECK(has(line, " ms=17.2/60.0/60.0 slow33=2 slow50=1 "));
@@ -100,7 +110,8 @@ int main() {
                   " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"));
   CHECK(has(line, " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"
                   " | splitMiBSubmit=315.0 splitMiBXfer=0.0 splitMiBClear=105.0 splitMiBOther=0.0"
-                  " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0"));
+                  " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0"
+                  " | lockCs=1/1.50ms lockGpu=2/4.25ms lockStatic=2 demoted=1 readWait=1/2.00ms"));
   { // #80: countSplit (splitCheck's classification) picks the first reason that holds, and the
     // reasons' bytes add up to SplitBytes.
     uint64_t c[rstats::Count] = { };
@@ -117,7 +128,7 @@ int main() {
           + c[rstats::SplitBytesOther] == c[rstats::SplitBytes]);
     CHECK(c[rstats::SplitBytes] == 4124u && c[rstats::Draws] == 0u);
   }
-  const std::string tail = " clrRect=0.5 clrRectDs=3.0";
+  const std::string tail = " demoted=1 readWait=1/2.00ms";
   CHECK(line.compare(line.size() - tail.size(), tail.size(), tail) == 0);   // the end of the line
 
   // The next window reports deltas only, and a negative saving (restores).
@@ -133,7 +144,8 @@ int main() {
   extra.att = "live-off";
   for (int i = 0; i < 63 * 2; i++) fc.noteFlushed(stats::FlushOrigin::Wait);
   for (int i = 0; i < 63; i++) cc.noteWrite(1u, false);
-  line = w.take(t, rs, ct, extra, fc, cc);
+  lw.noteWait(stats::LockWait::Buffer, false, 500000u);
+  line = w.take(t, rs, ct, extra, fc, cc, lw);
   std::printf("%s\n", line.c_str());
   // The flush fields are this window's only: 63 Presents, nothing carried over.
   CHECK(has(line, " | flushChunk=0.0/0.0 flushRt=0.0/0.0 "));
@@ -148,6 +160,8 @@ int main() {
   CHECK(has(line, " restore=1.0 savedMiB=-1.0 attMs=0.00 clrFold=0.0 clrPass=0.0 "));
   CHECK(has(line, "| sh=0 pso=0 wait=0/0.0ms "));
   CHECK(has(line, " att=live-off"));
+  // The lock waits are this window's only too.
+  CHECK(has(line, " | lockCs=1/0.50ms lockGpu=0/0.00ms lockStatic=0 demoted=0 readWait=0/0.00ms"));
 
   // RESTORE: what the restores were for, per second and for the session.
   {

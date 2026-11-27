@@ -4896,9 +4896,17 @@ namespace dxvk {
   bool D3D9DeviceEx::WaitForResource(
     const MtlResource&                Resource,
           uint64_t                          SequenceNumber,
-          DWORD                             MapFlags) {
-    if (!m_dxvkDevice->isResourceInUse(Resource))
+          DWORD                             MapFlags,
+          stats::LockWait                   What) {
+    // D9MT_PROFILE: the calls that waited, by what for and how (STATS lockCs= … readWait=).
+    const bool counted = unlikely(hitch::g_enabled);
+    const auto t0 = counted ? high_resolution_clock::now() : high_resolution_clock::time_point();
+    bool csWaited = false, gpuBlocked = false, done = true;
+
+    if (!m_dxvkDevice->isResourceInUse(Resource)) {
+      csWaited = counted && D3D9DirectBufferTracker::needsCsSync(SequenceNumber, m_csThread.lastSequenceNumber());
       SynchronizeCsThread(SequenceNumber);
+    }
 
     if (m_dxvkDevice->isResourceInUse(Resource)) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
@@ -4909,21 +4917,26 @@ namespace dxvk {
           ExecuteFlush(stats::FlushOrigin::Wait, false);
         else
           ConsiderFlush(GpuFlushType::ImplicitWeakHint, stats::FlushOrigin::Wait);
-        return false;
+        done = false;
+      } else {
+        ExecuteFlush(stats::FlushOrigin::Wait, false);
+        SynchronizeCsThread(SequenceNumber);
+
+        { hitch::Scope hs(m_hitch, hitch::GpuWait);
+          m_dxvkDevice->waitForResource(Resource);
+        }
+        gpuBlocked = true;
+
+        if (unlikely(m_memStats))
+          m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
       }
-
-      ExecuteFlush(stats::FlushOrigin::Wait, false);
-      SynchronizeCsThread(SequenceNumber);
-
-      { hitch::Scope hs(m_hitch, hitch::GpuWait);
-        m_dxvkDevice->waitForResource(Resource);
-      }
-
-      if (unlikely(m_memStats))
-        m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
     }
 
-    return true;
+    if (unlikely(counted) && (csWaited || gpuBlocked))
+      m_lockWaits.noteWait(What, gpuBlocked, uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        high_resolution_clock::now() - t0).count()));
+
+    return done;
   }
 
 
@@ -5112,7 +5125,8 @@ namespace dxvk {
         TrackTextureMappingBufferSequenceNumber(pResource, Subresource);
       }
 
-      if (!WaitForResource(*mappedBuffer, pResource->GetMappingBufferSequenceNumber(Subresource), Flags))
+      if (!WaitForResource(*mappedBuffer, pResource->GetMappingBufferSequenceNumber(Subresource), Flags,
+                           stats::LockWait::Readback))
         return D3DERR_WASSTILLDRAWING;
     }
 
@@ -5278,7 +5292,8 @@ namespace dxvk {
 
     if (unlikely(pSrcTexture->NeedsReadback(SrcSubresource))) {
       const Rc<MtlBuffer>& buffer = pSrcTexture->GetBuffer();
-      WaitForResource(*buffer, pSrcTexture->GetMappingBufferSequenceNumber(SrcSubresource), 0);
+      WaitForResource(*buffer, pSrcTexture->GetMappingBufferSequenceNumber(SrcSubresource), 0,
+                      stats::LockWait::Readback);
       pSrcTexture->SetNeedsReadback(SrcSubresource, false);
     }
 
@@ -5452,8 +5467,11 @@ namespace dxvk {
           break;
         case D3D9DirectBufferTracker::LockAction::Demote:
           pResource->DemoteToBufferMode();
-          if (pResource->GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_BUFFER)
+          if (pResource->GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_BUFFER) {
             m_dxvkDevice->frontendStats().writeOnlyDemoted.fetch_add(1u, std::memory_order_relaxed);
+            if (unlikely(hitch::g_enabled))
+              m_lockWaits.demoted++;
+          }
           break;
         case D3D9DirectBufferTracker::LockAction::Wait:
           break;
@@ -5518,10 +5536,13 @@ namespace dxvk {
       if (!skipWait) {
         const Rc<MtlBuffer> mappingBuffer = pResource->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>();
         const uint64_t seq = pResource->GetMappingBufferSequenceNumber();
+        const stats::LockWait what = desc.Pool == D3DPOOL_DEFAULT
+          && (desc.Usage & (D3DUSAGE_WRITEONLY | D3DUSAGE_DYNAMIC)) == D3DUSAGE_WRITEONLY
+          ? stats::LockWait::StaticBuffer : stats::LockWait::Buffer;
         hs.addAux();
 
         if (likely(!m_memStats)) {
-          if (!WaitForResource(*mappingBuffer, seq, Flags))
+          if (!WaitForResource(*mappingBuffer, seq, Flags, what))
             return D3DERR_WASSTILLDRAWING;
         } else {
           // Count only locks that really waited: the CS thread had not run the
@@ -5530,7 +5551,7 @@ namespace dxvk {
           const bool csBehind = D3D9DirectBufferTracker::needsCsSync(seq, m_csThread.lastSequenceNumber());
           const uint64_t gpuWaits = stats.resourceGpuWaits.load(std::memory_order_relaxed);
           const auto t0 = high_resolution_clock::now();
-          if (!WaitForResource(*mappingBuffer, seq, Flags))
+          if (!WaitForResource(*mappingBuffer, seq, Flags, what))
             return D3DERR_WASSTILLDRAWING;
 
           if (csBehind || stats.resourceGpuWaits.load(std::memory_order_relaxed) != gpuWaits) {
@@ -5680,7 +5701,8 @@ namespace dxvk {
 
       if (unlikely(vbo->NeedsReadback())) {
         // MAPPING, not STAGING: a DIRECT buffer has no staging buffer.
-        WaitForResource(*vbo->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>(), vbo->GetMappingBufferSequenceNumber(), D3DLOCK_READONLY);
+        WaitForResource(*vbo->GetBuffer<D3D9_COMMON_BUFFER_TYPE_MAPPING>(), vbo->GetMappingBufferSequenceNumber(),
+                        D3DLOCK_READONLY, stats::LockWait::Readback);
       }
 
       const uint32_t vertexSize = m_state.vertexDecl->GetSize(i);
@@ -5971,16 +5993,18 @@ namespace dxvk {
       extra.att = !m_dxvkDevice->memoryProfile().attachmentOpt || deferred ? "off"
                 : (d9mtdbg::flags() & d9mtdbg::NoAttachOpt) ? "live-off" : "on";
       const rstats::Snapshot rs = m_dxvkDevice->renderStats().snapshot();
-      // Present has released the device lock by now; the flush and constant counts are written
-      // under it.
+      // Present has released the device lock by now; the flush, constant and lock-wait counts are
+      // written under it.
       stats::FlushCounts fc;
       stats::ConstCounts cc;
+      stats::LockWaitCounts lw;
       { D3D9DeviceLock lock = m_multithread.AcquireLock();
         fc = m_flushCounts;
         cc = m_constCounts;
+        lw = m_lockWaits;
       }
       const double t = m_statsWindow.seconds(nowNs);
-      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc, cc) + hitch::stampSuffix(wallClockStamp()));
+      Logger::warn(m_statsWindow.take(nowNs, rs, ct, extra, fc, cc, lw) + hitch::stampSuffix(wallClockStamp()));
       std::string restores = m_restoreWindow.take(t, rs.v[rstats::Frames],
         m_dxvkDevice->restoreLog().snapshot());
       if (!restores.empty())
