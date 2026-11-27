@@ -19,7 +19,9 @@
  *  V7. a visit that clears S7 (BLUE), and S7 copied with StretchRect while the visit is open;
  *  then S1, S4, S5, S6, C and the copy of S7 sampled into cells: BLUE, MAGENTA in a BLUE frame,
  *  BLUE, YELLOW, RED, BLUE.
- * Frame 1 reads the back buffer back and prints a FAIL line for each pixel that differs. */
+ * Frame 1 reads the back buffer back and prints a FAIL line for each pixel that differs. From frame 2
+ * on, frame 1's reads of the cleared targets keep their stores (the read hint), so every visit gets
+ * a pass of its own: frame 1 checks the kept visits, and the frame hashes compare the two paths. */
 #include "t_common.h"
 
 #ifndef CV_NAME
@@ -108,9 +110,12 @@ static void frame(int n) {
   scene();
   colourCell(RED, 20, 20);
 
-  /* V2: back on the scene, a draw before S2 is bound again, so the visit ends on the scene */
+  /* V2: back on the scene, a draw before S2 is bound again, so the visit ends on the scene. The
+   * GREY cell, a draw on the scene, puts unbind() into effect before the visit: without it S2 is
+   * still bound for sampling when the visit ends, and the visit gets a pass of its own, as in V3. */
   sampleCell(2, 120, 20);
   unbind();
+  colourCell(GREY, 420, 120);
   visit(2);
   IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u | BLUE, 1.0f, 0);
   scene();
