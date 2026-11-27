@@ -189,8 +189,18 @@ namespace dxvk {
     return p;
   }
 
-  // Tier from config/env/RAM plus explicit overrides (d9mt.* options, D9MT_* env).
-  MtlMemoryProfile resolveMemoryProfile(const Config& config);
+  // The app profile's staticBuffersDirect (mtl_app_profile.h): static buffers mapped directly,
+  // and demoted after as many in-place locks as the default, on a tier that has neither
+  // (`unlimited`). The other tiers already have both, so they don't change.
+  inline void applyStaticBuffersDirect(MtlMemoryProfile& p) {
+    p.writeOnlyDirect = true;
+    if (!p.writeOnlyDemoteLocks)
+      p.writeOnlyDemoteLocks = MtlMemoryProfile().writeOnlyDemoteLocks;
+  }
+
+  // Tier from config/env/RAM, then the app profile's staticBuffersDirect, then explicit
+  // overrides (d9mt.* options, D9MT_* env), which win.
+  MtlMemoryProfile resolveMemoryProfile(const Config& config, bool staticBuffersDirect);
 
   // Installed RAM in bytes (GlobalMemoryStatusEx), 0 if unknown.
   uint64_t queryPhysicalRam();

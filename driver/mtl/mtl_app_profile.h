@@ -2,9 +2,9 @@
 
 // The app profile (ADR-0008, D9MT_APP_PROFILE in docs/configuration.md): which game's tuning d9mt
 // applies. The game's exe selects it: swtor.exe gets `swtor`, every other exe `generic`.
-// Both app profiles hold the same values today, so no game behaves differently yet. A change for
-// SWTOR alone adds its field to AppProfile, with the generic value as the default, and sets the
-// SWTOR value where the app profile is resolved.
+// A change for SWTOR alone adds its field to AppProfile, with the generic value as the default,
+// sets the SWTOR value in appProfileFor, and gets a D9MT_<FIELD>=0|1 override of its own
+// (applyAppProfileSwitch), so an A/B is one binary with the field toggled.
 //
 // Header-only and dependency-free so the exe match and the override are unit-tested natively
 // (test/native/app_profile_test.cpp). MtlInstance reads the exe path and the variable once, at
@@ -17,12 +17,37 @@ namespace dxvk {
 
   enum class AppProfileId : uint32_t { Generic, Swtor };
 
+  // What D9MT_APP_PROFILE, or a field's D9MT_<FIELD>, did: unset or empty, chose the app profile
+  // (set the field), or named none (ignored).
+  enum class AppProfileOverride : uint32_t { Unset, Used, Unknown };
+
   struct AppProfile {
     AppProfileId id = AppProfileId::Generic;
+    // Static buffers (DEFAULT pool, WRITEONLY without DYNAMIC) mapped directly on every memory
+    // profile, demoted to staging after the same in-place locks as below 64 GB of RAM: the
+    // `unlimited` memory profile otherwise puts them on the staging path
+    // (applyStaticBuffersDirect, mtl_memory_profile.h). swtor: on. D9MT_STATIC_BUFFERS_DIRECT.
+    bool staticBuffersDirect = false;
   };
 
-  // What D9MT_APP_PROFILE did: unset or empty, chose the app profile, or named none (ignored).
-  enum class AppProfileOverride : uint32_t { Unset, Used, Unknown };
+  // The fields' values of an app profile.
+  inline AppProfile appProfileFor(AppProfileId id) {
+    AppProfile p;
+    p.id = id;
+    p.staticBuffersDirect = id == AppProfileId::Swtor;
+    return p;
+  }
+
+  // A field's D9MT_<FIELD> override: "1" sets it, "0" clears it, empty is unset, anything else is
+  // ignored (Unknown) and the app profile's value stays.
+  inline AppProfileOverride applyAppProfileSwitch(const std::string& value, bool& field) {
+    if (value.empty())
+      return AppProfileOverride::Unset;
+    if (value != "0" && value != "1")
+      return AppProfileOverride::Unknown;
+    field = value == "1";
+    return AppProfileOverride::Used;
+  }
 
   inline const char* appProfileName(AppProfileId id) {
     return id == AppProfileId::Swtor ? "swtor" : "generic";
@@ -60,12 +85,11 @@ namespace dxvk {
   // other value that names no app profile is ignored and reported in `how`.
   inline AppProfile resolveAppProfile(const std::string& exePath, const std::string& value,
                                       AppProfileOverride& how) {
-    AppProfile p;
-    p.id = appProfileForExe(exePath);
+    AppProfileId id = appProfileForExe(exePath);
     how = AppProfileOverride::Unset;
     if (!value.empty())
-      how = parseAppProfile(value, p.id) ? AppProfileOverride::Used : AppProfileOverride::Unknown;
-    return p;
+      how = parseAppProfile(value, id) ? AppProfileOverride::Used : AppProfileOverride::Unknown;
+    return appProfileFor(id);
   }
 
   // The start-up log line: `d9mt: app profile swtor (exe swtor.exe)`, with `D9MT_APP_PROFILE, `
@@ -77,6 +101,14 @@ namespace dxvk {
     return std::string("d9mt: app profile ") + appProfileName(p.id) + " ("
       + (how == AppProfileOverride::Used ? "D9MT_APP_PROFILE, " : "")
       + "exe " + (exe.empty() ? "unknown" : exe) + ")";
+  }
+
+  // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on`, with
+  // ` (D9MT_STATIC_BUFFERS_DIRECT)` after a value the override set.
+  inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect) {
+    return std::string("d9mt: app profile fields: staticBuffersDirect ")
+      + (p.staticBuffersDirect ? "on" : "off")
+      + (staticBuffersDirect == AppProfileOverride::Used ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "");
   }
 
 }

@@ -205,14 +205,20 @@ namespace dxvk {
     m_config.merge(Config::getAppConfig(exePath));
     m_config.logOptions();
 
-    m_memProfile = resolveMemoryProfile(m_config);
-
     const std::string profileEnv = env::getEnvVar("D9MT_APP_PROFILE");
     AppProfileOverride how = AppProfileOverride::Unset;
     m_appProfile = resolveAppProfile(exePath, profileEnv, how);
     if (how == AppProfileOverride::Unknown)
       Logger::warn("d9mt: D9MT_APP_PROFILE names no app profile (generic or swtor), ignored");
     Logger::info(appProfileLogLine(m_appProfile, exePath, how));
+    const AppProfileOverride staticHow = applyAppProfileSwitch(
+      env::getEnvVar("D9MT_STATIC_BUFFERS_DIRECT"), m_appProfile.staticBuffersDirect);
+    if (staticHow == AppProfileOverride::Unknown)
+      Logger::warn("d9mt: D9MT_STATIC_BUFFERS_DIRECT is neither 0 nor 1, ignored");
+    Logger::info(appProfileFieldsLine(m_appProfile, staticHow));
+
+    // after the app profile: its staticBuffersDirect is one of the memory profile's inputs
+    m_memProfile = resolveMemoryProfile(m_config, m_appProfile.staticBuffersDirect);
   }
 
   MtlInstance::~MtlInstance() {

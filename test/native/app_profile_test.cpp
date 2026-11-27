@@ -142,6 +142,38 @@ int main() {
   p = resolveAppProfile("", "", how);
   CHECK(appProfileLogLine(p, "", how) == "d9mt: app profile generic (exe unknown)");
 
+  // Fields: swtor's values, generic's defaults, and the resolved app profile carries them.
+  CHECK(appProfileFor(S).staticBuffersDirect && !appProfileFor(G).staticBuffersDirect);
+  CHECK(!AppProfile().staticBuffersDirect);
+  for (const Case& c : kCases) {
+    AppProfileOverride h = Unset;
+    const AppProfile r = resolveAppProfile(c.exePath, c.value, h);
+    CHECK(r.staticBuffersDirect == (r.id == S));
+  }
+
+  // A field's override: 1 and 0 set it either way on either app profile; empty and anything
+  // else leave it.
+  for (AppProfileId id : { G, S }) {
+    const bool def = appProfileFor(id).staticBuffersDirect;
+    struct { const char* v; bool want; AppProfileOverride how; } sw[] = {
+      { "1", true, Used }, { "0", false, Used }, { "", def, Unset },
+      { "true", def, Unknown }, { "on", def, Unknown }, { " 1", def, Unknown }, { "2", def, Unknown },
+    };
+    for (const auto& s : sw) {
+      AppProfile f = appProfileFor(id);
+      CHECK(applyAppProfileSwitch(s.v, f.staticBuffersDirect) == s.how);
+      CHECK(f.staticBuffersDirect == s.want);
+    }
+  }
+
+  // The fields' log line.
+  AppProfile f = appProfileFor(S);
+  CHECK(appProfileFieldsLine(f, Unset) == "d9mt: app profile fields: staticBuffersDirect on");
+  applyAppProfileSwitch("0", f.staticBuffersDirect);
+  CHECK(appProfileFieldsLine(f, Used)
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT)");
+  CHECK(appProfileFieldsLine(appProfileFor(G), Unknown) == "d9mt: app profile fields: staticBuffersDirect off");
+
   if (g_fail)
     return 1;
   std::printf("ok\n");
