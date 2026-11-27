@@ -34,6 +34,7 @@
 #include "../util/util_flush.h"
 #include "../util/util_lru.h"
 #include "../util/util_unmap.h"
+#include "../util/util_rt_sample.h"
 #include "../util/sync/sync_signal.h"
 
 namespace dxvk {
@@ -1689,6 +1690,10 @@ namespace dxvk {
     // other member moves.
     uint64_t                        m_diagBurnTicks   = 0u;
     uint64_t                        m_diagBurnCsTicks = 0u;
+
+    // D9MT_RT_SAMPLE (util_rt_sample.h): the sampler of the thread that created the device, empty
+    // when off. Last, so no other member moves.
+    rtsample::Handle                m_rtSample;
   };
 
 }

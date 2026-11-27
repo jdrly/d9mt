@@ -119,6 +119,9 @@ namespace dxvk {
           cheap_clock::process().tsc ? "TSC" : "steady clock"));
       }
     }
+    // D9MT_RT_SAMPLE (util_rt_sample.h): a sampler of this thread, the render thread. Unset: one
+    // environment read and nothing else
+    m_rtSample = rtsample::startFromEnv([] (const char* line) { Logger::warn(line); });
     m_stagingPool.setCapacity(m_dxvkDevice->memoryProfile().stagingBlocks);
     m_stagingMaxInFlight = MtlDeviceSize(env::is32BitHostPlatform()
       ? std::min(m_dxvkDevice->memoryProfile().stagingInFlightMB, 30u)
@@ -155,6 +158,10 @@ namespace dxvk {
 
 
   D3D9DeviceEx::~D3D9DeviceEx() {
+    // D9MT_RT_SAMPLE: the sampler's last window, first, so it holds none of the teardown. At
+    // process exit it isn't waited for (its thread has been ended already)
+    rtsample::stop(m_rtSample, !this_thread::isInModuleDetachment());
+
     if (m_dbg.dumpFile)
       std::fclose(m_dbg.dumpFile);
     if (m_dbg.logFile)

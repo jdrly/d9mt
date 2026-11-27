@@ -118,7 +118,8 @@ names the runner of each test it skips, among them `state_cache_test`
 (`scripts/test-state-cache.sh`), `pso_key_hash_test` (`scripts/test-pso-key-hash.sh`),
 `upload_copy_test` (`scripts/test-upload-copy.sh`), `query_getdata_test` (`scripts/test-query-getdata.sh`), `sampler_lod_bias_test` (`scripts/test-sampler-lod-bias.sh`),
 `wait_resource_test` (`scripts/test-wait-resource.sh`), `fatal_log_test`
-(`scripts/test-fatal-log.sh`, a mingw program it builds and runs under Wine), and `lifetime_check_test`,
+(`scripts/test-fatal-log.sh`, a mingw program it builds and runs under Wine), `rt_sample_wine_test`
+(`scripts/test-rt-sample.sh`, the same, on an Apple Silicon Mac), and `lifetime_check_test`,
 `submission_retire_test` and `submission_tracker_test`, which are mingw programs run
 by hand under Wine (the build line is in each source). A test in neither list fails
 the run, and so does any failing or unbuildable test (exit status 1).
