@@ -13,10 +13,11 @@
 // While the render thread is suspended it may hold any lock of the process: the heap's, the
 // loader lock, Wine's virtual-memory lock, the Logger's. So between SuspendThread and ResumeThread
 // the sampler only
-//   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs, or until
-//     the device is released: Wine's GetThreadContext waits without a limit until the thread has
+//   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs (a device
+//     release waits for it too): Wine's GetThreadContext waits without a limit until the thread has
 //     stopped. On the rented M1 (macOS 26.7.3, CrossOver 26.3 engine) one test program's captures
-//     took up to 250 ms, landing in winemetal.dll, while others took under 3 ms. A thread that
+//     took 42 to 54 ms on average and some passed the 250 ms limit of an earlier version, while
+//     its samples landed in winemetal.dll; other programs' captures took under 3 ms. A thread that
 //     never stops must not stay suspended, so past the limit the sampler resumes the thread and
 //     stops for good, and no sampler starts again in the process. The capture thread frees the
 //     state when its call comes back (never, if it never does: a state and a thread for each
@@ -38,7 +39,7 @@ namespace dxvk::rtsample {
   namespace {
 
     constexpr uint32_t MaxSamplers = 8u;
-    // A capture normally takes well under 3 ms; some took up to 250 ms on the M1 (above)
+    // A capture normally takes well under 3 ms; some took over 250 ms on the M1 (above)
     constexpr DWORD    kCaptureMs  = 2000u;
 
     /** Set once a capture got stuck: no sampler starts again in the process. */
@@ -175,6 +176,7 @@ namespace dxvk::rtsample {
       std::atomic<bool> quit = { false };    // the capture thread ends, or skips a late request
       CONTEXT     ctx     = { };
       BOOL        got     = FALSE;
+      DWORD       captureError = 0u;  // the wait for a capture failed with it (0: timed out)
 
       ModuleTable table;
       Window      window;
@@ -297,7 +299,7 @@ namespace dxvk::rtsample {
     }
 
 
-    enum class Sampled { Ok, Missed, ThreadGone, CaptureStuck, Released };
+    enum class Sampled { Ok, Missed, ThreadGone, CaptureStuck };
 
     /**
      * One sample: suspend, read the instruction pointer and copy the top of the stack, resume;
@@ -319,20 +321,20 @@ namespace dxvk::rtsample {
 
       // Suspended: from here to ResumeThread, see the top of this file
       SetEvent(s.go);
-      const HANDLE waits[2] = { s.done, s.stop };
-      const DWORD w = WaitForMultipleObjects(2u, waits, FALSE, kCaptureMs);
+      // Only the capture ends this wait, or the limit: a release in the meantime waits for it
+      // (stop() waits longer than the limit), so no capture is given up but a stuck one
+      const DWORD w = WaitForSingleObject(s.done, kCaptureMs);
       if (w != WAIT_OBJECT_0) {
-        // Given up: past the limit, or the device is going. The capture thread skips the request
-        // if it hasn't made it, and ends after it if it has
+        // The capture thread skips the request if it hasn't made it, and ends after it if it has
+        s.captureError = w == WAIT_TIMEOUT ? 0u : GetLastError();
         s.quit.store(true, std::memory_order_release);
-        if (w != WAIT_OBJECT_0 + 1u)
-          s_captureStuck.store(true, std::memory_order_release);
+        s_captureStuck.store(true, std::memory_order_release);
         ResumeThread(s.target);
         QueryPerformanceCounter(&t1);
         s.window.missed++;
         const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
         s.window.heldMaxNs = std::max(s.window.heldMaxNs, heldNs);
-        return w == WAIT_OBJECT_0 + 1u ? Sampled::Released : Sampled::CaptureStuck;
+        return Sampled::CaptureStuck;
       }
       const BOOL got = s.got;
       if (got && s.stack) {
@@ -455,8 +457,6 @@ namespace dxvk::rtsample {
             why = "last, the thread ended";
             break;
           }
-          if (r == Sampled::Released)
-            break;
           if (r == Sampled::CaptureStuck) {
             why = "last, a context capture took too long";
             stuck = true;
@@ -476,9 +476,12 @@ namespace dxvk::rtsample {
           emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x raised a CPU fault (%08x): sampling stopped for good "
             "(suspending a thread while Wine handles its fault can end it under Rosetta)", s.tid, fault);
         }
-        if (stuck) {
+        if (stuck && s.captureError == 0u) {
           emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x: GetThreadContext didn't return within %u ms; the thread "
             "is resumed and sampling stopped for good", s.tid, kCaptureMs);
+        } else if (stuck) {
+          emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x: the wait for GetThreadContext failed (error %u); the "
+            "thread is resumed and sampling stopped for good", s.tid, s.captureError);
         }
       }
 
@@ -647,8 +650,9 @@ namespace dxvk::rtsample {
       CloseHandle(h.stop);
     }
     if (h.thread != nullptr) {
+      // a capture may take kCaptureMs, then the last window is written
       if (wait)
-        WaitForSingleObject(h.thread, 500u);
+        WaitForSingleObject(h.thread, kCaptureMs + 500u);
       CloseHandle(h.thread);
     }
     h = Handle();

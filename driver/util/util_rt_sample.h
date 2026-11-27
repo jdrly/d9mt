@@ -23,8 +23,9 @@
 // Shares are of wall time: a wait counts too, under the module the thread waits in (ntdll.dll for
 // most). A thread inside a Unix call (Metal, the wineserver) shows the PE caller's address:
 // winemetal.dll for d9mt's Metal calls, ntdll.dll or win32u.dll for Wine's system calls. A capture
-// can take longer than a sampling period (on the rented M1, up to 250 ms in a program whose samples
-// landed in winemetal.dll); the periods it covered get no sample, and the first line counts them.
+// can take longer than a sampling period (on the rented M1, macOS 26.7.3, CrossOver 26.3 engine: 42
+// to 54 ms on average, some over 250 ms, in one test program whose samples landed in
+// winemetal.dll); the periods it covered get no sample, and the first line counts them.
 //
 // Safety. On Wine + Rosetta a thread that gets Wine's suspend signal while it handles a CPU fault
 // (an access violation, a breakpoint) can die: Wine ends it with "nested exception on signal
@@ -36,9 +37,9 @@
 //   - afterwards the first CPU fault on the thread stops it for good, with a line that names the
 //     code;
 //   - between the suspend and the resume it lets a capture thread of its own call
-//     GetThreadContext and waits for it at most 2 s, or until the device is released (Wine's call
-//     waits without a limit for the thread to stop; past the limit the sampler resumes the thread
-//     and stops for good), and
+//     GetThreadContext and waits for it at most 2 s, a device release too (Wine's call waits
+//     without a limit for the thread to stop; past the limit the sampler resumes the thread and
+//     stops for good), and
 //     copies stack slots only between the stack pointer and the base of the thread's own stack as
 //     it was at the start (memory the thread has used; a thread on a fiber's stack isn't read).
 //     No heap, no lock, no module lookup, no log: a suspended thread may hold any of them.
@@ -451,8 +452,8 @@ namespace dxvk::rtsample {
   /**
    * \brief Stops the sampler
    *
-   * Asks it to write its last window and end. With \p wait, waits up to 500 ms for that (so a
-   * program that exits right after has the lines). Never frees anything the sampler uses: the
+   * Asks it to write its last window and end. With \p wait, waits up to 2.5 s for that (a
+   * capture in flight may take 2 s; a program that exits right after then has the lines). Never frees anything the sampler uses: the
    * sampler thread frees its own state. Closes the handle's handles and empties it.
    */
   void stop(Handle& h, bool wait);
