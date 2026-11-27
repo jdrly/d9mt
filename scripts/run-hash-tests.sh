@@ -25,6 +25,10 @@
 #           Mac with 64 GB or more gets, so a smaller Mac runs its paths, the staging path of static
 #           buffers among them, whatever D9MT_WRITEONLY_DIRECT the caller has; every program's log
 #           must have "D9MT: memory profile unlimited:" with "writeOnlyDirect off")
+#           swtor-unlimited (D9MT_APP_PROFILE=swtor D9MT_MEMORY_PROFILE=unlimited: the swtor app
+#           profile on a Mac with 64 GB or more, where its staticBuffersDirect maps static buffers
+#           directly and a tree without it stages them; every program's log must have both
+#           lines, "d9mt: app profile swtor (D9MT_APP_PROFILE" and "D9MT: memory profile unlimited:")
 #           Any other D9MT_* variable of the caller reaches the programs, D9MT_AIR_MACOS too.
 # WORK      a scratch folder, removed and made again (default ${TMPDIR:-/tmp}/d9mt-hash). The
 #           engine clone, a new prefix, d9mt's caches and every log live there, nothing else is
@@ -115,6 +119,7 @@ case "$VARIANT" in
   profile) VARIANT_ENV=(D9MT_PROFILE=1) ;;
   appswtor) VARIANT_ENV=(D9MT_APP_PROFILE=swtor) ;;
   unlimited) VARIANT_ENV=(D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0) ;;
+  swtor-unlimited) VARIANT_ENV=(D9MT_APP_PROFILE=swtor D9MT_MEMORY_PROFILE=unlimited) ;;
   *) echo "FATAL: unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
 esac
 
@@ -267,10 +272,12 @@ for t in "${TESTS[@]}"; do
   grep -q 'D9MT: compile workers' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null || noproof+="$t "
   [ "$VARIANT" != profile ] || grep -q 'D9MT: profiler clock:' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
     || noprofile+="$t "
-  { [ "$VARIANT" != appswtor ] || [ ! -f "$SRC/driver/mtl/mtl_app_profile.h" ]; } \
+  { { [ "$VARIANT" != appswtor ] && [ "$VARIANT" != swtor-unlimited ]; } || [ ! -f "$SRC/driver/mtl/mtl_app_profile.h" ]; } \
     || grep -q 'd9mt: app profile swtor (D9MT_APP_PROFILE' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
     || noapp+="$t "
   [ "$VARIANT" != unlimited ] || grep -q 'D9MT: memory profile unlimited:.*, writeOnlyDirect off' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
+    || nomem+="$t "
+  [ "$VARIANT" != swtor-unlimited ] || grep -q 'D9MT: memory profile unlimited:' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
     || nomem+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
 done
@@ -316,11 +323,11 @@ if [ -n "$noprofile" ]; then
   exit 1
 fi
 if [ -n "$noapp" ]; then
-  echo "[hash] INVALID: variant appswtor, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor app profile)" >&2
+  echo "[hash] INVALID: variant $VARIANT, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor app profile)" >&2
   exit 1
 fi
 if [ -n "$nomem" ]; then
-  echo "[hash] INVALID: variant unlimited, but no 'D9MT: memory profile unlimited:' line with 'writeOnlyDirect off' for: $nomem(the override didn't reach d9mt, so these runs aren't the unlimited memory profile on the staging path)" >&2
+  echo "[hash] INVALID: variant $VARIANT, but no 'D9MT: memory profile unlimited:' line$([ "$VARIANT" = unlimited ] && echo " with 'writeOnlyDirect off'") for: $nomem(the override didn't reach d9mt, so these runs aren't the unlimited memory profile)" >&2
   exit 1
 fi
 if [ -n "$rerundiffers" ]; then

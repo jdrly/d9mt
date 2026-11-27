@@ -104,6 +104,26 @@ int main() {
   CHECK(memoryProfileForTier(MtlMemoryTier::Medium).reportedVramMB == 3072u);
   CHECK(memoryProfileForTier(MtlMemoryTier::High).reportedVramMB == 4096u);
 
+  // The app profile's staticBuffersDirect: every tier maps static buffers directly and demotes
+  // them after 2 in-place locks, as below 64 GB; nothing else of a tier changes.
+  for (MtlMemoryTier t : { MtlMemoryTier::Low, MtlMemoryTier::Medium, MtlMemoryTier::High,
+                           MtlMemoryTier::Ultra, MtlMemoryTier::Unlimited }) {
+    const MtlMemoryProfile before = memoryProfileForTier(t);
+    MtlMemoryProfile p = before;
+    applyStaticBuffersDirect(p);
+    CHECK(p.writeOnlyDirect && p.writeOnlyDemoteLocks == 2u);
+    CHECK(p.legacy == before.legacy && p.stagingBlocks == before.stagingBlocks
+          && p.budget == before.budget && p.recycledPerBuffer == before.recycledPerBuffer);
+    if (t != MtlMemoryTier::Unlimited)   // the tiers below 64 GB already have both
+      CHECK(p.writeOnlyDirect == before.writeOnlyDirect && p.writeOnlyDemoteLocks == before.writeOnlyDemoteLocks);
+  }
+  { // an explicit demotion count set before it stays
+    MtlMemoryProfile p = memoryProfileForTier(MtlMemoryTier::Unlimited);
+    p.writeOnlyDemoteLocks = 5u;
+    applyStaticBuffersDirect(p);
+    CHECK(p.writeOnlyDirect && p.writeOnlyDemoteLocks == 5u);
+  }
+
   std::printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
   return g_fail ? 1 : 0;
 }

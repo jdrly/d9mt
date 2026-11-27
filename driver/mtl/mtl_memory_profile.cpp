@@ -17,7 +17,7 @@ namespace dxvk {
   }
 
 
-  MtlMemoryProfile resolveMemoryProfile(const Config& config) {
+  MtlMemoryProfile resolveMemoryProfile(const Config& config, bool staticBuffersDirect) {
     std::string name = env::getEnvVar("D9MT_MEMORY_PROFILE");
     if (name.empty())
       name = config.getOption<std::string>("d9mt.memoryProfile", "auto");
@@ -41,6 +41,9 @@ namespace dxvk {
       p.reportedVramMB = uint32_t(mb);
     if (int32_t mb = config.getOption<int32_t>("d9mt.memoryBudgetMB", 0); mb > 0)
       p.budget = uint64_t(mb) << 20;
+
+    if (staticBuffersDirect)
+      applyStaticBuffersDirect(p);
 
     p.writeOnlyDirect = config.getOption<bool>("d9mt.writeOnlyDirect", p.writeOnlyDirect);
     if (int v = parseSwitch(env::getEnvVar("D9MT_WRITEONLY_DIRECT")); v >= 0)

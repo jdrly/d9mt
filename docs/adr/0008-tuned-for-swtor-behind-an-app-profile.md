@@ -82,4 +82,6 @@ target other GPUs and other games than SWTOR on Apple's GPUs.
 `driver/mtl/mtl_app_profile.h` (the struct, the exe match, the override), read once by
 `MtlInstance` at Direct3DCreate9 (`driver/mtl/mtl_device_stub.cpp`), which logs
 `d9mt: app profile <name> (exe <file name>)`. Tested by `test/native/app_profile_test.cpp` and the
-hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). No field yet.
+hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). The first field is
+`staticBuffersDirect` (static buffers mapped directly on every memory profile; its override
+`D9MT_STATIC_BUFFERS_DIRECT`, the `swtor-unlimited` variant).
