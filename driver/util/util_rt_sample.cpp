@@ -17,7 +17,10 @@
 //     GetThreadContext waits without a limit until the thread has stopped, and a thread that never
 //     stops must not stay suspended. Past the limit the sampler resumes the thread, stops for
 //     good and leaves the capture thread and its own state behind (never freed: the capture
-//     thread may still write into them);
+//     thread may still write into them), and no sampler starts again in the process. A capture
+//     thread that was delayed past the limit skips the request; one that had already checked
+//     makes it on the running thread, which Wine stops once more for it: one suspend outside the
+//     sampler's rhythm, after a 250 ms stall;
 //   - reads the thread's TEB and copies stack slots with plain loads, only between the stack
 //     pointer and the base of the stack the thread had when the sampler started, and only when
 //     the stack pointer is inside that stack and at or above its committed limit: memory the
@@ -33,6 +36,9 @@ namespace dxvk::rtsample {
 
     constexpr uint32_t MaxSamplers = 8u;
     constexpr DWORD    kCaptureMs  = 250u;   // a GetThreadContext normally takes well under 2 ms
+
+    /** Set once a capture got stuck: its thread and state stay behind, so no sampler starts again. */
+    std::atomic<bool> s_captureStuck = { false };
 
     /**
      * A thread the fault watch looks after, in one word: its id in the high half, the first CPU
@@ -159,7 +165,7 @@ namespace dxvk::rtsample {
       HANDLE      captureThread = nullptr;
       HANDLE      go      = nullptr;
       HANDLE      done    = nullptr;
-      std::atomic<bool> quit = { false };
+      std::atomic<bool> quit = { false };    // the capture thread ends, or skips a late request
       CONTEXT     ctx     = { };
       BOOL        got     = FALSE;
 
@@ -176,9 +182,13 @@ namespace dxvk::rtsample {
 
     DWORD WINAPI captureMain(void* arg) {
       State& s = *static_cast<State*>(arg);
-      while (WaitForSingleObject(s.go, INFINITE) == WAIT_OBJECT_0 && !s.quit.load(std::memory_order_acquire)) {
+      while (WaitForSingleObject(s.go, INFINITE) == WAIT_OBJECT_0) {
         std::memset(&s.ctx, 0, sizeof(s.ctx));
         s.ctx.ContextFlags = CONTEXT_CONTROL;
+        // A request the sampler gave up on (it resumed the thread and set quit) isn't made: on a
+        // running thread Wine would stop it once more to read its context
+        if (s.quit.load(std::memory_order_acquire))
+          break;
         s.got = GetThreadContext(s.target, &s.ctx);
         SetEvent(s.done);
       }
@@ -287,6 +297,8 @@ namespace dxvk::rtsample {
       // Suspended: from here to ResumeThread, see the top of this file
       SetEvent(s.go);
       if (WaitForSingleObject(s.done, kCaptureMs) != WAIT_OBJECT_0) {
+        s.quit.store(true, std::memory_order_release);
+        s_captureStuck.store(true, std::memory_order_release);
         ResumeThread(s.target);
         return Sampled::CaptureStuck;
       }
@@ -465,6 +477,10 @@ namespace dxvk::rtsample {
 
     Handle start(uint32_t hz, void (*sink)(const char*), bool guard, const char* rvaModule) {
       const DWORD tid = GetCurrentThreadId();
+      if (s_captureStuck.load(std::memory_order_acquire)) {
+        emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: an earlier sampler's context capture got stuck", tid);
+        return Handle();
+      }
       if (!installWatch()) {
         emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: the fault watch couldn't be installed", tid);
         return Handle();
@@ -509,18 +525,27 @@ namespace dxvk::rtsample {
         && (s->go   = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr
         && (s->done = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr
         && DuplicateHandle(self, s->stop, self, &h.stop, 0u, FALSE, DUPLICATE_SAME_ACCESS);
-      if (ok && (s->captureThread = CreateThread(nullptr, 0u, captureMain, s, 0u, nullptr)) == nullptr)
+      DWORD error = ok ? 0u : GetLastError();
+      if (ok && (s->captureThread = CreateThread(nullptr, 0u, captureMain, s, 0u, nullptr)) == nullptr) {
+        error = GetLastError();
         ok = false;
+      }
       if (ok && (h.thread = CreateThread(nullptr, 0u, samplerMain, s, 0u, nullptr)) == nullptr) {
-        // the capture thread waits on `go`: end it before the state goes
+        error = GetLastError();
+        // the capture thread waits on `go`: end it before the state goes, or leave the state
         s->quit.store(true, std::memory_order_release);
         SetEvent(s->go);
-        WaitForSingleObject(s->captureThread, INFINITE);
+        if (WaitForSingleObject(s->captureThread, 1000u) != WAIT_OBJECT_0) {
+          if (h.stop != nullptr)
+            CloseHandle(h.stop);
+          slot->store(0u, std::memory_order_release);
+          emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: no sampler thread (error %u)", tid, error);
+          return Handle();
+        }
         ok = false;
       }
 
       if (!ok) {
-        const DWORD error = GetLastError();
         if (s->captureThread != nullptr)
           CloseHandle(s->captureThread);
         if (h.stop != nullptr)

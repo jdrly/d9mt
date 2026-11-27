@@ -121,7 +121,7 @@ namespace dxvk::rtsample {
   }
 
 
-  constexpr uint32_t kMaxCodeRanges = 4u;
+  constexpr uint32_t kMaxCodeRanges = 16u;
 
   /** An address range, absolute: [begin, end). */
   struct Range {
@@ -133,7 +133,7 @@ namespace dxvk::rtsample {
   struct Module {
     uintptr_t base;
     uintptr_t size;
-    Range     code[kMaxCodeRanges];   // the first kMaxCodeRanges executable sections
+    Range     code[kMaxCodeRanges];   // its executable sections (the first kMaxCodeRanges)
     uint32_t  codeRanges;
     int       leaf;                   // its index among the system DLLs, -1 for any other module
     char      name[40];

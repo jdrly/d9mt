@@ -112,10 +112,14 @@ int main() {
     const rtsample::Range past[] = { { 0x2010u, 0x2200u } };   // code past the image
     CHECK(t.add(0x2000u, 0x100u, "ntdll.dll", past, 1u) == 1);
     CHECK(t.at(1).leaf == 0 && t.at(1).codeRanges == 0u && !t.at(1).inCode(0x2010u));
-    const rtsample::Range five[] = { { 0x3000u, 0x3010u }, { 0x3020u, 0x3030u }, { 0x3040u, 0x3050u },
-                                     { 0x3060u, 0x3070u }, { 0x3080u, 0x3090u } };
-    CHECK(t.add(0x3000u, 0x100u, "five.dll", five, 5u) == 2);   // the first four are kept
-    CHECK(t.at(2).codeRanges == rtsample::kMaxCodeRanges && t.at(2).inCode(0x3065u) && !t.at(2).inCode(0x3085u));
+    rtsample::Range many[rtsample::kMaxCodeRanges + 1u];
+    for (uint32_t i = 0u; i <= rtsample::kMaxCodeRanges; i++)
+      many[i] = { 0x10000u + 0x20u * i, 0x10010u + 0x20u * i };
+    CHECK(t.add(0x10000u, 0x1000u, "many.dll", many, rtsample::kMaxCodeRanges + 1u) == 2);   // the first 16 are kept
+    CHECK(t.at(2).codeRanges == rtsample::kMaxCodeRanges);
+    CHECK(t.at(2).inCode(0x10000u + 0x20u * (rtsample::kMaxCodeRanges - 1u)));
+    CHECK(!t.at(2).inCode(0x10000u + 0x20u * rtsample::kMaxCodeRanges));
+    CHECK(!t.at(2).inCode(0x10018u));   // between two sections
     for (uint32_t i = 1u; i < rtsample::kMaxLeaves; i++)
       CHECK(t.at(uint32_t(t.add(0x10000u * uintptr_t(i + 1u), 0x100u, "msvcrt.dll"))).leaf == int(i));
     CHECK(t.at(uint32_t(t.add(0x900000u, 0x100u, "msvcrt.dll"))).leaf == -1);
