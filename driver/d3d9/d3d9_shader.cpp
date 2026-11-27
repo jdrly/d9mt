@@ -2,7 +2,6 @@
 #include "d3d9_shader_compiler.h"
 #include "d3d9_device.h"
 
-#include "../util/util_env.h"
 #include "../util/util_fatal_log.h"
 
 namespace dxvk {
@@ -180,12 +179,15 @@ namespace dxvk {
     m_stateId.origin = uint8_t(statecache::Origin::D3D9);
     std::memcpy(m_stateId.sha, Sha.digest(), sizeof(m_stateId.sha));
 
-    // D9MT_PS_PREFETCH=0: compile pixel shaders only once a draw needs them
-    // (default: right after Phase A, like vertex shaders, since a PS linked
-    // against a compatible VS reuses the standalone library).
-    static const bool s_psPrefetch = env::getEnvVar("D9MT_PS_PREFETCH") != "0";
+    // The app profile's psPrefetch (D9MT_PS_PREFETCH): a pixel shader's standalone function is
+    // queued right after Phase A, like a vertex shader's, since a PS linked against a compatible
+    // VS reuses the standalone library. Off, it is made once a draw (or the state cache's
+    // prewarm) asks for it. psIrPrefetch off, with it, defers Phase A to that moment too: the
+    // shader's creator doesn't submit this task, and the first function task runs it (C5).
+    const AppProfile& app = pDevice->appProfile();
+    m_phaseAAtCreate = Stage == MtlShaderStage::Vertex || app.psPrefetch || app.psIrPrefetch;
 
-    if (Stage == MtlShaderStage::Vertex || s_psPrefetch) {
+    if (Stage == MtlShaderStage::Vertex || app.psPrefetch) {
       Rc<MtlShaderFunction> fn = CreateFunction(nullptr, false);
       m_functions.emplace(FunctionKey { nullptr, false }, fn);
       m_prefetch = fn->task;
@@ -247,7 +249,12 @@ namespace dxvk {
   void D3D9ShaderProgram::run() {
     Logger::debug(str::format("Compiling shader ", m_name));
 
+    const uint64_t t0 = compile_stats::g_enabled ? compile_stats::nowNs() : 0u;
+
     m_backend = createD3D9MetalShader(m_name, m_stage, m_options, m_analysis, m_bytecode.data());
+
+    if (compile_stats::g_enabled)
+      compile_stats::g_phaseA.add(compile_stats::nowNs() - t0);
 
     if (m_backend == nullptr)
       Logger::err(str::format("D3D9 shader: Phase-A build failed for ", m_name));
@@ -284,7 +291,10 @@ namespace dxvk {
     m_program = new D3D9ShaderProgram(pDevice->GetDXVKDevice().ptr(),
       m_name, stage, ShaderKey.sha(), ModuleInfo.shaderOptions, m_analysis, pShaderBytecode);
 
-    pDevice->GetDXVKDevice()->submitCompile(m_program, false);
+    // Not submitted: Phase A runs at the program's first wait(), which the
+    // first function task of a draw or of the prewarm makes.
+    if (m_program->PhaseAAtCreate())
+      pDevice->GetDXVKDevice()->submitCompile(m_program, false);
   }
 
 

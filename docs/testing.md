@@ -272,6 +272,12 @@ is still a FAIL: the bias added coverage).
 
 `scripts/test-compile-mt.sh` runs the compile-path concurrency tests (with
 ThreadSanitizer) against the built bridge.
+`scripts/test-ps-first-use.sh` (`ENGINE`, `WORK`; on a Mac with Metal 4, after a build) runs
+`test/code_ps_first_use.c` through `scripts/run-hash-tests.sh` under each arm of the app profile's
+`psPrefetch` and `psIrPrefetch` with `D9MT_PROFILE=1`, and checks from each log the fields line,
+the Phase A runs and libraries the `COMPILE` lines count (only the drawn pixel shaders' with a
+field off), the program's colour checks, and that every arm draws the same frames. The program
+also runs in the hash suite like any other.
 `scripts/test-present-ring.sh` runs `present_ring_test` (the bridge's presented-time ring
 behind the `SCREEN` line, `bridge/unix/present_ring.h`) under ThreadSanitizer; its plain build
 runs in `scripts/run-native-tests.sh`. The scripts under `scripts/run-*`

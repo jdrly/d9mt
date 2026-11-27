@@ -268,6 +268,7 @@ namespace dxvk {
     }
 
     inline Counter g_shaders;   // AIR codegen + MTLLibrary (worker or inline)
+    inline Counter g_phaseA;    // D3D9 shader Phase A (SM3 to IR), on any thread
     inline Counter g_shared;    // linkages that reused an identical library
     inline Counter g_psos;      // render PSO builds
     inline Counter g_wait;      // render (CS) thread blocked on a compile
@@ -333,15 +334,16 @@ namespace dxvk {
         return double(c.ns.exchange(0u, std::memory_order_relaxed)) * 1e-6;
       };
 
-      uint64_t nSh, nShared, nPso, nWait, nSkip, nBudget;
+      uint64_t nSh, nShared, nPso, nWait, nSkip, nBudget, nPhaseA;
       double msSh = take(g_shaders, nSh);
+      double msPhaseA = take(g_phaseA, nPhaseA);
       take(g_shared, nShared);
       double msPso = take(g_psos, nPso);
       double msWait = take(g_wait, nWait);
       take(g_skips, nSkip);
       take(g_budgetHits, nBudget);
 
-      if (!(nSh | nShared | nPso | nWait | nSkip | nBudget) && dtMs < 33.4)
+      if (!(nSh | nShared | nPso | nWait | nSkip | nBudget | nPhaseA) && dtMs < 33.4)
         return;
 
       // Render-thread frames: a long one is part of a hitch, so make it
@@ -349,7 +351,8 @@ namespace dxvk {
       std::string line = str::format("COMPILE frame=", s_frame, " dtMs=", dtMs,
         " shaders=", nSh, "/", msSh, "ms shared=", nShared,
         " psos=", nPso, "/", msPso, "ms renderWait=", nWait, "/", msWait,
-        "ms skipped=", nSkip, " budgetHit=", nBudget, " queued=", queued);
+        "ms skipped=", nSkip, " budgetHit=", nBudget, " queued=", queued,
+        " phaseA=", nPhaseA, "/", msPhaseA, "ms");
       if (dtMs >= hitchMs())
         Logger::warn(line);
       else
