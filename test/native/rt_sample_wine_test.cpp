@@ -5,7 +5,13 @@
 //   ratio      the sampled thread spins 30 ms in this exe, then 10 ms in rt_sample_dll.dll, for
 //              5 s (4 s sampled, after the watch second): the exe's samples must be 65-85 % of the two, and the two at least 90 % of all
 //              (the control: the same loop with the two spins swapped must give the mirror image)
+//              With the DLL as the module written by RVA: every RVA bucket of its samples lies in
+//              rt_dll_spin's first 256 bytes
 //   swapped    that control: 10 ms in the exe, 30 ms in the DLL
+//   caller     the thread calls ntdll's memmove from rt_sample_dll.dll for 5 s: most samples are
+//              in ntdll.dll, and at least 80 % of those name rt_sample_dll.dll as the caller, with
+//              its caller RVAs inside rt_dll_memmove's first 512 bytes
+//   caller-exe the control: the same memmove called from this exe; the callers are the exe
 //   wait       the thread waits on an event for 4 s (3 s sampled): samples come, the exe has under 5 % of them,
 //              and the thread wakes and ends normally
 //   syscall    the thread calls SwitchToThread and GetFileAttributes for 4 s: it survives, and
@@ -33,6 +39,7 @@
 #include <vector>
 
 extern "C" __declspec(dllimport) void rt_dll_spin(uint64_t ticks);
+extern "C" __declspec(dllimport) void rt_dll_memmove(uint64_t ticks);
 
 using namespace dxvk;
 
@@ -114,9 +121,19 @@ namespace {
     }
   }
 
+  __attribute__((noinline)) void exeMemmove(uint64_t ticks) {
+    using PFN_memmove = void* (__cdecl *)(void*, const void*, size_t);
+    static const auto move = reinterpret_cast<PFN_memmove>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleA("ntdll.dll"), "memmove")));
+    static char a[256 << 10], b[256 << 10];
+    const uint64_t t0 = __rdtsc();
+    while (__rdtsc() - t0 < ticks)
+      move(a, b, sizeof(a));
+  }
+
   DWORD WINAPI worker(void* arg) {
     Job& job = *static_cast<Job*>(arg);
-    rtsample::Handle h = rtsample::startForTest(job.hz, sink, job.guard);
+    rtsample::Handle h = rtsample::startForTest(job.hz, sink, job.guard, "rt_sample_dll.dll");
 
     if (job.mode == "ratio" || job.mode == "swapped") {
       const uint64_t a = (job.mode == "ratio" ? 30u : 10u) * g_ticksPerMs;
@@ -126,6 +143,10 @@ namespace {
         exeSpin(a);
         rt_dll_spin(b);
       }
+    } else if (job.mode == "caller") {
+      rt_dll_memmove(5000u * g_ticksPerMs);
+    } else if (job.mode == "caller-exe") {
+      exeMemmove(5000u * g_ticksPerMs);
     } else if (job.mode == "wait") {
       HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
       WaitForSingleObject(ev, 4000u);
@@ -204,6 +225,56 @@ namespace {
     return t;
   }
 
+  // The samples of system DLL `leaf` that name `caller`, and all of that DLL's samples
+  std::pair<uint64_t, uint64_t> calledFrom(const char* leaf, const char* caller) {
+    std::pair<uint64_t, uint64_t> r = { 0u, 0u };
+    const std::string at = std::string(" % ") + leaf + " (";
+    const std::string who = std::string(" ") + caller + " ";
+    EnterCriticalSection(&g_linesLock);
+    for (const auto& l : g_lines) {
+      const size_t p = l.find(at);
+      if (p == std::string::npos)
+        continue;
+      r.second += std::strtoull(l.c_str() + p + at.size(), nullptr, 10);
+      const size_t from = l.find(", called from");
+      const size_t c = from == std::string::npos ? std::string::npos : l.find(who, from);
+      if (c != std::string::npos)
+        r.first += std::strtoull(l.c_str() + c + who.size(), nullptr, 10);
+    }
+    LeaveCriticalSection(&g_linesLock);
+    return r;
+  }
+
+  // The RVA buckets of the lines "<module> <what> window", as (rva, count); false if one is
+  // outside [lo, hi)
+  bool rvasWithin(const char* what, uintptr_t lo, uintptr_t hi, uint64_t* total) {
+    const std::string prefix = std::string("D9MT-RT-SAMPLE: rt_sample_dll.dll ") + what + " window ";
+    bool inside = true;
+    *total = 0u;
+    EnterCriticalSection(&g_linesLock);
+    for (const auto& l : g_lines) {
+      if (l.rfind(prefix, 0) != 0)
+        continue;
+      const char* p = std::strchr(l.c_str() + prefix.size(), ':');
+      while (p != nullptr && *p != '\0') {
+        char* end = nullptr;
+        const uintptr_t rva = uintptr_t(std::strtoull(p + 1, &end, 16));
+        if (end == nullptr || *end != '=')
+          break;
+        const uint64_t n = std::strtoull(end + 1, &end, 10);
+        *total += n;
+        if (rva < (lo & ~uintptr_t(15)) || rva >= hi) {
+          std::printf("rt_sample_wine_test: rva bucket %llx=%llu outside [%llx, %llx)\n",
+            (unsigned long long)rva, (unsigned long long)n, (unsigned long long)lo, (unsigned long long)hi);
+          inside = false;
+        }
+        p = end;
+      }
+    }
+    LeaveCriticalSection(&g_linesLock);
+    return inside;
+  }
+
   bool hasLine(const char* text) {
     EnterCriticalSection(&g_linesLock);
     bool found = false;
@@ -267,6 +338,34 @@ int main(int argc, char** argv) {
       return fail(job.mode, "the exe's share of exe+dll is off the spins' ratio");
     if (double(s.exe + s.dll) < 0.9 * double(s.total))
       return fail(job.mode, "under 90 % of the samples in the two spinning modules");
+    const uintptr_t fn = uintptr_t(&rt_dll_spin) - uintptr_t(GetModuleHandleA("rt_sample_dll.dll"));
+    uint64_t inRva = 0u;
+    const bool inside = rvasWithin("rva", fn, fn + 0x100u, &inRva);
+    std::printf("rt_sample_wine_test %s: %llu samples by RVA, rt_dll_spin at rva %llx\n", job.mode.c_str(),
+      (unsigned long long)inRva, (unsigned long long)fn);
+    if (!inside || inRva != s.dll)
+      return fail(job.mode, "the DLL's RVA lines don't hold its samples inside rt_dll_spin");
+  } else if (job.mode == "caller" || job.mode == "caller-exe") {
+    const char* want = job.mode == "caller" ? "rt_sample_dll.dll" : "rt_sample_wine_test.exe";
+    const char* other = job.mode == "caller" ? "rt_sample_wine_test.exe" : "rt_sample_dll.dll";
+    const auto mine = calledFrom("ntdll.dll", want);
+    const auto theirs = calledFrom("ntdll.dll", other);
+    std::printf("rt_sample_wine_test %s: ntdll.dll %llu samples, called from %s %llu, from %s %llu\n",
+      job.mode.c_str(), (unsigned long long)mine.second, want, (unsigned long long)mine.first, other,
+      (unsigned long long)theirs.first);
+    if (mine.second < 0.5 * double(s.total))
+      return fail(job.mode, "under half of the samples in ntdll.dll");
+    if (double(mine.first) < 0.8 * double(mine.second))
+      return fail(job.mode, "under 80 % of ntdll.dll's samples name the module that called memmove");
+    if (job.mode == "caller") {
+      const uintptr_t fn = uintptr_t(&rt_dll_memmove) - uintptr_t(GetModuleHandleA("rt_sample_dll.dll"));
+      uint64_t inRva = 0u;
+      const bool inside = rvasWithin("caller rva", fn, fn + 0x200u, &inRva);
+      std::printf("rt_sample_wine_test %s: %llu caller RVAs, rt_dll_memmove at rva %llx\n", job.mode.c_str(),
+        (unsigned long long)inRva, (unsigned long long)fn);
+      if (!inside || inRva < mine.first)
+        return fail(job.mode, "the caller RVA lines don't hold the calls inside rt_dll_memmove");
+    }
   } else if (job.mode == "wait" || job.mode == "syscall") {
     if (s.total < 200u)
       return fail(job.mode, "under 200 samples in 3 s at 200 Hz");
