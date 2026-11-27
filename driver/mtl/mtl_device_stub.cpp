@@ -185,8 +185,8 @@ namespace dxvk {
   }
 
   Rc<MtlDevice> MtlAdapter::createDevice() {
-    extern Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile);
-    Rc<MtlDevice> device = backendCreateDevice(m_memProfile);
+    extern Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile, const AppProfile& app);
+    Rc<MtlDevice> device = backendCreateDevice(m_memProfile, m_appProfile);
     if (device == nullptr) {
       Logger::err("MtlAdapter::createDevice: backend device unavailable");
       return new MtlDevice();
@@ -215,7 +215,11 @@ namespace dxvk {
       env::getEnvVar("D9MT_STATIC_BUFFERS_DIRECT"), m_appProfile.staticBuffersDirect);
     if (staticHow == AppProfileOverride::Unknown)
       Logger::warn("d9mt: D9MT_STATIC_BUFFERS_DIRECT is neither 0 nor 1, ignored");
-    Logger::info(appProfileFieldsLine(m_appProfile, staticHow));
+    const AppProfileOverride inpassHow = applyAppProfileSwitch(
+      env::getEnvVar("D9MT_INPASS_CLEAR"), m_appProfile.inpassClear);
+    if (inpassHow == AppProfileOverride::Unknown)
+      Logger::warn("d9mt: D9MT_INPASS_CLEAR is neither 0 nor 1, ignored");
+    Logger::info(appProfileFieldsLine(m_appProfile, staticHow, inpassHow));
 
     // after the app profile: its staticBuffersDirect is one of the memory profile's inputs
     m_memProfile = resolveMemoryProfile(m_config, m_appProfile.staticBuffersDirect);
@@ -230,7 +234,7 @@ namespace dxvk {
   }
 
   Rc<MtlAdapter> MtlInstance::enumAdapters(uint32_t index) {
-    return index == 0u ? new MtlAdapter(m_memProfile) : nullptr;
+    return index == 0u ? new MtlAdapter(m_memProfile, m_appProfile) : nullptr;
   }
 
 }

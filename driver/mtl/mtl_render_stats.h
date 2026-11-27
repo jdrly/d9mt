@@ -49,6 +49,7 @@ namespace dxvk::rstats {
     ClearsViewFull,  // color clears through clearImageView whose rect covers the whole mip level: a pass of their own
     ClearsRect,      // part-surface color clears: a scissored draw
     ClearsRectDs,    // part-surface depth/stencil clears: a draw
+    ClearsRectDsIn,  //   ... of them drawn inside the open pass, which goes on (#129, inpassClear)
     Count
   };
 

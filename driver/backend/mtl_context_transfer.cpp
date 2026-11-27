@@ -1611,6 +1611,23 @@ namespace dxvk::backend {
     }
     obj_handle_t dsso = m_device->getDepthStencilState(ds);
 
+    WMTViewport vp = {};
+    vp.originX = double(offset.x);
+    vp.originY = double(offset.y);
+    vp.width   = double(x1 - offset.x);
+    vp.height  = double(y1 - offset.y);
+    vp.znear   = 0.0;
+    vp.zfar    = 1.0;
+    WMTScissorRect sc = {};
+    sc.x      = offset.x;
+    sc.y      = offset.y;
+    sc.width  = x1 - offset.x;
+    sc.height = y1 - offset.y;
+
+    if (m_inpassClear && clearDepthStencilInPass(view, vp, sc, clearDepth, clearStencil, dsso,
+                                                 value.stencil, value.depth))
+      return;
+
     prepareDirectEncode(uint32_t(prof::CntPassCloseClear));
     if (m_attOpt)
       attWrite(view->image.ptr(), rstore::Reason::PartialClear);
@@ -1636,19 +1653,6 @@ namespace dxvk::backend {
     }
     info.render_target_width  = mipExtent.width;
     info.render_target_height = mipExtent.height;
-
-    WMTViewport vp = {};
-    vp.originX = double(offset.x);
-    vp.originY = double(offset.y);
-    vp.width   = double(x1 - offset.x);
-    vp.height  = double(y1 - offset.y);
-    vp.znear   = 0.0;
-    vp.zfar    = 1.0;
-    WMTScissorRect sc = {};
-    sc.x      = offset.x;
-    sc.y      = offset.y;
-    sc.width  = x1 - offset.x;
-    sc.height = y1 - offset.y;
 
     float params[8] = {
       0.f, 0.f, 0.f, 0.f,

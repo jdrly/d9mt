@@ -56,6 +56,7 @@ int main() {
   rs.v[rstats::ClearsPending]  = 60u * 1u;
   rs.v[rstats::ClearsRect]     = 30u;
   rs.v[rstats::ClearsRectDs]   = 60u * 3u;
+  rs.v[rstats::ClearsRectDsIn] = 60u * 2u;
   stats::CompileTotals ct;
   ct.shaders = 3u; ct.psos = 2u; ct.waits = 1u; ct.waitsNs = 12500000u;
   stats::Extra extra;
@@ -110,7 +111,7 @@ int main() {
                   " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"));
   CHECK(has(line, " upPs=1.0 upPsKiB=0.2 upPsPadKiB=0.0"
                   " | splitMiBSubmit=315.0 splitMiBXfer=0.0 splitMiBClear=105.0 splitMiBOther=0.0"
-                  " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0"
+                  " | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0 clrRect=0.5 clrRectDs=3.0 clrRectDsIn=2.0"
                   " | lockCs=1/1.50ms lockGpu=2/4.25ms lockStatic=2 demoted=1 readWait=1/2.00ms"));
   { // #80: countSplit (splitCheck's classification) picks the first reason that holds, and the
     // reasons' bytes add up to SplitBytes.
@@ -154,7 +155,7 @@ int main() {
   CHECK(has(line, " | constVs=0.0/0.0 constPs=1.0/0.0 upVs=0.0 upVsKiB=0.0 upVsPadKiB=0.0 upPs=0.0 "));
   CHECK(has(line, " splitMiB=1.0 "));
   CHECK(has(line, " | splitMiBSubmit=0.0 splitMiBXfer=0.0 splitMiBClear=0.0 splitMiBOther=1.0"
-                  " | clrOpen=0.0 clrPending=0.0 clrViewFull=0.0 clrRect=0.0 clrRectDs=0.0"));
+                  " | clrOpen=0.0 clrPending=0.0 clrViewFull=0.0 clrRect=0.0 clrRectDs=0.0 clrRectDsIn=0.0"));
   CHECK(has(line, " ms=16.0/16.0/16.0 slow33=0 slow50=0 "));
   CHECK(has(line, " rp=0.0 "));
   CHECK(has(line, " restore=1.0 savedMiB=-1.0 attMs=0.00 clrFold=0.0 clrPass=0.0 "));

@@ -1,6 +1,7 @@
 #include "mtl_context_impl.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -60,6 +61,8 @@ namespace dxvk::backend {
     else
       Logger::warn(str::format("D9MT: attachment load/store optimization off (",
         deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
+
+    m_inpassClear = m_device->appProfile().inpassClear && !deferredPassesEnabled();
 
     const char* clearDiscard = std::getenv("D9MT_CLEAR_DISCARD");
     m_clearDiscard = m_attOpt && !(clearDiscard && std::strcmp(clearDiscard, "0") == 0);
@@ -887,6 +890,107 @@ namespace dxvk::backend {
     materializePass();
     closePass();
     m_pass = std::move(saved);
+  }
+
+  bool MtlContextImpl::clearDepthStencilInPass(const Rc<MtlTextureView>& view, const WMTViewport& vp,
+                                               const WMTScissorRect& sc, bool clearDepth, bool clearStencil,
+                                               obj_handle_t dsso, uint32_t stencilRef, float depth) {
+    /* A depth/stencil clear clipped to a small viewport, between draws of one pass (a stencil
+     * mask cleared before it's drawn again, say). Ending the pass for it stores and reloads every
+     * attachment and adds a pass of the clear's own. Inside the open pass the clear is a draw:
+     * the pass's colour formats with nothing written, the clear's depth-stencil state, viewport
+     * and scissor, then the pass's own state again before its next draw.
+     * Only for the pass's own depth-stencil, and only where nothing reads the image outside the
+     * pass's attachments while it is open: not while an occlusion query counts samples (the
+     * clear's would count), not for an image shaders can sample (an INTZ texture: a draw that
+     * samples it in this pass reads memory, which holds the clear only once the pass ends), and
+     * not in a pass with a feedback loop. Anything else takes the pass of its own. */
+    if (!m_pass.active || deferredPassesEnabled() || !m_activeOcclusion.empty() || m_passFeedbackLoop != 0u
+     || m_pass.targets.depthStencil == nullptr || !sameAttachment(m_pass.targets.depthStencil, view)
+     || m_pass.targets.depthStencil->key.format != view->key.format
+     || (view->image->info().usage & MtlTextureUsageShaderRead) != 0u)
+      return false;
+
+    RenderPsoKey key = {};
+    key.vsCookie = uint64_t(m_depthClearVs->library);
+    key.fsCookie = 0u;
+    uint8_t colorCount = 0u;
+    for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+      const Rc<MtlTextureView>& c = m_pass.targets.color[i];
+      if (c == nullptr)
+        continue;
+      key.colors[i].pixelFormat = uint32_t(c->key.format);
+      key.colors[i].writeMask   = 0u;
+      colorCount = uint8_t(i + 1u);
+    }
+    key.colorCount  = colorCount;
+    key.sampleCount = uint8_t(std::max(view->image->info().sampleCount, 1u));
+    obj_handle_t pso = m_psoCache.getSync(
+      key, m_depthClearVs->library, 0u, m_depthClearVs->entryName, nullptr);
+    if (!pso)
+      return false;
+
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::ClearsRectDsIn]++;
+    static std::atomic<bool> s_logged = { false };   // devices record on threads of their own
+    if (unlikely(!s_logged.load(std::memory_order_relaxed)) && !s_logged.exchange(true))
+      Logger::info("D9MT: inpassClear: a depth/stencil clear drawn inside its pass");
+    view->image->setTrackingSerial(m_currentSerial);
+
+    const float params[8] = { 0.f, 0.f, 0.f, 0.f, depth, 0.f, 0.f, 0.f };
+    RingSlice rs = m_device->uploadRing().allocate(sizeof(params), 256u);
+    if (rs.cpuPtr)
+      std::memcpy(rs.cpuPtr, params, sizeof(params));
+    obj_handle_t table = selectBlitArgTable();
+    MTL4ArgumentTable_setAddress(table, rs.gpuAddress, 0u);
+
+    auto* p = m_cmdChunk.append<wmtcmd_mtl4_setpso>(uint16_t(WMTMtl4RenderCommandSetPSO));
+    p->pso = pso;
+    auto* d = m_cmdChunk.append<wmtcmd_mtl4_setdsso>(uint16_t(WMTMtl4RenderCommandSetDepthStencilState));
+    d->dsso = dsso;
+    if (clearStencil) {
+      auto* r = m_cmdChunk.append<wmtcmd_mtl4_setstencilref>(uint16_t(WMTMtl4RenderCommandSetStencilReferenceValue));
+      r->reference = stencilRef;
+    }
+    auto* v = m_cmdChunk.append<wmtcmd_mtl4_setviewport>(uint16_t(WMTMtl4RenderCommandSetViewport));
+    v->viewport = vp;
+    auto* s = m_cmdChunk.append<wmtcmd_mtl4_setscissorrect>(uint16_t(WMTMtl4RenderCommandSetScissorRect));
+    s->rect = sc;
+    // The rest of the state a separate pass starts with: no culling, no depth bias, clip, filled.
+    auto* cu = m_cmdChunk.append<wmtcmd_mtl4_setcullmode>(uint16_t(WMTMtl4RenderCommandSetCullMode));
+    cu->mode = uint64_t(WMTCullModeNone);
+    auto* b = m_cmdChunk.append<wmtcmd_mtl4_setdepthbias>(uint16_t(WMTMtl4RenderCommandSetDepthBias));
+    b->bias = 0.f;
+    b->slope_scale = 0.f;
+    b->clamp = 0.f;
+    auto* dc = m_cmdChunk.append<wmtcmd_mtl4_setdepthclipmode>(uint16_t(WMTMtl4RenderCommandSetDepthClipMode));
+    dc->mode = uint64_t(WMTDepthClipModeClip);
+    auto* fm = m_cmdChunk.append<wmtcmd_mtl4_settrianglefillmode>(uint16_t(WMTMtl4RenderCommandSetTriangleFillMode));
+    fm->mode = uint64_t(WMTTriangleFillModeFill);
+    auto* t = m_cmdChunk.append<wmtcmd_mtl4_setargtable>(uint16_t(WMTMtl4RenderCommandSetArgumentTable));
+    t->table  = table;
+    t->stages = uint64_t(WMTRenderStageVertex | WMTRenderStageFragment);
+    auto* dr = m_cmdChunk.append<wmtcmd_mtl4_draw>(uint16_t(WMTMtl4RenderCommandDraw));
+    dr->primitive      = uint64_t(WMTPrimitiveTypeTriangle);
+    dr->vertex_start   = 0u;
+    dr->vertex_count   = 3u;
+    dr->instance_count = 1u;
+    dr->base_instance  = 0u;
+
+    /* The pass's own state again before its next draw. The encoder's clip and fill modes are now
+     * a new encoder's (clip, filled), so the next flushDynamicState can treat it as one: it sends
+     * the viewport, scissor, depth-stencil state, stencil reference, blend colour, culling,
+     * winding and depth bias, and the clip and fill modes where they differ. The pass's argument
+     * tables still hold its bindings: bind them again. */
+    if (m_argTablesBound)
+      bindArgumentTables();
+    m_lastEncodedPso = nullptr;
+    m_dynValid       = false;
+    m_dirty |= DirtyPso | DirtyViewport | DirtyDepthStencil | DirtyStencilRef
+             | DirtyDepthBias | DirtyRasterizer | DirtyBlendColor;
+    if (m_attOpt)
+      m_pass.writtenMask |= uint8_t((clearDepth ? 1u << kAttDepth : 0u) | (clearStencil ? 1u << kAttStencil : 0u));
+    return true;
   }
 
   void MtlContextImpl::flushPendingClears() {

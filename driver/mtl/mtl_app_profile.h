@@ -28,6 +28,9 @@ namespace dxvk {
     // `unlimited` memory profile otherwise puts them on the staging path
     // (applyStaticBuffersDirect, mtl_memory_profile.h). swtor: on. D9MT_STATIC_BUFFERS_DIRECT.
     bool staticBuffersDirect = false;
+    // A part-surface depth/stencil clear of the open pass's own depth-stencil attachment is drawn
+    // inside that pass instead of ending it (#129). swtor: on. D9MT_INPASS_CLEAR.
+    bool inpassClear = false;
   };
 
   // The fields' values of an app profile.
@@ -35,6 +38,7 @@ namespace dxvk {
     AppProfile p;
     p.id = id;
     p.staticBuffersDirect = id == AppProfileId::Swtor;
+    p.inpassClear         = id == AppProfileId::Swtor;
     return p;
   }
 
@@ -103,12 +107,15 @@ namespace dxvk {
       + "exe " + (exe.empty() ? "unknown" : exe) + ")";
   }
 
-  // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on`, with
-  // ` (D9MT_STATIC_BUFFERS_DIRECT)` after a value the override set.
-  inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect) {
+  // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on`,
+  // with ` (D9MT_<FIELD>)` after a value its override set.
+  inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect,
+                                          AppProfileOverride inpassClear = AppProfileOverride::Unset) {
     return std::string("d9mt: app profile fields: staticBuffersDirect ")
       + (p.staticBuffersDirect ? "on" : "off")
-      + (staticBuffersDirect == AppProfileOverride::Used ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "");
+      + (staticBuffersDirect == AppProfileOverride::Used ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "")
+      + ", inpassClear " + (p.inpassClear ? "on" : "off")
+      + (inpassClear == AppProfileOverride::Used ? " (D9MT_INPASS_CLEAR)" : "");
   }
 
 }

@@ -457,6 +457,11 @@ namespace dxvk::backend {
     bool m_fxChecked = false, m_fxUnsupported = false;
     void clearDepthStencilRect(const Rc<MtlTextureView>& view, MtlOrigin offset,
                                MtlSize extent, MtlAspectMask aspects, MtlClearValue value);
+    // The app profile's inpassClear (#129): a part-surface depth/stencil clear of the open pass's
+    // own depth-stencil drawn inside it. False: not eligible, nothing recorded.
+    bool clearDepthStencilInPass(const Rc<MtlTextureView>& view, const WMTViewport& vp,
+                                 const WMTScissorRect& sc, bool clearDepth, bool clearStencil,
+                                 obj_handle_t dsso, uint32_t stencilRef, float depth);
     void resolveDepthStencil(const Rc<MtlTexture>& dst, const Rc<MtlTexture>& src,
                              const MtlResolveRegion& region, const MtlFormatInfo* fi,
                              MtlResolveMode depthMode);
@@ -472,6 +477,7 @@ namespace dxvk::backend {
     // D9MT_NO_ATTACHMENT_OPT=1 / d9mt.attachmentOpt = False and under
     // D9MT_DEFERRED (deferred passes decide their own load/store actions).
     bool         m_attOpt = false;
+    bool         m_inpassClear = false;   // the app profile's inpassClear, without D9MT_DEFERRED
     bool         m_clearDiscard = false;  // a clear that ends a pass discards what it clears (D9MT_CLEAR_DISCARD=0: off)
     uint64_t     m_attEpoch = 0u;
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
