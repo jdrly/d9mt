@@ -96,13 +96,14 @@ No Wine or GPU needed, from the repo root:
 ```bash
 scripts/run-native-tests.sh   # the 15 host clang++ tests in test/native/; never starts Wine
 scripts/test-upload-copy.sh   # UploadPerDrawData's own clamp and copy, under ASan/UBSan
+scripts/test-query-getdata.sh # a TIMESTAMPFREQ query answers GetData with S_OK at once, under ASan/UBSan
 ```
 
 `scripts/run-native-tests.sh` builds and runs every `test/native/*_test.cpp` that
 needs only the host's clang++ (each source's first lines give its own command), and
-names the runner of each of the other seven: `state_cache_test`
+names the runner of each test it skips, among them `state_cache_test`
 (`scripts/test-state-cache.sh`), `pso_key_hash_test` (`scripts/test-pso-key-hash.sh`),
-`upload_copy_test` (`scripts/test-upload-copy.sh`), `fatal_log_test`
+`upload_copy_test` (`scripts/test-upload-copy.sh`), `query_getdata_test` (`scripts/test-query-getdata.sh`), `fatal_log_test`
 (`scripts/test-fatal-log.sh`, a mingw program it builds and runs under Wine), and `lifetime_check_test`,
 `submission_retire_test` and `submission_tracker_test`, which are mingw programs run
 by hand under Wine (the build line is in each source). A test in neither list fails
@@ -294,7 +295,7 @@ its own that a later push doesn't cancel. Its jobs:
   `scripts/run-native-tests.sh` and these scripts: `test-air-versions.sh`, `test-air-forms.sh`,
   `test-air-invariance.sh`, `test-air-cache-lineage.sh`, `test-build-deps.sh` (without
   `BUILD=1`), `test-fetch-deps.sh`, `test-null-kind.sh`, `test-pass-barrier.sh`,
-  `test-present-ring.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
+  `test-present-ring.sh`, `test-query-getdata.sh`, `test-pso-key-hash.sh`, `test-residency.sh`, `test-state-cache.sh`,
   `test-upload-copy.sh`, `test-perf-compare.py`, `test-cmp-hash-runs.py`, `test-bench-counters.py`
   and `test-cmp-hot-code.sh`. DXVK's native headers
   come from DXVK v3.0.2.

@@ -304,6 +304,7 @@ jobs:
             scripts/test-null-kind.sh
             scripts/test-pass-barrier.sh
             scripts/test-present-ring.sh
+            scripts/test-query-getdata.sh
             scripts/test-pso-key-hash.sh
             scripts/test-residency.sh
             scripts/test-state-cache.sh
