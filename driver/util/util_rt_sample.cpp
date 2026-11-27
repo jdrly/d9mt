@@ -17,7 +17,8 @@
 //     GetThreadContext waits without a limit until the thread has stopped, and a thread that never
 //     stops must not stay suspended. Past the limit the sampler resumes the thread and stops for
 //     good, and no sampler starts again in the process; the capture thread frees the state when
-//     its call comes back (never, if it never does: one state and one thread). A capture
+//     its call comes back (never, if it never does: a state and a thread for each sampler that was
+//     running then). A capture
 //     thread that was delayed past the limit skips the request; one that had already checked
 //     makes it on the running thread, which Wine stops once more for it: one suspend outside the
 //     sampler's rhythm, after a 250 ms stall;
