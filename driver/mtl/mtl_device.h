@@ -5,6 +5,7 @@
 
 #include "mtl_types.h"
 #include "mtl_resource.h"
+#include "mtl_app_profile.h"
 #include "mtl_memory_profile.h"
 #include "mtl_render_stats.h"
 #include "mtl_restore_stats.h"
@@ -266,9 +267,13 @@ namespace dxvk {
     const Config& config() const { return m_config; }
     void setConfig(const Config& config) { m_config = config; }
 
+    // The game's app profile (mtl_app_profile.h), resolved once per instance.
+    const AppProfile& appProfile() const { return m_appProfile; }
+
   protected:
     Config           m_config;
     MtlMemoryProfile m_memProfile = { };
+    AppProfile       m_appProfile = { };
   };
 
 }

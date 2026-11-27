@@ -38,6 +38,7 @@ This table is the status source of truth. Update both it and the ADR's frontmatt
 | [0005](0005-correctness-first-speed-proven.md) | Correctness on every supported Mac comes first, and a speed-only change proves itself or waits behind a switch | `superseded by ADR-0007` |
 | [0006](0006-air-cache-keyed-on-codegen.md) | The AIR cache is keyed on the AIR codegen, not on `winemetal.so`, and keeps 0.1.5.1's metallibs | `accepted` |
 | [0007](0007-correctness-and-representative-performance.md) | Correctness fixes merge on correctness evidence with a representative performance guard | `accepted` |
+| [0008](0008-tuned-for-swtor-behind-an-app-profile.md) | d9mt is tuned for SWTOR behind an app profile, and every other game keeps the generic path | `accepted` |
 
 ## Candidates
 

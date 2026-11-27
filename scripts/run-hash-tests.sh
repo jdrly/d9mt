@@ -18,7 +18,9 @@
 #           repro (d3d9.reproducibleCommandStream = True) | lifetime (D9MT_LIFETIME_CHECK=1) |
 #           shaderval (Metal shader validation, PSO archives off) | early (D9MT_EARLY_COMMIT=always) |
 #           profile (D9MT_PROFILE=1: every program's log must have d9mt's "D9MT: profiler clock:"
-#           line, which needs a tree from d4391fb (#141) on)
+#           line, which needs a tree from d4391fb (#141) on) |
+#           appswtor (D9MT_APP_PROFILE=swtor: with a tree that has the app profile, every program's
+#           log must have "d9mt: app profile swtor (D9MT_APP_PROFILE"; an older tree ignores it)
 #           Any other D9MT_* variable of the caller reaches the programs, D9MT_AIR_MACOS too.
 # WORK      a scratch folder, removed and made again (default ${TMPDIR:-/tmp}/d9mt-hash). The
 #           engine clone, a new prefix, d9mt's caches and every log live there, nothing else is
@@ -107,6 +109,7 @@ case "$VARIANT" in
   shaderval) VARIANT_ENV=(MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 D9MT_PSO_ARCHIVE=0) ;;
   early) VARIANT_ENV=(D9MT_EARLY_COMMIT=always) ;;
   profile) VARIANT_ENV=(D9MT_PROFILE=1) ;;
+  appswtor) VARIANT_ENV=(D9MT_APP_PROFILE=swtor) ;;
   *) echo "FATAL: unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
 esac
 
@@ -227,7 +230,7 @@ if [ "$BUILD_ONLY" = 1 ]; then
 fi
 
 : > "$WORK/hashes.txt"
-noproof="" noprofile="" notclean="" reruns="" rerundiffers=""
+noproof="" noprofile="" noapp="" notclean="" reruns="" rerundiffers=""
 # run_program <name>: one run of it; sets rc, hashes and fails
 run_program() {
   local t=$1
@@ -259,6 +262,9 @@ for t in "${TESTS[@]}"; do
   grep -q 'D9MT: compile workers' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null || noproof+="$t "
   [ "$VARIANT" != profile ] || grep -q 'D9MT: profiler clock:' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
     || noprofile+="$t "
+  { [ "$VARIANT" != appswtor ] || [ ! -f "$SRC/driver/mtl/mtl_app_profile.h" ]; } \
+    || grep -q 'd9mt: app profile swtor (D9MT_APP_PROFILE' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
+    || noapp+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
 done
 stop_wine
@@ -300,6 +306,10 @@ if [ -n "$noproof" ]; then
 fi
 if [ -n "$noprofile" ]; then
   echo "[hash] INVALID: variant profile, but no 'D9MT: profiler clock:' line for: $noprofile(D9MT_PROFILE didn't reach d9mt, so these runs aren't profiled)" >&2
+  exit 1
+fi
+if [ -n "$noapp" ]; then
+  echo "[hash] INVALID: variant appswtor, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor app profile)" >&2
   exit 1
 fi
 if [ -n "$rerundiffers" ]; then
