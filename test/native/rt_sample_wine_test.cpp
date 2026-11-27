@@ -12,8 +12,9 @@
 //              in ntdll.dll, and at least 80 % of those name rt_sample_dll.dll as the caller, with
 //              its caller RVAs inside rt_dll_memmove's first 512 bytes
 //   caller-exe the control: the same memmove called from this exe; the callers are the exe
-//   nostack    caller's loop with the stack copy off (D9MT_RT_SAMPLE_STACK=0): every ntdll.dll
-//              sample counts as "stack not read", none names a caller
+//   nostack    caller's loop, the sampler started from D9MT_RT_SAMPLE=200 and
+//              D9MT_RT_SAMPLE_STACK=0 as the device starts it: every system DLL line counts all its
+//              samples as "stack not read" and names no caller
 //   wait       the thread waits on an event for 4 s (3 s sampled): at least 90 % of the samples
 //              are in ntdll.dll, at least 80 % of those name this exe as the caller (the wait goes
 //              through kernelbase.dll, a system DLL too), and the thread wakes and ends normally
@@ -136,7 +137,13 @@ namespace {
 
   DWORD WINAPI worker(void* arg) {
     Job& job = *static_cast<Job*>(arg);
-    rtsample::Handle h = rtsample::startForTest(job.hz, sink, job.guard, job.mode != "nostack", "rt_sample_dll.dll");
+    // nostack goes through the switches as the device reads them
+    if (job.mode == "nostack") {
+      SetEnvironmentVariableA("D9MT_RT_SAMPLE", "200");
+      SetEnvironmentVariableA("D9MT_RT_SAMPLE_STACK", "0");
+    }
+    rtsample::Handle h = job.mode == "nostack" ? rtsample::startFromEnv(sink)
+                                               : rtsample::startForTest(job.hz, sink, job.guard, true, "rt_sample_dll.dll");
 
     if (job.mode == "ratio" || job.mode == "swapped") {
       const uint64_t a = (job.mode == "ratio" ? 30u : 10u) * g_ticksPerMs;
@@ -372,13 +379,34 @@ int main(int argc, char** argv) {
         return fail(job.mode, "the caller RVA lines don't hold the calls inside rt_dll_memmove");
     }
   } else if (job.mode == "nostack") {
-    const auto mine = calledFrom("ntdll.dll", "rt_sample_dll.dll");
-    std::printf("rt_sample_wine_test %s: ntdll.dll %llu samples, called from rt_sample_dll.dll %llu\n",
-      job.mode.c_str(), (unsigned long long)mine.second, (unsigned long long)mine.first);
-    if (s.total < 400u || mine.second < 0.5 * double(s.total))
+    const auto nt = calledFrom("ntdll.dll", "rt_sample_dll.dll");
+    if (s.total < 400u || nt.second < 0.5 * double(s.total))
       return fail(job.mode, "too few samples, or under half in ntdll.dll");
-    if (mine.first != 0u || !hasLine("stack copy off") || !hasLine(", no caller found 0, stack not read "))
-      return fail(job.mode, "a caller was named with the stack copy off");
+    if (!hasLine("stack copy off"))
+      return fail(job.mode, "no start line saying the stack copy is off");
+    // every line that names callers at all (a system DLL's) must be "no caller found 0, stack not
+    // read <its count>", with no "called from" and no caller RVA line
+    uint32_t leafLines = 0u;
+    bool bad = false;
+    EnterCriticalSection(&g_linesLock);
+    for (const auto& l : g_lines) {
+      if (l.find("caller rva") != std::string::npos || l.find(", called from") != std::string::npos)
+        bad = true;
+      const size_t unread = l.find(", no caller found 0, stack not read ");
+      const size_t open = l.find(" (");
+      if (l.find("no caller found") != std::string::npos) {
+        leafLines++;
+        if (unread == std::string::npos || open == std::string::npos
+         || std::strtoull(l.c_str() + open + 2u, nullptr, 10)
+            != std::strtoull(l.c_str() + unread + std::strlen(", no caller found 0, stack not read "), nullptr, 10))
+          bad = true;
+      }
+    }
+    LeaveCriticalSection(&g_linesLock);
+    std::printf("rt_sample_wine_test %s: ntdll.dll %llu of %llu samples, %u system DLL lines\n",
+      job.mode.c_str(), (unsigned long long)nt.second, (unsigned long long)s.total, leafLines);
+    if (bad || leafLines == 0u)
+      return fail(job.mode, "a system DLL line names a caller, or doesn't count all its samples as not read");
   } else if (job.mode == "wait" || job.mode == "syscall") {
     if (s.total < 200u)
       return fail(job.mode, "under 200 samples in 3 s at 200 Hz");

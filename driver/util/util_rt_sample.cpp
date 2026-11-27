@@ -321,6 +321,11 @@ namespace dxvk::rtsample {
         s.quit.store(true, std::memory_order_release);
         s_captureStuck.store(true, std::memory_order_release);
         ResumeThread(s.target);
+        QueryPerformanceCounter(&t1);
+        // a missed sample that held the thread the whole limit
+        s.window.missed++;
+        const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
+        s.window.heldMaxNs = std::max(s.window.heldMaxNs, heldNs);
         return Sampled::CaptureStuck;
       }
       const BOOL got = s.got;
@@ -603,12 +608,22 @@ namespace dxvk::rtsample {
     if (hz == 0u)
       return Handle();
 
-    // D9MT_RT_SAMPLE_STACK: 0 turns the stack copy off, anything else leaves it on
-    char stackValue[4] = { };
+    // D9MT_RT_SAMPLE_STACK: 0 turns the stack copy off; unset or 1 leaves it on; anything else
+    // (an empty value too) leaves it on and is named
+    char stackValue[16] = { };
+    SetLastError(ERROR_SUCCESS);
     const DWORD ns = GetEnvironmentVariableA("D9MT_RT_SAMPLE_STACK", stackValue, sizeof(stackValue));
+    const bool unset = ns == 0u && GetLastError() == ERROR_ENVVAR_NOT_FOUND;
     const bool stack = !(ns == 1u && stackValue[0] == '0');
-    if (ns != 0u && stack && !(ns == 1u && stackValue[0] == '1'))
-      sink("D9MT-RT-SAMPLE: D9MT_RT_SAMPLE_STACK ignored (0 or 1): the stack copy stays on");
+    if (!unset && stack && !(ns == 1u && stackValue[0] == '1')) {
+      if (ns >= sizeof(stackValue))
+        std::snprintf(buf, sizeof(buf), "D9MT-RT-SAMPLE: D9MT_RT_SAMPLE_STACK ignored: %u characters (0 or 1); "
+          "the stack copy stays on", unsigned(ns - 1u));
+      else
+        std::snprintf(buf, sizeof(buf), "D9MT-RT-SAMPLE: D9MT_RT_SAMPLE_STACK=\"%s\" ignored (0 or 1); "
+          "the stack copy stays on", stackValue);
+      sink(buf);
+    }
     return start(hz, sink, true, stack, kRvaModule);
   }
 
