@@ -12,9 +12,10 @@
  * the buffer goes to the staging path for good), the staging path from the first lock on 64 GB
  * and up (D9MT_MEMORY_PROFILE=unlimited, run-hash-tests.sh VARIANT=unlimited). The frames are
  * the same on both. Five frames; prints "RESULT vbrelock frames=5", and "FAIL <what>" for each
- * wrong pixel. It sleeps 1.1 s before the fifth Present, so that with D9MT_PROFILE the fifth
- * Present writes a STATS line: on the direct path its lockCs or lockGpu, lockStatic and demoted
- * are at least 1, on the staging path all 0. */
+ * wrong pixel. It sleeps 1.1 s before the fifth Present, so that with D9MT_PROFILE a STATS
+ * second ends by then (an earlier one can too, on cold caches). Summed over the run's STATS lines,
+ * on the direct path lockCs + lockGpu, lockStatic and demoted are at least 1; on the staging path
+ * all 0. */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d9.h>
