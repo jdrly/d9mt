@@ -3,12 +3,13 @@
 // each mode in a fresh process:
 //
 //   ratio      the sampled thread spins 30 ms in this exe, then 10 ms in rt_sample_dll.dll, for
-//              4 s: the exe's samples must be 65-85 % of the two, and the two at least 90 % of all
+//              5 s (4 s sampled, after the watch second): the exe's samples must be 65-85 % of the two, and the two at least 90 % of all
 //              (the control: the same loop with the two spins swapped must give the mirror image)
 //   swapped    that control: 10 ms in the exe, 30 ms in the DLL
-//   wait       the thread waits on an event for 3 s: samples come, the exe has under 5 % of them,
+//   wait       the thread waits on an event for 4 s (3 s sampled): samples come, the exe has under 5 % of them,
 //              and the thread wakes and ends normally
-//   syscall    the thread calls SwitchToThread and GetFileAttributes for 3 s: it survives
+//   syscall    the thread calls SwitchToThread and GetFileAttributes for 4 s: it survives, and
+//              its samples come
 //   fault      2 s of spinning, then an access violation every ms for 2 s, which the program's own
 //              handler steps over: the sampler stops at the first one, with its line, and the
 //              thread handles every fault and ends normally

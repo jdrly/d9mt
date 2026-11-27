@@ -119,9 +119,6 @@ namespace dxvk {
           cheap_clock::process().tsc ? "TSC" : "steady clock"));
       }
     }
-    // D9MT_RT_SAMPLE (util_rt_sample.h): a sampler of this thread, the render thread. Unset: one
-    // environment read and nothing else
-    m_rtSample = rtsample::startFromEnv([] (const char* line) { Logger::warn(line); });
     m_stagingPool.setCapacity(m_dxvkDevice->memoryProfile().stagingBlocks);
     m_stagingMaxInFlight = MtlDeviceSize(env::is32BitHostPlatform()
       ? std::min(m_dxvkDevice->memoryProfile().stagingInFlightMB, 30u)
@@ -154,6 +151,10 @@ namespace dxvk {
     BindFFUbershader<D3D9ShaderType::PixelShader>();
 
     m_unlockAdditionalFormats = m_parent->HasFormatsUnlocked();
+
+    // D9MT_RT_SAMPLE (util_rt_sample.h): a sampler of this thread, the render thread. Last, so a
+    // constructor that throws never leaves one running. Unset: one environment read, nothing else
+    m_rtSample = rtsample::startFromEnv([] (const char* line) { Logger::warn(line); });
   }
 
 
