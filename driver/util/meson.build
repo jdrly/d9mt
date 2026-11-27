@@ -7,6 +7,7 @@ util_src = files([
   'util_flush.cpp',
   'util_gdi.cpp',
   'util_luid.cpp',
+  'util_rt_sample.cpp',
   'util_matrix.cpp',
   'util_shared_res.cpp',
   'util_sleep.cpp',
