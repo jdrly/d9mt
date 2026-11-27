@@ -307,6 +307,7 @@ jobs:
             scripts/test-query-getdata.sh
             scripts/test-pso-key-hash.sh
             scripts/test-residency.sh
+            scripts/test-sampler-lod-bias.sh
             scripts/test-state-cache.sh
             scripts/test-upload-copy.sh
             scripts/test-perf-compare.py
