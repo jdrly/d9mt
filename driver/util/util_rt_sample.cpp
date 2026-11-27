@@ -155,6 +155,7 @@ namespace dxvk::rtsample {
       DWORD       tid     = 0u;
       uint32_t    hz      = 0u;
       bool        guard   = true;
+      bool        stack   = true;      // D9MT_RT_SAMPLE_STACK: copy the stack for the caller search
       std::atomic<uint64_t>* slot = nullptr;
       void      (*sink)(const char*) = nullptr;
 
@@ -323,7 +324,7 @@ namespace dxvk::rtsample {
         return Sampled::CaptureStuck;
       }
       const BOOL got = s.got;
-      if (got) {
+      if (got && s.stack) {
 #ifdef _WIN64
         const uintptr_t sp = uintptr_t(s.ctx.Rsp);
 #else
@@ -479,7 +480,7 @@ namespace dxvk::rtsample {
     }
 
 
-    Handle start(uint32_t hz, void (*sink)(const char*), bool guard, const char* rvaModule) {
+    Handle start(uint32_t hz, void (*sink)(const char*), bool guard, bool stack, const char* rvaModule) {
       const DWORD tid = GetCurrentThreadId();
       if (s_captureStuck.load(std::memory_order_acquire)) {
         emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: an earlier sampler's context capture got stuck", tid);
@@ -507,6 +508,7 @@ namespace dxvk::rtsample {
       s->tid   = tid;
       s->hz    = hz;
       s->guard = guard;
+      s->stack = stack;
       s->slot  = slot;
       s->sink  = sink;
       std::strncpy(s->rvaName, rvaModule, sizeof(s->rvaName) - 1u);
@@ -563,8 +565,12 @@ namespace dxvk::rtsample {
 
       // s belongs to the sampler thread from here on
       emitLine(sink, guard
-        ? "D9MT-RT-SAMPLE: sampling thread 0x%04x at %u Hz after a second's watch, a window every 10 s; "
-          "a developer switch, it suspends the thread, and stops at the thread's first CPU fault"
+        ? (stack ? "D9MT-RT-SAMPLE: sampling thread 0x%04x at %u Hz after a second's watch, a window every 10 s; "
+                   "a developer switch, it suspends the thread, and stops at the thread's first CPU fault; "
+                   "stack copy on (D9MT_RT_SAMPLE_STACK=0 turns it off)"
+                 : "D9MT-RT-SAMPLE: sampling thread 0x%04x at %u Hz after a second's watch, a window every 10 s; "
+                   "a developer switch, it suspends the thread, and stops at the thread's first CPU fault; "
+                   "stack copy off (D9MT_RT_SAMPLE_STACK=0): no callers")
         : "D9MT-RT-SAMPLE: sampling thread 0x%04x at %u Hz, no fault guard (tests only)", tid, hz);
       return h;
     }
@@ -594,12 +600,21 @@ namespace dxvk::rtsample {
       sink(buf);
       return Handle();
     }
-    return hz != 0u ? start(hz, sink, true, kRvaModule) : Handle();
+    if (hz == 0u)
+      return Handle();
+
+    // D9MT_RT_SAMPLE_STACK: 0 turns the stack copy off, anything else leaves it on
+    char stackValue[4] = { };
+    const DWORD ns = GetEnvironmentVariableA("D9MT_RT_SAMPLE_STACK", stackValue, sizeof(stackValue));
+    const bool stack = !(ns == 1u && stackValue[0] == '0');
+    if (ns != 0u && stack && !(ns == 1u && stackValue[0] == '1'))
+      sink("D9MT-RT-SAMPLE: D9MT_RT_SAMPLE_STACK ignored (0 or 1): the stack copy stays on");
+    return start(hz, sink, true, stack, kRvaModule);
   }
 
 
-  Handle startForTest(uint32_t hz, void (*sink)(const char* line), bool guard, const char* rvaModule) {
-    return start(hz, sink, guard, rvaModule);
+  Handle startForTest(uint32_t hz, void (*sink)(const char* line), bool guard, bool stack, const char* rvaModule) {
+    return start(hz, sink, guard, stack, rvaModule);
   }
 
 

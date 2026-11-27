@@ -12,6 +12,8 @@
 //              in ntdll.dll, and at least 80 % of those name rt_sample_dll.dll as the caller, with
 //              its caller RVAs inside rt_dll_memmove's first 512 bytes
 //   caller-exe the control: the same memmove called from this exe; the callers are the exe
+//   nostack    caller's loop with the stack copy off (D9MT_RT_SAMPLE_STACK=0): every ntdll.dll
+//              sample counts as "stack not read", none names a caller
 //   wait       the thread waits on an event for 4 s (3 s sampled): at least 90 % of the samples
 //              are in ntdll.dll, at least 80 % of those name this exe as the caller (the wait goes
 //              through kernelbase.dll, a system DLL too), and the thread wakes and ends normally
@@ -134,7 +136,7 @@ namespace {
 
   DWORD WINAPI worker(void* arg) {
     Job& job = *static_cast<Job*>(arg);
-    rtsample::Handle h = rtsample::startForTest(job.hz, sink, job.guard, "rt_sample_dll.dll");
+    rtsample::Handle h = rtsample::startForTest(job.hz, sink, job.guard, job.mode != "nostack", "rt_sample_dll.dll");
 
     if (job.mode == "ratio" || job.mode == "swapped") {
       const uint64_t a = (job.mode == "ratio" ? 30u : 10u) * g_ticksPerMs;
@@ -144,7 +146,7 @@ namespace {
         exeSpin(a);
         rt_dll_spin(b);
       }
-    } else if (job.mode == "caller") {
+    } else if (job.mode == "caller" || job.mode == "nostack") {
       rt_dll_memmove(5000u * g_ticksPerMs);
     } else if (job.mode == "caller-exe") {
       exeMemmove(5000u * g_ticksPerMs);
@@ -369,6 +371,14 @@ int main(int argc, char** argv) {
       if (!inside || inRva < mine.first)
         return fail(job.mode, "the caller RVA lines don't hold the calls inside rt_dll_memmove");
     }
+  } else if (job.mode == "nostack") {
+    const auto mine = calledFrom("ntdll.dll", "rt_sample_dll.dll");
+    std::printf("rt_sample_wine_test %s: ntdll.dll %llu samples, called from rt_sample_dll.dll %llu\n",
+      job.mode.c_str(), (unsigned long long)mine.second, (unsigned long long)mine.first);
+    if (s.total < 400u || mine.second < 0.5 * double(s.total))
+      return fail(job.mode, "too few samples, or under half in ntdll.dll");
+    if (mine.first != 0u || !hasLine("stack copy off") || !hasLine(", no caller found 0, stack not read "))
+      return fail(job.mode, "a caller was named with the stack copy off");
   } else if (job.mode == "wait" || job.mode == "syscall") {
     if (s.total < 200u)
       return fail(job.mode, "under 200 samples in 3 s at 200 Hz");

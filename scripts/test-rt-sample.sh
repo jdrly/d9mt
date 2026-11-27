@@ -4,8 +4,8 @@
 # (x64) and runs each mode in a fresh process.
 #
 #   ENGINE=<Wine engine root, bin/wine inside> WORK=<durable dir> scripts/test-rt-sample.sh
-#       the checks: ratio, swapped (its control), caller, caller-exe (its control), wait, syscall,
-#       fault, fault-early
+#       the checks: ratio, swapped (its control), caller, caller-exe (its control), nostack, wait,
+#       syscall, fault, fault-early
 #   ENGINE=... WORK=... scripts/test-rt-sample.sh storm <runs> <hz> <faults per s> <s> <guard 0|1>
 #       the measurement behind the fault guard: <runs> runs of a thread that faults at the rate
 #       while it is sampled at <hz>; counts the runs in which Wine ended the thread. Not a check:
@@ -84,7 +84,7 @@ if [ "${1:-}" = storm ]; then
 fi
 
 fails=0
-for mode in ratio swapped caller caller-exe wait syscall fault fault-early; do
+for mode in ratio swapped caller caller-exe nostack wait syscall fault fault-early; do
   log="$WORK/$mode.log"
   one "$log" "$mode"
   if [ "$rc" = 0 ] && grep -q "^rt_sample_wine_test $mode: ok" "$log"; then

@@ -39,6 +39,8 @@
 //     copies stack slots only between the stack pointer and the base of the thread's own stack as
 //     it was at the start (memory the thread has used; a thread on a fiber's stack isn't read).
 //     No heap, no lock, no module lookup, no log: a suspended thread may hold any of them.
+//     D9MT_RT_SAMPLE_STACK=0 turns the stack copy off (no callers then): a live stack page that
+//     another thread made unreadable would fault the copy while the thread is suspended.
 // What is left: a first fault that comes while a suspend is in flight; a fault that a vectored
 // handler added later as first resolves, and one Wine resolves itself, are never seen.
 //
@@ -426,7 +428,8 @@ namespace dxvk::rtsample {
   /**
    * \brief Starts a sampler of the calling thread, when D9MT_RT_SAMPLE asks for one
    *
-   * Reads the variable; unset, returns an empty handle and does nothing else. Set but invalid:
+   * Reads the variable (and D9MT_RT_SAMPLE_STACK when it is set); unset, returns an empty
+   * handle and does nothing else. Set but invalid:
    * one line says it is ignored. Otherwise one line names the thread and the rate. Each line goes
    * to \p sink, from the sampler's thread after the first.
    */
@@ -445,10 +448,10 @@ namespace dxvk::rtsample {
    * \brief Tests only: starts a sampler of the calling thread at \p hz
    *
    * \p guard false turns the fault guard off (the watch second and the stop at a fault), for the
-   * test that measures what the guard is for. \p rvaModule names the module written by RVA in
-   * place of kRvaModule.
+   * test that measures what the guard is for. \p stack false turns the stack copy off.
+   * \p rvaModule names the module written by RVA in place of kRvaModule.
    */
-  Handle startForTest(uint32_t hz, void (*sink)(const char* line), bool guard, const char* rvaModule);
+  Handle startForTest(uint32_t hz, void (*sink)(const char* line), bool guard, bool stack, const char* rvaModule);
 
 }
 #endif
