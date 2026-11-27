@@ -39,7 +39,7 @@
 #define BG      0x181828u
 
 static IDirect3DSurface9 *backBuffer, *autoDs, *sceneRt, *sceneDs, *sys, *dsS, *cS;
-static IDirect3DTexture9 *tex[8], *cTex, *copyTex;
+static IDirect3DTexture9 *tex[8], *cTex, *copyTex, *greyTex;
 static IDirect3DSurface9 *surf[8], *copyS;
 static int failed;
 
@@ -110,12 +110,14 @@ static void frame(int n) {
   scene();
   colourCell(RED, 20, 20);
 
-  /* V2: back on the scene, a draw before S2 is bound again, so the visit ends on the scene. The
-   * GREY cell, a draw on the scene, puts unbind() into effect before the visit: without it S2 is
-   * still bound for sampling when the visit ends, and the visit gets a pass of its own, as in V3. */
+  /* V2: back on the scene, a draw before S2 is bound again, so the visit ends on the scene. A
+   * draw that samples greyTex on stage 0 (GREY on the GREY scene) replaces S2 there before the
+   * visit: unbind() alone leaves S2 bound until a shader samples stage 0 again, and the visit then
+   * gets a pass of its own, as in V3. */
   sampleCell(2, 120, 20);
+  IDirect3DDevice9_SetTexture(t_dev, 0, (IDirect3DBaseTexture9 *)greyTex);
+  cell(420, 120, 80, 80);
   unbind();
-  colourCell(GREY, 420, 120);
   visit(2);
   IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u | BLUE, 1.0f, 0);
   scene();
@@ -232,6 +234,15 @@ int main(void) {
   copyS = t_level0(copyTex);
   T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, SZ, SZ, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &cTex, NULL));
   cS = t_level0(cTex);
+  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &greyTex, NULL));
+  {
+    D3DLOCKED_RECT lr;
+    T_CHECK(IDirect3DTexture9_LockRect(greyTex, 0, &lr, NULL, 0));
+    for (int y = 0; y < 4; y++)
+      for (int x = 0; x < 4; x++)
+        ((DWORD *)((char *)lr.pBits + y * lr.Pitch))[x] = 0xff000000u | GREY;
+    T_CHECK(IDirect3DTexture9_UnlockRect(greyTex, 0));
+  }
   T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, SZ, SZ, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &dsS, NULL));
   T_CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(t_dev, W, H, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, &sys, NULL));
   return t_loop(frame);
