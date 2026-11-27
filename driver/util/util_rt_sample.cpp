@@ -13,16 +13,16 @@
 // While the render thread is suspended it may hold any lock of the process: the heap's, the
 // loader lock, Wine's virtual-memory lock, the Logger's. So between SuspendThread and ResumeThread
 // the sampler only
-//   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs: Wine's
-//     GetThreadContext waits without a limit until the thread has stopped. A thread inside a Unix
-//     call (a Metal wait) stops only when the call returns, and runs on until then: on the rented
-//     M1 a test program's captures took up to 250 ms that way. A thread that never stops must not
-//     stay suspended, so past the limit the sampler resumes the thread and stops for good, and no
-//     sampler starts again in the process; the capture thread frees the state when its call comes
-//     back (never, if it never does: a state and a thread for each sampler that was running then).
-//     A capture thread that was delayed past the limit skips the request; one that had already
-//     checked makes it on the running thread, which Wine stops once more for it: one suspend
-//     outside the sampler's rhythm, after a stall of the whole limit;
+//   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs, or until
+//     the device is released: Wine's GetThreadContext waits without a limit until the thread has
+//     stopped. On the rented M1 (macOS 26.7.3, CrossOver 26.3 engine) one test program's captures
+//     took up to 250 ms, landing in winemetal.dll, while others took under 3 ms. A thread that
+//     never stops must not stay suspended, so past the limit the sampler resumes the thread and
+//     stops for good, and no sampler starts again in the process. The capture thread frees the
+//     state when its call comes back (never, if it never does: a state and a thread for each
+//     sampler that was running then). A capture thread that was delayed past the limit skips the
+//     request; one that had already checked makes it on the running thread, which Wine stops once
+//     more for it: one suspend outside the sampler's rhythm, after a stall of the whole limit;
 //   - reads the thread's TEB and copies stack slots with plain loads, only between the stack
 //     pointer and the base of the stack the thread had when the sampler started, and only when
 //     the TEB still names that base and the stack pointer is inside that stack and at or above
@@ -38,7 +38,7 @@ namespace dxvk::rtsample {
   namespace {
 
     constexpr uint32_t MaxSamplers = 8u;
-    // A capture of a thread outside a Unix call takes well under 2 ms; one inside waits for the call
+    // A capture normally takes well under 3 ms; some took up to 250 ms on the M1 (above)
     constexpr DWORD    kCaptureMs  = 2000u;
 
     /** Set once a capture got stuck: no sampler starts again in the process. */
@@ -297,7 +297,7 @@ namespace dxvk::rtsample {
     }
 
 
-    enum class Sampled { Ok, Missed, ThreadGone, CaptureStuck };
+    enum class Sampled { Ok, Missed, ThreadGone, CaptureStuck, Released };
 
     /**
      * One sample: suspend, read the instruction pointer and copy the top of the stack, resume;
@@ -319,16 +319,20 @@ namespace dxvk::rtsample {
 
       // Suspended: from here to ResumeThread, see the top of this file
       SetEvent(s.go);
-      if (WaitForSingleObject(s.done, kCaptureMs) != WAIT_OBJECT_0) {
+      const HANDLE waits[2] = { s.done, s.stop };
+      const DWORD w = WaitForMultipleObjects(2u, waits, FALSE, kCaptureMs);
+      if (w != WAIT_OBJECT_0) {
+        // Given up: past the limit, or the device is going. The capture thread skips the request
+        // if it hasn't made it, and ends after it if it has
         s.quit.store(true, std::memory_order_release);
-        s_captureStuck.store(true, std::memory_order_release);
+        if (w != WAIT_OBJECT_0 + 1u)
+          s_captureStuck.store(true, std::memory_order_release);
         ResumeThread(s.target);
         QueryPerformanceCounter(&t1);
-        // a missed sample that held the thread the whole limit
         s.window.missed++;
         const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
         s.window.heldMaxNs = std::max(s.window.heldMaxNs, heldNs);
-        return Sampled::CaptureStuck;
+        return w == WAIT_OBJECT_0 + 1u ? Sampled::Released : Sampled::CaptureStuck;
       }
       const BOOL got = s.got;
       if (got && s.stack) {
@@ -363,21 +367,20 @@ namespace dxvk::rtsample {
       const uintptr_t ip = uintptr_t(s.ctx.Eip);
 #endif
       const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
-      const uint32_t weight = weightOf(heldNs, 1000000000ull / s.hz);
       const int index = moduleOf(s, ip);
-      s.window.add(index, heldNs, weight);
+      s.window.add(index, heldNs, 1000000000ull / s.hz);
       if (index < 0)
         return Sampled::Ok;
 
       const Module& m = s.table.at(uint32_t(index));
       if (index == s.rvaIndex)
-        s.rvaSamples.add(ip - m.base, weight);
+        s.rvaSamples.add(ip - m.base);
       if (m.leaf >= 0) {
         uint32_t slot = 0u;
         const int caller = stackRead ? s.table.findCaller(slots, nSlots, &slot) : -2;
-        s.window.addCaller(m.leaf, caller, weight);
+        s.window.addCaller(m.leaf, caller);
         if (caller >= 0 && caller == s.rvaIndex)
-          s.rvaCallers.add(slots[slot] - s.table.at(uint32_t(caller)).base, weight);
+          s.rvaCallers.add(slots[slot] - s.table.at(uint32_t(caller)).base);
       }
       return Sampled::Ok;
     }
@@ -452,6 +455,8 @@ namespace dxvk::rtsample {
             why = "last, the thread ended";
             break;
           }
+          if (r == Sampled::Released)
+            break;
           if (r == Sampled::CaptureStuck) {
             why = "last, a context capture took too long";
             stuck = true;

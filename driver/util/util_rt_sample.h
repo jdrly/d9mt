@@ -22,9 +22,9 @@
 //     the RVAs of that module's caller slots, so a function map of the DLL can sum them.
 // Shares are of wall time: a wait counts too, under the module the thread waits in (ntdll.dll for
 // most). A thread inside a Unix call (Metal, the wineserver) shows the PE caller's address:
-// winemetal.dll for d9mt's Metal calls, ntdll.dll or win32u.dll for Wine's system calls. Such a
-// thread may stop only when its call returns; that capture then stands for every sampling period
-// it waited (weightOf), so a long Metal wait keeps its share.
+// winemetal.dll for d9mt's Metal calls, ntdll.dll or win32u.dll for Wine's system calls. A capture
+// can take longer than a sampling period (on the rented M1, up to 250 ms in a program whose samples
+// landed in winemetal.dll); the periods it covered get no sample, and the first line counts them.
 //
 // Safety. On Wine + Rosetta a thread that gets Wine's suspend signal while it handles a CPU fault
 // (an access violation, a breakpoint) can die: Wine ends it with "nested exception on signal
@@ -36,9 +36,9 @@
 //   - afterwards the first CPU fault on the thread stops it for good, with a line that names the
 //     code;
 //   - between the suspend and the resume it lets a capture thread of its own call
-//     GetThreadContext and waits for it at most 2 s (Wine's call waits without a limit for the
-//     thread to stop, which a thread inside a Unix call does only when the call returns; past the
-//     limit the sampler resumes the thread and stops for good), and
+//     GetThreadContext and waits for it at most 2 s, or until the device is released (Wine's call
+//     waits without a limit for the thread to stop; past the limit the sampler resumes the thread
+//     and stops for good), and
 //     copies stack slots only between the stack pointer and the base of the thread's own stack as
 //     it was at the start (memory the thread has used; a thread on a fiber's stack isn't read).
 //     No heap, no lock, no module lookup, no log: a suspended thread may hold any of them.
@@ -229,9 +229,10 @@ namespace dxvk::rtsample {
     uint32_t perModule[kMaxModules] = { };
     uint32_t noModule     = 0u;   // outside every image, or in an image the table had no room for
     uint32_t missed       = 0u;   // SuspendThread or GetThreadContext failed, or the capture timed out
-    uint32_t taken        = 0u;   // captures; samples() also counts the periods a slow one stood for
     uint64_t heldTotalNs  = 0u;   // per capture, from SuspendThread to ResumeThread
     uint64_t heldMaxNs    = 0u;
+    uint32_t slow         = 0u;   // captures that took longer than a sampling period
+    uint64_t slowNs       = 0u;   // and their time: samples that couldn't be taken, not attributed
 
     // per system DLL: its samples by caller module, and those with no caller found and with the
     // stack not read (the stack pointer outside the thread's stack range)
@@ -247,49 +248,35 @@ namespace dxvk::rtsample {
     }
 
     /**
-     * One capture in the table's module \p index (-1: none) that took \p heldNs, standing for
-     * \p weight samples: a capture that waited for the thread to leave a Unix call stands for the
-     * sampling periods the thread spent there (weightOf).
+     * One sample in the table's module \p index (-1: none) whose capture took \p heldNs; one
+     * longer than \p periodNs also counts as slow.
      */
-    void add(int index, uint64_t heldNs, uint32_t weight = 1u) {
+    void add(int index, uint64_t heldNs, uint64_t periodNs = ~uint64_t(0)) {
       if (index >= 0 && uint32_t(index) < kMaxModules)
-        perModule[index] += weight;
+        perModule[index]++;
       else
-        noModule += weight;
-      taken++;
+        noModule++;
+      if (heldNs > periodNs) {
+        slow++;
+        slowNs += heldNs;
+      }
       heldTotalNs += heldNs;
       if (heldNs > heldMaxNs)
         heldMaxNs = heldNs;
     }
 
-    /** \p weight samples of system DLL \p leaf: the caller's module index, -1 none found, -2 not read. */
-    void addCaller(int leaf, int caller, uint32_t weight = 1u) {
+    /** A sample of system DLL \p leaf: its caller's module index, -1 none found, -2 not read. */
+    void addCaller(int leaf, int caller) {
       if (leaf < 0 || uint32_t(leaf) >= kMaxLeaves)
         return;
       if (caller >= 0 && uint32_t(caller) < kMaxModules)
-        callers[leaf][caller] += weight;
+        callers[leaf][caller]++;
       else if (caller == -2)
-        stackUnread[leaf] += weight;
+        stackUnread[leaf]++;
       else
-        callerNone[leaf] += weight;
+        callerNone[leaf]++;
     }
   };
-
-
-  /**
-   * \brief The samples a capture stands for
-   *
-   * GetThreadContext comes back once the thread has stopped. A thread inside a Unix call (a Metal
-   * wait) stops only when the call returns, and runs on meanwhile; the capture then lands where the
-   * call returns to. So a capture that took \p heldNs stands for every sampling period of
-   * \p periodNs it covered, at least one.
-   */
-  inline uint32_t weightOf(uint64_t heldNs, uint64_t periodNs) {
-    if (periodNs == 0u || heldNs < periodNs)
-      return 1u;
-    const uint64_t w = heldNs / periodNs;
-    return w > 100000u ? 100000u : uint32_t(w);
-  }
 
 
   /** (count, index) pairs of \p counts' nonzero entries, the most first, equal counts by index. */
@@ -310,9 +297,9 @@ namespace dxvk::rtsample {
   /**
    * \brief The window's lines, without a line end
    *
-   * The first: the thread, the window's number and length, the samples (and of them, those that
-   * slow captures stand for), the misses and how long a capture took. Then one per module with
-   * samples, the most first (equal counts
+   * The first: the thread, the window's number and length, the samples, the misses, how long a
+   * capture took, and the captures slower than a sampling period with their time (periods with no
+   * sample, attributed to no module). Then one per module with samples, the most first (equal counts
    * in table order), "(no module)" among them; a system DLL's line goes on with its callers (the
    * six most), and its samples with no caller found or with the stack not read.
    */
@@ -321,12 +308,12 @@ namespace dxvk::rtsample {
     std::vector<std::string> lines;
     char buf[256];
     const uint32_t n = w.samples();
-    const double meanMs = w.taken != 0u ? double(w.heldTotalNs) / double(w.taken) / 1.0e6 : 0.0;
+    const double meanMs = n != 0u ? double(w.heldTotalNs) / double(n) / 1.0e6 : 0.0;
     std::snprintf(buf, sizeof(buf),
-      "D9MT-RT-SAMPLE: thread 0x%04x, window %u (%s), %.1f s, %u samples at %u Hz asked (%u for slow captures), "
-      "%u missed, capture %.3f ms mean, %.3f ms longest",
-      unsigned(tid), unsigned(number), why, seconds, unsigned(n), unsigned(hz), unsigned(n - w.taken),
-      unsigned(w.missed), meanMs, double(w.heldMaxNs) / 1.0e6);
+      "D9MT-RT-SAMPLE: thread 0x%04x, window %u (%s), %.1f s, %u samples at %u Hz asked, %u missed, "
+      "capture %.3f ms mean, %.3f ms longest, %u slower than a period (%.1f ms, not attributed)",
+      unsigned(tid), unsigned(number), why, seconds, unsigned(n), unsigned(hz), unsigned(w.missed),
+      meanMs, double(w.heldMaxNs) / 1.0e6, unsigned(w.slow), double(w.slowNs) / 1.0e6);
     lines.push_back(buf);
 
     // kMaxModules + 1 counts: the modules', then "(no module)"
@@ -382,11 +369,11 @@ namespace dxvk::rtsample {
 
     bool empty() const { return m_counts.empty(); }
 
-    /** \p weight samples at \p rva; outside the module: nothing. A bucket saturates at 65535. */
-    void add(uintptr_t rva, uint32_t weight = 1u) {
+    /** One sample at \p rva; outside the module: nothing. A bucket saturates at 65535. */
+    void add(uintptr_t rva) {
       const uintptr_t b = rva / kRvaBucket;
-      if (b < m_counts.size())
-        m_counts[b] = uint16_t(std::min<uint32_t>(0xffffu, uint32_t(m_counts[b]) + weight));
+      if (b < m_counts.size() && m_counts[b] != 0xffffu)
+        m_counts[b]++;
     }
 
     void clear() {

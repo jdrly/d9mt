@@ -204,8 +204,8 @@ int main() {
     for (const auto& l : lines)
       std::printf("%s\n", l.c_str());
     CHECK(lines.size() == 5u);
-    CHECK(has(lines[0], "D9MT-RT-SAMPLE: thread 0x01f4, window 3 (every 10 s), 10.0 s, 13 samples at 200 Hz asked (0 for slow captures), 4 missed"));
-    CHECK(has(lines[0], "capture 0.007 ms mean, 0.013 ms longest"));
+    CHECK(has(lines[0], "D9MT-RT-SAMPLE: thread 0x01f4, window 3 (every 10 s), 10.0 s, 13 samples at 200 Hz asked, 4 missed"));
+    CHECK(has(lines[0], "capture 0.007 ms mean, 0.013 ms longest, 0 slower than a period (0.0 ms, not attributed)"));
     CHECK(lines.size() > 4u && lines[1] == "D9MT-RT-SAMPLE:    38.5 % b.dll (5)");
     CHECK(lines.size() > 4u && lines[2] == "D9MT-RT-SAMPLE:    23.1 % a.dll (3)");
     CHECK(lines.size() > 4u && lines[3] == "D9MT-RT-SAMPLE:    23.1 % c.exe (3)");
@@ -214,7 +214,7 @@ int main() {
     // an empty window: the first line only, no division by zero
     const auto empty = rtsample::windowLines(t, rtsample::Window(), 0x1f4u, 4u, 0.3, 200u, "last, device released");
     CHECK(empty.size() == 1u);
-    CHECK(has(empty[0], "window 4 (last, device released), 0.3 s, 0 samples at 200 Hz asked (0 for slow captures), 0 missed, capture 0.000 ms mean"));
+    CHECK(has(empty[0], "window 4 (last, device released), 0.3 s, 0 samples at 200 Hz asked, 0 missed, capture 0.000 ms mean"));
   }
 
   // 6. a system DLL's line: its callers, the most first, then those with none found and with the
@@ -266,36 +266,27 @@ int main() {
     CHECK(h.lines("x.dll", "rva", 9u).empty());
   }
 
-  // 8. a slow capture (the thread in a Unix call) stands for the periods it waited: at 5 ms
-  //    periods 0.06 ms and 5 ms are 1, 10 ms is 2, 212 ms is 42. The window, its callers and the
-  //    RVA buckets count the weight; the mean capture time is per capture
+  // 8. a capture slower than a sampling period counts once, in its module, and as slow with its
+  //    time (the periods it covered get no sample); one exactly a period long isn't slow
   {
-    CHECK(rtsample::weightOf(60000u, 5000000u) == 1u);
-    CHECK(rtsample::weightOf(4900000u, 5000000u) == 1u);
-    CHECK(rtsample::weightOf(5000000u, 5000000u) == 1u);
-    CHECK(rtsample::weightOf(10000000u, 5000000u) == 2u);
-    CHECK(rtsample::weightOf(212000000u, 5000000u) == 42u);
-    CHECK(rtsample::weightOf(5000000u, 0u) == 1u);
-    CHECK(rtsample::weightOf(~uint64_t(0), 1u) == 100000u);
-
     rtsample::ModuleTable t;
     t.add(0x10000u, 0x1000u, "ntdll.dll");
     t.add(0x20000u, 0x1000u, "winemetal.dll");
     rtsample::Window w;
-    w.add(1, 212000000u, rtsample::weightOf(212000000u, 5000000u));   // 42
-    w.add(0, 60000u, 1u);
-    w.addCaller(t.at(0).leaf, 1, 1u);
-    CHECK(w.samples() == 43u && w.taken == 2u && w.heldMaxNs == 212000000u);
+    w.add(1, 212000000u, 5000000u);
+    w.add(1, 5000000u, 5000000u);
+    w.add(0, 60000u, 5000000u);
+    CHECK(w.samples() == 3u && w.slow == 1u && w.slowNs == 212000000u && w.heldMaxNs == 212000000u);
     const auto lines = rtsample::windowLines(t, w, 0x10u, 1u, 1.0, 200u, "every 10 s");
     for (const auto& l : lines)
       std::printf("%s\n", l.c_str());
-    CHECK(lines.size() == 3u && has(lines[0], "43 samples at 200 Hz asked (41 for slow captures), 0 missed, capture 106.030 ms mean, 212.000 ms longest"));
-    CHECK(lines.size() == 3u && lines[1] == "D9MT-RT-SAMPLE:    97.7 % winemetal.dll (42)");
+    CHECK(lines.size() == 3u && has(lines[0], "3 samples at 200 Hz asked, 0 missed, capture 72.353 ms mean, 212.000 ms longest, 1 slower than a period (212.0 ms, not attributed)"));
+    CHECK(lines.size() == 3u && lines[1] == "D9MT-RT-SAMPLE:    66.7 % winemetal.dll (2)");
 
     rtsample::RvaHistogram h;
     h.init(0x100u);
-    h.add(0x20u, 42u);
-    h.add(0x20u, 0xffffu);   // saturates
+    for (uint32_t i = 0u; i < 0x10005u; i++)
+      h.add(0x20u);
     const auto rl = h.lines("x.dll", "rva", 1u);
     CHECK(rl.size() == 1u && rl[0] == "D9MT-RT-SAMPLE: x.dll rva window 1: 20=65535");
   }
