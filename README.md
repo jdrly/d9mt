@@ -68,7 +68,8 @@ game session and identical rendering on other Mac generations, a slower and a
 fanless one among them.
 
 - `D9MT_FLUSH_CAP=1` stops weak flush hints from submitting a command buffer mid-frame, as
-  upstream DXVK does on tiling GPUs. [#113](https://github.com/jdrly/d9mt/pull/113)
+  upstream DXVK does on tiling GPUs. [#113](https://github.com/jdrly/d9mt/pull/113) The `swtor`
+  app profile now turns it on (`D9MT_FLUSH_CAP=0` turns it off); other games keep it off.
 - `D9MT_PSO_ASYNC_FLUSH=1` writes the Metal pipeline archive on a thread of its own. With the
   switch off, the pipeline build that makes a flush due writes it, usually on the render thread,
   which stalled for 0.5 to 0.67 s once per session in measured sessions.

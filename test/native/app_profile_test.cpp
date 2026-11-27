@@ -156,7 +156,9 @@ int main() {
     CHECK(r.keepPassOverClearVisit == (r.id == S));
     CHECK(r.psPrefetch == (r.id != S));
     CHECK(r.psIrPrefetch);
+    CHECK(r.flushCap == (r.id == S));
   }
+  CHECK(appProfileFor(S).flushCap && !appProfileFor(G).flushCap && !AppProfile().flushCap);
   // C5's two fields are the first whose generic value is on; psIrPrefetch keeps it in swtor.
   CHECK(!appProfileFor(S).psPrefetch && appProfileFor(G).psPrefetch && AppProfile().psPrefetch);
   CHECK(appProfileFor(S).psIrPrefetch && appProfileFor(G).psIrPrefetch && AppProfile().psIrPrefetch);
@@ -214,41 +216,67 @@ int main() {
       CHECK(f.psIrPrefetch == appProfileFor(id).psIrPrefetch);
       CHECK(f.keepPassOverClearVisit == appProfileFor(id).keepPassOverClearVisit);
     }
+
+    // D9MT_FLUSH_CAP keeps its meaning from before the app profile too: "1" is on, empty is
+    // unset, and every other value is off (Legacy with other = false) on both app profiles.
+    const bool defCap = appProfileFor(id).flushCap;
+    struct { const char* v; bool want; AppProfileOverride how; } fc[] = {
+      { "1", true, Used }, { "0", false, Used }, { "", defCap, Unset },
+      { "true", false, Legacy }, { "on", false, Legacy }, { " 1", false, Legacy }, { "2", false, Legacy },
+      { "yes", false, Legacy }, { "11", false, Legacy },
+    };
+    for (const auto& s : fc) {
+      AppProfile f = appProfileFor(id);
+      CHECK(applyAppProfileLegacySwitch(s.v, f.flushCap, false) == s.how);
+      CHECK(f.flushCap == s.want);
+      CHECK(f.psPrefetch == appProfileFor(id).psPrefetch);
+      CHECK(f.psIrPrefetch == appProfileFor(id).psIrPrefetch);
+      CHECK(f.keepPassOverClearVisit == appProfileFor(id).keepPassOverClearVisit);
+    }
   }
 
   // The fields' log line.
   AppProfile f = appProfileFor(S);
   CHECK(appProfileFieldsLine(f, Unset)
         == "d9mt: app profile fields: staticBuffersDirect on, inpassClear on, keepPassOverClearVisit on,"
-           " psPrefetch off, psIrPrefetch on");
+           " psPrefetch off, psIrPrefetch on, flushCap on");
   applyAppProfileSwitch("0", f.staticBuffersDirect);
   CHECK(appProfileFieldsLine(f, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear on,"
-           " keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on");
+           " keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on, flushCap on");
   applyAppProfileSwitch("0", f.inpassClear);
   CHECK(appProfileFieldsLine(f, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
-           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on");
+           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on, flushCap on");
   applyAppProfileSwitch("0", f.keepPassOverClearVisit);
   CHECK(appProfileFieldsLine(f, Used, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
            " (D9MT_INPASS_CLEAR), keepPassOverClearVisit off (D9MT_KEEP_PASS_OVER_CLEAR_VISIT),"
-           " psPrefetch off, psIrPrefetch on");
+           " psPrefetch off, psIrPrefetch on, flushCap on");
   applyAppProfileLegacySwitch("yes", f.psPrefetch);
   CHECK(appProfileFieldsLine(f, Used, Used, Used, Legacy)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
            " (D9MT_INPASS_CLEAR), keepPassOverClearVisit off (D9MT_KEEP_PASS_OVER_CLEAR_VISIT),"
-           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch on");
+           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch on, flushCap on");
   applyAppProfileSwitch("0", f.psIrPrefetch);
   CHECK(appProfileFieldsLine(f, Unset, Unset, Unset, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
-           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch off (D9MT_PS_IR_PREFETCH)");
+           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch off (D9MT_PS_IR_PREFETCH), flushCap on");
+  applyAppProfileLegacySwitch("off", f.flushCap, false);
+  CHECK(appProfileFieldsLine(f, Unset, Unset, Unset, Unset, Unset, Legacy)
+        == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
+           " psPrefetch on, psIrPrefetch off, flushCap off (D9MT_FLUSH_CAP)");
   CHECK(appProfileFieldsLine(appProfileFor(G), Unknown)
         == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
-           " psPrefetch on, psIrPrefetch on");
+           " psPrefetch on, psIrPrefetch on, flushCap off");
   CHECK(appProfileFieldsLine(appProfileFor(G), Unset, Unset, Unset, Unknown, Unknown)
         == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
-           " psPrefetch on, psIrPrefetch on");
+           " psPrefetch on, psIrPrefetch on, flushCap off");
+  AppProfile g = appProfileFor(G);
+  applyAppProfileLegacySwitch("1", g.flushCap, false);
+  CHECK(appProfileFieldsLine(g, Unset, Unset, Unset, Unset, Unset, Used)
+        == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
+           " psPrefetch on, psIrPrefetch on, flushCap on (D9MT_FLUSH_CAP)");
 
   if (g_fail)
     return 1;
