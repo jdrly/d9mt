@@ -87,9 +87,9 @@
 //   clrRectDs   ... part-surface depth/stencil clears: a draw
 //   clrRectDsIn ... of them drawn inside the open pass, which goes on (#129, inpassClear); the
 //               rest end the pass and get a pass of their own
-//   visitKept   per frame: passes kept open across a visit to other targets that drew nothing,
-//               only cleared them or not even that (keepPassOverClearVisit); each saves a store
-//               and a load of the pass's attachments
+//   visitKept   per frame: visits to other targets that drew nothing (and only cleared them,
+//               or not even that) across which the open pass stayed open
+//               (keepPassOverClearVisit). A restore later in the same pass can still end it
 //   lockCs=n/ms   the window's totals, not per frame: buffer Locks that found the CS thread
 //               behind the buffer's last use (the GPU no longer had it) and synced it, and the
 //               time of those Locks' waits

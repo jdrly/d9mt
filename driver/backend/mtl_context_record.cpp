@@ -419,6 +419,7 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::Submit);
     // This submit completes a carried flush, if any (closePass below mustn't do it again).
     m_completePending = false;
+    realizeVisit();   // the open pass ended at the visit's targets, as before
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -716,6 +717,7 @@ namespace dxvk::backend {
       return;
     }
 
+    realizeVisit();
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -767,7 +769,7 @@ namespace dxvk::backend {
      * Anything else ends the open pass, which turns the visit into its pending pass, and goes
      * on as before. */
     if (unlikely(m_visitPending)) {
-      if (sameViews(targets, m_visit.targets) && uint32_t(feedbackLoop) == m_visitFeedback)
+      if (!noSameViewSkip && sameViews(targets, m_visit.targets) && uint32_t(feedbackLoop) == m_visitFeedback)
         return;
       if (!noSameViewSkip && sameViews(targets, m_pass.targets)
        && uint32_t(feedbackLoop) == m_passFeedbackLoop && resolveVisit())
@@ -806,8 +808,10 @@ namespace dxvk::backend {
     if (m_pass.active) {
       /* keepPassOverClearVisit: keep the open pass and hold the new targets as a visit, until
        * it draws or anything else needs the pass to end. Only for targets that share no image
-       * with the open pass (a clear of one of its attachments must end it). */
-      if (m_keepPassOverVisit && !rtSkipOn) {
+       * with the open pass (a clear of one of its attachments must end it), and not while a
+       * carried flush waits for this pass's end: ending it here completes that flush, and the
+       * work stamped until the visit ends would get the next serial (queries, uploads). */
+      if (m_keepPassOverVisit && !rtSkipOn && !noSameViewSkip && !m_completePending) {
         bool disjoint = true;
         auto img = [] (const Rc<MtlTextureView>& v) { return v != nullptr ? v->image.ptr() : nullptr; };
         const Rc<MtlTextureView>* mine[5] = { &m_pass.targets.color[0], &m_pass.targets.color[1],

@@ -5,7 +5,7 @@
  * pixels. CV_MSAA (code_clear_visit_msaa.c) draws the scene into a 4x render target and a 4x
  * D24S8 surface and resolves it into the back buffer with StretchRect.
  *
- * Every frame: six 128x128 targets S1..S6 (each with a D24S8 surface) are drawn YELLOW, each in a
+ * Every frame: seven 128x128 targets S1..S7 (each with a D24S8 surface) are drawn YELLOW, each in a
  * pass of its own. Then the scene pass (GREY), and in it:
  *  V1. a visit that clears S1 (BLUE, depth, stencil); back: a RED cell;
  *  V2. a cell that samples S2 (YELLOW); S2 unbound; a visit that clears S2 (BLUE); back: a RED
@@ -13,10 +13,12 @@
  *      draw comes before the clear, which reaches memory only when S2 is bound again;
  *  V3. as V2 with S3 still bound for sampling when the visit ends;
  *  V4. a visit that clears S4 (BLUE) and draws MAGENTA in its middle; back: a RED cell;
- *  V5. a visit that clears S5 (BLUE), then another target (S6's surface pair is not used: a
- *      separate 128x128 target C, nothing drawn), then back;
- *  V6. a visit to S6 with no clear and no draw;
- *  then S1, S4, S5 and S6 sampled into cells: BLUE, MAGENTA in a BLUE frame, BLUE, YELLOW.
+ *  V5. a visit that clears S5 (BLUE), then another 128x128 target C cleared RED with no draw,
+ *      then back;
+ *  V6. a visit to S6 with a clear clipped to nothing (it binds S6) and no draw;
+ *  V7. a visit that clears S7 (BLUE), and S7 copied with StretchRect while the visit is open;
+ *  then S1, S4, S5, S6, C and the copy of S7 sampled into cells: BLUE, MAGENTA in a BLUE frame,
+ *  BLUE, YELLOW, RED, BLUE.
  * Frame 1 reads the back buffer back and prints a FAIL line for each pixel that differs. */
 #include "t_common.h"
 
@@ -35,8 +37,8 @@
 #define BG      0x181828u
 
 static IDirect3DSurface9 *backBuffer, *autoDs, *sceneRt, *sceneDs, *sys, *dsS, *cS;
-static IDirect3DTexture9 *tex[7], *cTex;
-static IDirect3DSurface9 *surf[7];
+static IDirect3DTexture9 *tex[8], *cTex, *copyTex;
+static IDirect3DSurface9 *surf[8], *copyS;
 static int failed;
 
 static void rs(D3DRENDERSTATETYPE s, DWORD v) { IDirect3DDevice9_SetRenderState(t_dev, s, v); }
@@ -89,7 +91,7 @@ static void frame(int n) {
   rs(D3DRS_CULLMODE, D3DCULL_NONE);
   IDirect3DDevice9_SetTexture(t_dev, 0, NULL);
 
-  for (int k = 1; k <= 6; k++) {
+  for (int k = 1; k <= 7; k++) {
     visit(k);
     colour(YELLOW);
     t_quad(-1.0f, -1.0f, 1.0f, 1.0f, 0.5f);
@@ -140,10 +142,21 @@ static void frame(int n) {
   scene();
   colourCell(RED, 20, 120);
 
-  /* V6 */
+  /* V6: a clear clipped to nothing binds S6, and clears nothing */
   visit(6);
+  {
+    const D3DRECT none = { 0, 0, 0, 0 };
+    IDirect3DDevice9_Clear(t_dev, 1, &none, D3DCLEAR_TARGET, 0xff000000u | BLUE, 1.0f, 0);
+  }
   scene();
   colourCell(RED, 120, 120);
+
+  /* V7: S7 copied while its visit is pending: the copy must see the visit's clear */
+  visit(7);
+  IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u | BLUE, 1.0f, 0);
+  T_CHECK(IDirect3DDevice9_StretchRect(t_dev, surf[7], NULL, copyS, NULL, D3DTEXF_NONE));
+  scene();
+  colourCell(RED, 220, 120);
 
   /* the visited targets */
   sampleCell(1, 20, 240);
@@ -153,6 +166,8 @@ static void frame(int n) {
   IDirect3DDevice9_SetPixelShader(t_dev, t_ps_sample);
   IDirect3DDevice9_SetTexture(t_dev, 0, (IDirect3DBaseTexture9 *)cTex);
   cell(420, 240, 80, 80);
+  IDirect3DDevice9_SetTexture(t_dev, 0, (IDirect3DBaseTexture9 *)copyTex);
+  cell(520, 240, 80, 80);
   unbind();
   IDirect3DDevice9_EndScene(t_dev);
 
@@ -169,6 +184,7 @@ static void frame(int n) {
       { 560,  60, RED,     "V4: the scene after a visit that drew" },
       {  60, 160, RED,     "V5: the scene after a visit and another target" },
       { 160, 160, RED,     "V6: the scene after a visit without a clear" },
+      { 260, 160, RED,     "V7: the scene after a visit its target was copied in" },
       { 310, 300, GREY,    "the scene between cells" },
       {  60, 280, BLUE,    "S1 cleared by its visit" },
       { 160, 280, MAGENTA, "S4: drawn in its visit" },
@@ -176,6 +192,7 @@ static void frame(int n) {
       { 260, 280, BLUE,    "S5 cleared by its visit" },
       { 360, 280, YELLOW,  "S6 untouched by its visit" },
       { 460, 280, RED,     "C cleared after S5's visit" },
+      { 560, 280, BLUE,    "V7: S7 copied during its visit, after the visit's clear" },
     };
     D3DLOCKED_RECT lr;
     T_CHECK(IDirect3DDevice9_GetRenderTargetData(t_dev, backBuffer, sys));
@@ -202,10 +219,12 @@ int main(void) {
   sceneRt = backBuffer;
   sceneDs = autoDs;
 #endif
-  for (int k = 1; k <= 6; k++) {
+  for (int k = 1; k <= 7; k++) {
     T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, SZ, SZ, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex[k], NULL));
     surf[k] = t_level0(tex[k]);
   }
+  T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, SZ, SZ, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &copyTex, NULL));
+  copyS = t_level0(copyTex);
   T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, SZ, SZ, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &cTex, NULL));
   cS = t_level0(cTex);
   T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, SZ, SZ, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &dsS, NULL));

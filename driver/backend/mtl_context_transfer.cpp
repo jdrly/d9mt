@@ -1466,6 +1466,7 @@ namespace dxvk::backend {
       /* End an active pass in either mode (a second encoder can't be opened
        * while it is live) and execute pending clears first, so an older
        * folded clear on this image can't land after this one. */
+      realizeVisit();
       if (m_pass.active) {
         prof::bump(prof::CntPassCloseClear);
         if (unlikely(prof::g_profEnabled))
