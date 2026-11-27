@@ -243,6 +243,8 @@ int main(void) {
         ((DWORD *)((char *)lr.pBits + y * lr.Pitch))[x] = 0xff000000u | GREY;
     T_CHECK(IDirect3DTexture9_UnlockRect(greyTex, 0));
   }
+  /* uploaded now: an upload at its first bind would end the scene pass before V2's visit */
+  IDirect3DTexture9_PreLoad(greyTex);
   T_CHECK(IDirect3DDevice9_CreateDepthStencilSurface(t_dev, SZ, SZ, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &dsS, NULL));
   T_CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(t_dev, W, H, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, &sys, NULL));
   return t_loop(frame);
