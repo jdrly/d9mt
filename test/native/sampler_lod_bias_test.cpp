@@ -92,7 +92,7 @@ struct BiasCase { float key; bool on; float sent; };
 static const float kNaN = std::numeric_limits<float>::quiet_NaN();
 
 static const BiasCase kBiases[] = {
-  { -0.75f,      true,  -0.75f },      // the UI's bias in the brief
+  { -0.75f,      true,  -0.75f },
   { -0.75f,      false,  0.0f },
   {  1.0f,       true,   1.0f },
   {  1.0f,       false,  0.0f },
