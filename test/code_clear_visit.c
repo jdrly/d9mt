@@ -20,8 +20,9 @@
  *  then S1, S4, S5, S6, C and the copy of S7 sampled into cells: BLUE, MAGENTA in a BLUE frame,
  *  BLUE, YELLOW, RED, BLUE.
  * Frame 1 reads the back buffer back and prints a FAIL line for each pixel that differs. From frame 2
- * on, frame 1's reads of the cleared targets keep their stores (the read hint), so every visit gets
- * a pass of its own: frame 1 checks the kept visits, and the frame hashes compare the two paths. */
+ * on, frame 1's reads of the cleared targets keep their stores (the read hint), so the visits that
+ * clear (V1, V2) get a pass of their own: frame 1 checks them kept, and the frame hashes compare the
+ * two paths. The empty V6 has nothing to store and stays kept. */
 #include "t_common.h"
 
 #ifndef CV_NAME
