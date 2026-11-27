@@ -11,7 +11,8 @@
 //  - after that sync, the GPU was found idle, or the call waited for it after a flush.
 // A call without DONOTWAIT always returns true. A DONOTWAIT call never blocks on the GPU and
 // returns false exactly when its last reading was busy; then it forces a flush when the open,
-// carried submission holds the resource, and hints one otherwise.
+// carried submission holds the resource, and hints one otherwise (no carry, or a carry open while
+// an older submission holds it).
 //
 //   scripts/test-wait-resource.sh [d3d9_device.cpp]
 #include <atomic>
@@ -57,7 +58,9 @@ namespace dxvk {
   // W a GPU wait.
   struct World {
     std::vector<bool> script;
-    bool              carried = false;  // the open, carried submission holds the resource
+    // No carry open; a carry open that holds the resource (its serial is the open one); a carry
+    // open while an older submission holds the resource.
+    enum class Carry { None, Holds, Older } carry = Carry::None;
     size_t            next = 0u;
     std::string       log;
     uint64_t          syncedTo = 0u;
@@ -74,8 +77,9 @@ namespace dxvk {
     World* w;
     struct FrontendStats { std::atomic<uint64_t> resourceGpuWaits = { 0u }; } fs;
     bool isResourceInUse(const MtlResource&) { return w->read(); }
-    bool carryOpen() const { return w->carried; }
-    uint64_t getNextSerial() const { return 1u; }   // the resource's serial (1) is the open one
+    bool carryOpen() const { return w->carry != World::Carry::None; }
+    // the resource's serial is 1: the open one, or an older one when the open one is 2
+    uint64_t getNextSerial() const { return w->carry == World::Carry::Older ? 2u : 1u; }
     void waitForResource(const MtlResource&) { w->log += "W "; }
     FrontendStats& frontendStats() { return fs; }
   };
@@ -113,11 +117,12 @@ static std::vector<std::string> events(const std::string& log) {
 }
 
 // The contract for one call; prints the case when it doesn't hold.
-static void check(const std::vector<bool>& script, bool profiled, bool doNotWait, bool carried) {
+static void check(const std::vector<bool>& script, bool profiled, bool doNotWait, World::Carry carry) {
   g_cases++;
   World w;
   w.script = script;
-  w.carried = carried;
+  w.carry = carry;
+  const bool carried = carry == World::Carry::Holds;
   FakeMtlDevice mtl;
   mtl.w = &w;
   D3D9DeviceEx dev;
@@ -144,7 +149,7 @@ static void check(const std::vector<bool>& script, bool profiled, bool doNotWait
   if (doNotWait) {
     if (done == lastBusy)
       ok = false;   // a poll fails exactly when the resource was busy at its last reading
-    if (!done && e.back() != (carried ? "F" : "H"))
+    if (!done && (e.empty() || e.back() != (carried ? "F" : "H")))
       ok = false;   // a busy poll forces a flush of the carry that holds it, else hints one
   }
   for (int i = 0; i < int(e.size()); i++)
@@ -168,15 +173,15 @@ static void check(const std::vector<bool>& script, bool profiled, bool doNotWait
   if (!ok) {
     std::string s;
     for (bool b : script) s += b ? "busy " : "idle ";
-    std::printf("FAIL readings [%s] profiled=%d donotwait=%d carried=%d: returned %s, events: %s\n",
-                s.c_str(), int(profiled), int(doNotWait), int(carried), done ? "true" : "false", w.log.c_str());
+    std::printf("FAIL readings [%s] profiled=%d donotwait=%d carry=%d: returned %s, events: %s\n",
+                s.c_str(), int(profiled), int(doNotWait), int(carry), done ? "true" : "false", w.log.c_str());
     g_fail++;
   }
 }
 
 int main() {
-  // Every script of 1 to 4 readings, profiled or not, with and without DONOTWAIT, with the
-  // resource in the open carried submission or not.
+  // Every script of 1 to 4 readings, profiled or not, with and without DONOTWAIT, and each carry
+  // state.
   for (size_t n = 1u; n <= 4u; n++)
     for (uint32_t bits = 0u; bits < (1u << n); bits++) {
       std::vector<bool> script;
@@ -184,8 +189,8 @@ int main() {
         script.push_back((bits >> i) & 1u);
       for (bool profiled : { false, true })
         for (bool doNotWait : { false, true })
-          for (bool carried : { false, true })
-            check(script, profiled, doNotWait, carried);
+          for (World::Carry carry : { World::Carry::None, World::Carry::Holds, World::Carry::Older })
+            check(script, profiled, doNotWait, carry);
     }
   hitch::g_enabled = false;
 
