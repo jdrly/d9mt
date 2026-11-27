@@ -15,17 +15,18 @@
 // the sampler only
 //   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs: Wine's
 //     GetThreadContext waits without a limit until the thread has stopped, and a thread that never
-//     stops must not stay suspended. Past the limit the sampler resumes the thread, stops for
-//     good and leaves the capture thread and its own state behind (never freed: the capture
-//     thread may still write into them), and no sampler starts again in the process. A capture
+//     stops must not stay suspended. Past the limit the sampler resumes the thread and stops for
+//     good, and no sampler starts again in the process; the capture thread frees the state when
+//     its call comes back (never, if it never does: one state and one thread). A capture
 //     thread that was delayed past the limit skips the request; one that had already checked
 //     makes it on the running thread, which Wine stops once more for it: one suspend outside the
 //     sampler's rhythm, after a 250 ms stall;
 //   - reads the thread's TEB and copies stack slots with plain loads, only between the stack
 //     pointer and the base of the stack the thread had when the sampler started, and only when
-//     the stack pointer is inside that stack and at or above its committed limit: memory the
-//     thread has used, which can't fault. A thread on another stack (a fiber) isn't read. No
-//     fault may happen there: Wine's fault handler takes its virtual-memory lock.
+//     the TEB still names that base and the stack pointer is inside that stack and at or above
+//     its committed limit: the live frames of the thread's own calls, which it reads itself when
+//     it returns. A thread on another stack (a fiber) isn't read. No fault may happen there:
+//     Wine's fault handler takes its virtual-memory lock.
 // Every path after a successful SuspendThread resumes. The module lookups (GetModuleHandleEx and
 // K32EnumProcessModules take the loader lock), the caller search, the clock and the lines all come
 // after the resume.
@@ -37,7 +38,7 @@ namespace dxvk::rtsample {
     constexpr uint32_t MaxSamplers = 8u;
     constexpr DWORD    kCaptureMs  = 250u;   // a GetThreadContext normally takes well under 2 ms
 
-    /** Set once a capture got stuck: its thread and state stay behind, so no sampler starts again. */
+    /** Set once a capture got stuck: no sampler starts again in the process. */
     std::atomic<bool> s_captureStuck = { false };
 
     /**
@@ -161,8 +162,10 @@ namespace dxvk::rtsample {
       uintptr_t   stackLow  = 0u;
       uintptr_t   stackHigh = 0u;
 
+      // the sampler thread and the capture thread hold it; the last one to let go frees it
+      std::atomic<int> refs = { 2 };
+
       // the capture thread: `go` asks it for one GetThreadContext into `ctx`, `done` answers
-      HANDLE      captureThread = nullptr;
       HANDLE      go      = nullptr;
       HANDLE      done    = nullptr;
       std::atomic<bool> quit = { false };    // the capture thread ends, or skips a late request
@@ -180,6 +183,18 @@ namespace dxvk::rtsample {
     };
 
 
+    /** Lets go of the state: the last of its two threads closes its handles and frees it. */
+    void release(State& s) {
+      if (s.refs.fetch_sub(1, std::memory_order_acq_rel) != 1)
+        return;
+      for (HANDLE h : { s.go, s.done, s.stop, s.target }) {
+        if (h != nullptr)
+          CloseHandle(h);
+      }
+      delete &s;
+    }
+
+
     DWORD WINAPI captureMain(void* arg) {
       State& s = *static_cast<State*>(arg);
       while (WaitForSingleObject(s.go, INFINITE) == WAIT_OBJECT_0) {
@@ -190,8 +205,12 @@ namespace dxvk::rtsample {
         if (s.quit.load(std::memory_order_acquire))
           break;
         s.got = GetThreadContext(s.target, &s.ctx);
+        // a capture that came back after the sampler gave up on it: nothing waits for it
+        if (s.quit.load(std::memory_order_acquire))
+          break;
         SetEvent(s.done);
       }
+      release(s);
       return 0u;
     }
 
@@ -309,8 +328,12 @@ namespace dxvk::rtsample {
 #else
         const uintptr_t sp = uintptr_t(s.ctx.Esp);
 #endif
+        // the TEB must still name the stack of the start: a fiber made later at the same address
+        // with a smaller stack has another base
+        const uintptr_t base  = uintptr_t(s.tib->StackBase);
         const uintptr_t limit = uintptr_t(s.tib->StackLimit);
-        if (sp >= s.stackLow && sp < s.stackHigh && sp >= limit && sp % sizeof(uintptr_t) == 0u) {
+        if (base == s.stackHigh && sp >= s.stackLow && sp < s.stackHigh && sp >= limit
+         && sp % sizeof(uintptr_t) == 0u) {
           nSlots = uint32_t(std::min<uintptr_t>(kStackSlots, (s.stackHigh - sp) / sizeof(uintptr_t)));
           const auto* src = reinterpret_cast<const volatile uintptr_t*>(sp);
           for (uint32_t i = 0u; i < nSlots; i++)
@@ -446,32 +469,12 @@ namespace dxvk::rtsample {
 
       s.slot->store(0u, std::memory_order_release);
 
-      // The capture thread: idle unless a capture got stuck. Then it may still write into the
-      // state, so the state, its handles and the thread are left as they are
-      if (!stuck) {
-        s.quit.store(true, std::memory_order_release);
-        SetEvent(s.go);
-        if (WaitForSingleObject(s.captureThread, 1000u) != WAIT_OBJECT_0)
-          stuck = true;
-      }
-      if (stuck)
-        return 0u;
-
-      CloseHandle(s.captureThread);
-      CloseHandle(s.go);
-      CloseHandle(s.done);
-      CloseHandle(s.target);
-      CloseHandle(s.stop);
-      delete &s;
+      // The capture thread ends when it sees quit: at once if idle, after its call if a capture
+      // got stuck (never, if the call never returns: then the state is never freed)
+      s.quit.store(true, std::memory_order_release);
+      SetEvent(s.go);
+      release(s);
       return 0u;
-    }
-
-
-    void closeAll(State* s) {
-      for (HANDLE h : { s->go, s->done, s->stop, s->target }) {
-        if (h != nullptr)
-          CloseHandle(h);
-      }
     }
 
 
@@ -526,36 +529,36 @@ namespace dxvk::rtsample {
         && (s->done = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr
         && DuplicateHandle(self, s->stop, self, &h.stop, 0u, FALSE, DUPLICATE_SAME_ACCESS);
       DWORD error = ok ? 0u : GetLastError();
-      if (ok && (s->captureThread = CreateThread(nullptr, 0u, captureMain, s, 0u, nullptr)) == nullptr) {
+      HANDLE capture = nullptr;
+      if (ok && (capture = CreateThread(nullptr, 0u, captureMain, s, 0u, nullptr)) == nullptr) {
         error = GetLastError();
         ok = false;
       }
       if (ok && (h.thread = CreateThread(nullptr, 0u, samplerMain, s, 0u, nullptr)) == nullptr) {
+        // the capture thread holds the state: it ends at quit and lets go; this lets go for the
+        // sampler thread that never ran
         error = GetLastError();
-        // the capture thread waits on `go`: end it before the state goes, or leave the state
         s->quit.store(true, std::memory_order_release);
         SetEvent(s->go);
-        if (WaitForSingleObject(s->captureThread, 1000u) != WAIT_OBJECT_0) {
-          if (h.stop != nullptr)
-            CloseHandle(h.stop);
-          slot->store(0u, std::memory_order_release);
-          emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: no sampler thread (error %u)", tid, error);
-          return Handle();
-        }
-        ok = false;
+        CloseHandle(capture);
+        if (h.stop != nullptr)
+          CloseHandle(h.stop);
+        slot->store(0u, std::memory_order_release);
+        release(*s);
+        emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: no sampler thread (error %u)", tid, error);
+        return Handle();
       }
 
       if (!ok) {
-        if (s->captureThread != nullptr)
-          CloseHandle(s->captureThread);
         if (h.stop != nullptr)
           CloseHandle(h.stop);
-        closeAll(s);
-        delete s;
+        s->refs.store(1, std::memory_order_relaxed);   // no thread holds it
+        release(*s);
         slot->store(0u, std::memory_order_release);
         emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: no sampler thread (error %u)", tid, error);
         return Handle();
       }
+      CloseHandle(capture);
 
       // s belongs to the sampler thread from here on
       emitLine(sink, guard
