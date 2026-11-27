@@ -4903,10 +4903,16 @@ namespace dxvk {
     const auto t0 = counted ? high_resolution_clock::now() : high_resolution_clock::time_point();
     bool csWaited = false, gpuBlocked = false, done = true;
 
-    if (!m_dxvkDevice->isResourceInUse(Resource))
+    // One reading decides. Idle: sync the CS thread (a draw still queued there hasn't marked the
+    // resource), then read again. Busy: the branch below flushes and syncs. Two independent
+    // readings could see busy, then idle once the GPU retired an older use, and skip the sync.
+    bool inUse = m_dxvkDevice->isResourceInUse(Resource);
+    if (!inUse) {
       csWaited = SynchronizeCsThread(SequenceNumber);
+      inUse = m_dxvkDevice->isResourceInUse(Resource);
+    }
 
-    if (m_dxvkDevice->isResourceInUse(Resource)) {
+    if (inUse) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
         // A poll on a resource the open, carried submission uses: complete the carry, or the
         // poll could wait for a submit that only the end of the pass brings. Otherwise a hint,
