@@ -124,8 +124,9 @@ A submit in the middle of a render pass: the pass ends, so its attachments are s
 again (`docs/gpu-4k.md`, `docs/g1-early-commit.md`).
 
 **Visit**
-The targets an open render pass is switched away from and back to, when only clears and no draw
-happen on them in between (a shadow map cleared for a light that casts nothing, say). With the
+A temporary switch from an open render pass's targets to other targets, then back to the pass's
+own, with only clears and no draw on the other targets in between (a shadow map cleared for a
+light that casts nothing, say). With the
 app profile's `keepPassOverClearVisit` the open pass stays open across a visit; anything else on
 the visit's targets ends it first, as any target change did (`D9MT_KEEP_PASS_OVER_CLEAR_VISIT`).
 
