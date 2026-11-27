@@ -14,14 +14,15 @@
 // loader lock, Wine's virtual-memory lock, the Logger's. So between SuspendThread and ResumeThread
 // the sampler only
 //   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs: Wine's
-//     GetThreadContext waits without a limit until the thread has stopped, and a thread that never
-//     stops must not stay suspended. Past the limit the sampler resumes the thread and stops for
-//     good, and no sampler starts again in the process; the capture thread frees the state when
-//     its call comes back (never, if it never does: a state and a thread for each sampler that was
-//     running then). A capture
-//     thread that was delayed past the limit skips the request; one that had already checked
-//     makes it on the running thread, which Wine stops once more for it: one suspend outside the
-//     sampler's rhythm, after a 250 ms stall;
+//     GetThreadContext waits without a limit until the thread has stopped. A thread inside a Unix
+//     call (a Metal wait) stops only when the call returns, and runs on until then: on the rented
+//     M1 a test program's captures took up to 250 ms that way. A thread that never stops must not
+//     stay suspended, so past the limit the sampler resumes the thread and stops for good, and no
+//     sampler starts again in the process; the capture thread frees the state when its call comes
+//     back (never, if it never does: a state and a thread for each sampler that was running then).
+//     A capture thread that was delayed past the limit skips the request; one that had already
+//     checked makes it on the running thread, which Wine stops once more for it: one suspend
+//     outside the sampler's rhythm, after a stall of the whole limit;
 //   - reads the thread's TEB and copies stack slots with plain loads, only between the stack
 //     pointer and the base of the stack the thread had when the sampler started, and only when
 //     the TEB still names that base and the stack pointer is inside that stack and at or above
@@ -37,7 +38,8 @@ namespace dxvk::rtsample {
   namespace {
 
     constexpr uint32_t MaxSamplers = 8u;
-    constexpr DWORD    kCaptureMs  = 250u;   // a GetThreadContext normally takes well under 2 ms
+    // A capture of a thread outside a Unix call takes well under 2 ms; one inside waits for the call
+    constexpr DWORD    kCaptureMs  = 2000u;
 
     /** Set once a capture got stuck: no sampler starts again in the process. */
     std::atomic<bool> s_captureStuck = { false };
@@ -361,20 +363,21 @@ namespace dxvk::rtsample {
       const uintptr_t ip = uintptr_t(s.ctx.Eip);
 #endif
       const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
+      const uint32_t weight = weightOf(heldNs, 1000000000ull / s.hz);
       const int index = moduleOf(s, ip);
-      s.window.add(index, heldNs);
+      s.window.add(index, heldNs, weight);
       if (index < 0)
         return Sampled::Ok;
 
       const Module& m = s.table.at(uint32_t(index));
       if (index == s.rvaIndex)
-        s.rvaSamples.add(ip - m.base);
+        s.rvaSamples.add(ip - m.base, weight);
       if (m.leaf >= 0) {
         uint32_t slot = 0u;
         const int caller = stackRead ? s.table.findCaller(slots, nSlots, &slot) : -2;
-        s.window.addCaller(m.leaf, caller);
+        s.window.addCaller(m.leaf, caller, weight);
         if (caller >= 0 && caller == s.rvaIndex)
-          s.rvaCallers.add(slots[slot] - s.table.at(uint32_t(caller)).base);
+          s.rvaCallers.add(slots[slot] - s.table.at(uint32_t(caller)).base, weight);
       }
       return Sampled::Ok;
     }
