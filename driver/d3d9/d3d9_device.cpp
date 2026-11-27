@@ -4903,10 +4903,8 @@ namespace dxvk {
     const auto t0 = counted ? high_resolution_clock::now() : high_resolution_clock::time_point();
     bool csWaited = false, gpuBlocked = false, done = true;
 
-    if (!m_dxvkDevice->isResourceInUse(Resource)) {
-      csWaited = counted && D3D9DirectBufferTracker::needsCsSync(SequenceNumber, m_csThread.lastSequenceNumber());
-      SynchronizeCsThread(SequenceNumber);
-    }
+    if (!m_dxvkDevice->isResourceInUse(Resource))
+      csWaited = SynchronizeCsThread(SequenceNumber);
 
     if (m_dxvkDevice->isResourceInUse(Resource)) {
       if (MapFlags & D3DLOCK_DONOTWAIT) {
@@ -4920,12 +4918,13 @@ namespace dxvk {
         done = false;
       } else {
         ExecuteFlush(stats::FlushOrigin::Wait, false);
-        SynchronizeCsThread(SequenceNumber);
+        csWaited |= SynchronizeCsThread(SequenceNumber);
+        // the GPU may have retired it during the flush and the sync: then the wait returns at once
+        gpuBlocked = counted && m_dxvkDevice->isResourceInUse(Resource);
 
         { hitch::Scope hs(m_hitch, hitch::GpuWait);
           m_dxvkDevice->waitForResource(Resource);
         }
-        gpuBlocked = true;
 
         if (unlikely(m_memStats))
           m_dxvkDevice->frontendStats().resourceGpuWaits.fetch_add(1u, std::memory_order_relaxed);
@@ -5917,20 +5916,23 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::SynchronizeCsThread(uint64_t SequenceNumber) {
+  bool D3D9DeviceEx::SynchronizeCsThread(uint64_t SequenceNumber) {
     D3D9DeviceLock lock = LockDevice();
 
     if (SequenceNumber > m_csSeqNum)
       FlushCsChunk();
 
-    // D9MT_PROFILE: only syncs that wait count.
+    // D9MT_PROFILE: only syncs that wait count. The CS thread waits for SequenceNumber or, for
+    // SynchronizeAll, for everything dispatched (m_csSeqNum, after the flush above).
     if (unlikely(hitch::g_enabled) && SequenceNumber > m_csThread.lastSequenceNumber()) {
+      const bool behind = std::min(SequenceNumber, m_csSeqNum) > m_csThread.lastSequenceNumber();
       hitch::Scope hs(m_hitch, hitch::CsSync);
       m_csThread.synchronize(SequenceNumber);
-      return;
+      return behind;
     }
 
     m_csThread.synchronize(SequenceNumber);
+    return false;
   }
 
 

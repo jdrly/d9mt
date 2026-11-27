@@ -89,13 +89,14 @@
 //               thread to run the buffer's last use (the GPU no longer had it), and the time
 //   lockGpu     ... buffer Locks the GPU still had: flush, CS sync and a block on the GPU
 //   lockStatic  of lockCs and lockGpu, the Locks of static buffers (DEFAULT pool, WRITEONLY
-//               without DYNAMIC). A Lock that needs no wait doesn't count, nor does any Lock
-//               of a buffer on the staging path (BUFFER mode: writes go to a CPU copy that
-//               Unlock uploads, flushBuf=)
+//               without DYNAMIC). A Lock that needs no wait doesn't count. A buffer on the
+//               staging path (BUFFER mode: writes go to a CPU copy that Unlock uploads,
+//               flushBuf=) waits at Lock only for a pending readback (ProcessVertices)
 //   demoted     static buffers that went from direct mapping to the staging path
 //               (d9mt.writeOnlyDemoteLocks)
 //   readWait    readbacks that waited (texture locks, UpdateTexture sources, a buffer copied
 //               at draw), and the time
+//               The first line's lock fields also hold what came before the first Present.
 //
 // When the second had restores, a RESTORE line follows with what they were
 // for (mtl/mtl_restore_stats.h); RESTORE-SUMMARY when the device is destroyed.

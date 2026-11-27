@@ -824,7 +824,9 @@ namespace dxvk {
 
     void CreateConstantBuffers();
 
-    void SynchronizeCsThread(uint64_t SequenceNumber);
+    // Returns whether the CS thread was behind, so the call waited: with D9MT_PROFILE only
+    // (STATS lockCs=), false without.
+    bool SynchronizeCsThread(uint64_t SequenceNumber);
 
     void Flush(stats::FlushOrigin Origin);
     void FlushAndSync9On12();

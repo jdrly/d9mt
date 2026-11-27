@@ -45,9 +45,10 @@ builds are tested, so a base from before the runner existed works too.
   ([ADR-0008](adr/0008-tuned-for-swtor-behind-an-app-profile.md)), and is invalid unless every
   program of a tree that has the app profile logs `d9mt: app profile swtor (D9MT_APP_PROFILE`; a
   base from before it runs generic. `ci/gpu/run.sh` keeps its logs too;
-  `unlimited` runs with `D9MT_MEMORY_PROFILE=unlimited`, the memory profile `auto` picks on a Mac
-  with 64 GB or more, so a smaller Mac runs its paths (static buffers on the staging path, not
-  mapped directly), and is invalid unless every program logs `D9MT: memory profile unlimited:`;
+  `unlimited` runs with `D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0`, the memory
+  profile `auto` picks on a Mac with 64 GB or more, so a smaller Mac runs its paths (static buffers
+  on the staging path, not mapped directly, whatever `D9MT_WRITEONLY_DIRECT` the caller has), and is
+  invalid unless every program logs `D9MT: memory profile unlimited:` with `writeOnlyDirect off`;
   `D9MT_AIR_MACOS=26` or `27` reaches the programs for the AIR target.
 - `CACHE=<dir>` puts d9mt's three caches (AIR cache, PSO archives, state cache) into a folder
   of the caller's, used as found and left behind (neither it nor `WORK` may lie inside the other). Without it every run starts
