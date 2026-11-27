@@ -166,6 +166,9 @@ namespace dxvk {
 
     const MtlMemoryProfile& memoryProfile() const { return m_memProfile; }
 
+    // The game's app profile (mtl_app_profile.h), with its fields' overrides applied.
+    const AppProfile& appProfile() const { return m_appProfile; }
+
     // Frontend counters for the DIAG MEM line. Lock counters are only
     // touched when memoryProfile().statsInterval != 0.
     struct FrontendStats {
@@ -211,6 +214,7 @@ namespace dxvk {
 
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };
+    AppProfile       m_appProfile = { };
     std::atomic<bool> m_carryOpen = { false };
 
   };
@@ -241,7 +245,8 @@ namespace dxvk {
 
   class MtlAdapter : public RcObject {
   public:
-    explicit MtlAdapter(const MtlMemoryProfile& profile = { }) : m_memProfile(profile) { }
+    explicit MtlAdapter(const MtlMemoryProfile& profile = { }, const AppProfile& app = { })
+    : m_memProfile(profile), m_appProfile(app) { }
     virtual ~MtlAdapter() { }
 
     virtual const MtlDeviceInfo& deviceInfo() const;
@@ -253,6 +258,7 @@ namespace dxvk {
   protected:
     MtlDeviceInfo    m_info = { };
     MtlMemoryProfile m_memProfile = { };
+    AppProfile       m_appProfile = { };
   };
 
   class MtlInstance : public RcObject {

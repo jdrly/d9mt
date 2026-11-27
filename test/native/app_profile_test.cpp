@@ -145,10 +145,12 @@ int main() {
   // Fields: swtor's values, generic's defaults, and the resolved app profile carries them.
   CHECK(appProfileFor(S).staticBuffersDirect && !appProfileFor(G).staticBuffersDirect);
   CHECK(!AppProfile().staticBuffersDirect);
+  CHECK(appProfileFor(S).inpassClear && !appProfileFor(G).inpassClear && !AppProfile().inpassClear);
   for (const Case& c : kCases) {
     AppProfileOverride h = Unset;
     const AppProfile r = resolveAppProfile(c.exePath, c.value, h);
     CHECK(r.staticBuffersDirect == (r.id == S));
+    CHECK(r.inpassClear == (r.id == S));
   }
 
   // A field's override: 1 and 0 set it either way on either app profile; empty and anything
@@ -163,16 +165,29 @@ int main() {
       AppProfile f = appProfileFor(id);
       CHECK(applyAppProfileSwitch(s.v, f.staticBuffersDirect) == s.how);
       CHECK(f.staticBuffersDirect == s.want);
+      CHECK(f.inpassClear == appProfileFor(id).inpassClear);   // one field's override leaves the others
+    }
+    const bool defIn = appProfileFor(id).inpassClear;
+    for (const auto& s : sw) {
+      AppProfile f = appProfileFor(id);
+      CHECK(applyAppProfileSwitch(s.v, f.inpassClear) == s.how);
+      CHECK(f.inpassClear == (s.how == Used ? s.want : defIn));
+      CHECK(f.staticBuffersDirect == appProfileFor(id).staticBuffersDirect);
     }
   }
 
   // The fields' log line.
   AppProfile f = appProfileFor(S);
-  CHECK(appProfileFieldsLine(f, Unset) == "d9mt: app profile fields: staticBuffersDirect on");
+  CHECK(appProfileFieldsLine(f, Unset)
+        == "d9mt: app profile fields: staticBuffersDirect on, inpassClear on");
   applyAppProfileSwitch("0", f.staticBuffersDirect);
   CHECK(appProfileFieldsLine(f, Used)
-        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT)");
-  CHECK(appProfileFieldsLine(appProfileFor(G), Unknown) == "d9mt: app profile fields: staticBuffersDirect off");
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear on");
+  applyAppProfileSwitch("0", f.inpassClear);
+  CHECK(appProfileFieldsLine(f, Used, Used)
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off (D9MT_INPASS_CLEAR)");
+  CHECK(appProfileFieldsLine(appProfileFor(G), Unknown)
+        == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off");
 
   if (g_fail)
     return 1;

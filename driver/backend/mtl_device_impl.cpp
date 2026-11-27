@@ -154,9 +154,10 @@ namespace dxvk::backend {
     return n;
   }
 
-  MtlDeviceImpl::MtlDeviceImpl(const MtlMemoryProfile& profile)
+  MtlDeviceImpl::MtlDeviceImpl(const MtlMemoryProfile& profile, const AppProfile& app)
   : m_compileWorkers(std::make_unique<MtlCompileWorkers>(compileThreadCount())) {
     m_memProfile = profile;
+    m_appProfile = app;
     if (std::getenv("D9MT_PROFILE") != nullptr) {
       static const bool logged = [] {
         const auto& cal = cheap_clock::process();
@@ -811,8 +812,8 @@ namespace dxvk::backend {
 
 namespace dxvk {
 
-  Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile) {
-    Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl(profile);
+  Rc<MtlDevice> backendCreateDevice(const MtlMemoryProfile& profile, const AppProfile& app) {
+    Rc<backend::MtlDeviceImpl> device = new backend::MtlDeviceImpl(profile, app);
     return device->valid() ? Rc<MtlDevice>(device) : nullptr;
   }
 
