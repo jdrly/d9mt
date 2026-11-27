@@ -106,10 +106,16 @@ int main() {
     CHECK(!rtsample::isLeafName("d3d9.dll") && !rtsample::isLeafName("d3dx9_43.dll"));
 
     rtsample::ModuleTable t;
-    CHECK(t.add(0x1000u, 0x100u, "game.exe", 0x1010u, 0x1080u) == 0);
-    CHECK(t.at(0).leaf == -1 && t.at(0).codeBegin == 0x1010u && t.at(0).codeEnd == 0x1080u);
-    CHECK(t.add(0x2000u, 0x100u, "ntdll.dll", 0x2010u, 0x2200u) == 1);   // code past the image
-    CHECK(t.at(1).leaf == 0 && t.at(1).codeBegin == 0u && t.at(1).codeEnd == 0u);
+    const rtsample::Range exeCode[] = { { 0x1010u, 0x1080u } };
+    CHECK(t.add(0x1000u, 0x100u, "game.exe", exeCode, 1u) == 0);
+    CHECK(t.at(0).leaf == -1 && t.at(0).codeRanges == 1u && t.at(0).inCode(0x1010u) && !t.at(0).inCode(0x1080u));
+    const rtsample::Range past[] = { { 0x2010u, 0x2200u } };   // code past the image
+    CHECK(t.add(0x2000u, 0x100u, "ntdll.dll", past, 1u) == 1);
+    CHECK(t.at(1).leaf == 0 && t.at(1).codeRanges == 0u && !t.at(1).inCode(0x2010u));
+    const rtsample::Range five[] = { { 0x3000u, 0x3010u }, { 0x3020u, 0x3030u }, { 0x3040u, 0x3050u },
+                                     { 0x3060u, 0x3070u }, { 0x3080u, 0x3090u } };
+    CHECK(t.add(0x3000u, 0x100u, "five.dll", five, 5u) == 2);   // the first four are kept
+    CHECK(t.at(2).codeRanges == rtsample::kMaxCodeRanges && t.at(2).inCode(0x3065u) && !t.at(2).inCode(0x3085u));
     for (uint32_t i = 1u; i < rtsample::kMaxLeaves; i++)
       CHECK(t.at(uint32_t(t.add(0x10000u * uintptr_t(i + 1u), 0x100u, "msvcrt.dll"))).leaf == int(i));
     CHECK(t.at(uint32_t(t.add(0x900000u, 0x100u, "msvcrt.dll"))).leaf == -1);
@@ -119,15 +125,18 @@ int main() {
   //     (its data too) or in a system DLL fails the same check
   {
     rtsample::ModuleTable t;
-    t.add(0x10000u, 0x4000u, "ucrtbase.dll", 0x11000u, 0x12000u);   // 0: system DLL
-    t.add(0x20000u, 0x4000u, "d3dx9_43.dll", 0x21000u, 0x22000u);   // 1: code 0x21000-0x21fff
-    t.add(0x30000u, 0x4000u, "game.exe", 0x31000u, 0x33000u);       // 2
+    const rtsample::Range crtCode[] = { { 0x11000u, 0x12000u } };
+    const rtsample::Range fxCode[]  = { { 0x21000u, 0x21800u }, { 0x22000u, 0x22800u } };   // a data gap between
+    const rtsample::Range exeCode[] = { { 0x31000u, 0x33000u } };
+    t.add(0x10000u, 0x4000u, "ucrtbase.dll", crtCode, 1u);   // 0: system DLL
+    t.add(0x20000u, 0x4000u, "d3dx9_43.dll", fxCode, 2u);    // 1
+    t.add(0x30000u, 0x4000u, "game.exe", exeCode, 1u);       // 2
     const uintptr_t slots[] = {
       0x7fff1234u,   // a stack value in no module
       0x11800u,      // a return address inside ucrtbase itself (system DLL): skipped
       0x20100u,      // a pointer to d3dx9's headers/data, not its code: skipped
-      0x22000u,      // d3dx9's code end: not its code
-      0x21234u,      // d3dx9 code: the caller
+      0x21900u,      // between d3dx9's two executable sections (data): skipped
+      0x22234u,      // d3dx9's second executable section: the caller
       0x31000u,      // game.exe code, further up: not reached
     };
     uint32_t slot = 99u;
@@ -146,6 +155,19 @@ int main() {
     const int control = anyAddress(t, slots, 6u);
     std::printf("caller: real search finds module 1 (d3dx9_43.dll), the control finds %d\n", control);
     CHECK(control != 1);
+
+    // the second control: a search over the span from the first executable section to the last
+    // takes the data between them, slot 3, not the return address in slot 4
+    uint32_t spanSlot = 99u;
+    for (uint32_t i = 0u; i < 6u && spanSlot == 99u; i++) {
+      const int m = t.find(slots[i]);
+      if (m >= 0 && t.at(uint32_t(m)).leaf < 0 && t.at(uint32_t(m)).codeRanges != 0u
+       && slots[i] >= t.at(uint32_t(m)).code[0].begin
+       && slots[i] < t.at(uint32_t(m)).code[t.at(uint32_t(m)).codeRanges - 1u].end)
+        spanSlot = i;
+    }
+    std::printf("caller: real search takes slot %u, the span control slot %u\n", slot, spanSlot);
+    CHECK(spanSlot != slot);
   }
 
   // 4. the leaf of a path

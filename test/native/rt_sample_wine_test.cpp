@@ -12,10 +12,11 @@
 //              in ntdll.dll, and at least 80 % of those name rt_sample_dll.dll as the caller, with
 //              its caller RVAs inside rt_dll_memmove's first 512 bytes
 //   caller-exe the control: the same memmove called from this exe; the callers are the exe
-//   wait       the thread waits on an event for 4 s (3 s sampled): samples come, the exe has under 5 % of them,
-//              and the thread wakes and ends normally
+//   wait       the thread waits on an event for 4 s (3 s sampled): at least 90 % of the samples
+//              are in ntdll.dll, at least 80 % of those name this exe as the caller (the wait goes
+//              through kernelbase.dll, a system DLL too), and the thread wakes and ends normally
 //   syscall    the thread calls SwitchToThread and GetFileAttributes for 4 s: it survives, and
-//              its samples come
+//              at least 80 % of its samples are in ntdll.dll
 //   fault      2 s of spinning, then an access violation every ms for 2 s, which the program's own
 //              handler steps over: the sampler stops at the first one, with its line, and the
 //              thread handles every fault and ends normally
@@ -353,6 +354,8 @@ int main(int argc, char** argv) {
     std::printf("rt_sample_wine_test %s: ntdll.dll %llu samples, called from %s %llu, from %s %llu\n",
       job.mode.c_str(), (unsigned long long)mine.second, want, (unsigned long long)mine.first, other,
       (unsigned long long)theirs.first);
+    if (s.total < 400u)
+      return fail(job.mode, "under 400 samples in 4 s at 200 Hz");
     if (mine.second < 0.5 * double(s.total))
       return fail(job.mode, "under half of the samples in ntdll.dll");
     if (double(mine.first) < 0.8 * double(mine.second))
@@ -369,8 +372,13 @@ int main(int argc, char** argv) {
   } else if (job.mode == "wait" || job.mode == "syscall") {
     if (s.total < 200u)
       return fail(job.mode, "under 200 samples in 3 s at 200 Hz");
-    if (job.mode == "wait" && double(s.exe) >= 0.05 * double(s.total))
-      return fail(job.mode, "the exe has 5 % or more of a waiting thread's samples");
+    const auto nt = calledFrom("ntdll.dll", "rt_sample_wine_test.exe");
+    std::printf("rt_sample_wine_test %s: ntdll.dll %llu of %llu samples, %llu of them called from the exe\n",
+      job.mode.c_str(), (unsigned long long)nt.second, (unsigned long long)s.total, (unsigned long long)nt.first);
+    if (double(nt.second) < (job.mode == "wait" ? 0.9 : 0.8) * double(s.total))
+      return fail(job.mode, "too few of the samples in ntdll.dll");
+    if (job.mode == "wait" && double(nt.first) < 0.8 * double(nt.second))
+      return fail(job.mode, "under 80 % of a waiting thread's ntdll.dll samples name the exe as the caller");
   } else if (job.mode == "fault") {
     if (!hasLine("sampling stopped for good") || !hasLine("(c0000005)"))
       return fail(job.mode, "no stop line naming c0000005");

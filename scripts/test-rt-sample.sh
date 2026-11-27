@@ -65,16 +65,21 @@ one() {
 if [ "${1:-}" = storm ]; then
   [ $# = 6 ] || { sed -n '8,11p' "$0" >&2; exit 64; }
   runs=$2; shift 2
-  died=0 nested=0
+  died=0 hung=0 other=0 nested=0
   for i in $(seq 1 "$runs"); do
     log="$WORK/storm-$i.log"
     one "$log" storm "$@"
     n=$(grep -c 'nested exception on signal stack' "$log")
     nested=$((nested + n))
-    [ "$rc" = 0 ] || died=$((died + 1))
+    # the program's own verdict: a thread that ended without finishing died; one still running
+    # at the limit hung; any other non-zero exit (a crash, a launch failure) is neither
+    if grep -q '^rt_sample_wine_test storm: .*thread DIED' "$log"; then died=$((died + 1))
+    elif grep -q '^rt_sample_wine_test storm: .*thread still running' "$log"; then hung=$((hung + 1))
+    elif [ "$rc" != 0 ]; then other=$((other + 1))
+    fi
     echo "storm $i/$runs: exit $rc, nested-exception lines $n: $(grep '^rt_sample_wine_test storm:' "$log" | head -1)"
   done
-  echo "[rt-sample] storm $* : $died of $runs runs lost the thread ($nested nested-exception lines)"
+  echo "[rt-sample] storm $* : $died of $runs runs lost the thread, $hung hung, $other ended otherwise ($nested nested-exception lines)"
   exit 0
 fi
 

@@ -151,17 +151,14 @@ namespace dxvk {
     BindFFUbershader<D3D9ShaderType::PixelShader>();
 
     m_unlockAdditionalFormats = m_parent->HasFormatsUnlocked();
-
-    // D9MT_RT_SAMPLE (util_rt_sample.h): a sampler of this thread, the render thread. Last, so a
-    // constructor that throws never leaves one running. Unset: one environment read, nothing else
-    m_rtSample = rtsample::startFromEnv([] (const char* line) { Logger::warn(line); });
   }
 
 
   D3D9DeviceEx::~D3D9DeviceEx() {
     // D9MT_RT_SAMPLE: the sampler's last window, first, so it holds none of the teardown. At
     // process exit it isn't waited for (its thread has been ended already)
-    rtsample::stop(m_rtSample, !this_thread::isInModuleDetachment());
+    if (unlikely(m_rtSample.stop != nullptr))
+      rtsample::stop(m_rtSample, !this_thread::isInModuleDetachment());
 
     if (m_dbg.dumpFile)
       std::fclose(m_dbg.dumpFile);
@@ -9164,6 +9161,10 @@ namespace dxvk {
     ExecuteFlush(stats::FlushOrigin::Other, false);
     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
 
+    // D9MT_RT_SAMPLE (util_rt_sample.h): a sampler of this thread, the render thread. Here, the
+    // last step of a creation that succeeds: a device whose creation fails is never released, so
+    // it must not leave one running. Unset: one environment read, nothing else
+    m_rtSample = rtsample::startFromEnv([] (const char* line) { Logger::warn(line); });
     return D3D_OK;
   }
 

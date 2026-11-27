@@ -9,14 +9,15 @@
 //
 // What it does: a thread of its own suspends the render thread at the rate asked, reads its
 // instruction pointer and the top of its stack (SuspendThread, GetThreadContext, a copy of at most
-// kStackSlots stack slots, ResumeThread), and maps the address to the module that holds it. Every
-// 10 s, and when the device is released, it writes:
+// kStackSlots stack slots, ResumeThread), and maps the address to the module that holds it, from a
+// table of the loaded modules it makes again at each window's start. Every 10 s, and when the
+// device is released, it writes:
 //   - one line with the window's samples, misses and how long the thread was held suspended;
 //   - one line per module with its share of the samples, the most first. A sample in a system
 //     DLL (ntdll, kernelbase, the C runtimes, ...: isLeafName) also names its caller: the first
-//     stack slot that points into the code of a module that isn't one, so a d3dx9 call that spends
-//     its time in the C runtime's strcmp counts as "ucrtbase.dll, called from d3dx9_43.dll". A
-//     heuristic: a stale return address can stand in for the real caller;
+//     stack slot that points into an executable section of a module that isn't one, so a d3dx9
+//     call that spends its time in the C runtime's strcmp counts as "ucrtbase.dll, called from
+//     d3dx9_43.dll". A heuristic: a stale return address can stand in for the real caller;
 //   - the samples inside one module (kRvaModule, d3dx9_43.dll) by RVA, in 16-byte buckets, and
 //     the RVAs of that module's caller slots, so a function map of the DLL can sum them.
 // Shares are of wall time: a wait counts too, under the module the thread waits in (ntdll.dll for
@@ -32,11 +33,14 @@
 //     fault by then, it never samples;
 //   - afterwards the first CPU fault on the thread stops it for good, with a line that names the
 //     code;
-//   - between the suspend and the resume it reads the context into a buffer on its stack and
-//     copies stack slots that lie between the thread's stack pointer and its stack base (its TEB's
-//     range, committed memory), and calls nothing else: no heap, no lock, no module lookup, no log
-//     (a suspended thread may hold any of them).
-// The risk left is the first fault itself: a fault that comes while a suspend is in flight.
+//   - between the suspend and the resume it lets a capture thread of its own call
+//     GetThreadContext and waits for it at most 250 ms (Wine's call waits without a limit for the
+//     thread to stop; past the limit the sampler resumes the thread and stops for good), and
+//     copies stack slots only between the stack pointer and the base of the thread's own stack as
+//     it was at the start (memory the thread has used; a thread on a fiber's stack isn't read).
+//     No heap, no lock, no module lookup, no log: a suspended thread may hold any of them.
+// What is left: a first fault that comes while a suspend is in flight; a fault that a vectored
+// handler added later as first resolves, and one Wine resolves itself, are never seen.
 //
 // The pure part (the parse, the module table, the caller search, the lines) is in this header, so
 // it builds natively (test/native/rt_sample_test.cpp); the sampler itself is util_rt_sample.cpp
@@ -117,14 +121,30 @@ namespace dxvk::rtsample {
   }
 
 
-  /** A module named in the lines: its range, its code's range and file name. */
+  constexpr uint32_t kMaxCodeRanges = 4u;
+
+  /** An address range, absolute: [begin, end). */
+  struct Range {
+    uintptr_t begin;
+    uintptr_t end;
+  };
+
+  /** A module named in the lines: its range, its executable sections and its file name. */
   struct Module {
     uintptr_t base;
     uintptr_t size;
-    uintptr_t codeBegin;   // the executable sections' span, absolute; empty: none known
-    uintptr_t codeEnd;
-    int       leaf;        // its index among the system DLLs, -1 for any other module
+    Range     code[kMaxCodeRanges];   // the first kMaxCodeRanges executable sections
+    uint32_t  codeRanges;
+    int       leaf;                   // its index among the system DLLs, -1 for any other module
     char      name[40];
+
+    bool inCode(uintptr_t addr) const {
+      for (uint32_t i = 0u; i < codeRanges; i++) {
+        if (addr >= code[i].begin && addr < code[i].end)
+          return true;
+      }
+      return false;
+    }
   };
 
 
@@ -148,19 +168,22 @@ namespace dxvk::rtsample {
     }
 
     /**
-     * Adds a module: its index, or -1 if the table is full, the range empty or it wraps. A code
-     * range outside the image is dropped (no caller is then found in the module). The 17th system
-     * DLL and later are added as other modules.
+     * Adds a module: its index, or -1 if the table is full, the range empty or it wraps. Of its
+     * \p nCode executable ranges the first kMaxCodeRanges inside the image are kept (none: no
+     * caller is ever found in the module). The 17th system DLL and later are added as other
+     * modules.
      */
-    int add(uintptr_t base, uintptr_t size, const char* name, uintptr_t codeBegin = 0u, uintptr_t codeEnd = 0u) {
+    int add(uintptr_t base, uintptr_t size, const char* name, const Range* code = nullptr, uint32_t nCode = 0u) {
       if (m_count >= kMaxModules || size == 0u || base + size < base)
         return -1;
       Module& m = m_modules[m_count];
       m.base = base;
       m.size = size;
-      const bool codeInside = codeBegin >= base && codeBegin < codeEnd && codeEnd - base <= size;
-      m.codeBegin = codeInside ? codeBegin : 0u;
-      m.codeEnd   = codeInside ? codeEnd : 0u;
+      m.codeRanges = 0u;
+      for (uint32_t i = 0u; i < nCode && m.codeRanges < kMaxCodeRanges; i++) {
+        if (code[i].begin >= base && code[i].begin < code[i].end && code[i].end - base <= size)
+          m.code[m.codeRanges++] = code[i];
+      }
       std::strncpy(m.name, name != nullptr ? name : "?", sizeof(m.name) - 1u);
       m.name[sizeof(m.name) - 1u] = '\0';
       m.leaf = (isLeafName(m.name) && m_leaves < kMaxLeaves) ? int(m_leaves++) : -1;
@@ -169,13 +192,12 @@ namespace dxvk::rtsample {
 
     /**
      * The caller of a sample in a system DLL: the module of the first of \p n stack slots that
-     * points into the code of a module that isn't a system DLL, or -1.
+     * points into an executable section of a module that isn't a system DLL, or -1.
      */
     int findCaller(const uintptr_t* slots, uint32_t n, uint32_t* slot = nullptr) const {
       for (uint32_t s = 0u; s < n; s++) {
         const int i = find(slots[s]);
-        if (i >= 0 && m_modules[i].leaf < 0
-         && slots[s] >= m_modules[i].codeBegin && slots[s] < m_modules[i].codeEnd) {
+        if (i >= 0 && m_modules[i].leaf < 0 && m_modules[i].inCode(slots[s])) {
           if (slot != nullptr)
             *slot = s;
           return i;

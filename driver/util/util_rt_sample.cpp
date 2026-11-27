@@ -12,24 +12,36 @@
 //
 // While the render thread is suspended it may hold any lock of the process: the heap's, the
 // loader lock, Wine's virtual-memory lock, the Logger's. So between SuspendThread and ResumeThread
-// the sampler calls GetThreadContext into a CONTEXT on its own stack, reads the thread's TEB and
-// copies stack slots with plain loads, and calls nothing else; every path after a successful
-// SuspendThread resumes. The module lookups (GetModuleHandleEx and K32EnumProcessModules take the
-// loader lock), the caller search, the clock and the lines all come after the resume.
+// the sampler only
+//   - lets its capture thread call GetThreadContext, and waits for it at most kCaptureMs: Wine's
+//     GetThreadContext waits without a limit until the thread has stopped, and a thread that never
+//     stops must not stay suspended. Past the limit the sampler resumes the thread, stops for
+//     good and leaves the capture thread and its own state behind (never freed: the capture
+//     thread may still write into them);
+//   - reads the thread's TEB and copies stack slots with plain loads, only between the stack
+//     pointer and the base of the stack the thread had when the sampler started, and only when
+//     the stack pointer is inside that stack and at or above its committed limit: memory the
+//     thread has used, which can't fault. A thread on another stack (a fiber) isn't read. No
+//     fault may happen there: Wine's fault handler takes its virtual-memory lock.
+// Every path after a successful SuspendThread resumes. The module lookups (GetModuleHandleEx and
+// K32EnumProcessModules take the loader lock), the caller search, the clock and the lines all come
+// after the resume.
 
 namespace dxvk::rtsample {
 
   namespace {
 
-    /** A thread the fault watch looks after: its id, and the first CPU fault it raised (0: none). */
-    struct FaultSlot {
-      std::atomic<DWORD> tid  = { 0u };
-      std::atomic<DWORD> code = { 0u };
-    };
-
     constexpr uint32_t MaxSamplers = 8u;
+    constexpr DWORD    kCaptureMs  = 250u;   // a GetThreadContext normally takes well under 2 ms
 
-    FaultSlot s_slots[MaxSamplers];
+    /**
+     * A thread the fault watch looks after, in one word: its id in the high half, the first CPU
+     * fault it raised in the low half (0: none). Claimed, faulted and freed by compare-exchange or
+     * a store of the whole word, so a fault can't land in a slot another thread has claimed since.
+     */
+    std::atomic<uint64_t> s_slots[MaxSamplers] = { };
+
+    uint64_t slotOf(DWORD tid) { return uint64_t(tid) << 32; }
 
 
     /** An exception the CPU raises, as opposed to one RaiseException raises (a C++ throw, ...). */
@@ -43,6 +55,8 @@ namespace dxvk::rtsample {
         case 0xc0000006u:  // in-page error
         case 0xc000001du:  // illegal instruction
         case 0xc00000fdu:  // stack overflow
+        case 0xc00002b4u:  // float multiple faults (SSE)
+        case 0xc00002b5u:  // float multiple traps (SSE)
           return true;
         default:
           // array bounds, the float faults, integer divide by zero and overflow, privileged
@@ -53,21 +67,20 @@ namespace dxvk::rtsample {
 
 
     /**
-     * The fault watch: first in the vectored list, so a handler that resolves a fault can't hide
-     * it. Records the code for a watched thread and changes nothing: no allocation, no lock, the
-     * thread's last error untouched (GetCurrentThreadId reads the TEB).
+     * The fault watch: first in the vectored list when installed, so a handler that resolves a
+     * fault can't hide it (one added later as first still can). Records the code for a watched
+     * thread and changes nothing: no allocation, no lock, the thread's last error untouched
+     * (GetCurrentThreadId reads the TEB).
      */
     LONG CALLBACK faultWatch(EXCEPTION_POINTERS* info) {
       const EXCEPTION_RECORD* rec = info != nullptr ? info->ExceptionRecord : nullptr;
       if (rec == nullptr || !isCpuFault(rec->ExceptionCode))
         return EXCEPTION_CONTINUE_SEARCH;
 
-      const DWORD tid = GetCurrentThreadId();
+      const uint64_t mine = slotOf(GetCurrentThreadId());
       for (auto& slot : s_slots) {
-        if (slot.tid.load(std::memory_order_acquire) == tid) {
-          DWORD none = 0u;
-          slot.code.compare_exchange_strong(none, rec->ExceptionCode, std::memory_order_release);
-        }
+        uint64_t clean = mine;   // this thread's, no fault yet
+        slot.compare_exchange_strong(clean, mine | rec->ExceptionCode, std::memory_order_acq_rel);
       }
       return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -90,11 +103,11 @@ namespace dxvk::rtsample {
     }
 
 
-    /** An image's range and its executable sections' span, from its headers. The module is referenced. */
+    /** An image's size and executable sections, from its headers. The module is referenced. */
     struct ImageInfo {
-      uintptr_t size      = 0u;   // 0: the headers look wrong
-      uintptr_t codeBegin = 0u;   // absolute
-      uintptr_t codeEnd   = 0u;
+      uintptr_t size = 0u;   // 0: the headers look wrong
+      Range     code[kMaxCodeRanges] = { };
+      uint32_t  codeRanges = 0u;
     };
 
     ImageInfo imageInfo(HMODULE module) {
@@ -107,20 +120,21 @@ namespace dxvk::rtsample {
       if (nt->Signature != IMAGE_NT_SIGNATURE
        || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC)
         return info;
-      info.size = uintptr_t(nt->OptionalHeader.SizeOfImage);
 
+      // the section table must lie inside the headers the loader mapped
       const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-      uintptr_t lo = ~uintptr_t(0), hi = 0u;
-      for (uint32_t i = 0u; i < nt->FileHeader.NumberOfSections && i < 96u; i++) {
+      const uint32_t n = nt->FileHeader.NumberOfSections;
+      const uintptr_t tableEnd = uintptr_t(reinterpret_cast<const uint8_t*>(sec + n) - base);
+      if (n > 96u || tableEnd > nt->OptionalHeader.SizeOfHeaders)
+        return info;
+
+      info.size = uintptr_t(nt->OptionalHeader.SizeOfImage);
+      for (uint32_t i = 0u; i < n && info.codeRanges < kMaxCodeRanges; i++) {
         if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE))
           continue;
         const uintptr_t vsize = sec[i].Misc.VirtualSize != 0u ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
-        lo = std::min(lo, uintptr_t(sec[i].VirtualAddress));
-        hi = std::max(hi, uintptr_t(sec[i].VirtualAddress) + vsize);
-      }
-      if (lo < hi && hi <= info.size) {
-        info.codeBegin = uintptr_t(module) + lo;
-        info.codeEnd   = uintptr_t(module) + hi;
+        info.code[info.codeRanges++] = { uintptr_t(module) + sec[i].VirtualAddress,
+                                         uintptr_t(module) + sec[i].VirtualAddress + vsize };
       }
       return info;
     }
@@ -128,23 +142,48 @@ namespace dxvk::rtsample {
 
     /** A sampler's state. Its thread owns it and frees it; the starter keeps only handles. */
     struct State {
-      HANDLE      target = nullptr;   // the render thread: suspend, resume, get context, query
-      HANDLE      stop   = nullptr;   // set: write the last window and end
-      DWORD       tid    = 0u;
-      const NT_TIB* tib  = nullptr;   // the render thread's TEB: its stack range
-      uint32_t    hz     = 0u;
-      bool        guard  = true;
-      FaultSlot*  slot   = nullptr;
+      HANDLE      target  = nullptr;   // the render thread: suspend, resume, get context, wait
+      HANDLE      stop    = nullptr;   // set: write the last window and end
+      DWORD       tid     = 0u;
+      uint32_t    hz      = 0u;
+      bool        guard   = true;
+      std::atomic<uint64_t>* slot = nullptr;
       void      (*sink)(const char*) = nullptr;
+
+      // the render thread's TEB, and its own stack as it was at the start: [stackLow, stackHigh)
+      const NT_TIB* tib   = nullptr;
+      uintptr_t   stackLow  = 0u;
+      uintptr_t   stackHigh = 0u;
+
+      // the capture thread: `go` asks it for one GetThreadContext into `ctx`, `done` answers
+      HANDLE      captureThread = nullptr;
+      HANDLE      go      = nullptr;
+      HANDLE      done    = nullptr;
+      std::atomic<bool> quit = { false };
+      CONTEXT     ctx     = { };
+      BOOL        got     = FALSE;
+
       ModuleTable table;
       Window      window;
-      LARGE_INTEGER freq = { };
+      LARGE_INTEGER freq  = { };
 
       char         rvaName[40] = { };  // the module written by RVA
       int          rvaIndex = -1;      // its index in the table, once seen
       RvaHistogram rvaSamples;         // samples inside it
       RvaHistogram rvaCallers;         // return addresses into it, of samples in a system DLL
     };
+
+
+    DWORD WINAPI captureMain(void* arg) {
+      State& s = *static_cast<State*>(arg);
+      while (WaitForSingleObject(s.go, INFINITE) == WAIT_OBJECT_0 && !s.quit.load(std::memory_order_acquire)) {
+        std::memset(&s.ctx, 0, sizeof(s.ctx));
+        s.ctx.ContextFlags = CONTEXT_CONTROL;
+        s.got = GetThreadContext(s.target, &s.ctx);
+        SetEvent(s.done);
+      }
+      return 0u;
+    }
 
 
     void emit(const State& s, const std::vector<std::string>& lines) {
@@ -167,7 +206,7 @@ namespace dxvk::rtsample {
       const ImageInfo info = imageInfo(module);
       if (len == 0u || len >= sizeof(path) || info.size == 0u)
         return -1;
-      const int index = s.table.add(uintptr_t(module), info.size, leafName(path), info.codeBegin, info.codeEnd);
+      const int index = s.table.add(uintptr_t(module), info.size, leafName(path), info.code, info.codeRanges);
       if (index >= 0 && s.rvaIndex < 0 && sameName(s.table.at(uint32_t(index)).name, s.rvaName)
        && s.rvaSamples.init(info.size) && s.rvaCallers.init(info.size))
         s.rvaIndex = index;
@@ -194,11 +233,14 @@ namespace dxvk::rtsample {
 
 
     /**
-     * Adds every module loaded now that the table doesn't have, so the caller search knows them
-     * (it looks only in the table: a lookup per stack slot would take the loader lock 64 times a
-     * sample). At the start and at each window's end.
+     * Makes the table again from the modules loaded now, so the caller search knows them (it looks
+     * only in the table: a lookup per stack slot would take the loader lock 64 times a sample),
+     * and an unloaded DLL's range doesn't keep its name. At the start and at each window's end.
      */
-    void addLoadedModules(State& s) {
+    void loadTable(State& s) {
+      s.table = ModuleTable();
+      s.rvaIndex = -1;
+
       using PFN_Enum = BOOL (WINAPI *)(HANDLE, HMODULE*, DWORD, DWORD*);
       static const auto enumModules = reinterpret_cast<PFN_Enum>(reinterpret_cast<void*>(
         GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32EnumProcessModules")));
@@ -210,29 +252,25 @@ namespace dxvk::rtsample {
         return;
       const DWORD n = std::min<DWORD>(bytes / sizeof(HMODULE), DWORD(sizeof(modules) / sizeof(HMODULE)));
       for (DWORD i = 0u; i < n; i++) {
-        if (s.table.find(uintptr_t(modules[i])) >= 0)
-          continue;
         // referenced while it is read: it may be unloading
         HMODULE module = nullptr;
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(modules[i]), &module)
          && module != nullptr) {
-          addModule(s, module);
+          if (s.table.find(uintptr_t(module)) < 0)
+            addModule(s, module);
           FreeLibrary(module);
         }
       }
     }
 
 
-    enum class Sampled { Ok, Missed, ThreadGone };
+    enum class Sampled { Ok, Missed, ThreadGone, CaptureStuck };
 
     /**
      * One sample: suspend, read the instruction pointer and copy the top of the stack, resume;
      * then the lookups.
      */
     Sampled sampleOnce(State& s) {
-      CONTEXT ctx;
-      std::memset(&ctx, 0, sizeof(ctx));
-      ctx.ContextFlags = CONTEXT_CONTROL;
       uintptr_t slots[kStackSlots];
       uint32_t  nSlots = 0u;
       bool      stackRead = false;
@@ -240,26 +278,28 @@ namespace dxvk::rtsample {
       LARGE_INTEGER t0, t1;
       QueryPerformanceCounter(&t0);
       if (SuspendThread(s.target) == DWORD(-1)) {
-        DWORD exitCode = 0u;
-        if (GetExitCodeThread(s.target, &exitCode) && exitCode != STILL_ACTIVE)
+        if (WaitForSingleObject(s.target, 0u) == WAIT_OBJECT_0)
           return Sampled::ThreadGone;
         s.window.missed++;
         return Sampled::Missed;
       }
-      // Suspended: GetThreadContext, and plain reads of the thread's TEB and of its stack between
-      // the stack pointer and the stack base (committed memory while the thread runs on its own
-      // stack). No call that could wait on the suspended thread. Then resume, whatever happened
-      const BOOL got = GetThreadContext(s.target, &ctx);
+
+      // Suspended: from here to ResumeThread, see the top of this file
+      SetEvent(s.go);
+      if (WaitForSingleObject(s.done, kCaptureMs) != WAIT_OBJECT_0) {
+        ResumeThread(s.target);
+        return Sampled::CaptureStuck;
+      }
+      const BOOL got = s.got;
       if (got) {
 #ifdef _WIN64
-        const uintptr_t sp = uintptr_t(ctx.Rsp);
+        const uintptr_t sp = uintptr_t(s.ctx.Rsp);
 #else
-        const uintptr_t sp = uintptr_t(ctx.Esp);
+        const uintptr_t sp = uintptr_t(s.ctx.Esp);
 #endif
-        const uintptr_t base  = uintptr_t(s.tib->StackBase);
         const uintptr_t limit = uintptr_t(s.tib->StackLimit);
-        if (sp >= limit && sp < base && sp % sizeof(uintptr_t) == 0u) {
-          nSlots = uint32_t(std::min<uintptr_t>(kStackSlots, (base - sp) / sizeof(uintptr_t)));
+        if (sp >= s.stackLow && sp < s.stackHigh && sp >= limit && sp % sizeof(uintptr_t) == 0u) {
+          nSlots = uint32_t(std::min<uintptr_t>(kStackSlots, (s.stackHigh - sp) / sizeof(uintptr_t)));
           const auto* src = reinterpret_cast<const volatile uintptr_t*>(sp);
           for (uint32_t i = 0u; i < nSlots; i++)
             slots[i] = src[i];
@@ -274,9 +314,9 @@ namespace dxvk::rtsample {
         return Sampled::Missed;
       }
 #ifdef _WIN64
-      const uintptr_t ip = uintptr_t(ctx.Rip);
+      const uintptr_t ip = uintptr_t(s.ctx.Rip);
 #else
-      const uintptr_t ip = uintptr_t(ctx.Eip);
+      const uintptr_t ip = uintptr_t(s.ctx.Eip);
 #endif
       const uint64_t heldNs = uint64_t(double(t1.QuadPart - t0.QuadPart) * 1.0e9 / double(s.freq.QuadPart));
       const int index = moduleOf(s, ip);
@@ -318,40 +358,64 @@ namespace dxvk::rtsample {
     }
 
 
+    /** The fault the watch recorded for this sampler's thread, 0 for none. */
+    DWORD faultSeen(const State& s) {
+      return s.guard ? DWORD(s.slot->load(std::memory_order_acquire) & 0xffffffffu) : 0u;
+    }
+
+
     DWORD WINAPI samplerMain(void* arg) {
       State& s = *static_cast<State*>(arg);
       QueryPerformanceFrequency(&s.freq);
-      const DWORD periodMs = 1000u / s.hz;
+      bool stuck = false;
 
       // The watch second: no suspend at all. A thread that faults by then isn't sampled
       const bool released = WaitForSingleObject(s.stop, s.guard ? kWatchMs : 0u) == WAIT_OBJECT_0;
-      DWORD fault = s.guard ? s.slot->code.load(std::memory_order_acquire) : 0u;
+      DWORD fault = faultSeen(s);
 
-      if (!released && fault != 0u) {
+      if (released) {
+        emit(s, windowLines(s.table, s.window, s.tid, 1u, 0.0, s.hz, "last, device released in the watch second"));
+      } else if (fault != 0u) {
         emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x raised a CPU fault (%08x) in its first second: "
           "not sampled (suspending a thread while Wine handles its fault can end it under Rosetta)", s.tid, fault);
-      } else if (!released) {
-        addLoadedModules(s);
-        LARGE_INTEGER windowStart;
+      } else {
+        loadTable(s);
+        LARGE_INTEGER windowStart, next;
         QueryPerformanceCounter(&windowStart);
+        next = windowStart;
+        const LONGLONG period = std::max<LONGLONG>(1, s.freq.QuadPart / LONGLONG(s.hz));
         uint32_t number = 1u;
         const char* why = "last, device released";
 
         for (;;) {
-          if (WaitForSingleObject(s.stop, periodMs) == WAIT_OBJECT_0)
+          // the next sample at its deadline (whole ms waits, so it may come early; never two for one)
+          next.QuadPart += period;
+          LARGE_INTEGER now;
+          QueryPerformanceCounter(&now);
+          if (next.QuadPart < now.QuadPart - period)
+            next = now;
+          const LONGLONG ahead = next.QuadPart - now.QuadPart;
+          const DWORD waitMs = ahead > 0 ? DWORD(ahead * 1000 / s.freq.QuadPart) : 0u;
+          if (WaitForSingleObject(s.stop, waitMs) == WAIT_OBJECT_0)
             break;
-          if (s.guard && (fault = s.slot->code.load(std::memory_order_acquire)) != 0u) {
+          if ((fault = faultSeen(s)) != 0u) {
             why = "last, stopped at a CPU fault";
             break;
           }
-          if (sampleOnce(s) == Sampled::ThreadGone) {
+          const Sampled r = sampleOnce(s);
+          if (r == Sampled::ThreadGone) {
             why = "last, the thread ended";
+            break;
+          }
+          if (r == Sampled::CaptureStuck) {
+            why = "last, a context capture took too long";
+            stuck = true;
             break;
           }
           const double seconds = secondsSince(s, windowStart);
           if (seconds * 1000.0 >= double(kReportMs)) {
             emitWindow(s, number, seconds, "every 10 s");
-            addLoadedModules(s);
+            loadTable(s);
             QueryPerformanceCounter(&windowStart);
             number++;
           }
@@ -362,14 +426,40 @@ namespace dxvk::rtsample {
           emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x raised a CPU fault (%08x): sampling stopped for good "
             "(suspending a thread while Wine handles its fault can end it under Rosetta)", s.tid, fault);
         }
+        if (stuck) {
+          emitLine(s.sink, "D9MT-RT-SAMPLE: thread 0x%04x: GetThreadContext didn't return within %u ms; the thread "
+            "is resumed and sampling stopped for good", s.tid, kCaptureMs);
+        }
       }
 
-      s.slot->tid.store(0u, std::memory_order_release);
-      s.slot->code.store(0u, std::memory_order_relaxed);
+      s.slot->store(0u, std::memory_order_release);
+
+      // The capture thread: idle unless a capture got stuck. Then it may still write into the
+      // state, so the state, its handles and the thread are left as they are
+      if (!stuck) {
+        s.quit.store(true, std::memory_order_release);
+        SetEvent(s.go);
+        if (WaitForSingleObject(s.captureThread, 1000u) != WAIT_OBJECT_0)
+          stuck = true;
+      }
+      if (stuck)
+        return 0u;
+
+      CloseHandle(s.captureThread);
+      CloseHandle(s.go);
+      CloseHandle(s.done);
       CloseHandle(s.target);
       CloseHandle(s.stop);
       delete &s;
       return 0u;
+    }
+
+
+    void closeAll(State* s) {
+      for (HANDLE h : { s->go, s->done, s->stop, s->target }) {
+        if (h != nullptr)
+          CloseHandle(h);
+      }
     }
 
 
@@ -380,10 +470,10 @@ namespace dxvk::rtsample {
         return Handle();
       }
 
-      FaultSlot* slot = nullptr;
+      std::atomic<uint64_t>* slot = nullptr;
       for (auto& candidate : s_slots) {
-        DWORD none = 0u;
-        if (candidate.tid.compare_exchange_strong(none, tid, std::memory_order_acq_rel)) {
+        uint64_t unclaimed = 0u;
+        if (candidate.compare_exchange_strong(unclaimed, slotOf(tid), std::memory_order_acq_rel)) {
           slot = &candidate;
           break;
         }
@@ -392,7 +482,6 @@ namespace dxvk::rtsample {
         emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: %u samplers run already", tid, MaxSamplers);
         return Handle();
       }
-      slot->code.store(0u, std::memory_order_release);
 
       auto* s = new State();
       s->tid   = tid;
@@ -400,27 +489,45 @@ namespace dxvk::rtsample {
       s->guard = guard;
       s->slot  = slot;
       s->sink  = sink;
-      s->tib   = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
       std::strncpy(s->rvaName, rvaModule, sizeof(s->rvaName) - 1u);
+
+      // This thread's stack, now, on this thread: the range the stack copy may read
+      s->tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+      MEMORY_BASIC_INFORMATION mbi = { };
+      if (VirtualQuery(&mbi, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+        s->stackLow  = uintptr_t(mbi.AllocationBase);
+        s->stackHigh = uintptr_t(s->tib->StackBase);
+        if (!(s->stackLow < uintptr_t(&mbi) && uintptr_t(&mbi) < s->stackHigh))
+          s->stackLow = s->stackHigh = 0u;   // not on its own stack: the stack is never read
+      }
 
       const HANDLE self = GetCurrentProcess();
       Handle h;
       bool ok = DuplicateHandle(self, GetCurrentThread(), self, &s->target,
-          THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0u)
+          THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | SYNCHRONIZE, FALSE, 0u)
         && (s->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr)) != nullptr
-        && DuplicateHandle(self, s->stop, self, &h.stop, 0u, FALSE, DUPLICATE_SAME_ACCESS)
-        && (h.thread = CreateThread(nullptr, 0u, samplerMain, s, 0u, nullptr)) != nullptr;
+        && (s->go   = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr
+        && (s->done = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr
+        && DuplicateHandle(self, s->stop, self, &h.stop, 0u, FALSE, DUPLICATE_SAME_ACCESS);
+      if (ok && (s->captureThread = CreateThread(nullptr, 0u, captureMain, s, 0u, nullptr)) == nullptr)
+        ok = false;
+      if (ok && (h.thread = CreateThread(nullptr, 0u, samplerMain, s, 0u, nullptr)) == nullptr) {
+        // the capture thread waits on `go`: end it before the state goes
+        s->quit.store(true, std::memory_order_release);
+        SetEvent(s->go);
+        WaitForSingleObject(s->captureThread, INFINITE);
+        ok = false;
+      }
 
       if (!ok) {
         const DWORD error = GetLastError();
+        if (s->captureThread != nullptr)
+          CloseHandle(s->captureThread);
         if (h.stop != nullptr)
           CloseHandle(h.stop);
-        if (s->stop != nullptr)
-          CloseHandle(s->stop);
-        if (s->target != nullptr)
-          CloseHandle(s->target);
+        closeAll(s);
         delete s;
-        slot->tid.store(0u, std::memory_order_release);
+        slot->store(0u, std::memory_order_release);
         emitLine(sink, "D9MT-RT-SAMPLE: thread 0x%04x not sampled: no sampler thread (error %u)", tid, error);
         return Handle();
       }
@@ -442,12 +549,19 @@ namespace dxvk::rtsample {
     if (n == 0u)
       return Handle();
 
-    bool invalid = n >= sizeof(value);
-    const uint32_t hz = invalid ? 0u : hzFromEnv(value, &invalid);
+    char buf[160];
+    if (n >= sizeof(value)) {
+      // the buffer's content is undefined then: not printed
+      std::snprintf(buf, sizeof(buf), "D9MT-RT-SAMPLE: D9MT_RT_SAMPLE ignored: %u characters (a whole number of Hz, 1 to %u)",
+        unsigned(n - 1u), unsigned(kMaxHz));
+      sink(buf);
+      return Handle();
+    }
+    bool invalid = false;
+    const uint32_t hz = hzFromEnv(value, &invalid);
     if (invalid) {
-      char buf[160];
-      std::snprintf(buf, sizeof(buf), "D9MT-RT-SAMPLE: D9MT_RT_SAMPLE=\"%s%s\" ignored (a whole number of Hz, 1 to %u)",
-        value, n >= sizeof(value) ? "..." : "", unsigned(kMaxHz));
+      std::snprintf(buf, sizeof(buf), "D9MT-RT-SAMPLE: D9MT_RT_SAMPLE=\"%s\" ignored (a whole number of Hz, 1 to %u)",
+        value, unsigned(kMaxHz));
       sink(buf);
       return Handle();
     }
