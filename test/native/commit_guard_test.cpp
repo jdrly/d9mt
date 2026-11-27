@@ -212,6 +212,7 @@ namespace dxvk::backend {
     RetireBatch& retireBatch() { return *m_retire; }
     void emitProducerBarrier(obj_handle_t, uint64_t, uint64_t = 0u) { }
     void closePass() { }
+    void realizeVisit() { }   // no visit (keepPassOverClearVisit) in these cases
     void flushFramePasses() { }
     void armCanary() { g.canaryArms++; }
     void checkCanaries(uint64_t) { g.canaryChecks++; }
