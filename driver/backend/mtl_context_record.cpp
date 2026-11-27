@@ -63,6 +63,7 @@ namespace dxvk::backend {
         deferredPassesEnabled() ? "D9MT_DEFERRED" : "D9MT_NO_ATTACHMENT_OPT / d9mt.attachmentOpt", ")"));
 
     m_inpassClear = m_device->appProfile().inpassClear && !deferredPassesEnabled();
+    m_keepPassOverVisit = m_device->appProfile().keepPassOverClearVisit && m_attOpt;
 
     const char* clearDiscard = std::getenv("D9MT_CLEAR_DISCARD");
     m_clearDiscard = m_attOpt && !(clearDiscard && std::strcmp(clearDiscard, "0") == 0);
@@ -418,6 +419,7 @@ namespace dxvk::backend {
     prof::Scope profScope(prof::Submit);
     // This submit completes a carried flush, if any (closePass below mustn't do it again).
     m_completePending = false;
+    realizeVisit();   // the open pass ended at the visit's targets, as before
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -715,6 +717,7 @@ namespace dxvk::backend {
       return;
     }
 
+    realizeVisit();
     if (m_pass.active) {
       prof::bump(prof::CntPassCloseSubmit);
       closePass();
@@ -751,6 +754,28 @@ namespace dxvk::backend {
     static const bool noSameViewSkipEnv = std::getenv("D9MT_NO_SAMEVIEW_SKIP") != nullptr;
     const bool noSameViewSkip = noSameViewSkipEnv
       || (d9mtdbg::flags() & d9mtdbg::NoSameViewSkip);
+    auto sameViews = [] (const MtlRenderTargets& a, const MtlRenderTargets& b) {
+      if (a.depthStencil != b.depthStencil)
+        return false;
+      for (uint32_t i = 0u; i < MtlRenderTargets::MaxColorTargets; i++) {
+        if (a.color[i] != b.color[i])
+          return false;
+      }
+      return true;
+    };
+
+    /* keepPassOverClearVisit: the open pass's targets come back after a visit that drew
+     * nothing. If the visit would be a skipped pass, the open pass goes on (resolveVisit).
+     * Anything else ends the open pass, which turns the visit into its pending pass, and goes
+     * on as before. */
+    if (unlikely(m_visitPending)) {
+      if (!noSameViewSkip && sameViews(targets, m_visit.targets) && uint32_t(feedbackLoop) == m_visitFeedback)
+        return;
+      if (!noSameViewSkip && sameViews(targets, m_pass.targets)
+       && uint32_t(feedbackLoop) == m_passFeedbackLoop && resolveVisit())
+        return;
+      realizeVisit();
+    }
 
     /* DXVK semantics (DxvkContext::bindRenderTargets): re-binding the exact
      * same view objects is not a framebuffer change and must not end the
@@ -777,9 +802,39 @@ namespace dxvk::backend {
       if (same)
         return;
     }
+    const uint32_t openFeedbackLoop = m_passFeedbackLoop;
     m_passFeedbackLoop = uint32_t(feedbackLoop);
 
     if (m_pass.active) {
+      /* keepPassOverClearVisit: keep the open pass and hold the new targets as a visit, until
+       * it draws or anything else needs the pass to end. Only for targets that share no image
+       * with the open pass (a clear of one of its attachments must end it), and not while a
+       * carried flush waits for this pass's end: ending it here completes that flush, and the
+       * work stamped until the visit ends would get the next serial (queries, uploads). */
+      if (m_keepPassOverVisit && !rtSkipOn && !noSameViewSkip && !m_completePending) {
+        bool disjoint = true;
+        auto img = [] (const Rc<MtlTextureView>& v) { return v != nullptr ? v->image.ptr() : nullptr; };
+        const Rc<MtlTextureView>* mine[5] = { &m_pass.targets.color[0], &m_pass.targets.color[1],
+          &m_pass.targets.color[2], &m_pass.targets.color[3], &m_pass.targets.depthStencil };
+        const Rc<MtlTextureView>* theirs[5] = { &targets.color[0], &targets.color[1],
+          &targets.color[2], &targets.color[3], &targets.depthStencil };
+        for (uint32_t i = 0u; disjoint && i < 5u; i++) {
+          for (uint32_t j = 0u; disjoint && j < 5u; j++) {
+            if (img(*theirs[i]) != nullptr && img(*theirs[i]) == img(*mine[j]))
+              disjoint = false;
+          }
+        }
+        if (disjoint) {
+          m_visit = PendingPass();
+          m_visit.targets = std::move(targets);
+          m_visit.pending = true;
+          m_visitFeedback = uint32_t(feedbackLoop);
+          m_visitPending  = true;
+          m_visitClears   = 0u;
+          m_passFeedbackLoop = openFeedbackLoop;
+          return;
+        }
+      }
       if (rtSkipOn) {
         auto sameRt = [](const Rc<MtlTextureView>& a, const Rc<MtlTextureView>& b) {
           if (!sameAttachment(a, b))
@@ -813,6 +868,75 @@ namespace dxvk::backend {
         && a->key.baseLayer == b->key.baseLayer;
   }
 
+  bool MtlContextImpl::resolveVisit() {
+    /* The visit drew nothing and the open pass's targets are back. The visit's clears get the
+     * load and store actions of the pass it would be (createPassEncoder's dry run). When that
+     * pass would be skipped (nothing to store: no reader wants the clear in memory, nothing
+     * samples the images now), its attachments take the state the skipped pass leaves (a clear
+     * not yet in memory, which every reader outside a pass restores first), and the open pass
+     * goes on. Otherwise the caller ends the open pass and the visit gets its pass, as before. */
+    bool anyClear = m_visit.clearDepth || m_visit.clearStencil;
+    for (bool c : m_visit.clearColor)
+      anyClear = anyClear || c;
+    if (anyClear) {
+      PendingPass open = std::move(m_pass);
+      m_pass = std::move(m_visit);
+      m_pass.epoch = m_attEpoch + 1u;   // the epoch materializePass would give it
+      const bool needsPass = createPassEncoder(false, true);
+      if (needsPass) {
+        m_visit = std::move(m_pass);
+        m_pass  = std::move(open);
+        return false;
+      }
+      ++m_attEpoch;
+      attApplyAfter();
+      // A restore of these images while the open pass is still open must end it first: the
+      // pass's earlier draws read what memory held before the clear (attRestore).
+      for (uint32_t i = 0u; i < 5u; i++) {
+        const Rc<MtlTextureView>& v = i < kAttDepth ? m_pass.targets.color[i] : m_pass.targets.depthStencil;
+        if (v != nullptr && v->image != nullptr)
+          static_cast<MtlTextureImpl*>(v->image.ptr())->attVisitEpoch = open.epoch;
+      }
+      m_pass = std::move(open);
+      if (unlikely(prof::g_profEnabled)) {
+        m_rs[rstats::ClearPasses]++;     // counted as flushPendingClears counts the skipped pass
+        m_rs[rstats::ClearsPending]++;
+      }
+    }
+    if (unlikely(prof::g_profEnabled))
+      m_rs[rstats::VisitsKept]++;
+    m_visit = PendingPass();
+    m_visitPending = false;
+    m_visitClears  = 0u;
+    return true;
+  }
+
+  void MtlContextImpl::realizeVisit() {
+    if (unlikely(m_visitPending)) {
+      prof::bump(prof::CntPassCloseRt);
+      closePass();
+    }
+  }
+
+  // A clear of one of a pending pass's targets folds into its load action: the first colour
+  // target it is, else the depth-stencil. False: none of its targets.
+  bool MtlContextImpl::foldClear(PendingPass& p, const Rc<MtlTextureView>& view,
+                                 MtlAspectMask clear, const MtlClearValue& value) {
+    for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
+      if (sameAttachment(p.targets.color[i], view) && (clear & MtlAspectColor)) {
+        p.clearColor[i] = true;
+        p.clearValues[i] = value;
+        return true;
+      }
+    }
+    if (sameAttachment(p.targets.depthStencil, view)) {
+      if (clear & MtlAspectDepth)   { p.clearDepth = true;   p.depthClear = value.depth; }
+      if (clear & MtlAspectStencil) { p.clearStencil = true; p.stencilClear = value.stencil; }
+      return true;
+    }
+    return false;
+  }
+
   void MtlContextImpl::clearRenderTarget(
     const Rc<MtlTextureView>& view, MtlAspectMask clear,
     MtlClearValue value, MtlAspectMask discard) {
@@ -824,6 +948,18 @@ namespace dxvk::backend {
     if (noColorClear && (clear & MtlAspectColor)) {
       clear = MtlAspectMask(clear & ~MtlAspectColor);
       if (!clear) return;
+    }
+    // A clear of a visit's targets folds into the visit, as into any pending pass; a clear of
+    // anything else realizes it first.
+    if (unlikely(m_visitPending)) {
+      if (view != nullptr && foldClear(m_visit, view, clear, value)) {
+        if (unlikely(prof::g_profEnabled)) {
+          m_visitClears++;
+          m_rs[rstats::ClearsFolded]++;
+        }
+        return;
+      }
+      realizeVisit();
     }
     /* A same-view rebind (e.g. the one D3D9 Clear() emits) no longer ends
      * the pass, so an active pass must end here: the clear has to land after
@@ -853,23 +989,10 @@ namespace dxvk::backend {
     }
     if (unlikely(prof::g_profEnabled))
       m_splitClears++;
-    if (m_pass.pending) {
-      for (uint32_t i = 0; i < MtlRenderTargets::MaxColorTargets; i++) {
-        if (sameAttachment(m_pass.targets.color[i], view) && (clear & MtlAspectColor)) {
-          m_pass.clearColor[i] = true;
-          m_pass.clearValues[i] = value;
-          if (unlikely(prof::g_profEnabled))
-            m_rs[rstats::ClearsFolded]++;
-          return;
-        }
-      }
-      if (sameAttachment(m_pass.targets.depthStencil, view)) {
-        if (clear & MtlAspectDepth)   { m_pass.clearDepth = true;   m_pass.depthClear = value.depth; }
-        if (clear & MtlAspectStencil) { m_pass.clearStencil = true; m_pass.stencilClear = value.stencil; }
-        if (unlikely(prof::g_profEnabled))
-          m_rs[rstats::ClearsFolded]++;
-        return;
-      }
+    if (m_pass.pending && foldClear(m_pass, view, clear, value)) {
+      if (unlikely(prof::g_profEnabled))
+        m_rs[rstats::ClearsFolded]++;
+      return;
     }
 
     PendingPass saved = std::move(m_pass);
@@ -905,7 +1028,7 @@ namespace dxvk::backend {
      * clear's would count), not for an image shaders can sample (an INTZ texture: a draw that
      * samples it in this pass reads memory, which holds the clear only once the pass ends), and
      * not in a pass with a feedback loop. Anything else takes the pass of its own. */
-    if (!m_pass.active || deferredPassesEnabled() || !m_activeOcclusion.empty() || m_passFeedbackLoop != 0u
+    if (!m_pass.active || m_visitPending || deferredPassesEnabled() || !m_activeOcclusion.empty() || m_passFeedbackLoop != 0u
      || m_pass.targets.depthStencil == nullptr || !sameAttachment(m_pass.targets.depthStencil, view)
      || m_pass.targets.depthStencil->key.format != view->key.format
      || (view->image->info().usage & MtlTextureUsageShaderRead) != 0u)
@@ -1257,6 +1380,17 @@ namespace dxvk::backend {
       for (auto& r : m_pass.resolveTo) r = nullptr;
       m_pass.discardDs = false;
       m_pass.discardMask = 0u;
+      if (unlikely(m_visitPending)) {
+        // The visit doesn't end on this pass's targets: it is the pending pass it would have been.
+        m_visitPending = false;
+        m_pass = std::move(m_visit);
+        m_visit = PendingPass();
+        m_passFeedbackLoop = m_visitFeedback;
+        m_dirty |= DirtyPso | DirtyViewport;
+        if (unlikely(prof::g_profEnabled))
+          m_splitClears += m_visitClears;
+        m_visitClears = 0u;
+      }
       if (unlikely(m_completePending))
         completeCarry();
       return;
@@ -1463,7 +1597,7 @@ namespace dxvk::backend {
      * recorded before the pass and leaves the pass open under the same serial, instead of
      * ending it (a store now and a load of every attachment when it resumes). The flush
      * itself completes when the pass closes (closePass -> completeCarry). */
-    if (!m_earlyCommit || !m_attOpt || deferredPassesEnabled()
+    if (!m_earlyCommit || !m_attOpt || deferredPassesEnabled() || m_visitPending
      || !m_pass.active || m_pass.encoder || !m_cmdbuf)
       return false;
 
@@ -1542,7 +1676,7 @@ namespace dxvk::backend {
   }
 
 
-  bool MtlContextImpl::createPassEncoder(bool early) {
+  bool MtlContextImpl::createPassEncoder(bool early, bool dryRun) {
     AttTimer attTimer(unlikely(prof::g_profEnabled) ? &m_rs[rstats::AttNs] : nullptr);
     const uint32_t dbg   = d9mtdbg::flags();
     const bool     optOn = !(dbg & d9mtdbg::NoAttachOpt);
@@ -1562,7 +1696,10 @@ namespace dxvk::backend {
       return true;
     };
 
-    bool needed = early || m_pass.encodedDraws != 0u || !m_psoPatches.empty() || !chunkHasNoWork();
+    // A dry run is a visit's: no draws, and the command chunk and pipeline patches are the open
+    // pass's, not its own.
+    bool needed = !dryRun && (early || m_pass.encodedDraws != 0u || !m_psoPatches.empty() || !chunkHasNoWork());
+    bool restoreNeeded = false;
     attopt::AspectState dummy;
 
     auto decideSlot = [&] (uint32_t s, MtlTextureImpl* img, attopt::AspectState& st,
@@ -1581,7 +1718,9 @@ namespace dxvk::backend {
       a.in.sampled = eligible && full && optOn && !a.in.written && attSampled(img);
       a.in.readHint = attopt::readRecently(st, m_attFrame);
       a.d = attopt::decide(a.in);
-      if (a.d.restoreFirst) {
+      if (a.d.restoreFirst && dryRun) {
+        restoreNeeded = true;
+      } else if (a.d.restoreFirst) {
         attRestore(img, rstore::Reason::RtView,
           s < kAttDepth ? MtlAspectColor : s == kAttDepth ? MtlAspectDepth : MtlAspectStencil);
         a.in.content = st.content;
@@ -1655,7 +1794,9 @@ namespace dxvk::backend {
     }
 
     // No draws, no resolve and nothing to store: the pass is a no-op.
-    const bool skip = full && optOn && !needed;
+    const bool skip = full && optOn && !needed && !restoreNeeded;
+    if (dryRun && !skip)
+      return true;
 
     if (unlikely(prof::g_profEnabled)) {
       int64_t saved = 0;
@@ -1847,7 +1988,9 @@ namespace dxvk::backend {
     // Its own pass, before whatever reads; an encoder already open ends first.
     // Only `aspects` are re-cleared; another Lazy aspect is loaded and stored
     // unchanged and stays Lazy (memory never holds it).
-    if (m_pass.encoder) {
+    // An image a kept visit cleared inside the open pass: the restore must come after the pass's
+    // draws so far, which read what memory held before that clear.
+    if (m_pass.encoder || (m_pass.active && m_pass.epoch != 0u && t->attVisitEpoch == m_pass.epoch)) {
       prof::bump(prof::CntPassCloseBlit);
       closePass();
     }
@@ -1941,6 +2084,7 @@ namespace dxvk::backend {
   void MtlContextImpl::discardImage(const Rc<MtlTexture>& image) {
     if (!m_attOpt || image == nullptr || !attImageEligible(image.ptr()))
       return;
+    realizeVisit();
     auto* t = static_cast<MtlTextureImpl*>(image.ptr());
     const Rc<MtlTextureView>& dsv = m_pass.targets.depthStencil;
     if (m_pass.active && dsv != nullptr && dsv->image.ptr() == t) {
@@ -2305,6 +2449,7 @@ namespace dxvk::backend {
   }
 
   bool MtlContextImpl::prepareDraw() {
+    realizeVisit();   // a draw on a visit's targets: it is a pass of its own
     if (!m_pass.pending && !m_pass.active)
       return false;
     if (unlikely(m_viewport.scissorEmpty))
@@ -2404,6 +2549,7 @@ namespace dxvk::backend {
   }
 
   void MtlContextImpl::prepareDirectEncode(uint32_t passCloseCounter) {
+    realizeVisit();   // then a visit's clears are flushed below, as a pending pass's are
     if (m_pass.active) {
       prof::bump(prof::Counter(passCloseCounter));
       closePass();

@@ -146,11 +146,14 @@ int main() {
   CHECK(appProfileFor(S).staticBuffersDirect && !appProfileFor(G).staticBuffersDirect);
   CHECK(!AppProfile().staticBuffersDirect);
   CHECK(appProfileFor(S).inpassClear && !appProfileFor(G).inpassClear && !AppProfile().inpassClear);
+  CHECK(appProfileFor(S).keepPassOverClearVisit && !appProfileFor(G).keepPassOverClearVisit
+        && !AppProfile().keepPassOverClearVisit);
   for (const Case& c : kCases) {
     AppProfileOverride h = Unset;
     const AppProfile r = resolveAppProfile(c.exePath, c.value, h);
     CHECK(r.staticBuffersDirect == (r.id == S));
     CHECK(r.inpassClear == (r.id == S));
+    CHECK(r.keepPassOverClearVisit == (r.id == S));
   }
 
   // A field's override: 1 and 0 set it either way on either app profile; empty and anything
@@ -174,20 +177,34 @@ int main() {
       CHECK(f.inpassClear == (s.how == Used ? s.want : defIn));
       CHECK(f.staticBuffersDirect == appProfileFor(id).staticBuffersDirect);
     }
+    const bool defVisit = appProfileFor(id).keepPassOverClearVisit;
+    for (const auto& s : sw) {
+      AppProfile f = appProfileFor(id);
+      CHECK(applyAppProfileSwitch(s.v, f.keepPassOverClearVisit) == s.how);
+      CHECK(f.keepPassOverClearVisit == (s.how == Used ? s.want : defVisit));
+      CHECK(f.inpassClear == appProfileFor(id).inpassClear);
+      CHECK(f.staticBuffersDirect == appProfileFor(id).staticBuffersDirect);
+    }
   }
 
   // The fields' log line.
   AppProfile f = appProfileFor(S);
   CHECK(appProfileFieldsLine(f, Unset)
-        == "d9mt: app profile fields: staticBuffersDirect on, inpassClear on");
+        == "d9mt: app profile fields: staticBuffersDirect on, inpassClear on, keepPassOverClearVisit on");
   applyAppProfileSwitch("0", f.staticBuffersDirect);
   CHECK(appProfileFieldsLine(f, Used)
-        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear on");
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear on,"
+           " keepPassOverClearVisit on");
   applyAppProfileSwitch("0", f.inpassClear);
   CHECK(appProfileFieldsLine(f, Used, Used)
-        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off (D9MT_INPASS_CLEAR)");
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
+           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit on");
+  applyAppProfileSwitch("0", f.keepPassOverClearVisit);
+  CHECK(appProfileFieldsLine(f, Used, Used, Used)
+        == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
+           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit off (D9MT_KEEP_PASS_OVER_CLEAR_VISIT)");
   CHECK(appProfileFieldsLine(appProfileFor(G), Unknown)
-        == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off");
+        == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off");
 
   if (g_fail)
     return 1;

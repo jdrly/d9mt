@@ -31,6 +31,10 @@ namespace dxvk {
     // A part-surface depth/stencil clear of the open pass's own depth-stencil attachment is drawn
     // inside that pass instead of ending it (#129). swtor: on. D9MT_INPASS_CLEAR.
     bool inpassClear = false;
+    // A pass whose targets are switched for other targets that only get cleared, then switched
+    // back, stays open across that visit instead of being stored and loaded again (C2). swtor: on.
+    // D9MT_KEEP_PASS_OVER_CLEAR_VISIT.
+    bool keepPassOverClearVisit = false;
   };
 
   // The fields' values of an app profile.
@@ -39,6 +43,7 @@ namespace dxvk {
     p.id = id;
     p.staticBuffersDirect = id == AppProfileId::Swtor;
     p.inpassClear         = id == AppProfileId::Swtor;
+    p.keepPassOverClearVisit = id == AppProfileId::Swtor;
     return p;
   }
 
@@ -107,15 +112,18 @@ namespace dxvk {
       + "exe " + (exe.empty() ? "unknown" : exe) + ")";
   }
 
-  // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on`,
-  // with ` (D9MT_<FIELD>)` after a value its override set.
+  // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on,
+  // keepPassOverClearVisit on`, with ` (D9MT_<FIELD>)` after a value its override set.
   inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect,
-                                          AppProfileOverride inpassClear = AppProfileOverride::Unset) {
+                                          AppProfileOverride inpassClear = AppProfileOverride::Unset,
+                                          AppProfileOverride keepPassOverClearVisit = AppProfileOverride::Unset) {
     return std::string("d9mt: app profile fields: staticBuffersDirect ")
       + (p.staticBuffersDirect ? "on" : "off")
       + (staticBuffersDirect == AppProfileOverride::Used ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "")
       + ", inpassClear " + (p.inpassClear ? "on" : "off")
-      + (inpassClear == AppProfileOverride::Used ? " (D9MT_INPASS_CLEAR)" : "");
+      + (inpassClear == AppProfileOverride::Used ? " (D9MT_INPASS_CLEAR)" : "")
+      + ", keepPassOverClearVisit " + (p.keepPassOverClearVisit ? "on" : "off")
+      + (keepPassOverClearVisit == AppProfileOverride::Used ? " (D9MT_KEEP_PASS_OVER_CLEAR_VISIT)" : "");
   }
 
 }

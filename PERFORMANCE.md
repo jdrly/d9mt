@@ -397,7 +397,8 @@ them in `<game>_d3d9.log`.
   `clrPass`), `clrViewFull` (color clears through the part-surface path whose rect covers the whole mip
   level: a pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
   (part-surface depth/stencil clears: a draw), `clrRectDsIn` (of them, those drawn inside the open
-  pass under the app profile's `inpassClear`, #129; the rest end the pass);
+  pass under the app profile's `inpassClear`, #129; the rest end the pass), `visitKept` (visits to other
+  targets that only cleared them, across which the open pass stayed open, `keepPassOverClearVisit`);
 - the lock waits, as the second's totals: `lockCs` and `lockGpu` as `count/ms` (buffer Locks that
   found the CS thread behind the buffer's last use, and those that found the GPU still had it
   after the flush and the sync; what the Lock found when it checked, with the whole call's time), `lockStatic` (of those, static buffers: DEFAULT pool, WRITEONLY without DYNAMIC),

@@ -123,6 +123,13 @@ command buffers that still complete; when nothing completes again, `D9MT-GPU-ERR
 A submit in the middle of a render pass: the pass ends, so its attachments are stored and loaded
 again (`docs/gpu-4k.md`, `docs/g1-early-commit.md`).
 
+**Visit**
+A temporary switch from an open render pass's targets to other targets, then back to the pass's
+own, with only clears and no draw on the other targets in between (a shadow map cleared for a
+light that casts nothing, say). With the
+app profile's `keepPassOverClearVisit` the open pass stays open across a visit; anything else on
+the visit's targets ends it first, as any target change did (`D9MT_KEEP_PASS_OVER_CLEAR_VISIT`).
+
 **G1, carry**
 G1 (“commit early, complete late”): a heuristic flush in the middle of a pass commits the work
 recorded before the open pass, without splitting the pass; that is a **carry**. The serial

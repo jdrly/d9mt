@@ -87,4 +87,6 @@ hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). The fields:
   `D9MT_STATIC_BUFFERS_DIRECT`, the `swtor-unlimited` variant;
 - `inpassClear` (#129): a part-surface depth/stencil clear of the open pass's own depth-stencil
   is drawn inside that pass; its override `D9MT_INPASS_CLEAR`. The device carries the app profile
-  (`MtlDevice::appProfile`) for the backend.
+  (`MtlDevice::appProfile`) for the backend;
+- `keepPassOverClearVisit`: an open pass stays open across a visit to other targets that only
+  clears them; its override `D9MT_KEEP_PASS_OVER_CLEAR_VISIT`.
