@@ -121,8 +121,10 @@ case "$VARIANT" in
   early) VARIANT_ENV=(D9MT_EARLY_COMMIT=always) ;;
   profile) VARIANT_ENV=(D9MT_PROFILE=1) ;;
   appswtor) VARIANT_ENV=(D9MT_APP_PROFILE=swtor) ;;
-  unlimited) VARIANT_ENV=(D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0) ;;
-  swtor-unlimited) VARIANT_ENV=(D9MT_APP_PROFILE=swtor D9MT_MEMORY_PROFILE=unlimited) ;;
+  # both lock-path variants clear an inherited dxvk.conf setting (d3d9.allowDirectBufferMapping,
+  # d3d9.forceDrawTimeBufferUpload) that would change the path behind the memory profile's back
+  unlimited) VARIANT_ENV=(D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0 DXVK_CONFIG= DXVK_CONFIG_FILE=) ;;
+  swtor-unlimited) VARIANT_ENV=(D9MT_APP_PROFILE=swtor D9MT_MEMORY_PROFILE=unlimited DXVK_CONFIG= DXVK_CONFIG_FILE=) ;;
   *) echo "FATAL: unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
 esac
 

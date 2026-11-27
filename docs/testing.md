@@ -54,7 +54,8 @@ builds are tested, so a base from before the runner existed works too.
   directly (a base without the field stages them), and is invalid unless every program logs both
   the app profile line and `D9MT: memory profile unlimited:` with the path its tree must take
   (`writeOnlyDirect on (demote after 2 in-place locks)` with the field, `writeOnlyDirect off`
-  without). `ci/gpu/run.sh` keeps its logs;
+  without). Both clear `DXVK_CONFIG` and `DXVK_CONFIG_FILE`, so an inherited `dxvk.conf` option
+  can't change the path behind the memory profile. `ci/gpu/run.sh` keeps its logs;
   `D9MT_AIR_MACOS=26` or `27` reaches the programs for the AIR target.
 - `CACHE=<dir>` puts d9mt's three caches (AIR cache, PSO archives, state cache) into a folder
   of the caller's, used as found and left behind (neither it nor `WORK` may lie inside the other). Without it every run starts
