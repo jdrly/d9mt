@@ -23,7 +23,7 @@ STATS = ('warn:  STATS t={t} fps=58.3 ms=17.1/20.2/25.0 slow33=0 slow50=0 | rp=1
          'splitClear=0.0 splitMiB=0.0 carried=0.0 carryRefused=0.0 carryCap=0.0 | flushChunk=1.0/0.0 '
          'flushRt=0.0/0.0 flushPresent=1.0/0.5 flushCapped=0.0 | constVs=120.0/80.0 constPs=40.0/10.0 upVs=3.0 '
          'upVsKiB=12.0 upVsPadKiB=0.5 | splitMiBSubmit=0.0 splitMiBOther=1.5 | clrOpen=1.0 clrRect=0.0 '
-         'oddPair=3.0/4.0 | at=12:00:01.250')
+         'oddPair=3.0/4.0 | lockCs=3/0.75ms lockStatic=1 | at=12:00:01.250')
 
 
 def prof(frame=512, draws=1536000, cmds=3072000, cs=True):
@@ -87,6 +87,9 @@ class Counters(unittest.TestCase):
         self.assertEqual(rows[('STATS', 'splitMiBOther')][:2], ['1.5', '1.5'])
         self.assertEqual(rows[('STATS', 'oddPair.2')][:2], ['4', '4'])
         self.assertNotIn(('STATS', 'constVs'), rows)
+        # a <count>/<ms>ms field other than wait=: the count, never the time
+        self.assertEqual(rows[('STATS', 'lockCs')][:2], ['3', '3'])
+        self.assertEqual(rows[('STATS', 'lockStatic')][:2], ['1', '1'])
 
     def test_repeat_and_text(self):
         b = self.log('b', prof(), STATS.format(t=2, draws=6000, att='on'))

@@ -16,7 +16,8 @@ counter, never a time:
 - STATS: the fields after the first "|", as printed (per frame of the render thread, the flush
   requests per Present as <name>.flushed and <name>.refused, constVs/constPs as .writes and
   .changed, any other a/b/... field numbered). Left out: t, fps, ms, slow33 and
-  slow50 before the first "|", attMs, the ms of wait=<count>/<ms>ms, and at=.
+  slow50 before the first "|", attMs, the ms of each <count>/<ms>ms field (wait=, lockCs=, …), and
+  at=.
 
 Output on stdout, tab-separated, a header first: line, counter, base, head, diff (head - base,
 or "differs" for a text field), and with --repeat the column repeat: "yes" when each side's second

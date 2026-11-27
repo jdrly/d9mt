@@ -365,7 +365,8 @@ argument.
 ## 4. Diagnostics
 
 `D9MT_PROFILE` (any value) turns on the `STATS`, `PACE`, `HITCH`, `COMPILE`, `RESTORE`, `XFER` and
-`PROF` lines. Unset, they cost one predictable branch per scope. Set `DXVK_LOG_PATH=<dir>` to get
+`PROF` lines. Unset, they cost one predictable branch per scope; the lock-wait counts add a few
+predictable branches on the paths that wait (WaitForResource, the CS sync), none per draw. Set `DXVK_LOG_PATH=<dir>` to get
 them in `<game>_d3d9.log`.
 
 **`STATS`**, once a second (fields in `driver/d3d9/d3d9_stats.h`):
@@ -395,7 +396,14 @@ them in `<game>_d3d9.log`.
   target's or not), `clrPending` (folded clears that got a pass of their own because nothing drew there; also in
   `clrPass`), `clrViewFull` (color clears through the part-surface path whose rect covers the whole mip
   level: a pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
-  (part-surface depth/stencil clears: a draw).
+  (part-surface depth/stencil clears: a draw);
+- the lock waits, as the second's totals: `lockCs` and `lockGpu` as `count/ms` (buffer Locks that
+  found the CS thread behind the buffer's last use, and those that found the GPU still had it
+  after the flush and the sync; what the Lock found when it checked, with the whole call's time), `lockStatic` (of those, static buffers: DEFAULT pool, WRITEONLY without DYNAMIC),
+  `demoted` (static buffers that went from direct mapping to staging), `readWait` as `count/ms`
+  (readbacks that found the CS thread or the GPU not done). The first line also holds the waits before the first Present. A buffer
+  on the staging path waits at Lock only for a pending readback (`ProcessVertices`): its cost is
+  the upload at Unlock (`flushBuf`) and the pass that upload ends (`splitXfer`).
 - **No GPU time**: MTL4 command buffers don't report it. Use the **Metal HUD**
   (`MTL_HUD_ENABLED=1`) for GPU time and for *Direct* vs *Composited* presentation, the check for
   every present-path change.

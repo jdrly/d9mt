@@ -751,7 +751,8 @@ namespace dxvk {
     bool WaitForResource(
       const MtlResource&            Resource,
             uint64_t                SequenceNumber,
-            DWORD                   MapFlags);
+            DWORD                   MapFlags,
+            stats::LockWait         What);
 
     HRESULT LockImage(
             D3D9CommonTexture* pResource,
@@ -823,7 +824,9 @@ namespace dxvk {
 
     void CreateConstantBuffers();
 
-    void SynchronizeCsThread(uint64_t SequenceNumber);
+    // Returns whether the CS thread was behind, so the call waited: with D9MT_PROFILE only
+    // (STATS lockCs=), false without.
+    bool SynchronizeCsThread(uint64_t SequenceNumber);
 
     void Flush(stats::FlushOrigin Origin);
     void FlushAndSync9On12();
@@ -1557,6 +1560,7 @@ namespace dxvk {
     xfer::Stats                     m_xferStats;       // D9MT_PROFILE: StretchRect / ColorFill paths
     stats::FlushCounts              m_flushCounts;     // D9MT_PROFILE: flush requests by origin (STATS)
     stats::ConstCounts              m_constCounts;     // D9MT_PROFILE: constant writes and uploads (STATS)
+    stats::LockWaitCounts           m_lockWaits;       // D9MT_PROFILE: lock waits and demotions (STATS)
     rstore::Api                     m_profApi = rstore::Api::Unknown;
     bool                            m_discardLogged = false;
 

@@ -21,6 +21,10 @@
 #           line, which needs a tree from d4391fb (#141) on) |
 #           appswtor (D9MT_APP_PROFILE=swtor: with a tree that has the app profile, every program's
 #           log must have "d9mt: app profile swtor (D9MT_APP_PROFILE"; an older tree ignores it)
+#           unlimited (D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0: the memory profile a
+#           Mac with 64 GB or more gets, so a smaller Mac runs its paths, the staging path of static
+#           buffers among them, whatever D9MT_WRITEONLY_DIRECT the caller has; every program's log
+#           must have "D9MT: memory profile unlimited:" with "writeOnlyDirect off")
 #           Any other D9MT_* variable of the caller reaches the programs, D9MT_AIR_MACOS too.
 # WORK      a scratch folder, removed and made again (default ${TMPDIR:-/tmp}/d9mt-hash). The
 #           engine clone, a new prefix, d9mt's caches and every log live there, nothing else is
@@ -110,6 +114,7 @@ case "$VARIANT" in
   early) VARIANT_ENV=(D9MT_EARLY_COMMIT=always) ;;
   profile) VARIANT_ENV=(D9MT_PROFILE=1) ;;
   appswtor) VARIANT_ENV=(D9MT_APP_PROFILE=swtor) ;;
+  unlimited) VARIANT_ENV=(D9MT_MEMORY_PROFILE=unlimited D9MT_WRITEONLY_DIRECT=0) ;;
   *) echo "FATAL: unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
 esac
 
@@ -230,7 +235,7 @@ if [ "$BUILD_ONLY" = 1 ]; then
 fi
 
 : > "$WORK/hashes.txt"
-noproof="" noprofile="" noapp="" notclean="" reruns="" rerundiffers=""
+noproof="" noprofile="" noapp="" nomem="" notclean="" reruns="" rerundiffers=""
 # run_program <name>: one run of it; sets rc, hashes and fails
 run_program() {
   local t=$1
@@ -265,6 +270,8 @@ for t in "${TESTS[@]}"; do
   { [ "$VARIANT" != appswtor ] || [ ! -f "$SRC/driver/mtl/mtl_app_profile.h" ]; } \
     || grep -q 'd9mt: app profile swtor (D9MT_APP_PROFILE' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
     || noapp+="$t "
+  [ "$VARIANT" != unlimited ] || grep -q 'D9MT: memory profile unlimited:.*, writeOnlyDirect off' "$WORK/logs/$t.err" "$WORK/logs/$t.out" 2>/dev/null \
+    || nomem+="$t "
   { [ "$rc" = 0 ] && [ "$fails" = 0 ]; } || notclean+="$t(rc=$rc,fails=$fails) "
 done
 stop_wine
@@ -310,6 +317,10 @@ if [ -n "$noprofile" ]; then
 fi
 if [ -n "$noapp" ]; then
   echo "[hash] INVALID: variant appswtor, but no 'd9mt: app profile swtor (D9MT_APP_PROFILE' line for: $noapp(the override didn't reach d9mt, so these runs aren't the swtor app profile)" >&2
+  exit 1
+fi
+if [ -n "$nomem" ]; then
+  echo "[hash] INVALID: variant unlimited, but no 'D9MT: memory profile unlimited:' line with 'writeOnlyDirect off' for: $nomem(the override didn't reach d9mt, so these runs aren't the unlimited memory profile on the staging path)" >&2
   exit 1
 fi
 if [ -n "$rerundiffers" ]; then
