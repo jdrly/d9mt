@@ -398,8 +398,8 @@ them in `<game>_d3d9.log`.
   level: a pass of their own), `clrRect` (part-surface color clears: a scissored draw), `clrRectDs`
   (part-surface depth/stencil clears: a draw);
 - the lock waits, as the second's totals: `lockCs` and `lockGpu` as `count/ms` (buffer Locks that
-  found the CS thread behind the buffer's last use, and those that found the GPU still had it:
-  flush, sync, wait; what the Lock found when it checked, so a wait that ends at once has ~0 ms), `lockStatic` (of those, static buffers: DEFAULT pool, WRITEONLY without DYNAMIC),
+  found the CS thread behind the buffer's last use, and those that found the GPU still had it
+  after the flush and the sync; what the Lock found when it checked, with the whole call's time), `lockStatic` (of those, static buffers: DEFAULT pool, WRITEONLY without DYNAMIC),
   `demoted` (static buffers that went from direct mapping to staging), `readWait` as `count/ms`
   (readbacks that found the CS thread or the GPU not done). The first line also holds the waits before the first Present. A buffer
   on the staging path waits at Lock only for a pending readback (`ProcessVertices`): its cost is

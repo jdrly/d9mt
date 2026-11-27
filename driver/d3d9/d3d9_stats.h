@@ -88,9 +88,10 @@
 //   lockCs=n/ms   the window's totals, not per frame: buffer Locks that found the CS thread
 //               behind the buffer's last use (the GPU no longer had it) and synced it, and the
 //               time of those Locks' waits
-//   lockGpu     ... buffer Locks that found the GPU still had the buffer: flush, CS sync and a
-//               wait on the GPU. Both are what the Lock found when it checked: if the CS thread
-//               or the GPU finishes just after, the wait returns at once and its time is ~0
+//   lockGpu     ... buffer Locks that found the GPU still had the buffer after the flush and
+//               the CS sync, then waited on it. Both are what the Lock found when it checked: if
+//               the CS thread or the GPU finishes just after, that part returns at once. The time
+//               is the whole WaitForResource call's (the CS sync's included)
 //   lockStatic  of lockCs and lockGpu, the Locks of static buffers (DEFAULT pool, WRITEONLY
 //               without DYNAMIC). A Lock that needs no wait doesn't count. A buffer on the
 //               staging path (BUFFER mode: writes go to a CPU copy that Unlock uploads,
