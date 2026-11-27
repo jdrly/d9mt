@@ -40,7 +40,9 @@ to 16 GB `medium`, up to 24 GB `high`, below 64 GB `ultra`, otherwise
 3 GB, otherwise 4 GB) and how much the driver keeps pooled
 (staging blocks, staging bytes in flight, spare buffer backings, idle
 upload-ring chunks, command allocators). `unlimited` behaves like the driver
-before profiles existed and is meant for A/B comparisons.
+before profiles existed (legacy pools, static buffers on a staging copy) and is meant for A/B
+comparisons; the `swtor` app profile maps static buffers directly there too
+(`D9MT_STATIC_BUFFERS_DIRECT`).
 
 ## Pipeline wait budget
 
@@ -136,7 +138,7 @@ passes have their own load/store rules).
 | `D9MT_AIR_FASTMATH` | off | `1` restores full fast-math in compiled shaders (faster, but can produce NaN specks) |
 | `D9MT_METALFX` | off | MetalFX spatial upscaling at present. **Currently broken** (selector bug; fix pending) |
 | `D9MT_APP_PROFILE` | the exe's | the app profile ([ADR-0008](adr/0008-tuned-for-swtor-behind-an-app-profile.md)): `swtor` or `generic`, in any case, instead of the one the game's exe selects (an exe named `swtor.exe`, in any case and any folder, selects `swtor`; every other exe `generic`). For tests and A/Bs. Empty is unset, and so is a value of 260 characters or more, which d9mt can't read. Any other value is ignored, with a warning that doesn't repeat it, and the exe decides. An exe path d9mt can't read (260 characters or longer, Windows' `MAX_PATH`) selects `generic`; `D9MT_APP_PROFILE=swtor` still works there. The `swtor` app profile differs from `generic` in one field, `staticBuffersDirect` (`D9MT_STATIC_BUFFERS_DIRECT` below). Read when Direct3DCreate9 creates d9mt's instance, and logged: `d9mt: app profile swtor (exe swtor.exe)`, with `D9MT_APP_PROFILE, ` before `exe` when the variable chose it (the exe's file name only, never its folder) |
-| `D9MT_STATIC_BUFFERS_DIRECT` | the app profile's (`swtor` 1, `generic` 0) | `1`: static buffers (DEFAULT pool, `D3DUSAGE_WRITEONLY` without `DYNAMIC`) are mapped directly on every memory profile, and go to a staging copy after `d9mt.writeOnlyDemoteLocks` in-place locks (2 unless set), as below 64 GB of RAM. It changes only `unlimited`, which otherwise stages them (and then also tracks the uses of DYNAMIC buffers, as the other profiles do). `0`: each memory profile's own choice. Any other value is ignored, with a warning. `d9mt.writeOnlyDirect`, `d9mt.writeOnlyDemoteLocks` and their variables win over it. Logged after the app profile: `d9mt: app profile fields: staticBuffersDirect on`, with ` (D9MT_STATIC_BUFFERS_DIRECT)` when the variable set it |
+| `D9MT_STATIC_BUFFERS_DIRECT` | the app profile's (`swtor` 1, `generic` 0) | `1`: static buffers (DEFAULT pool, `D3DUSAGE_WRITEONLY` without `DYNAMIC`) are mapped directly on every memory profile, and go to a staging copy after `d9mt.writeOnlyDemoteLocks` in-place locks (2 unless set), as below 64 GB of RAM. It changes only `unlimited`, which otherwise stages them (and then also tracks the uses of DYNAMIC buffers, as the other profiles do). `0`: each memory profile's own choice. Empty is unset, and so is a value of 260 characters or more, which d9mt can't read; any other value is ignored, with a warning. `d9mt.writeOnlyDirect`, `d9mt.writeOnlyDemoteLocks` and their variables win over it. Logged after the app profile: `d9mt: app profile fields: staticBuffersDirect on`, with ` (D9MT_STATIC_BUFFERS_DIRECT)` when the variable set it |
 | `D9MT_MEMORY_PROFILE`, `D9MT_WRITEONLY_DIRECT`, `D9MT_WRITEONLY_DEMOTE`, `D9MT_MEMSTATS`, `D9MT_LABELS` | | see the `dxvk.conf` table |
 | `DXVK_LOG_PATH`, `DXVK_LOG_LEVEL` | none, `info` | log directory and verbosity, as in DXVK |
 
