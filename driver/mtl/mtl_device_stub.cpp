@@ -219,7 +219,11 @@ namespace dxvk {
       env::getEnvVar("D9MT_INPASS_CLEAR"), m_appProfile.inpassClear);
     if (inpassHow == AppProfileOverride::Unknown)
       Logger::warn("d9mt: D9MT_INPASS_CLEAR is neither 0 nor 1, ignored");
-    Logger::info(appProfileFieldsLine(m_appProfile, staticHow, inpassHow));
+    const AppProfileOverride visitHow = applyAppProfileSwitch(
+      env::getEnvVar("D9MT_KEEP_PASS_OVER_CLEAR_VISIT"), m_appProfile.keepPassOverClearVisit);
+    if (visitHow == AppProfileOverride::Unknown)
+      Logger::warn("d9mt: D9MT_KEEP_PASS_OVER_CLEAR_VISIT is neither 0 nor 1, ignored");
+    Logger::info(appProfileFieldsLine(m_appProfile, staticHow, inpassHow, visitHow));
 
     // after the app profile: its staticBuffersDirect is one of the memory profile's inputs
     m_memProfile = resolveMemoryProfile(m_config, m_appProfile.staticBuffersDirect);

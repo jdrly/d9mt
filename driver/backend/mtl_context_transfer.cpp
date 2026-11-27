@@ -885,6 +885,7 @@ namespace dxvk::backend {
 
   void MtlContextImpl::emitGraphicsBarrier(MtlStageMask, MtlBarrierScope,
                                            MtlStageMask, MtlBarrierScope) {
+    realizeVisit();
     if (m_pass.active) {
       if (deferredPassesEnabled()) {
         auto* cmd = m_cmdChunk.append<wmtcmd_mtl4_barrier>(
@@ -1201,6 +1202,7 @@ namespace dxvk::backend {
                                       MtlResolveRegion region, MtlFormat format,
                                       MtlResolveMode color, MtlResolveMode stencil) {
     (void)stencil;
+    realizeVisit();   // never fold into an open pass a visit has left: its later draws would be resolved too
     auto* d = static_cast<MtlTextureImpl*>(dst.ptr());
     auto* s = static_cast<MtlTextureImpl*>(src.ptr());
     if (!d || !s)
@@ -2011,6 +2013,7 @@ namespace dxvk::backend {
     auto* q = static_cast<MtlBackendQuery*>(query.ptr());
     if (!q || q->type != MtlQueryType::Occlusion)
       return;
+    realizeVisit();
     ensureVisBuffer();
     q->visCpu  = m_visCpu;
     q->tracker = &m_device->submissions();
@@ -2081,6 +2084,7 @@ namespace dxvk::backend {
     if (q->type != MtlQueryType::Occlusion)
       return;
 
+    realizeVisit();
     if (removeActiveOcclusion(q))
       newVisSegment();
   }

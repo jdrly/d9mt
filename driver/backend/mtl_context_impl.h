@@ -287,6 +287,13 @@ namespace dxvk::backend {
 
     WmtCommandBuffer   m_cmdbuf;
     PendingPass        m_pass;
+    // The app profile's keepPassOverClearVisit (C2): while m_pass stays open, the targets bound
+    // after it, with the clears folded into them and no draw yet. Back on m_pass's targets, a
+    // visit that would be a skipped pass leaves m_pass open (resolveVisit); anything else ends
+    // m_pass first, and closePass turns the visit into the pending pass it would have been.
+    PendingPass        m_visit;
+    bool               m_visitPending  = false;
+    uint32_t           m_visitFeedback = 0u;
     uint32_t           m_passFeedbackLoop = 0u;
 
     CmdChunk           m_cmdChunk;
@@ -478,6 +485,7 @@ namespace dxvk::backend {
     // D9MT_DEFERRED (deferred passes decide their own load/store actions).
     bool         m_attOpt = false;
     bool         m_inpassClear = false;   // the app profile's inpassClear, without D9MT_DEFERRED
+    bool         m_keepPassOverVisit = false;   // the app profile's keepPassOverClearVisit, with the attachment optimization
     bool         m_clearDiscard = false;  // a clear that ends a pass discards what it clears (D9MT_CLEAR_DISCARD=0: off)
     uint64_t     m_attEpoch = 0u;
     uint8_t      m_attWriteMask = 0u;   // aspects the current blend/depth-stencil state writes
@@ -485,7 +493,15 @@ namespace dxvk::backend {
     bool         m_attTraceOn = false;
     uint32_t     m_attFrame = 1u;       // 1-based frame counter for the read hint (attopt::readRecently)
     uint32_t     m_apiTag = 0u;         // D9MT_PROFILE: rstore::Api of the commands being recorded
-    bool         createPassEncoder(bool early);
+    // dryRun: decide the load and store actions of a pass with no draws and nothing recorded
+    // (a visit), create no encoder and restore nothing; true when it would need a pass.
+    bool         createPassEncoder(bool early, bool dryRun = false);
+    bool         resolveVisit();
+    // A pending visit becomes the pending pass it would have been: the open pass ends first.
+    void         realizeVisit();
+    static bool  foldClear(PendingPass& p, const Rc<MtlTextureView>& view, MtlAspectMask clear,
+                           const MtlClearValue& value);
+    uint32_t     m_visitClears = 0u;   // D9MT_PROFILE: the clears folded into the visit (m_splitClears once it is realized)
     void         attApplyAfter();
     uint8_t      attComputeWriteMask() const;
     bool         attSampled(const MtlTexture* img) const;

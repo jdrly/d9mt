@@ -13,7 +13,7 @@
 //     | constVs=3100.0/2900.0 constPs=1500.0/1400.0 upVs=1500.0 upVsKiB=270.0 upVsPadKiB=6.0
 //     upPs=1500.0 upPsKiB=94.0 upPsPadKiB=12.0 | splitMiBSubmit=315.0 splitMiBXfer=0.0
 //     splitMiBClear=105.1 splitMiBOther=0.0 | clrOpen=2.0 clrPending=1.0 clrViewFull=0.0
-//     clrRect=0.0 clrRectDs=0.0 clrRectDsIn=0.0 | lockCs=0/0.00ms lockGpu=0/0.00ms lockStatic=0
+//     clrRect=0.0 clrRectDs=0.0 clrRectDsIn=0.0 visitKept=0.0 | lockCs=0/0.00ms lockGpu=0/0.00ms lockStatic=0
 //     demoted=0 readWait=0/0.00ms
 //
 //   t           seconds since the first Present
@@ -87,6 +87,9 @@
 //   clrRectDs   ... part-surface depth/stencil clears: a draw
 //   clrRectDsIn ... of them drawn inside the open pass, which goes on (#129, inpassClear); the
 //               rest end the pass and get a pass of their own
+//   visitKept   per frame: passes kept open across a visit to other targets that drew nothing,
+//               only cleared them or not even that (keepPassOverClearVisit); each saves a store
+//               and a load of the pass's attachments
 //   lockCs=n/ms   the window's totals, not per frame: buffer Locks that found the CS thread
 //               behind the buffer's last use (the GPU no longer had it) and synced it, and the
 //               time of those Locks' waits
@@ -333,11 +336,11 @@ namespace dxvk::stats {
       constexpr double MiB = 1.0 / double(1u << 20);
       std::snprintf(buf, sizeof(buf),
         " | splitMiBSubmit=%.1f splitMiBXfer=%.1f splitMiBClear=%.1f splitMiBOther=%.1f"
-        " | clrOpen=%.1f clrPending=%.1f clrViewFull=%.1f clrRect=%.1f clrRectDs=%.1f clrRectDsIn=%.1f",
+        " | clrOpen=%.1f clrPending=%.1f clrViewFull=%.1f clrRect=%.1f clrRectDs=%.1f clrRectDsIn=%.1f visitKept=%.1f",
         double(d[rstats::SplitBytesSubmit]) / rf * MiB, double(d[rstats::SplitBytesXfer]) / rf * MiB,
         double(d[rstats::SplitBytesClear]) / rf * MiB, double(d[rstats::SplitBytesOther]) / rf * MiB,
         pf(rstats::ClearsOpen), pf(rstats::ClearsPending), pf(rstats::ClearsViewFull),
-        pf(rstats::ClearsRect), pf(rstats::ClearsRectDs), pf(rstats::ClearsRectDsIn));
+        pf(rstats::ClearsRect), pf(rstats::ClearsRectDs), pf(rstats::ClearsRectDsIn), pf(rstats::VisitsKept));
       line += buf;
 
       // Lock waits: the window's totals, not per frame (a few in a second are worth seeing).

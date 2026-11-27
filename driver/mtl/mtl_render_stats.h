@@ -50,6 +50,7 @@ namespace dxvk::rstats {
     ClearsRect,      // part-surface color clears: a scissored draw
     ClearsRectDs,    // part-surface depth/stencil clears: a draw
     ClearsRectDsIn,  //   ... of them drawn inside the open pass, which goes on (#129, inpassClear)
+    VisitsKept,      // passes kept open across a visit to other targets that only cleared them (keepPassOverClearVisit)
     Count
   };
 
