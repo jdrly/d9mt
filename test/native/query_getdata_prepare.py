@@ -8,7 +8,7 @@ child, the device, mtl/mtl_context.h) as forwarders to test/native/query_fakes.h
 compiles the driver's own query code. With <control>, plants one fault in the copied .cpp that
 the test must catch:
   gpu-query      TIMESTAMPFREQ creates a GPU query, so its answer waits on the GPU
-  endable        Issue(END) records an end for TIMESTAMPFREQ, so its answer waits on the render thread
+  endable        Issue(END) records an end for TIMESTAMPFREQ, so its answer waits on the CS thread
   no-frequency   GetData answers 0 instead of the device's timestamp frequency
 Each control's anchor must occur exactly once in the .cpp, or nothing is written and it exits 2.
 """

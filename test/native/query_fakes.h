@@ -4,7 +4,7 @@
 // this one in place of d3d9_device_child.h, d3d9_device.h and mtl/mtl_context.h.
 //
 // The fakes are hostile on purpose: every GPU query and event they create stays pending, every
-// query end the device records stays unexecuted (the real device records it for later), and a
+// query end the device records stays unexecuted (the real device leaves it to the CS thread), and a
 // carried flush is always open. A query whose answer depends on any of them never reaches S_OK.
 #pragma once
 
@@ -202,8 +202,8 @@ namespace dxvk {
     void Flush(stats::FlushOrigin) { counts.flushes++; }
     void ConsiderFlush(GpuFlushType, stats::FlushOrigin) { counts.considerFlushes++; }
 
-    // The real device records the query's Begin and End for the render thread (EmitCs), which
-    // runs them later; here they never run.
+    // The real device records the query's Begin and End for the CS thread (EmitCs), which runs
+    // them later; here they never run.
     void Begin(D3D9Query*) { counts.begins++; }
     void End(D3D9Query*) { counts.ends++; }
 

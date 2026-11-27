@@ -28,11 +28,12 @@ build "$OUT/driver"
 
 for c in gpu-query endable no-frequency; do
   build "$OUT/$c" "$c"
-  # A control must fail on a check, not crash: a crash would pass for a caught fault.
+  # A control must fail a check and finish (exit 3), not crash: a crash, a sanitizer's exit
+  # included, would pass for a caught fault.
   rc=0; "$OUT/$c/qgt" > "$OUT/$c.log" 2>&1 || rc=$?
   failed=$(grep -c '^FAIL' "$OUT/$c.log" || true)
-  if [ "$rc" != 1 ] || [ "$failed" = 0 ]; then
-    echo "control $c: exit $rc with $failed failed checks, want exit 1 and a failed check ($OUT/$c.log)"
+  if [ "$rc" != 3 ] || [ "$failed" = 0 ]; then
+    echo "control $c: exit $rc with $failed failed checks, want exit 3 and a failed check ($OUT/$c.log)"
     exit 1
   fi
   echo "control $c: the test fails, as it must ($failed failed checks)"

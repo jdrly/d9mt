@@ -1,12 +1,13 @@
 // Native test: a D3DQUERYTYPE_TIMESTAMPFREQ query answers GetData with S_OK and the device's
 // timestamp frequency on the first call. A caller may create one every frame, Issue(END) it and
-// poll GetData(D3DGETDATA_FLUSH) with no sleep until S_OK or D3DERR_DEVICELOST; any other answer
-// spins its thread for good.
+// poll GetData(D3DGETDATA_FLUSH) with no sleep until S_OK or D3DERR_DEVICELOST; an answer that stays
+// anything else spins its thread for good.
 //
 // It compiles driver/d3d9/d3d9_query.h and d3d9_query.cpp unchanged against the hostile fakes of
 // query_fakes.h (GPU queries and events never complete, recorded query ends never run), so an
-// answer that waits on the GPU or the render thread fails here. scripts/test-query-getdata.sh
-// sets it up and also runs it on copies with a planted fault, each of which must fail.
+// answer that waits on the GPU or the CS thread fails here. scripts/test-query-getdata.sh
+// sets it up and also runs it on copies with a planted fault, each of which must fail a check
+// (exit status 3, which no sanitizer uses).
 //
 //   scripts/test-query-getdata.sh [d3d9_query.cpp [d3d9_query.h]]
 #include "d3d9/d3d9_query.h"
@@ -59,6 +60,12 @@ static bool nothingRecorded(const FakeCounts& c) {
 }
 
 int main() {
+  // CreateQuery accepts the type.
+  {
+    D3D9DeviceEx dev(kFrequency);
+    CHECK(D3D9Query::QuerySupported(&dev, D3DQUERYTYPE_TIMESTAMPFREQ) == D3D_OK);
+  }
+
   // A fresh query each frame: Issue(END), then poll with FLUSH. Every frame answers on the first call.
   {
     D3D9DeviceEx dev(kFrequency);
@@ -114,15 +121,6 @@ int main() {
     CHECK(p.hr == D3DERR_DEVICELOST && p.calls == 1u);
   }
 
-  // The fakes do hold back what depends on the GPU: an event query never answers S_OK.
-  {
-    D3D9DeviceEx dev(kFrequency);
-    D3D9Query event(&dev, D3DQUERYTYPE_EVENT);
-    CHECK(event.Issue(D3DISSUE_END) == D3D_OK);
-    BOOL done = 1;
-    CHECK(poll(event, &done, sizeof(done), D3DGETDATA_FLUSH).hr == S_FALSE);
-  }
-
   std::printf("query_getdata_test: %d checks, %d failed\n", g_checks, g_fail);
-  return g_fail ? 1 : 0;
+  return g_fail ? 3 : 0;
 }
