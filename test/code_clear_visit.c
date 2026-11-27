@@ -8,9 +8,9 @@
  * Every frame: six 128x128 targets S1..S6 (each with a D24S8 surface) are drawn YELLOW, each in a
  * pass of its own. Then the scene pass (GREY), and in it:
  *  V1. a visit that clears S1 (BLUE, depth, stencil); back: a RED cell;
- *  V2. a cell that samples S2 (YELLOW); S2 unbound; a visit that clears S2 (BLUE); back: S2 bound
- *      again, a cell that samples it (BLUE). The first cell must stay YELLOW: its draw comes
- *      before the clear;
+ *  V2. a cell that samples S2 (YELLOW); S2 unbound; a visit that clears S2 (BLUE); back: a RED
+ *      cell, then S2 bound again and sampled over it (BLUE). The first cell must stay YELLOW: its
+ *      draw comes before the clear, which reaches memory only when S2 is bound again;
  *  V3. as V2 with S3 still bound for sampling when the visit ends;
  *  V4. a visit that clears S4 (BLUE) and draws MAGENTA in its middle; back: a RED cell;
  *  V5. a visit that clears S5 (BLUE), then another target (S6's surface pair is not used: a
@@ -106,12 +106,13 @@ static void frame(int n) {
   scene();
   colourCell(RED, 20, 20);
 
-  /* V2 */
+  /* V2: back on the scene, a draw before S2 is bound again, so the visit ends on the scene */
   sampleCell(2, 120, 20);
   unbind();
   visit(2);
   IDirect3DDevice9_Clear(t_dev, 0, NULL, D3DCLEAR_TARGET, 0xff000000u | BLUE, 1.0f, 0);
   scene();
+  colourCell(RED, 220, 20);
   sampleCell(2, 220, 20);
   unbind();
 
@@ -168,7 +169,7 @@ static void frame(int n) {
       { 560,  60, RED,     "V4: the scene after a visit that drew" },
       {  60, 160, RED,     "V5: the scene after a visit and another target" },
       { 160, 160, RED,     "V6: the scene after a visit without a clear" },
-      { 300, 300, GREY,    "the scene between cells" },
+      { 310, 300, GREY,    "the scene between cells" },
       {  60, 280, BLUE,    "S1 cleared by its visit" },
       { 160, 280, MAGENTA, "S4: drawn in its visit" },
       { 125, 245, BLUE,    "S4: cleared by its visit" },
