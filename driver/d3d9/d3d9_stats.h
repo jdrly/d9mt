@@ -85,17 +85,20 @@
 //   clrRect     ... part-surface color clears (D3D9 Clear with rects or a smaller viewport, a
 //               part-surface ColorFill): a scissored draw
 //   clrRectDs   ... part-surface depth/stencil clears: a draw
-//   lockCs=n/ms   the window's totals, not per frame: buffer Locks that waited for the CS
-//               thread to run the buffer's last use (the GPU no longer had it), and the time
-//   lockGpu     ... buffer Locks the GPU still had: flush, CS sync and a block on the GPU
+//   lockCs=n/ms   the window's totals, not per frame: buffer Locks that found the CS thread
+//               behind the buffer's last use (the GPU no longer had it) and synced it, and the
+//               time of those Locks' waits
+//   lockGpu     ... buffer Locks that found the GPU still had the buffer: flush, CS sync and a
+//               wait on the GPU. Both are what the Lock found when it checked: if the CS thread
+//               or the GPU finishes just after, the wait returns at once and its time is ~0
 //   lockStatic  of lockCs and lockGpu, the Locks of static buffers (DEFAULT pool, WRITEONLY
 //               without DYNAMIC). A Lock that needs no wait doesn't count. A buffer on the
 //               staging path (BUFFER mode: writes go to a CPU copy that Unlock uploads,
 //               flushBuf=) waits at Lock only for a pending readback (ProcessVertices)
 //   demoted     static buffers that went from direct mapping to the staging path
 //               (d9mt.writeOnlyDemoteLocks)
-//   readWait    readbacks that waited (texture locks, UpdateTexture sources, a buffer copied
-//               at draw), and the time
+//   readWait    readbacks that found the CS thread or the GPU not done (texture locks,
+//               UpdateTexture sources, a buffer copied at draw), and the time
 //               The first line's lock fields also hold what came before the first Present.
 //
 // When the second had restores, a RESTORE line follows with what they were
@@ -194,8 +197,8 @@ namespace dxvk::stats {
   // UpdateTexture source, a buffer copied at draw).
   enum class LockWait : uint32_t { Buffer, StaticBuffer, Readback };
 
-  // The lock waits for STATS (lockCs= … readWait=): WaitForResource calls that waited, by what
-  // they waited for. A buffer lock waits in one of two ways: it syncs the CS thread up to the
+  // The lock waits for STATS (lockCs= … readWait=): WaitForResource calls that found something to
+  // wait for, by what for. A buffer lock waits in one of two ways: it syncs the CS thread up to the
   // buffer's last use (cs), or the GPU still has the buffer and it flushes, syncs and blocks
   // (gpu). Calls that found nothing to wait for don't count. Also the static buffers demoted to
   // staging (the memory profile's writeOnlyDemoteLocks). Counted and copied under the device
