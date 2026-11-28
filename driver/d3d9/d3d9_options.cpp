@@ -120,7 +120,7 @@ namespace dxvk {
     if (this->flushCapStrong && !this->reproducibleCommandStream)
       Logger::info("D9MT: flush cap ImplicitStrongHint (app profile flushCap): weak flush hints don't submit");
     else if (this->flushCapStrong)
-      Logger::info("D9MT: flush cap: d3d9.reproducibleCommandStream caps every heuristic flush instead");
+      Logger::info("D9MT: flush cap off (d3d9.reproducibleCommandStream caps every heuristic flush instead)");
   }
 
 }

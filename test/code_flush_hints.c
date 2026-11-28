@@ -9,7 +9,11 @@
  *      kept), which fill CS chunks: chunk-full hints;
  *  H2. another depth-stencil surface set, a cell drawn with it, and the scene's set again;
  *  H3. a dynamic texture locked with DISCARD and drawn, four times, a colour each time;
- *  H4. a dynamic vertex buffer locked with DISCARD and drawn, four times, at a place each time;
+ *  H4. a staged vertex buffer (DEFAULT pool, neither DYNAMIC nor WRITEONLY: its unlock uploads
+ *      the locked range and sends the buffer hint) locked with NOOVERWRITE and drawn, four times,
+ *      at a place each time;
+ *  H5. a new WRITEONLY vertex buffer (mapped directly, its uses tracked) drawn, then locked with
+ *      DONOTWAIT until the lock succeeds (gives up after 5 s): each busy poll sends the wait hint;
  *  then a render target texture drawn BLUE and sampled into a cell (strong hints), and an event
  *  query polled with D3DGETDATA_FLUSH (gives up after 5 s).
  * Frame 1 reads the back buffer back and prints a FAIL line for each pixel that differs. */
@@ -35,7 +39,7 @@ static const unsigned kDyn[4] = { RED, GREEN, YELLOW, CYAN };
 
 static IDirect3DSurface9 *backBuffer, *autoDs, *sceneRt, *sceneDs, *ds2, *sys, *rttS;
 static IDirect3DTexture9 *dynTex, *rttTex;
-static IDirect3DVertexBuffer9 *dynVb;
+static IDirect3DVertexBuffer9 *stagedVb;
 static IDirect3DQuery9 *event;
 static int failed;
 
@@ -106,21 +110,55 @@ static void frame(int n) {
   IDirect3DDevice9_SetTexture(t_dev, 0, NULL);
   IDirect3DDevice9_SetPixelShader(t_dev, t_ps_color);
 
-  /* H4: a dynamic vertex buffer locked and drawn four times */
+  /* H4: a staged vertex buffer locked and drawn four times, a range each time */
   for (int k = 0; k < 4; k++) {
     struct TVertex *v;
     const float x0 = cx(340 + k * 70), x1 = cx(400 + k * 70), y0 = cy(240), y1 = cy(180);
-    T_CHECK(IDirect3DVertexBuffer9_Lock(dynVb, 0, 4 * sizeof(struct TVertex), (void **)&v, D3DLOCK_DISCARD));
+    const UINT off = (UINT)((n - 1) % 2 * 4 + k) * 4u * sizeof(struct TVertex);
+    T_CHECK(IDirect3DVertexBuffer9_Lock(stagedVb, off, 4 * sizeof(struct TVertex), (void **)&v, D3DLOCK_NOOVERWRITE));
     v[0] = (struct TVertex){ x0, y1, 0.5f, 0.0f, 0.0f };
     v[1] = (struct TVertex){ x1, y1, 0.5f, 1.0f, 0.0f };
     v[2] = (struct TVertex){ x0, y0, 0.5f, 0.0f, 1.0f };
     v[3] = (struct TVertex){ x1, y0, 0.5f, 1.0f, 1.0f };
-    T_CHECK(IDirect3DVertexBuffer9_Unlock(dynVb));
+    T_CHECK(IDirect3DVertexBuffer9_Unlock(stagedVb));
     colour(kDyn[3 - k]);
-    IDirect3DDevice9_SetStreamSource(t_dev, 0, dynVb, 0, sizeof(struct TVertex));
-    T_CHECK(IDirect3DDevice9_DrawPrimitive(t_dev, D3DPT_TRIANGLESTRIP, 0, 2));
+    IDirect3DDevice9_SetStreamSource(t_dev, 0, stagedVb, 0, sizeof(struct TVertex));
+    T_CHECK(IDirect3DDevice9_DrawPrimitive(t_dev, D3DPT_TRIANGLESTRIP, off / sizeof(struct TVertex), 2));
   }
   IDirect3DDevice9_SetStreamSource(t_dev, 0, NULL, 0, 0);
+
+  /* H5: a busy buffer polled with DONOTWAIT */
+  {
+    IDirect3DVertexBuffer9 *vb;
+    struct TVertex *v;
+    T_CHECK(IDirect3DDevice9_CreateVertexBuffer(t_dev, 4 * sizeof(struct TVertex), D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &vb, NULL));
+    T_CHECK(IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&v, 0));
+    v[0] = (struct TVertex){ cx(340), cy(400), 0.5f, 0.0f, 0.0f };
+    v[1] = (struct TVertex){ cx(400), cy(400), 0.5f, 1.0f, 0.0f };
+    v[2] = (struct TVertex){ cx(340), cy(340), 0.5f, 0.0f, 1.0f };
+    v[3] = (struct TVertex){ cx(400), cy(340), 0.5f, 1.0f, 1.0f };
+    T_CHECK(IDirect3DVertexBuffer9_Unlock(vb));
+    colour(MAGENTA);
+    IDirect3DDevice9_SetStreamSource(t_dev, 0, vb, 0, sizeof(struct TVertex));
+    T_CHECK(IDirect3DDevice9_DrawPrimitive(t_dev, D3DPT_TRIANGLESTRIP, 0, 2));
+    IDirect3DDevice9_SetStreamSource(t_dev, 0, NULL, 0, 0);
+    const DWORD start = GetTickCount();
+    int busy = 0;
+    HRESULT hr;
+    while ((hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&v, D3DLOCK_DONOTWAIT)) == D3DERR_WASSTILLDRAWING) {
+      busy++;
+      if (GetTickCount() - start > 5000u) {
+        printf("FAIL H5: the DONOTWAIT lock still busy after 5 s (%d polls)\n", busy);
+        failed++;
+        break;
+      }
+    }
+    if (hr == D3D_OK)
+      IDirect3DVertexBuffer9_Unlock(vb);
+    else if (hr != D3DERR_WASSTILLDRAWING) { printf("FAIL H5: Lock hr=%08lx\n", (unsigned long)hr); failed++; }
+    if (n == 1) printf("CF H5: %d busy polls\n", busy);
+    IDirect3DVertexBuffer9_Release(vb);
+  }
 
   /* a render target texture drawn and sampled (strong hints) */
   IDirect3DDevice9_SetRenderTarget(t_dev, 0, rttS);
@@ -175,6 +213,7 @@ static void frame(int n) {
       px[np++] = (struct Probe){ 370 + k * 70, 210, kDyn[3 - k], what[12 + k] };
     }
     px[np++] = (struct Probe){ 370, 290, BLUE, "the render target texture" };
+    px[np++] = (struct Probe){ 370, 370, MAGENTA, "H5: drawn from the polled buffer" };
     px[np++] = (struct Probe){ 560, 400, GREY, "the scene away from the cells" };
 
     D3DLOCKED_RECT lr;
@@ -207,7 +246,7 @@ int main(void) {
   T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 4, 4, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &dynTex, NULL));
   T_CHECK(IDirect3DDevice9_CreateTexture(t_dev, 64, 64, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &rttTex, NULL));
   rttS = t_level0(rttTex);
-  T_CHECK(IDirect3DDevice9_CreateVertexBuffer(t_dev, 4 * sizeof(struct TVertex), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &dynVb, NULL));
+  T_CHECK(IDirect3DDevice9_CreateVertexBuffer(t_dev, 8 * 4 * sizeof(struct TVertex), 0, 0, D3DPOOL_DEFAULT, &stagedVb, NULL));
   T_CHECK(IDirect3DDevice9_CreateQuery(t_dev, D3DQUERYTYPE_EVENT, &event));
   T_CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(t_dev, W, H, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, &sys, NULL));
   return t_loop(frame);

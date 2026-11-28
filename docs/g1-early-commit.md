@@ -329,9 +329,12 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   set (upstream c2f9dfca `src/d3d9/d3d9_device.cpp:9118-9125`, `src/dxvk/dxvk_device.cpp:719-731`).
   Weak hints then never submit, unless their estimated cost reaches `MaxCostPerSubmission`.
 - **d9mt** keeps `ImplicitWeakHint`, the cap of non-tiling GPUs (`GetMaxFlushType`,
-  `driver/d3d9/d3d9_device.cpp`). `d3d9.reproducibleCommandStream` still caps at
-  `ExplicitFlush` and takes precedence over everything below.
-- **Why the default stays weak:** no A/B has shown that the strong cap is faster on Apple GPUs,
+  `driver/d3d9/d3d9_device.cpp`), for every game but SWTOR. The `swtor` app profile caps at
+  `ImplicitStrongHint` (`flushCap`, #143), as the maintainer's exception to ADR-0007: on the M1
+  at 4K, a GPU-bound loop, the strong cap was 1.8 % faster, and the maintainer's M5 Max showed
+  fewer command buffers and split reloads at no CPU or power cost. `d3d9.reproducibleCommandStream`
+  still caps at `ExplicitFlush` and takes precedence over everything below.
+- **Why the generic default stays weak:** no A/B has shown that the strong cap is faster on Apple GPUs,
   and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
   cost +35–64 % in "wait every frame" by starving an idle GPU (§2). The strong cap is the same
   kind of change: a later GPU start for the work recorded before the next strong hint.
@@ -355,8 +358,8 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
 
 ### The switch
 - The app profile's `flushCap` (ADR-0008; `swtor` on, `generic` off; #143) sets the cap to
-  `ImplicitStrongHint`, and `D9MT_FLUSH_CAP=0|1` overrides it (any other value is ignored with a
-  warning). Off keeps `ImplicitWeakHint`. The device's `D3D9Options` reads the field once at
+  `ImplicitStrongHint`, and `D9MT_FLUSH_CAP=0|1` overrides it (empty, or 260 characters or more,
+  is unset; any other value is ignored with a warning). Off keeps `ImplicitWeakHint`. The device's `D3D9Options` reads the field once at
   device creation (`flushCapStrong`), and `GetMaxFlushType` tests that bool after
   `reproducibleCommandStream`. The read stays out of `d3d9_device.cpp`: an env read there
   changed GCC's code for other functions of that file. The same DLL serves both arms of an A/B, so they compare the same code

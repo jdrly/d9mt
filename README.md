@@ -62,7 +62,7 @@ on macOS 27.
   [#67](https://github.com/jdrly/d9mt/pull/67)
 
 Three switches merged on 2026-10-30 and stay off by default until testers' measurements back
-them. Under [ADR-0007](docs/adr/0007-correctness-and-representative-performance.md), a change made for speed
+them. The first is now on for SWTOR alone, as the maintainer's exception (below). Under [ADR-0007](docs/adr/0007-correctness-and-representative-performance.md), a change made for speed
 stays behind a switch until it shows a representative gain, a comparable before/after
 game session and identical rendering on other Mac generations, a slower and a
 fanless one among them.
