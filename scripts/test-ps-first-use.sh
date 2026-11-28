@@ -21,7 +21,7 @@ V2="$(cd "$(dirname "$0")/.." && pwd)"
 : "${WORK:?set WORK to a durable directory}"
 # WORK must be a directory this script can make and enter: each arm removes its own folder in it.
 mkdir -p "$WORK" || { echo "WORK=$WORK: can't make the directory" >&2; exit 2; }
-WORK="$(cd "$WORK" && pwd)" || { echo "WORK: can't enter the directory" >&2; exit 2; }
+WORK="$(cd "$WORK" && pwd -P)" || { echo "WORK: can't enter the directory" >&2; exit 2; }   # physical: a link to / is /
 [ -n "$WORK" ] && [ "$WORK" != / ] && [ -d "$WORK" ] || { echo "WORK: not a usable directory" >&2; exit 2; }
 fail=0 first_hashes=
 # The swtor app profile's own values (mtl_app_profile.h) and what they give.

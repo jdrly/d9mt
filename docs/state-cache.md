@@ -540,11 +540,12 @@ index, ring; plain C++, unit-tested natively).
     which are cheap (they share IR, §1.2).
   - With the app profile's `psPrefetch` off (the `swtor` app profile), no
     pixel shader's function is made at creation. A recorded pipeline's
-    linked PS function is made by whichever asks first: the prewarm thread
-    runs it (its AIR lookup, or compile on a miss, and `newLibrary`; its
-    Phase A too when `psIrPrefetch` is off as well), or a draw queues it and
-    the prewarm waits for it. A pixel shader no recorded pipeline names is
-    made at its first draw (`D9MT_PS_PREFETCH`, `D9MT_PS_IR_PREFETCH`).
+    linked PS function is run by the first thread that claims its task: the
+    prewarm thread (`tryRun`), a compile worker after a draw queued it, or
+    the CS thread waiting for it. That thread does its AIR lookup (a compile
+    on a miss) and `newLibrary`, and its Phase A too when `psIrPrefetch` is
+    off as well; the others wait. A pixel shader no recorded pipeline names
+    is made at its first draw (`D9MT_PS_PREFETCH`, `D9MT_PS_IR_PREFETCH`).
 - **PSO archives**: unchanged in the bridge.
   - Prewarm builds use the same compiler, so they are archive hits when
     possible and are captured by the serializer.
