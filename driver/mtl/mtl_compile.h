@@ -343,7 +343,9 @@ namespace dxvk {
       take(g_skips, nSkip);
       take(g_budgetHits, nBudget);
 
-      if (!(nSh | nShared | nPso | nWait | nSkip | nBudget | nPhaseA) && dtMs < 33.4)
+      // phaseA's count and time are taken one after the other, so a run that ends between them
+      // leaves its time alone in this frame: print that too.
+      if (!(nSh | nShared | nPso | nWait | nSkip | nBudget | nPhaseA) && msPhaseA == 0.0 && dtMs < 33.4)
         return;
 
       // Render-thread frames: a long one is part of a hitch, so make it

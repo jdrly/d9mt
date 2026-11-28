@@ -41,8 +41,9 @@ namespace dxvk {
     // draw (or the state cache's prewarm) first asks for it (C5). swtor: off. D9MT_PS_PREFETCH.
     bool psPrefetch = true;
     // A pixel shader's Phase A (SM3 to IR) is queued when the shader is created. Off, and with
-    // psPrefetch off, it runs when a function of the shader is first asked for (C5). swtor: off.
-    // D9MT_PS_IR_PREFETCH.
+    // psPrefetch off, it runs when a function of the shader is first asked for (C5). swtor: on, as
+    // generic: off, a first session's draws wait for Phase A in batches (7-8 frames over 16.7 ms
+    // in the M1's Sanctuary replay). For A/Bs: D9MT_PS_IR_PREFETCH.
     bool psIrPrefetch = true;
   };
 
@@ -54,7 +55,7 @@ namespace dxvk {
     p.inpassClear         = id == AppProfileId::Swtor;
     p.keepPassOverClearVisit = id == AppProfileId::Swtor;
     p.psPrefetch          = id != AppProfileId::Swtor;
-    p.psIrPrefetch        = id != AppProfileId::Swtor;
+    p.psIrPrefetch        = true;
     return p;
   }
 
@@ -133,7 +134,7 @@ namespace dxvk {
   }
 
   // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on,
-  // keepPassOverClearVisit on, psPrefetch off, psIrPrefetch off`, with ` (D9MT_<FIELD>)` after a
+  // keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on`, with ` (D9MT_<FIELD>)` after a
   // value its override set.
   inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect,
                                           AppProfileOverride inpassClear = AppProfileOverride::Unset,

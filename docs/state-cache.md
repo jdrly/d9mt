@@ -538,11 +538,12 @@ index, ring; plain C++, unit-tested natively).
   - After a bridge update the existing shader prefetch already recompiles
     all shaders at creation; the prewarm adds only the linked PS functions,
     which are cheap (they share IR, §1.2).
-  - With the app profile's `psPrefetch` off (and `psIrPrefetch` off), no
-    pixel shader is compiled at creation: the prewarm's linked PS function
-    is the shader's first, and runs its Phase A, AIR compile and
-    `newLibrary` on the prewarm thread. A pixel shader no recorded pipeline
-    names is compiled at its first draw (`D9MT_PS_PREFETCH`).
+  - With the app profile's `psPrefetch` off (the `swtor` app profile), no
+    pixel shader's function is compiled at creation: the prewarm's linked PS
+    function is the shader's first, and runs its AIR compile and
+    `newLibrary` on the prewarm thread (its Phase A too, with `psIrPrefetch`
+    off as well). A pixel shader no recorded pipeline names is compiled at
+    its first draw (`D9MT_PS_PREFETCH`, `D9MT_PS_IR_PREFETCH`).
 - **PSO archives**: unchanged in the bridge.
   - Prewarm builds use the same compiler, so they are archive hits when
     possible and are captured by the serializer.

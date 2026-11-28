@@ -155,11 +155,11 @@ int main() {
     CHECK(r.inpassClear == (r.id == S));
     CHECK(r.keepPassOverClearVisit == (r.id == S));
     CHECK(r.psPrefetch == (r.id != S));
-    CHECK(r.psIrPrefetch == (r.id != S));
+    CHECK(r.psIrPrefetch);
   }
-  // C5's two fields are the first whose generic value is on.
+  // C5's two fields are the first whose generic value is on; psIrPrefetch keeps it in swtor.
   CHECK(!appProfileFor(S).psPrefetch && appProfileFor(G).psPrefetch && AppProfile().psPrefetch);
-  CHECK(!appProfileFor(S).psIrPrefetch && appProfileFor(G).psIrPrefetch && AppProfile().psIrPrefetch);
+  CHECK(appProfileFor(S).psIrPrefetch && appProfileFor(G).psIrPrefetch && AppProfile().psIrPrefetch);
 
   // A field's override: 1 and 0 set it either way on either app profile; empty and anything
   // else leave it.
@@ -220,29 +220,29 @@ int main() {
   AppProfile f = appProfileFor(S);
   CHECK(appProfileFieldsLine(f, Unset)
         == "d9mt: app profile fields: staticBuffersDirect on, inpassClear on, keepPassOverClearVisit on,"
-           " psPrefetch off, psIrPrefetch off");
+           " psPrefetch off, psIrPrefetch on");
   applyAppProfileSwitch("0", f.staticBuffersDirect);
   CHECK(appProfileFieldsLine(f, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear on,"
-           " keepPassOverClearVisit on, psPrefetch off, psIrPrefetch off");
+           " keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on");
   applyAppProfileSwitch("0", f.inpassClear);
   CHECK(appProfileFieldsLine(f, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
-           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit on, psPrefetch off, psIrPrefetch off");
+           " (D9MT_INPASS_CLEAR), keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on");
   applyAppProfileSwitch("0", f.keepPassOverClearVisit);
   CHECK(appProfileFieldsLine(f, Used, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
            " (D9MT_INPASS_CLEAR), keepPassOverClearVisit off (D9MT_KEEP_PASS_OVER_CLEAR_VISIT),"
-           " psPrefetch off, psIrPrefetch off");
+           " psPrefetch off, psIrPrefetch on");
   applyAppProfileLegacySwitch("yes", f.psPrefetch);
   CHECK(appProfileFieldsLine(f, Used, Used, Used, Legacy)
         == "d9mt: app profile fields: staticBuffersDirect off (D9MT_STATIC_BUFFERS_DIRECT), inpassClear off"
            " (D9MT_INPASS_CLEAR), keepPassOverClearVisit off (D9MT_KEEP_PASS_OVER_CLEAR_VISIT),"
-           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch off");
-  applyAppProfileSwitch("1", f.psIrPrefetch);
+           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch on");
+  applyAppProfileSwitch("0", f.psIrPrefetch);
   CHECK(appProfileFieldsLine(f, Unset, Unset, Unset, Used, Used)
         == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
-           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch on (D9MT_PS_IR_PREFETCH)");
+           " psPrefetch on (D9MT_PS_PREFETCH), psIrPrefetch off (D9MT_PS_IR_PREFETCH)");
   CHECK(appProfileFieldsLine(appProfileFor(G), Unknown)
         == "d9mt: app profile fields: staticBuffersDirect off, inpassClear off, keepPassOverClearVisit off,"
            " psPrefetch on, psIrPrefetch on");

@@ -93,5 +93,6 @@ hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). The fields:
 - `psPrefetch` and `psIrPrefetch` (C5): a pixel shader's function, and with both off its Phase A
   too, are made when a draw or the state cache's prewarm first asks for them instead of at the
   shader's creation. Their overrides are `D9MT_PS_PREFETCH`, which predates the app profile and
-  keeps reading any value but `0` as on, and `D9MT_PS_IR_PREFETCH`. Unlike the fields before them,
-  their generic value is on.
+  keeps reading a non-empty value other than `0` as on (empty, or 260 characters or more, is
+  unset), and `D9MT_PS_IR_PREFETCH`. Unlike the fields before them, their generic value is on;
+  `swtor` turns off `psPrefetch` only, and `psIrPrefetch` stays for A/Bs.
