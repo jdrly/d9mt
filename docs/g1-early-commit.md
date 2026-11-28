@@ -330,12 +330,14 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   Weak hints then never submit, unless their estimated cost reaches `MaxCostPerSubmission`.
 - **d9mt** keeps `ImplicitWeakHint`, the cap of non-tiling GPUs (`GetMaxFlushType`,
   `driver/d3d9/d3d9_device.cpp`), for every game but SWTOR. The `swtor` app profile caps at
-  `ImplicitStrongHint` (`flushCap`, #143), as the maintainer's exception to ADR-0007: on the M1
-  at 4K, a GPU-bound loop, the strong cap was 1.8 % faster, and the maintainer's M5 Max showed
-  fewer command buffers and split reloads at no CPU or power cost. `d3d9.reproducibleCommandStream`
+  `ImplicitStrongHint` (`flushCap`, #143), as the maintainer's exception to ADR-0007. On the M1
+  (Apple7, macOS 26.7.3), in SWTOR's Sanctuary replay loop at 4K, which is GPU-bound there, the
+  strong cap lowered both the median GPU time (Metal HUD) and the median presented frame time
+  by 1.8 %. The maintainer's M5 Max showed fewer command buffers and split reloads at no CPU or
+  power cost. 1080p and Apple9 are still to measure. `d3d9.reproducibleCommandStream`
   still caps at `ExplicitFlush` and takes precedence over everything below.
-- **Why the generic default stays weak:** no A/B has shown that the strong cap is faster on Apple GPUs,
-  and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
+- **Why the generic default stays weak:** outside SWTOR no A/B has shown that the strong cap is
+  faster on Apple GPUs, and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
   cost +35–64 % in "wait every frame" by starving an idle GPU (§2). The strong cap is the same
   kind of change: a later GPU start for the work recorded before the next strong hint.
 - **What a weak hint is** (`driver/d3d9`): a full CS chunk (`EmitCs`, `EmitCsCmd`, the one

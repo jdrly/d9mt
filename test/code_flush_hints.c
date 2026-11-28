@@ -10,8 +10,8 @@
  *  H2. another depth-stencil surface set, a cell drawn with it, and the scene's set again;
  *  H3. a dynamic texture locked with DISCARD and drawn, four times, a colour each time;
  *  H4. a staged vertex buffer (DEFAULT pool, neither DYNAMIC nor WRITEONLY: its unlock uploads
- *      the locked range and sends the buffer hint) locked with NOOVERWRITE and drawn, four times,
- *      at a place each time;
+ *      the locked range and sends the buffer hint) locked over a range and drawn, four times, at a
+ *      place each time;
  *  H5. a new WRITEONLY vertex buffer (mapped directly, its uses tracked) drawn, then locked with
  *      DONOTWAIT until the lock succeeds (gives up after 5 s): each busy poll sends the wait hint;
  *  then a render target texture drawn BLUE and sampled into a cell (strong hints), and an event
@@ -115,7 +115,7 @@ static void frame(int n) {
     struct TVertex *v;
     const float x0 = cx(340 + k * 70), x1 = cx(400 + k * 70), y0 = cy(240), y1 = cy(180);
     const UINT off = (UINT)((n - 1) % 2 * 4 + k) * 4u * sizeof(struct TVertex);
-    T_CHECK(IDirect3DVertexBuffer9_Lock(stagedVb, off, 4 * sizeof(struct TVertex), (void **)&v, D3DLOCK_NOOVERWRITE));
+    T_CHECK(IDirect3DVertexBuffer9_Lock(stagedVb, off, 4 * sizeof(struct TVertex), (void **)&v, 0));
     v[0] = (struct TVertex){ x0, y1, 0.5f, 0.0f, 0.0f };
     v[1] = (struct TVertex){ x1, y1, 0.5f, 1.0f, 0.0f };
     v[2] = (struct TVertex){ x0, y0, 0.5f, 0.0f, 1.0f };
