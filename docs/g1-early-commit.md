@@ -358,8 +358,9 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
 
 ### The switch
 - The app profile's `flushCap` (ADR-0008; `swtor` on, `generic` off; #143) sets the cap to
-  `ImplicitStrongHint`, and `D9MT_FLUSH_CAP=0|1` overrides it (empty, or 260 characters or more,
-  is unset; any other value is ignored with a warning). Off keeps `ImplicitWeakHint`. The device's `D3D9Options` reads the field once at
+  `ImplicitStrongHint`, and `D9MT_FLUSH_CAP` overrides it: `1` on, `0` off, empty
+  (or 260 characters or more) unset, and any other value off, as before the field, with a
+  warning. Off keeps `ImplicitWeakHint`. The device's `D3D9Options` reads the field once at
   device creation (`flushCapStrong`), and `GetMaxFlushType` tests that bool after
   `reproducibleCommandStream`. The read stays out of `d3d9_device.cpp`: an env read there
   changed GCC's code for other functions of that file. The same DLL serves both arms of an A/B, so they compare the same code
