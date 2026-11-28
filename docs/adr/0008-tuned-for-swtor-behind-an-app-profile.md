@@ -89,4 +89,10 @@ hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). The fields:
   is drawn inside that pass; its override `D9MT_INPASS_CLEAR`. The device carries the app profile
   (`MtlDevice::appProfile`) for the backend;
 - `keepPassOverClearVisit`: an open pass stays open across a visit to other targets that only
-  clears them; its override `D9MT_KEEP_PASS_OVER_CLEAR_VISIT`.
+  clears them; its override `D9MT_KEEP_PASS_OVER_CLEAR_VISIT`;
+- `psPrefetch` and `psIrPrefetch` (C5): a pixel shader's function, and with both off its Phase A
+  too, are made when a draw or the state cache's prewarm first asks for them instead of at the
+  shader's creation. Their overrides are `D9MT_PS_PREFETCH`, which predates the app profile and
+  keeps reading a non-empty value other than `0` as on (empty, or 260 characters or more, is
+  unset), and `D9MT_PS_IR_PREFETCH`. Unlike the fields before them, their generic value is on;
+  `swtor` turns off `psPrefetch` only, and `psIrPrefetch` stays for A/Bs.

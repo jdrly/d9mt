@@ -196,6 +196,11 @@ namespace dxvk {
 
     MtlShaderStage Stage() const { return m_stage; }
 
+    /// Whether the shader's creator queues Phase A (this task). False only for a pixel shader
+    /// under the app profile's psPrefetch and psIrPrefetch both off: then its first function
+    /// request runs it.
+    bool PhaseAAtCreate() const { return m_phaseAAtCreate; }
+
   protected:
 
     void run() override;
@@ -206,6 +211,7 @@ namespace dxvk {
     std::string                 m_name;
     MtlShaderStage              m_stage;
     MtlShaderStateId            m_stateId;
+    bool                        m_phaseAAtCreate = true;
     D3D9ShaderOptions           m_options;
     D3D9ShaderAnalysis          m_analysis;
     std::vector<uint8_t>        m_bytecode;

@@ -18,8 +18,9 @@ namespace dxvk {
   enum class AppProfileId : uint32_t { Generic, Swtor };
 
   // What D9MT_APP_PROFILE, or a field's D9MT_<FIELD>, did: unset or empty, chose the app profile
-  // (set the field), or named none (ignored).
-  enum class AppProfileOverride : uint32_t { Unset, Used, Unknown };
+  // (set the field), or named none (ignored). Legacy: a value other than 0 or 1 that a field reads
+  // as 1, because the variable read it so before it was a field (D9MT_PS_PREFETCH).
+  enum class AppProfileOverride : uint32_t { Unset, Used, Unknown, Legacy };
 
   struct AppProfile {
     AppProfileId id = AppProfileId::Generic;
@@ -35,6 +36,15 @@ namespace dxvk {
     // back, stays open across that visit instead of being stored and loaded again (C2). swtor: on.
     // D9MT_KEEP_PASS_OVER_CLEAR_VISIT.
     bool keepPassOverClearVisit = false;
+    // A pixel shader's stand-alone function (its AIR lookup or compile and its MTLLibrary) is
+    // queued when the shader is created, as a vertex shader's always is. Off, it is made when a
+    // draw (or the state cache's prewarm) first asks for it (C5). swtor: off. D9MT_PS_PREFETCH.
+    bool psPrefetch = true;
+    // A pixel shader's Phase A (SM3 to IR) is queued when the shader is created. Off, and with
+    // psPrefetch off, it runs when a function of the shader is first asked for (C5). swtor: on, as
+    // generic: off, a session's first draws of new pixel shaders wait for their Phase A (measured
+    // in C5's pull request). For A/Bs: D9MT_PS_IR_PREFETCH.
+    bool psIrPrefetch = true;
   };
 
   // The fields' values of an app profile.
@@ -44,6 +54,8 @@ namespace dxvk {
     p.staticBuffersDirect = id == AppProfileId::Swtor;
     p.inpassClear         = id == AppProfileId::Swtor;
     p.keepPassOverClearVisit = id == AppProfileId::Swtor;
+    p.psPrefetch          = id != AppProfileId::Swtor;
+    p.psIrPrefetch        = true;
     return p;
   }
 
@@ -56,6 +68,15 @@ namespace dxvk {
       return AppProfileOverride::Unknown;
     field = value == "1";
     return AppProfileOverride::Used;
+  }
+
+  // D9MT_PS_PREFETCH, which predates the app profile and read any value but "0" as on: "0" clears
+  // the field, "1" sets it, empty is unset, and any other value still sets it (Legacy).
+  inline AppProfileOverride applyAppProfileLegacySwitch(const std::string& value, bool& field) {
+    if (value.empty())
+      return AppProfileOverride::Unset;
+    field = value != "0";
+    return value == "0" || value == "1" ? AppProfileOverride::Used : AppProfileOverride::Legacy;
   }
 
   inline const char* appProfileName(AppProfileId id) {
@@ -113,17 +134,27 @@ namespace dxvk {
   }
 
   // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on,
-  // keepPassOverClearVisit on`, with ` (D9MT_<FIELD>)` after a value its override set.
+  // keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on`, with ` (D9MT_<FIELD>)` after a
+  // value its override set.
   inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect,
                                           AppProfileOverride inpassClear = AppProfileOverride::Unset,
-                                          AppProfileOverride keepPassOverClearVisit = AppProfileOverride::Unset) {
+                                          AppProfileOverride keepPassOverClearVisit = AppProfileOverride::Unset,
+                                          AppProfileOverride psPrefetch = AppProfileOverride::Unset,
+                                          AppProfileOverride psIrPrefetch = AppProfileOverride::Unset) {
+    auto set = [] (AppProfileOverride how) {
+      return how == AppProfileOverride::Used || how == AppProfileOverride::Legacy;
+    };
     return std::string("d9mt: app profile fields: staticBuffersDirect ")
       + (p.staticBuffersDirect ? "on" : "off")
-      + (staticBuffersDirect == AppProfileOverride::Used ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "")
+      + (set(staticBuffersDirect) ? " (D9MT_STATIC_BUFFERS_DIRECT)" : "")
       + ", inpassClear " + (p.inpassClear ? "on" : "off")
-      + (inpassClear == AppProfileOverride::Used ? " (D9MT_INPASS_CLEAR)" : "")
+      + (set(inpassClear) ? " (D9MT_INPASS_CLEAR)" : "")
       + ", keepPassOverClearVisit " + (p.keepPassOverClearVisit ? "on" : "off")
-      + (keepPassOverClearVisit == AppProfileOverride::Used ? " (D9MT_KEEP_PASS_OVER_CLEAR_VISIT)" : "");
+      + (set(keepPassOverClearVisit) ? " (D9MT_KEEP_PASS_OVER_CLEAR_VISIT)" : "")
+      + ", psPrefetch " + (p.psPrefetch ? "on" : "off")
+      + (set(psPrefetch) ? " (D9MT_PS_PREFETCH)" : "")
+      + ", psIrPrefetch " + (p.psIrPrefetch ? "on" : "off")
+      + (set(psIrPrefetch) ? " (D9MT_PS_IR_PREFETCH)" : "");
   }
 
 }

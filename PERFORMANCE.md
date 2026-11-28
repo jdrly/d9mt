@@ -440,7 +440,8 @@ one as a breakdown, not as additive.
 
 **`COMPILE`** (`driver/mtl/mtl_compile.h`): shaders, pipelines and render-thread waits of a frame
 that compiled something or took 33.4 ms or more; `skipped` (draws dropped by the wait budget or
-`D9MT_ASYNC_SKIP`), `budgetHit`.
+`D9MT_ASYNC_SKIP`), `budgetHit`; at the end `phaseA` (D3D9 shaders' Phase A, SM3 to IR, on any
+thread: `count/ms`).
 
 **`PROF`**, every 256 frames (`driver/backend/mtl_profiler.h`): wall time per bucket
 (beginRecording, prepareDraw, resolvePso, flushVB, flushRes, flushDyn, encodeDraw, flushChunk,
