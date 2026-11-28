@@ -231,7 +231,11 @@ namespace dxvk {
       env::getEnvVar("D9MT_PS_IR_PREFETCH"), m_appProfile.psIrPrefetch);
     if (psIrHow == AppProfileOverride::Unknown)
       Logger::warn("d9mt: D9MT_PS_IR_PREFETCH is neither 0 nor 1, ignored");
-    Logger::info(appProfileFieldsLine(m_appProfile, staticHow, inpassHow, visitHow, psHow, psIrHow));
+    const AppProfileOverride flushCapHow = applyAppProfileLegacySwitch(
+      env::getEnvVar("D9MT_FLUSH_CAP"), m_appProfile.flushCap, false);
+    if (flushCapHow == AppProfileOverride::Legacy)
+      Logger::warn("d9mt: D9MT_FLUSH_CAP is neither 0 nor 1, read as 0 (as before)");
+    Logger::info(appProfileFieldsLine(m_appProfile, staticHow, inpassHow, visitHow, psHow, psIrHow, flushCapHow));
 
     // after the app profile: its staticBuffersDirect is one of the memory profile's inputs
     m_memProfile = resolveMemoryProfile(m_config, m_appProfile.staticBuffersDirect);

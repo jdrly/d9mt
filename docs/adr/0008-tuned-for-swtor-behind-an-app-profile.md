@@ -77,7 +77,7 @@ target other GPUs and other games than SWTOR on Apple's GPUs.
   profiles hold the same values, so no game behaves differently.
 - Whether SWGL gets an app profile of its own once something is tuned for it.
 
-## Implementation status as of 2026-11-27
+## Implementation status as of 2026-11-28
 
 `driver/mtl/mtl_app_profile.h` (the struct, the exe match, the override), read once by
 `MtlInstance` at Direct3DCreate9 (`driver/mtl/mtl_device_stub.cpp`), which logs
@@ -95,4 +95,7 @@ hash suite's `appswtor` variant (`scripts/run-hash-tests.sh`). The fields:
   shader's creation. Their overrides are `D9MT_PS_PREFETCH`, which predates the app profile and
   keeps reading a non-empty value other than `0` as on (empty, or 260 characters or more, is
   unset), and `D9MT_PS_IR_PREFETCH`. Unlike the fields before them, their generic value is on;
-  `swtor` turns off `psPrefetch` only, and `psIrPrefetch` stays for A/Bs.
+  `swtor` turns off `psPrefetch` only, and `psIrPrefetch` stays for A/Bs;
+- `flushCap` (#143): weak flush hints no longer submit a command buffer mid-frame. Its override
+  `D9MT_FLUSH_CAP` predates the app profile and keeps reading a non-empty value other than `1` as
+  off. The device's `D3D9Options` reads the field.

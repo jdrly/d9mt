@@ -19,7 +19,7 @@ namespace dxvk {
 
   // What D9MT_APP_PROFILE, or a field's D9MT_<FIELD>, did: unset or empty, chose the app profile
   // (set the field), or named none (ignored). Legacy: a value other than 0 or 1 that a field reads
-  // as 1, because the variable read it so before it was a field (D9MT_PS_PREFETCH).
+  // as the variable read it before it was a field (D9MT_PS_PREFETCH as 1, D9MT_FLUSH_CAP as 0).
   enum class AppProfileOverride : uint32_t { Unset, Used, Unknown, Legacy };
 
   struct AppProfile {
@@ -45,6 +45,10 @@ namespace dxvk {
     // generic: off, a session's first draws of new pixel shaders wait for their Phase A (measured
     // in C5's pull request). For A/Bs: D9MT_PS_IR_PREFETCH.
     bool psIrPrefetch = true;
+    // The flush cap: heuristic flushes stop at strong hints, so weak ones (a full CS chunk,
+    // SetDepthStencilSurface, a DONOTWAIT poll, ...) no longer submit a command buffer mid-frame
+    // (GetMaxFlushType, #143). swtor: on. D9MT_FLUSH_CAP.
+    bool flushCap = false;
   };
 
   // The fields' values of an app profile.
@@ -56,6 +60,7 @@ namespace dxvk {
     p.keepPassOverClearVisit = id == AppProfileId::Swtor;
     p.psPrefetch          = id != AppProfileId::Swtor;
     p.psIrPrefetch        = true;
+    p.flushCap            = id == AppProfileId::Swtor;
     return p;
   }
 
@@ -70,12 +75,15 @@ namespace dxvk {
     return AppProfileOverride::Used;
   }
 
-  // D9MT_PS_PREFETCH, which predates the app profile and read any value but "0" as on: "0" clears
-  // the field, "1" sets it, empty is unset, and any other value still sets it (Legacy).
-  inline AppProfileOverride applyAppProfileLegacySwitch(const std::string& value, bool& field) {
+  // A variable that predates the app profile: "0" clears the field, "1" sets it, empty is unset,
+  // and any other value gives `other`, what the variable read it as before (Legacy).
+  // D9MT_PS_PREFETCH read any value but "0" as on (other = true); D9MT_FLUSH_CAP read any value
+  // but "1" as off (other = false).
+  inline AppProfileOverride applyAppProfileLegacySwitch(const std::string& value, bool& field,
+                                                        bool other = true) {
     if (value.empty())
       return AppProfileOverride::Unset;
-    field = value != "0";
+    field = value == "0" ? false : value == "1" ? true : other;
     return value == "0" || value == "1" ? AppProfileOverride::Used : AppProfileOverride::Legacy;
   }
 
@@ -134,13 +142,14 @@ namespace dxvk {
   }
 
   // The fields' log line: `d9mt: app profile fields: staticBuffersDirect on, inpassClear on,
-  // keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on`, with ` (D9MT_<FIELD>)` after a
-  // value its override set.
+  // keepPassOverClearVisit on, psPrefetch off, psIrPrefetch on, flushCap on`, with ` (D9MT_<FIELD>)`
+  // after a value its override set.
   inline std::string appProfileFieldsLine(const AppProfile& p, AppProfileOverride staticBuffersDirect,
                                           AppProfileOverride inpassClear = AppProfileOverride::Unset,
                                           AppProfileOverride keepPassOverClearVisit = AppProfileOverride::Unset,
                                           AppProfileOverride psPrefetch = AppProfileOverride::Unset,
-                                          AppProfileOverride psIrPrefetch = AppProfileOverride::Unset) {
+                                          AppProfileOverride psIrPrefetch = AppProfileOverride::Unset,
+                                          AppProfileOverride flushCap = AppProfileOverride::Unset) {
     auto set = [] (AppProfileOverride how) {
       return how == AppProfileOverride::Used || how == AppProfileOverride::Legacy;
     };
@@ -154,7 +163,9 @@ namespace dxvk {
       + ", psPrefetch " + (p.psPrefetch ? "on" : "off")
       + (set(psPrefetch) ? " (D9MT_PS_PREFETCH)" : "")
       + ", psIrPrefetch " + (p.psIrPrefetch ? "on" : "off")
-      + (set(psIrPrefetch) ? " (D9MT_PS_IR_PREFETCH)" : "");
+      + (set(psIrPrefetch) ? " (D9MT_PS_IR_PREFETCH)" : "")
+      + ", flushCap " + (p.flushCap ? "on" : "off")
+      + (set(flushCap) ? " (D9MT_FLUSH_CAP)" : "");
   }
 
 }

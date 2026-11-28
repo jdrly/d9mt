@@ -329,10 +329,15 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   set (upstream c2f9dfca `src/d3d9/d3d9_device.cpp:9118-9125`, `src/dxvk/dxvk_device.cpp:719-731`).
   Weak hints then never submit, unless their estimated cost reaches `MaxCostPerSubmission`.
 - **d9mt** keeps `ImplicitWeakHint`, the cap of non-tiling GPUs (`GetMaxFlushType`,
-  `driver/d3d9/d3d9_device.cpp`). `d3d9.reproducibleCommandStream` still caps at
-  `ExplicitFlush` and takes precedence over everything below.
-- **Why the default stays weak:** no A/B has shown that the strong cap is faster on Apple GPUs,
-  and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
+  `driver/d3d9/d3d9_device.cpp`), for every game but SWTOR. The `swtor` app profile caps at
+  `ImplicitStrongHint` (`flushCap`, #143), as the maintainer's exception to ADR-0007. On the M1
+  (Apple7, macOS 26.7.3), in SWTOR's Sanctuary replay loop at 4K, which is GPU-bound there, the
+  strong cap lowered both the median GPU time (Metal HUD) and the median presented frame time
+  by 1.8 %. The maintainer's M5 Max showed fewer command buffers and split reloads at no CPU or
+  power cost. 1080p and Apple9 are still to measure. `d3d9.reproducibleCommandStream`
+  still caps at `ExplicitFlush` and takes precedence over everything below.
+- **Why the generic default stays weak:** outside SWTOR no A/B has shown that the strong cap is
+  faster on Apple GPUs, and the last attempt to hold heuristic flushes back measured the opposite. add2590's postpone
   cost +35–64 % in "wait every frame" by starving an idle GPU (§2). The strong cap is the same
   kind of change: a later GPU start for the work recorded before the next strong hint.
 - **What a weak hint is** (`driver/d3d9`): a full CS chunk (`EmitCs`, `EmitCsCmd`, the one
@@ -354,11 +359,13 @@ buffers, and ~500 GetData S_FALSE polls (20 µs spin).
   move, and in GPU-bound frames the risk is the starvation above.
 
 ### The switch
-- `D9MT_FLUSH_CAP=1` sets the cap to `ImplicitStrongHint`; unset, `0` or anything else keeps
-  `ImplicitWeakHint`. The device's `D3D9Options` reads it once at device creation
-  (`flushCapStrong`), and `GetMaxFlushType` tests that bool after `reproducibleCommandStream`.
-  The read stays out of `d3d9_device.cpp`: an env read there changed GCC's code for other
-  functions of that file. The same DLL serves both arms of an A/B, so they compare the same code
+- The app profile's `flushCap` (ADR-0008; `swtor` on, `generic` off; #143) sets the cap to
+  `ImplicitStrongHint`, and `D9MT_FLUSH_CAP` overrides it: `1` on, `0` off, empty
+  (or 260 characters or more) unset, and any other value off, as before the field, with a
+  warning. Off keeps `ImplicitWeakHint`. The device's `D3D9Options` reads the field once at
+  device creation (`flushCapStrong`), and `GetMaxFlushType` tests that bool after
+  `reproducibleCommandStream`. The read stays out of `d3d9_device.cpp`: an env read there
+  changed GCC's code for other functions of that file. The same DLL serves both arms of an A/B, so they compare the same code
   and layout (both arms set the variable, `0` and `1`, at equal width).
 - Unchanged with the switch on: `GpuFlushTracker` itself (`driver/util/util_flush.cpp`, with
   its estimated-cost escape, which d3d9's hints pass as 0), explicit flushes, synchronization,
