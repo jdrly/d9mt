@@ -19,8 +19,10 @@ set -uo pipefail
 V2="$(cd "$(dirname "$0")/.." && pwd)"
 : "${ENGINE:?set ENGINE to a Wine engine root}"
 : "${WORK:?set WORK to a durable directory}"
-mkdir -p "$WORK"
-WORK="$(cd "$WORK" && pwd)"
+# WORK must be a directory this script can make and enter: each arm removes its own folder in it.
+mkdir -p "$WORK" || { echo "WORK=$WORK: can't make the directory" >&2; exit 2; }
+WORK="$(cd "$WORK" && pwd)" || { echo "WORK: can't enter the directory" >&2; exit 2; }
+[ -n "$WORK" ] && [ "$WORK" != / ] && [ -d "$WORK" ] || { echo "WORK: not a usable directory" >&2; exit 2; }
 fail=0 first_hashes=
 # The swtor app profile's own values (mtl_app_profile.h) and what they give.
 SWTOR_PS=off SWTOR_IR=on SWTOR_PHASEA=18 SWTOR_LIBS='=4'
@@ -66,7 +68,8 @@ arm() {
     echo "  colour checks: $(tr -d '\r' < "$out" | grep '^code_ps_first_use:')"
   else echo "  FAIL: colour checks: $(tr -d '\r' < "$out" | grep -E '^code_ps_first_use:|FAIL' | head -5)"; fail=1; fi
   hashes="$(tr -d '\r' < "$out" | sed -n 's/^D9H frame=.*hash=\([0-9a-f]*\).*/\1/p' | tr '\n' ' ')"
-  if [ "$(echo $hashes | wc -w)" != 5 ]; then echo "  FAIL: $(echo $hashes | wc -w) frame hashes, want 5"; fail=1
+  local nh; nh=$(echo $hashes | wc -w | tr -d ' ')   # macOS's wc pads its count
+  if [ "$nh" -ne 5 ]; then echo "  FAIL: $nh frame hashes, want 5"; fail=1
   elif [ -z "$first_hashes" ]; then first_hashes=$hashes
   elif [ "$hashes" != "$first_hashes" ]; then echo "  FAIL: frames differ from the first arm's"; fail=1; fi
 }

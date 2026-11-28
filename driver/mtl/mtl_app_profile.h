@@ -42,8 +42,8 @@ namespace dxvk {
     bool psPrefetch = true;
     // A pixel shader's Phase A (SM3 to IR) is queued when the shader is created. Off, and with
     // psPrefetch off, it runs when a function of the shader is first asked for (C5). swtor: on, as
-    // generic: off, a first session's draws wait for Phase A in batches (7-8 frames over 16.7 ms
-    // in the M1's Sanctuary replay). For A/Bs: D9MT_PS_IR_PREFETCH.
+    // generic: off, a session's first draws of new pixel shaders wait for their Phase A (measured
+    // in C5's pull request). For A/Bs: D9MT_PS_IR_PREFETCH.
     bool psIrPrefetch = true;
   };
 
